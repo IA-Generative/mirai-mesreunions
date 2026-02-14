@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Audio - {{ simple_code }}</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f2f5; color: #1a1a2e;
+            min-height: 100vh; padding: 1rem;
+        }
+        .container { max-width: 480px; margin: 0 auto; }
+        .card {
+            background: white; border-radius: 16px; padding: 1.5rem;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 1rem;
+        }
+        h2 { font-size: 1.15rem; margin-bottom: 0.5rem; }
+        .code-display {
+            font-size: 1.5rem; font-weight: 800; color: #2563eb;
+            font-family: monospace; letter-spacing: 0.2em;
+        }
+
+        /* Upload zone */
+        .upload-zone {
+            border: 2px dashed #d1d5db; border-radius: 12px; padding: 2rem 1rem;
+            text-align: center; cursor: pointer; transition: all 0.2s;
+            margin: 1rem 0;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #2563eb; background: #eff6ff;
+        }
+        .upload-zone.disabled {
+            opacity: 0.5; cursor: not-allowed; border-color: #e5e7eb;
+        }
+        .upload-icon { font-size: 2.5rem; margin-bottom: 0.5rem; }
+        .upload-text { font-size: 0.9rem; color: #666; }
+        .upload-text strong { color: #2563eb; }
+
+        /* File input hidden */
+        #file-input { display: none; }
+
+        /* Progress */
+        .progress-bar {
+            height: 4px; background: #e5e7eb; border-radius: 2px;
+            overflow: hidden; margin-top: 0.5rem; display: none;
+        }
+        .progress-bar .fill {
+            height: 100%; background: #2563eb; border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        /* Info banner */
+        .info-banner {
+            background: #fef3c7; border-left: 4px solid #f59e0b;
+            padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
+            font-size: 0.85rem; color: #92400e; margin-bottom: 1rem;
+        }
+        .warning-banner {
+            background: #fee2e2; border-left: 4px solid #ef4444;
+            padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
+            font-size: 0.85rem; color: #991b1b; margin-bottom: 1rem;
+        }
+        .security-banner {
+            background: #dbeafe; border-left: 4px solid #3b82f6;
+            padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
+            font-size: 0.85rem; color: #1e40af;
+        }
+
+        /* File list */
+        .file-item {
+            padding: 0.75rem; background: #f8f9fa; border-radius: 10px;
+            margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.75rem;
+        }
+        .file-icon { font-size: 1.5rem; flex-shrink: 0; }
+        .file-info { flex: 1; min-width: 0; }
+        .file-name {
+            font-weight: 600; font-size: 0.85rem; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .file-status-text { font-size: 0.8rem; color: #666; margin-top: 0.2rem; }
+        .status-dot {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+            margin-right: 4px; vertical-align: middle;
+        }
+        .dot-pending { background: #f59e0b; }
+        .dot-scanning { background: #f59e0b; animation: pulse 1s infinite; }
+        .dot-clean { background: #10b981; }
+        .dot-infected { background: #ef4444; }
+        .dot-transcoding { background: #3b82f6; animation: pulse 1s infinite; }
+        .dot-transcoded, .dot-ready, .dot-transferred { background: #10b981; }
+        .dot-error { background: #ef4444; }
+
+        .remaining { color: #666; font-size: 0.85rem; text-align: center; margin-top: 0.5rem; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .quality-stars { color: #f59e0b; font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            <h2>Upload Audio</h2>
+            <span class="code-display">{{ simple_code }}</span>
+        </div>
+
+        {% if can_upload %}
+        <div class="info-banner">
+            <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
+            Vous pouvez revenir sur cette page pour vérifier l'avancement.
+        </div>
+
+        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+            <div class="upload-icon">🎤</div>
+            <div class="upload-text">
+                <strong>Touchez pour sélectionner</strong> un fichier audio<br>
+                ou glissez-déposez ici
+            </div>
+            <div style="font-size:0.75rem; color:#999; margin-top:0.5rem;">
+                Formats : MP3, WAV, OGG, FLAC, M4A, AAC, OPUS...
+            </div>
+        </div>
+        <input type="file" id="file-input" accept="{{ allowed_extensions }}" multiple>
+
+        <div class="progress-bar" id="progress-bar">
+            <div class="fill" id="progress-fill" style="width: 0%"></div>
+        </div>
+
+        <p class="remaining" id="remaining-text">
+            {{ remaining }} fichier(s) restant(s) sur {{ max_uploads }}
+        </p>
+
+        {% elif can_view %}
+        <div class="warning-banner">
+            {{ reason }}<br>
+            Vous pouvez encore consulter le statut de vos fichiers ci-dessous.
+        </div>
+        {% else %}
+        <div class="warning-banner">
+            {{ reason }}
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card" id="files-card" style="{% if not uploads %}display:none{% endif %}">
+        <h2>Fichiers</h2>
+        <div id="files-list">
+            {% for f in uploads %}
+            <div class="file-item" data-file-id="{{ f.id }}">
+                <div class="file-icon">🎵</div>
+                <div class="file-info">
+                    <div class="file-name">{{ f.name }}</div>
+                    <div class="file-status-text">
+                        <span class="status-dot dot-{{ f.status }}"></span>
+                        <span class="status-text">{{ f.message }}</span>
+                        {% if f.quality %}
+                        <span class="quality-stars">i {{ '%.1f'|format(f.quality) }}/5</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="card security-banner">
+        <strong>Rappel de sécurité :</strong> Les fichiers audio professionnels ne doivent
+        pas rester stockés sur un téléphone personnel. Une fois l'upload terminé et confirmé,
+        pensez à supprimer les fichiers de votre appareil.
+    </div>
+</div>
+
+<script>
+const qrToken = "{{ qr_token }}";
+let remaining = {{ remaining }};
+const canUpload = {{ 'true' if can_upload else 'false' }};
+
+// ─── WebSocket ────────────────────────────────────────
+const socket = io();
+socket.on('connect', () => {
+    socket.emit('join', { qr_token: qrToken });
+});
+
+socket.on('file_status', (data) => {
+    updateFileStatus(data);
+});
+
+// ─── File Upload ──────────────────────────────────────
+const fileInput = document.getElementById('file-input');
+const uploadZone = document.getElementById('upload-zone');
+
+if (fileInput) {
+    fileInput.addEventListener('change', handleFiles);
+}
+
+if (uploadZone) {
+    uploadZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        uploadZone.classList.add('dragover');
+    });
+    uploadZone.addEventListener('dragleave', () => {
+        uploadZone.classList.remove('dragover');
+    });
+    uploadZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        uploadZone.classList.remove('dragover');
+        handleFiles({ target: { files: e.dataTransfer.files } });
+    });
+}
+
+async function handleFiles(e) {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+
+    for (const file of files) {
+        if (remaining <= 0) {
+            alert('Nombre maximum de fichiers atteint.');
+            break;
+        }
+        await uploadFile(file);
+    }
+
+    if (fileInput) fileInput.value = '';
+}
+
+async function uploadFile(file) {
+    const progressBar = document.getElementById('progress-bar');
+    const progressFill = document.getElementById('progress-fill');
+
+    if (progressBar) {
+        progressBar.style.display = 'block';
+        progressFill.style.width = '0%';
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api/upload/${qrToken}`);
+
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable && progressFill) {
+                progressFill.style.width = Math.round((e.loaded / e.total) * 100) + '%';
+            }
+        };
+
+        const response = await new Promise((resolve, reject) => {
+            xhr.onload = () => {
+                if (xhr.status === 200) {
+                    resolve(JSON.parse(xhr.responseText));
+                } else {
+                    const err = JSON.parse(xhr.responseText);
+                    reject(new Error(err.error || 'Erreur upload'));
+                }
+            };
+            xhr.onerror = () => reject(new Error('Erreur réseau'));
+            xhr.send(formData);
+        });
+
+        remaining = response.remaining;
+        updateRemainingText();
+        // Use unified update path to avoid duplicates if WebSocket event arrived first.
+        updateFileStatus({
+            file_id: response.file_id,
+            name: file.name,
+            status: 'pending',
+            message: "Fichier reçu, en attente d'analyse...",
+        });
+
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        if (progressBar) {
+            setTimeout(() => { progressBar.style.display = 'none'; }, 1000);
+        }
+    }
+}
+
+function addFileToList(fileId, name, status, message) {
+    if (fileId) {
+        const existing = document.querySelector(`[data-file-id="${fileId}"]`);
+        if (existing) {
+            updateFileStatus({
+                file_id: fileId,
+                name: name,
+                status: status,
+                message: message,
+            });
+            return;
+        }
+    }
+
+    const filesCard = document.getElementById('files-card');
+    const filesList = document.getElementById('files-list');
+    filesCard.style.display = 'block';
+
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.dataset.fileId = fileId;
+    item.innerHTML = `
+        <div class="file-icon">🎵</div>
+        <div class="file-info">
+            <div class="file-name">${escapeHtml(name)}</div>
+            <div class="file-status-text">
+                <span class="status-dot dot-${status}"></span>
+                <span class="status-text">${escapeHtml(message)}</span>
+            </div>
+        </div>
+    `;
+    filesList.prepend(item);
+}
+
+function updateFileStatus(data) {
+    const item = document.querySelector(`[data-file-id="${data.file_id}"]`);
+    if (!item) {
+        addFileToList(data.file_id, data.name, data.status, data.message);
+        return;
+    }
+
+    const dot = item.querySelector('.status-dot');
+    const text = item.querySelector('.status-text');
+
+    // Reset dot class
+    dot.className = 'status-dot dot-' + data.status;
+    text.textContent = data.message || statusLabel(data.status);
+
+    // Add quality if available
+    if (data.quality) {
+        let qualityEl = item.querySelector('.quality-stars');
+        if (!qualityEl) {
+            qualityEl = document.createElement('span');
+            qualityEl.className = 'quality-stars';
+            item.querySelector('.file-status-text').appendChild(qualityEl);
+        }
+        qualityEl.textContent = ' i ' + data.quality.toFixed(1) + '/5';
+    }
+}
+
+function updateRemainingText() {
+    const el = document.getElementById('remaining-text');
+    if (el) {
+        el.textContent = `${remaining} fichier(s) restant(s) sur {{ max_uploads }}`;
+    }
+    if (remaining <= 0 && uploadZone) {
+        uploadZone.classList.add('disabled');
+        uploadZone.onclick = null;
+    }
+}
+
+function statusLabel(status) {
+    const labels = {
+        'pending': 'En attente...',
+        'scanning': 'Analyse antivirale en cours...',
+        'scan_clean': 'Fichier sain, transcodage en cours...',
+        'scan_infected': '⚠️ Virus détecté - fichier en quarantaine',
+        'transcoding': 'Transcodage et normalisation audio...',
+        'transcoded': 'Traitement terminé',
+        'ready_for_transfer': 'Prêt pour transfert',
+        'transferring': 'Transfert en cours...',
+        'transferred': '✅ Fichier intégré à votre compte',
+        'quarantined': '⚠️ Fichier en quarantaine',
+        'error': '❌ Erreur de traitement',
+    };
+    return labels[status] || status;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Auto-refresh status every 10s (fallback if WebSocket fails)
+setInterval(async () => {
+    try {
+        const resp = await fetch(`/api/status/${qrToken}`);
+        if (resp.ok) {
+            const data = await resp.json();
+            data.files.forEach(f => updateFileStatus({
+                file_id: f.id, name: f.name,
+                status: f.status, message: f.message,
+                quality: f.quality,
+            }));
+            if (data.remaining !== undefined) {
+                remaining = data.remaining;
+                updateRemainingText();
+            }
+        }
+    } catch (e) {}
+}, 10000);
+</script>
+</body>
+</html>

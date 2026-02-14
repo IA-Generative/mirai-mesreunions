@@ -1,0 +1,551 @@
+##############################################################################
+# Secure Audio Upload Pipeline - Docker Compose
+# Two logical zones: external (DMZ) and internal, sharing infra for dev.
+# In production, these run on separate clusters / networks.
+##############################################################################
+
+services:
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # --- PostgreSQL Zone Externe ---
+  postgres-external:
+    image: postgres:16-alpine@sha256:97ff59a4e30e08d1c11bdcd9455e7832368c0572b576c9092cde2df4ae5552a3
+    environment:
+      POSTGRES_DB: audio_upload_ext
+      POSTGRES_USER: audio_ext
+      POSTGRES_PASSWORD: changeme-ext
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata-external:/var/lib/postgresql/data
+    networks:
+      - external-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audio_ext -d audio_upload_ext"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- PostgreSQL Zone Interne ---
+  postgres-internal:
+    image: postgres:16-alpine@sha256:97ff59a4e30e08d1c11bdcd9455e7832368c0572b576c9092cde2df4ae5552a3
+    environment:
+      POSTGRES_DB: audio_upload_int
+      POSTGRES_USER: audio_int
+      POSTGRES_PASSWORD: changeme-int
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata-internal:/var/lib/postgresql/data
+    networks:
+      - internal-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audio_int -d audio_upload_int"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- RabbitMQ ---
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281
+    environment:
+      RABBITMQ_DEFAULT_USER: audio
+      RABBITMQ_DEFAULT_PASS: changeme-rabbit
+      RABBITMQ_DEFAULT_VHOST: audio_pipeline
+      RABBITMQ_ERLANG_COOKIE: secureaudioerlangcookie2026changeme
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - external-net
+      - internal-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # --- MinIO: Upload Staging (S3 #1) ---
+  minio-upload:
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-upload:/data
+    networks:
+      - external-net
+
+  # --- MinIO: Processed Staging (S3 #2) ---
+  minio-processed:
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address ":9003"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9002:9000"
+      - "9003:9003"
+    volumes:
+      - minio-processed:/data
+    networks:
+      - external-net
+      - internal-net  # Accessible by internal zone for PULL
+
+  # --- MinIO: Internal Storage (S3 #3) ---
+  minio-internal:
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address ":9005"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9004:9000"
+      - "9005:9005"
+    volumes:
+      - minio-internal:/data
+    networks:
+      - internal-net
+
+  # --- ClamAV ---
+  clamav:
+    image: clamav/clamav-debian:latest@sha256:8668886760afe0334ec3f8f154e2aaecb6839799a6703fdd66a6a98faa9c9fc0
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav-data:/var/lib/clamav
+    networks:
+      - external-net
+    healthcheck:
+      test: ["CMD-SHELL", "printf 'PING\\n' | nc -w 2 127.0.0.1 3310 | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # ClamAV needs time to load signatures
+
+  # --- Keycloak (Dev) ---
+  keycloak:
+    image: quay.io/keycloak/keycloak:latest@sha256:5a236ae4dd8ece77490115bace15a11a4d15e9cbcf58a490b95a7da2cd71d32a
+    command: start-dev --import-realm
+    environment:
+      KC_DB: dev-mem
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8180:8080"
+    volumes:
+      - ./keycloak-realm.json:/opt/keycloak/data/import/realm.json:ro
+    networks:
+      - external-net
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ZONE EXTERNE - Services applicatifs
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # --- Code Generator (OIDC + QR) ---
+  code-generator:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -w 2 --timeout 300 -b 0.0.0.0:8080 app.main:application
+    working_dir: /app/services/code-generator
+    volumes:
+      - ../../services/code-generator:/app/services/code-generator
+      - ../../libs:/app/libs
+    ports:
+      - "8080:8080"
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      SECRET_KEY: dev-secret-key-change-in-prod
+      OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8180/realms/audio-upload
+      OIDC_CLIENT_ID: audio-upload-app
+      OIDC_CLIENT_SECRET: dev-client-secret
+      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:8080/auth/callback
+      PUBLIC_HOST: ${PUBLIC_HOST:-}
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      UPLOAD_PORTAL_BASE_URL: http://${PUBLIC_HOST:-localhost}:8081
+      CODE_TTL_MINUTES: "15"
+      CODE_TTL_MAX_MINUTES: "4320"
+      ALLOW_SHORT_QR_TTL_SECONDS_TEST: "true"
+      MAX_UPLOADS_PER_SESSION: "5"
+      TOKEN_ISSUER_API_URL: http://token-issuer:8091/api/v1/issue-token
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+      NORMALIZATION_ANALYSIS_MAX_SECONDS: "180"
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      token-issuer:
+        condition: service_started
+    networks:
+      - external-net
+      - dmz-net  # Bridge pour appeler le token-issuer (zone interne)
+
+  # --- Admin Portal (OIDC + Monitoring) ---
+  admin-portal:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -w 2 -b 0.0.0.0:8082 app.main:application
+    working_dir: /app/services/admin-portal
+    volumes:
+      - ../../services/admin-portal:/app/services/admin-portal
+      - ../../libs:/app/libs
+    ports:
+      - "8082:8082"
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      SECRET_KEY: dev-secret-key-change-in-prod
+      OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8180/realms/audio-upload
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/audio-upload
+      OIDC_CLIENT_ID: audio-upload-app
+      OIDC_CLIENT_SECRET: dev-client-secret
+      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:8082/auth/callback
+      ADMIN_PORTAL_PORT: "8082"
+      ADMIN_ALLOWED_USERS: admin
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      INT_DB_HOST: postgres-internal
+      INT_DB_PORT: "5432"
+      INT_DB_NAME: audio_upload_int
+      INT_DB_USER: audio_int
+      INT_DB_PASSWORD: changeme-int
+      NORMALIZATION_CACHE_TTL_SECONDS: "3600"
+      NORMALIZATION_MAX_COMPUTE_PER_REFRESH: "0"
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      postgres-internal:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    networks:
+      - external-net
+      - internal-net
+
+  # --- Upload Portal (Public) ---
+  upload-portal:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -k eventlet -w 1 -b 0.0.0.0:8081 app.main:application
+    working_dir: /app/services/upload-portal
+    volumes:
+      - ../../services/upload-portal:/app/services/upload-portal
+      - ../../libs:/app/libs
+    ports:
+      - "8081:8081"
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      SECRET_KEY: dev-secret-key-change-in-prod
+      UPLOAD_PORTAL_PORT: "8081"
+      UPLOAD_EXPIRY_GRACE_SECONDS: "300"
+      EXTERNAL_PURGE_INTERVAL_SECONDS: "86400"
+      EXTERNAL_PURGE_MAX_AGE_HOURS: "12"
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      S3_UPLOAD_ENDPOINT: http://minio-upload:9000
+      S3_UPLOAD_ACCESS_KEY: minioadmin
+      S3_UPLOAD_SECRET_KEY: minioadmin
+      S3_UPLOAD_BUCKET: upload-staging
+      S3_PROCESSED_ENDPOINT: http://minio-processed:9000
+      S3_PROCESSED_ACCESS_KEY: minioadmin
+      S3_PROCESSED_SECRET_KEY: minioadmin
+      S3_PROCESSED_BUCKET: processed-staging
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio-upload:
+        condition: service_started
+    networks:
+      - external-net
+      - dmz-net
+
+  # --- Antivirus Worker ---
+  antivirus-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: python -m app.main
+    working_dir: /app/services/antivirus-worker
+    volumes:
+      - ../../services/antivirus-worker:/app/services/antivirus-worker
+      - ../../libs:/app/libs
+    environment:
+      LOG_LEVEL: INFO
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      S3_UPLOAD_ENDPOINT: http://minio-upload:9000
+      S3_UPLOAD_ACCESS_KEY: minioadmin
+      S3_UPLOAD_SECRET_KEY: minioadmin
+      S3_UPLOAD_BUCKET: upload-staging
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+    networks:
+      - external-net
+
+  # --- Transcode Worker ---
+  transcode-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: python -m app.main
+    working_dir: /app/services/transcode-worker
+    volumes:
+      - ../../services/transcode-worker:/app/services/transcode-worker
+      - ../../libs:/app/libs
+    environment:
+      LOG_LEVEL: INFO
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      S3_UPLOAD_ENDPOINT: http://minio-upload:9000
+      S3_UPLOAD_ACCESS_KEY: minioadmin
+      S3_UPLOAD_SECRET_KEY: minioadmin
+      S3_UPLOAD_BUCKET: upload-staging
+      S3_PROCESSED_ENDPOINT: http://minio-processed:9000
+      S3_PROCESSED_ACCESS_KEY: minioadmin
+      S3_PROCESSED_SECRET_KEY: minioadmin
+      S3_PROCESSED_BUCKET: processed-staging
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+      FFMPEG_AUDIO_FILTER: "highpass=f=80,lowpass=f=7000,loudnorm=I=-16:TP=-1.5:LRA=11"
+      POST_LOUDNORM_FILTER_CHAIN: "highpass=f=80,lowpass=f=7000,alimiter=limit=0.95"
+      ENABLE_LOUDNORM: "true"
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - external-net
+
+  # --- File Mover (Notificateur Zone Externe) ---
+  file-mover:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: python -m app.main
+    working_dir: /app/services/file-mover
+    volumes:
+      - ../../services/file-mover:/app/services/file-mover
+      - ../../libs:/app/libs
+    environment:
+      LOG_LEVEL: INFO
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      INTERNAL_API_URL: http://file-puller:8090/api/v1/pull
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - external-net
+      - dmz-net  # Bridge to internal zone notification only
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # ZONE INTERNE - Services applicatifs
+  # ═══════════════════════════════════════════════════════════════════════
+
+  # --- Token Issuer (Zone Interne - Autorité de génération des tokens) ---
+  token-issuer:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -w 2 -b 0.0.0.0:8091 app.main:application
+    working_dir: /app/services/token-issuer
+    volumes:
+      - ../../services/token-issuer:/app/services/token-issuer
+      - ../../libs:/app/libs
+    ports:
+      - "8091:8091"
+    environment:
+      LOG_LEVEL: INFO
+      TOKEN_ISSUER_PORT: "8091"
+      INT_DB_HOST: postgres-internal
+      INT_DB_PORT: "5432"
+      INT_DB_NAME: audio_upload_int
+      INT_DB_USER: audio_int
+      INT_DB_PASSWORD: changeme-int
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+      CODE_TTL_MINUTES: "15"
+      CODE_TTL_MAX_MINUTES: "4320"
+      ALLOW_SHORT_QR_TTL_SECONDS_TEST: "true"
+      MAX_UPLOADS_PER_SESSION: "5"
+      CODE_LENGTH: "6"
+      UPLOAD_STATUS_VIEW_TTL_MINUTES: "60"
+    depends_on:
+      postgres-internal:
+        condition: service_healthy
+    networks:
+      - internal-net
+      - dmz-net  # Accessible par code-generator (ext) via dmz
+
+  # --- File Puller (Zone Interne - API d'ingestion) ---
+  file-puller:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -w 2 -b 0.0.0.0:8090 app.puller:application
+    working_dir: /app/services/file-mover
+    volumes:
+      - ../../services/file-mover:/app/services/file-mover
+      - ../../libs:/app/libs
+    ports:
+      - "8090:8090"
+    environment:
+      LOG_LEVEL: INFO
+      FILE_PULLER_PORT: "8090"
+      INT_DB_HOST: postgres-internal
+      INT_DB_PORT: "5432"
+      INT_DB_NAME: audio_upload_int
+      INT_DB_USER: audio_int
+      INT_DB_PASSWORD: changeme-int
+      S3_PROCESSED_ENDPOINT: http://minio-processed:9000
+      S3_PROCESSED_ACCESS_KEY: minioadmin
+      S3_PROCESSED_SECRET_KEY: minioadmin
+      S3_PROCESSED_BUCKET: processed-staging
+      S3_INTERNAL_ENDPOINT: http://minio-internal:9000
+      S3_INTERNAL_ACCESS_KEY: minioadmin
+      S3_INTERNAL_SECRET_KEY: minioadmin
+      S3_INTERNAL_BUCKET: internal-storage
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+      EXTERNAL_CALLBACK_URL: http://upload-portal:8081/api/notify-status
+      INTERNAL_PURGE_INTERVAL_SECONDS: "86400"
+      INTERNAL_PURGE_MAX_AGE_DAYS: "7"
+    depends_on:
+      postgres-internal:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - internal-net
+      - dmz-net  # Receives notifications + pulls from processed S3
+
+  # --- Transcription Stub (Zone Interne) ---
+  transcription-stub:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: python -m app.main
+    working_dir: /app/services/transcription-stub
+    volumes:
+      - ../../services/transcription-stub:/app/services/transcription-stub
+      - ../../libs:/app/libs
+    environment:
+      LOG_LEVEL: INFO
+      INT_DB_HOST: postgres-internal
+      INT_DB_PORT: "5432"
+      INT_DB_NAME: audio_upload_int
+      INT_DB_USER: audio_int
+      INT_DB_PASSWORD: changeme-int
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: audio
+      RABBITMQ_PASSWORD: changeme-rabbit
+      RABBITMQ_VHOST: audio_pipeline
+      TRANSCRIPTION_SIMULATE_DELAY_SECONDS: "3"
+    depends_on:
+      postgres-internal:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - internal-net
+
+# ═══════════════════════════════════════════════════════════════════════
+# NETWORKS - Isolation des zones
+# ═══════════════════════════════════════════════════════════════════════
+
+networks:
+  external-net:
+    name: audio-external
+    driver: bridge
+  internal-net:
+    name: audio-internal
+    driver: bridge
+  dmz-net:
+    name: audio-dmz
+    driver: bridge
+    # Bridge network: only file-mover (ext) and file-puller (int) connect here
+
+# ═══════════════════════════════════════════════════════════════════════
+# VOLUMES
+# ═══════════════════════════════════════════════════════════════════════
+
+volumes:
+  pgdata-external:
+  pgdata-internal:
+  minio-upload:
+  minio-processed:
+  minio-internal:
+  clamav-data:

@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audio-external
+  labels:
+    zone: external
+    app.kubernetes.io/part-of: secure-audio-upload
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: audio-internal
+  labels:
+    zone: internal
+    app.kubernetes.io/part-of: secure-audio-upload
+---
+# ── Network Policy: Zone Interne - Deny All Ingress by default ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: audio-internal
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress: []
+---
+# ── Network Policy: Allow file-puller to receive from file-mover ONLY ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-file-puller-from-external
+  namespace: audio-internal
+spec:
+  podSelector:
+    matchLabels:
+      app: file-puller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              zone: external
+          podSelector:
+            matchLabels:
+              app: file-mover
+      ports:
+        - protocol: TCP
+          port: 8090
+---
+# ── Network Policy: Allow token-issuer to receive from code-generator ONLY ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-token-issuer-from-external
+  namespace: audio-internal
+spec:
+  podSelector:
+    matchLabels:
+      app: token-issuer
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              zone: external
+          podSelector:
+            matchLabels:
+              app: code-generator
+      ports:
+        - protocol: TCP
+          port: 8091
+---
+# ── Network Policy: Internal pods can talk to each other ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-internal-traffic
+  namespace: audio-internal
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              zone: internal
+---
+# ── Network Policy: Zone Externe - Allow inbound from Internet ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-external-ingress
+  namespace: audio-external
+spec:
+  podSelector:
+    matchLabels:
+      tier: frontend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
