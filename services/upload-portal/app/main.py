@@ -393,7 +393,7 @@ def on_join(data):
 
 @app.route("/api/notify-status", methods=["POST"])
 def notify_status():
-    """Called by workers to push status updates via WebSocket."""
+    """Called by workers to persist status updates and push WebSocket events."""
     auth = request.headers.get("Authorization", "")
     if not verify_bearer_token(auth, INTERNAL_API_TOKEN):
         logger.warning("Unauthorized notify-status request from %s", request.remote_addr)
@@ -402,14 +402,46 @@ def notify_status():
     data = request.get_json(silent=True) or {}
     if not data:
         return jsonify({"error": "Missing JSON body"}), 400
+    file_id = data.get("file_id")
+    status_raw = data.get("status")
+    status_msg = data.get("message", "")
+    quality = data.get("quality")
     qr_token = data.get("qr_token")
+
+    db = SessionLocal()
+    try:
+        if file_id:
+            file_obj = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
+            if file_obj:
+                if status_raw:
+                    try:
+                        file_obj.status = UploadStatus(status_raw)
+                    except Exception:
+                        logger.warning("Invalid status in notify-status: %s", status_raw)
+                file_obj.status_message = status_msg
+                if quality is not None:
+                    file_obj.audio_quality_score = quality
+                db.commit()
+
+                if not qr_token:
+                    sess = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+                    if sess:
+                        qr_token = sess.qr_token
+            else:
+                logger.warning("notify-status file not found: %s", file_id)
+    except Exception:
+        db.rollback()
+        logger.exception("notify-status DB update failed for file_id=%s", file_id)
+    finally:
+        db.close()
+
     if qr_token:
         socketio.emit("file_status", {
-            "file_id": data.get("file_id"),
+            "file_id": file_id,
             "name": data.get("filename"),
-            "status": data.get("status"),
-            "message": data.get("message", ""),
-            "quality": data.get("quality"),
+            "status": status_raw,
+            "message": status_msg,
+            "quality": quality,
         }, room=qr_token)
     return jsonify({"ok": True})
 
