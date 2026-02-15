@@ -38,21 +38,29 @@ Il couvre aussi la compréhension du **renouvellement token (+7 jours + quota)**
 ## Repères visuels (captures)
 
 1. Génération QR et options token (étape 1)
+
 ![QR Generator](../docs/screenshots/qr-code-gen.png)
 
 2. Suivi d'activité (étape 3)
+
 ![Suivi activité](../docs/screenshots/activity-follow.png)
 
 3. Saisie code court mobile (étapes 2-3)
+
+>Cette étape n'est pas nécessaire si le QRCode est flashé, passe directement à l'étape suivante Upload.
+
 ![Code court mobile](../docs/screenshots/enter-small-code.png)
 
 4. Upload mobile / statut (étape 3)
+
 ![Upload mobile](../docs/screenshots/upload-mobile.png)
 
 5. Vue application mobile (étapes 2-4)
+
 ![Application mobile](../docs/screenshots/mobile-application.jpeg)
 
 6. Portail admin / compte-rendu (étape 6)
+
 ![Admin panel](../docs/screenshots/admin-panel.png)
 
 ## Scénario guidé (pas à pas)
