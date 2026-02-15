@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import socket
-from datetime import timezone
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlencode
@@ -39,7 +39,9 @@ from libs.shared.app.config import (
     load_s3_internal,
 )
 from libs.shared.app.database import create_session_factory
-from libs.shared.app.models import UploadSession, UploadedFile, UserAudioFile, TranscriptionEvent, UploadStatus
+from libs.shared.app.models import (
+    UploadSession, UploadedFile, UserAudioFile, TranscriptionEvent, UploadStatus, DeviceEnrollment,
+)
 from libs.shared.app.s3_helper import delete_object, download_fileobj, get_s3_client
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -334,6 +336,14 @@ def create_app() -> Flask:
                     .order_by(UserAudioFile.created_at.desc())
                     .all()
                 )
+            devices = []
+            if int_db_available:
+                devices = (
+                    int_db.query(DeviceEnrollment)
+                    .order_by(DeviceEnrollment.created_at.desc())
+                    .limit(200)
+                    .all()
+                )
 
             internal_index = {}
             for it in internal_files:
@@ -393,6 +403,9 @@ def create_app() -> Flask:
                 "transcription_completed": sum(1 for uf in internal_files if uf.transcription_status == "completed"),
                 "transcription_processing": sum(1 for uf in internal_files if uf.transcription_status == "processing"),
                 "transcription_failed": sum(1 for uf in internal_files if uf.transcription_status == "failed"),
+                "devices_total": len(devices),
+                "devices_active": sum(1 for d in devices if d.status == "active"),
+                "devices_revoked": sum(1 for d in devices if d.status == "revoked"),
             }
 
             s3_buckets = [
@@ -437,6 +450,19 @@ def create_app() -> Flask:
             return {
                 "summary": summary,
                 "sessions": sessions_payload,
+                "devices": [
+                    {
+                        "device_id": str(d.id),
+                        "user_sub": d.user_sub,
+                        "device_name": d.device_name or "",
+                        "status": d.status,
+                        "simple_code": d.simple_code,
+                        "last_seen_at": _as_iso(d.last_seen_at),
+                        "retention_expires_at": _as_iso(d.retention_expires_at),
+                        "created_at": _as_iso(d.created_at),
+                    }
+                    for d in devices
+                ],
                 "s3": {
                     "summary": s3_summary,
                     "buckets": s3_buckets,
@@ -639,8 +665,12 @@ def create_app() -> Flask:
                         "transcription_completed": 0,
                         "transcription_processing": 0,
                         "transcription_failed": 0,
+                        "devices_total": 0,
+                        "devices_active": 0,
+                        "devices_revoked": 0,
                     },
                     "sessions": [],
+                    "devices": [],
                     "s3": {
                         "summary": {
                             "bucket_count": 0,
@@ -719,6 +749,59 @@ def create_app() -> Flask:
             return jsonify({"ok": True, **agg})
         finally:
             ext_db.close()
+            int_db.close()
+
+    @app.route("/api/devices/revoke-one", methods=["POST"])
+    @require_auth
+    def api_revoke_one_device():
+        payload = request.get_json(silent=True) or {}
+        device_id = (payload.get("device_id") or "").strip()
+        if not device_id:
+            return jsonify({"error": "device_id requis"}), 400
+        int_db = IntSessionLocal()
+        try:
+            rec = int_db.query(DeviceEnrollment).filter(DeviceEnrollment.id == device_id).first()
+            if not rec:
+                return jsonify({"error": "not_found"}), 404
+            rec.status = "revoked"
+            rec.revoked_reason = "revoked_by_admin_portal"
+            rec.revoked_at = datetime.now(timezone.utc)
+            rec.updated_at = rec.revoked_at
+            int_db.commit()
+            return jsonify({"ok": True})
+        except Exception:
+            int_db.rollback()
+            logger.exception("Admin revoke device failed for %s", device_id)
+            return jsonify({"error": "device_revoke_failed"}), 500
+        finally:
+            int_db.close()
+
+    @app.route("/api/devices/revoke-all", methods=["POST"])
+    @require_auth
+    def api_revoke_all_devices():
+        int_db = IntSessionLocal()
+        try:
+            now = datetime.now(timezone.utc)
+            updated = (
+                int_db.query(DeviceEnrollment)
+                .filter(DeviceEnrollment.status == "active")
+                .update(
+                    {
+                        DeviceEnrollment.status: "revoked",
+                        DeviceEnrollment.revoked_reason: "revoked_all_by_admin_portal",
+                        DeviceEnrollment.revoked_at: now,
+                        DeviceEnrollment.updated_at: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            int_db.commit()
+            return jsonify({"ok": True, "revoked": int(updated)})
+        except Exception:
+            int_db.rollback()
+            logger.exception("Admin revoke all devices failed")
+            return jsonify({"error": "device_revoke_all_failed"}), 500
+        finally:
             int_db.close()
 
     @app.route("/api/s3/download")
@@ -817,12 +900,20 @@ INDEX_TEMPLATE = """
         <div class=\"muted\">Connecte: {{ user.email or user.preferred_username or user.sub }}</div>
       </div>
       <div style=\"display:flex;align-items:center;gap:10px\">
+        <button id=\"revoke-all-devices-btn\" style=\"font-size:12px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;cursor:pointer\">Révoquer tous les devices</button>
         <button id=\"purge-all-btn\" style=\"font-size:12px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;cursor:pointer\">Purger tous les fichiers</button>
         <a id=\"logout-link\" href=\"logout\">Se deconnecter</a>
       </div>
     </div>
 
     <div class=\"summary\" id=\"summary\"></div>
+    <div class=\"card\">
+      <div style=\"display:flex;justify-content:space-between;align-items:center\">
+        <strong>Devices enrôlés</strong>
+        <span class=\"muted\">Gestion des appareils navigateur</span>
+      </div>
+      <div id=\"devices\" style=\"margin-top:10px\"></div>
+    </div>
     <div class=\"card\">
       <div style=\"display:flex;justify-content:space-between;align-items:center\">
         <strong>Buckets S3</strong>
@@ -856,10 +947,35 @@ function renderSummary(s) {
     <div class=\"kpi\"><div class=\"muted\">Sessions</div><div class=\"n\">${s.sessions}</div></div>
     <div class=\"kpi\"><div class=\"muted\">Fichiers</div><div class=\"n\">${s.files}</div></div>
     <div class=\"kpi\"><div class=\"muted\">En quarantaine</div><div class=\"n\">${s.quarantined || 0}</div></div>
+    <div class=\"kpi\"><div class=\"muted\">Devices actifs</div><div class=\"n\">${s.devices_active || 0}</div></div>
+    <div class=\"kpi\"><div class=\"muted\">Devices révoqués</div><div class=\"n\">${s.devices_revoked || 0}</div></div>
     <div class=\"kpi\"><div class=\"muted\">Transcriptions OK</div><div class=\"n\">${s.transcription_completed}</div></div>
     <div class=\"kpi\"><div class=\"muted\">Transcriptions en cours</div><div class=\"n\">${s.transcription_processing}</div></div>
     <div class=\"kpi\"><div class=\"muted\">Transcriptions KO</div><div class=\"n\">${s.transcription_failed}</div></div>
   `;
+}
+
+function renderDevices(devices) {
+  const root = document.getElementById('devices');
+  if (!devices || !devices.length) {
+    root.innerHTML = '<div class=\"muted\">Aucun device enrôlé.</div>';
+    return;
+  }
+  root.innerHTML = devices.map(d => `
+    <div class=\"obj\">
+      <div style=\"display:flex;justify-content:space-between;align-items:center;gap:8px\">
+        <div>
+          <strong>${esc(d.device_name || 'Device sans nom')}</strong>
+          <span class=\"pill\">${esc(d.status)}</span>
+          <span class=\"pill\">code ${esc(d.simple_code || '-')}</span>
+        </div>
+        <button style=\"font-size:12px;padding:3px 7px;border:1px solid #fca5a5;border-radius:8px;background:#fff;color:#b91c1c;cursor:pointer\"
+                onclick=\"revokeOneDevice('${esc(d.device_id)}')\">Révoquer</button>
+      </div>
+      <div class=\"muted\">last_seen: ${esc(d.last_seen_at || '-')} | retention: ${esc(d.retention_expires_at || '-')}</div>
+      <div class=\"muted\">user_sub: ${esc(d.user_sub || '-')}</div>
+    </div>
+  `).join('');
 }
 
 function renderS3(s3) {
@@ -1014,6 +1130,37 @@ async function purgeAllFiles() {
   }
 }
 
+async function revokeOneDevice(deviceId) {
+  if (!deviceId) return;
+  const ok = window.confirm('Révoquer ce device ?');
+  if (!ok) return;
+  try {
+    const r = await fetch('api/devices/revoke-one', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || 'device_revoke_failed');
+    await loadData();
+  } catch (e) {
+    alert('Echec révocation device.');
+  }
+}
+
+async function revokeAllDevices() {
+  const ok = window.confirm('Révoquer tous les devices enrôlés ?');
+  if (!ok) return;
+  try {
+    const r = await fetch('api/devices/revoke-all', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok || !data.ok) throw new Error(data.error || 'device_revoke_all_failed');
+    await loadData();
+  } catch (e) {
+    alert('Echec révocation globale devices.');
+  }
+}
+
 async function loadData() {
   if (window.__dashboardInFlight) return;
   window.__dashboardInFlight = true;
@@ -1034,16 +1181,19 @@ async function loadData() {
     const data = await r.json();
     if (data.error === 'dashboard_unavailable') {
       document.getElementById('sessions').innerHTML = '<div class=\"muted warn\">Dashboard temporairement indisponible. Recharge la page.</div>';
+      document.getElementById('devices').innerHTML = '<div class=\"muted warn\">Devices temporairement indisponibles.</div>';
       document.getElementById('s3-buckets').innerHTML = '<div class=\"muted warn\">S3 temporairement indisponible.</div>';
       document.getElementById('stt-events').innerHTML = '<div class=\"muted warn\">Journal transcription temporairement indisponible.</div>';
       return;
     }
     renderSummary(data.summary || {});
+    renderDevices(data.devices || []);
     renderS3(data.s3 || {});
     renderTranscriptionEvents(data.transcription_events || []);
     renderSessions(data.sessions || []);
   } catch (e) {
     document.getElementById('sessions').innerHTML = '<div class=\"muted warn\">Erreur chargement dashboard.</div>';
+    document.getElementById('devices').innerHTML = '<div class=\"muted warn\">Erreur chargement devices.</div>';
     document.getElementById('s3-buckets').innerHTML = '<div class=\"muted warn\">Erreur chargement S3.</div>';
     document.getElementById('stt-events').innerHTML = '<div class=\"muted warn\">Erreur chargement journal transcription.</div>';
   } finally {
@@ -1053,6 +1203,7 @@ async function loadData() {
 
 loadData();
 document.getElementById('purge-all-btn')?.addEventListener('click', purgeAllFiles);
+document.getElementById('revoke-all-devices-btn')?.addEventListener('click', revokeAllDevices);
 let dashboardTimer = setInterval(loadData, 5000);
 document.getElementById('logout-link')?.addEventListener('click', () => {
   if (dashboardTimer) {

@@ -38,7 +38,7 @@ from libs.shared.app.config import (
 )
 from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
-from libs.shared.app.security import require_strong_shared_secret
+from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.s3_helper import download_fileobj, delete_object, object_exists
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -192,6 +192,33 @@ def request_token_from_internal(
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def request_internal_device_api(method: str, path: str, *, json_body=None, timeout: int = 10, params=None) -> dict:
+    base = os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://token-issuer:8091").rstrip("/")
+    resp = req.request(
+        method,
+        f"{base}{path}",
+        json=json_body,
+        params=params,
+        headers={
+            "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        try:
+            err = resp.json()
+        except Exception:
+            err = {"error": resp.text[:200] or "internal_api_error"}
+        raise req.HTTPError(str(err), response=resp)
+    if not resp.text:
+        return {}
+    try:
+        return resp.json()
+    except Exception:
+        return {}
 
 
 def _get_owned_file(db, user_sub: str, file_id: str):
@@ -567,6 +594,109 @@ def api_my_sessions():
         return jsonify(result)
     finally:
         db.close()
+
+
+@app.route("/api/my-devices")
+@require_auth
+def api_my_devices():
+    user = get_current_user()
+    try:
+        devices = request_internal_device_api(
+            "GET",
+            "/api/v1/devices",
+            params={"user_sub": user.get("sub", "")},
+        )
+        return jsonify(devices if isinstance(devices, list) else [])
+    except Exception:
+        logger.exception("Failed to list enrolled devices for user %s", user.get("sub"))
+        return jsonify({"error": "device_list_unavailable"}), 503
+
+
+@app.route("/api/my-devices/<device_id>/rename", methods=["POST"])
+@require_auth
+def api_rename_device(device_id):
+    user = get_current_user()
+    data = request.get_json(silent=True) or {}
+    name = (data.get("device_name") or "").strip()
+    if not name:
+        return jsonify({"error": "device_name requis"}), 400
+    try:
+        request_internal_device_api(
+            "POST",
+            f"/api/v1/devices/{device_id}/rename",
+            json_body={"user_sub": user.get("sub", ""), "device_name": name},
+        )
+        return jsonify({"ok": True})
+    except Exception:
+        logger.exception("Failed to rename device %s for user %s", device_id, user.get("sub"))
+        return jsonify({"error": "device_rename_failed"}), 500
+
+
+@app.route("/api/my-devices/<device_id>/revoke", methods=["POST"])
+@require_auth
+def api_revoke_device(device_id):
+    user = get_current_user()
+    try:
+        request_internal_device_api(
+            "POST",
+            f"/api/v1/devices/{device_id}/revoke",
+            json_body={"user_sub": user.get("sub", ""), "reason": "revoked_from_qr_ui"},
+        )
+        return jsonify({"ok": True})
+    except Exception:
+        logger.exception("Failed to revoke device %s for user %s", device_id, user.get("sub"))
+        return jsonify({"error": "device_revoke_failed"}), 500
+
+
+@app.route("/api/my-devices/revoke-all", methods=["POST"])
+@require_auth
+def api_revoke_all_devices():
+    user = get_current_user()
+    try:
+        data = request_internal_device_api(
+            "POST",
+            "/api/v1/devices/revoke-all",
+            json_body={"user_sub": user.get("sub", ""), "reason": "revoked_all_from_qr_ui"},
+        )
+        return jsonify({"ok": True, "revoked": int(data.get("revoked", 0))})
+    except Exception:
+        logger.exception("Failed to revoke all devices for user %s", user.get("sub"))
+        return jsonify({"error": "device_revoke_all_failed"}), 500
+
+
+@app.route("/api/device/enroll-proxy", methods=["POST"])
+def api_device_enroll_proxy():
+    auth = request.headers.get("Authorization", "")
+    if not verify_bearer_token(auth, INTERNAL_API_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = request_internal_device_api("POST", "/api/v1/enroll-device", json_body=payload)
+        return jsonify(data)
+    except Exception:
+        logger.exception("Device enroll proxy failed")
+        return jsonify({"error": "device_enroll_proxy_failed"}), 502
+
+
+@app.route("/api/device/validate-proxy", methods=["POST"])
+def api_device_validate_proxy():
+    auth = request.headers.get("Authorization", "")
+    if not verify_bearer_token(auth, INTERNAL_API_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = request_internal_device_api("POST", "/api/v1/validate-device", json_body=payload)
+        return jsonify(data)
+    except req.HTTPError as err:
+        if err.response is not None:
+            try:
+                return jsonify(err.response.json()), err.response.status_code
+            except Exception:
+                return jsonify({"valid": False, "reason": "upstream_error"}), 502
+        return jsonify({"valid": False, "reason": "upstream_error"}), 502
+    except Exception:
+        logger.exception("Device validate proxy failed")
+        return jsonify({"valid": False, "reason": "proxy_error"}), 502
 
 
 @app.route("/api/file/download/<file_id>")
@@ -1223,6 +1353,17 @@ INDEX_TEMPLATE = """
     </div>
 
     <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.6rem;">
+            <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
+            <button class="btn-primary btn-danger-mini" id="revoke-all-devices-btn" onclick="revokeAllDevices()">Révoquer tous</button>
+        </div>
+        <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
+            Ces appareils peuvent uploader sans rescanner tant que leur enrôlement est valide.
+        </p>
+        <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils...</div>
+    </div>
+
+    <div class="card">
         <div class="activity-inline">
             <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
             <div class="activity-mini">
@@ -1393,6 +1534,7 @@ async function generateCode() {
         document.getElementById('result').classList.add('active');
 
         loadSessions();
+        loadDevices();
     } catch (e) {
         alert('Erreur: ' + e.message);
     } finally {
@@ -1404,6 +1546,89 @@ async function generateCode() {
 function resetForm() {
     document.getElementById('generate-form').style.display = 'block';
     document.getElementById('result').classList.remove('active');
+}
+
+async function loadDevices() {
+    const container = document.getElementById('devices-list');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/my-devices');
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Erreur chargement devices');
+        const devices = Array.isArray(data) ? data : [];
+        if (!devices.length) {
+            container.innerHTML = '<span style="color:#64748b">Aucun appareil enrôle.</span>';
+            return;
+        }
+        container.innerHTML = devices.map((d) => `
+            <div style="border:1px solid #e2e8f0;border-radius:8px;padding:0.55rem 0.6rem;margin-bottom:0.5rem;">
+                <div style="display:flex;justify-content:space-between;gap:0.5rem;align-items:center;">
+                    <div style="min-width:0;">
+                        <div style="font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                            ${escapeHtml(d.device_name || 'Appareil sans nom')}
+                        </div>
+                        <div style="font-size:0.74rem;color:#64748b;">
+                            ${escapeHtml(d.status)} | vu: ${escapeHtml(d.last_seen_at || '-')}
+                        </div>
+                    </div>
+                    <button class="btn-primary btn-danger-mini" onclick="revokeDevice('${escapeHtml(d.device_id)}')">Révoquer</button>
+                </div>
+                <div style="display:flex;gap:0.4rem;margin-top:0.45rem;">
+                    <input id="dev-name-${escapeHtml(d.device_id)}" type="text"
+                           style="flex:1;padding:0.35rem 0.45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;"
+                           placeholder="Renommer l'appareil" value="${escapeHtml(d.device_name || '')}">
+                    <button class="btn-primary" style="width:auto;padding:0.35rem 0.5rem;font-size:0.78rem;"
+                            onclick="renameDevice('${escapeHtml(d.device_id)}')">Renommer</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        container.innerHTML = '<span style="color:#b91c1c">Erreur chargement appareils.</span>';
+    }
+}
+
+async function renameDevice(deviceId) {
+    const input = document.getElementById(`dev-name-${deviceId}`);
+    if (!input) return;
+    const name = (input.value || '').trim();
+    if (!name) return;
+    try {
+        const resp = await fetch(`/api/my-devices/${deviceId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_name: name }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'rename_failed');
+        loadDevices();
+    } catch (e) {
+        alert('Echec renommage appareil.');
+    }
+}
+
+async function revokeDevice(deviceId) {
+    if (!confirm('Révoquer cet appareil ?')) return;
+    try {
+        const resp = await fetch(`/api/my-devices/${deviceId}/revoke`, { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'revoke_failed');
+        loadDevices();
+    } catch (e) {
+        alert('Echec révocation appareil.');
+    }
+}
+
+async function revokeAllDevices() {
+    if (!confirm('Révoquer tous vos appareils enrôlés ?')) return;
+    try {
+        const resp = await fetch('/api/my-devices/revoke-all', { method: 'POST' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'revoke_all_failed');
+        alert(`Appareils révoqués: ${data.revoked || 0}`);
+        loadDevices();
+    } catch (e) {
+        alert('Echec révocation globale.');
+    }
 }
 
 function toggleActivitiesPanel() {
@@ -1423,6 +1648,7 @@ async function purgeSessions() {
         if (!resp.ok) throw new Error(data.error || 'Erreur purge');
         alert(`Purge terminée: ${data.deleted_sessions} sessions, ${data.deleted_files} fichiers.`);
         loadSessions();
+        loadDevices();
     } catch (e) {
         alert('Erreur: ' + e.message);
     }
@@ -1694,7 +1920,9 @@ async function loadNormalizationImpact(fileId) {
 }
 
 loadSessions();
+loadDevices();
 setInterval(loadSessions, 15000);
+setInterval(loadDevices, 30000);
 </script>
 </body>
 </html>

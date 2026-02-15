@@ -91,6 +91,8 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 7. **Transfert idempotent** — Si une notification `file_ready` est rejouée (retry réseau/queue), le `file-puller` détecte le fichier déjà importé et répond `already_pulled` sans doublonner les données.
 
+8. **Enrôlement persistant device navigateur** — Le portail upload enrôle le navigateur (token device persistant), vérifie sa validité à chaque initialisation et permet la révocation unitaire/globale côté QR interne et admin.
+
 ## Démarrage rapide
 
 ### Docker Compose
@@ -215,6 +217,23 @@ curl -sS http://localhost:8091/health
   - supprime les objets audio associés dans les buckets externes
 - Bouton `Impact normalisation` (par fichier transcodé):
   - affiche une comparaison avant/après (`LUFS`, `True Peak`, `LRA`) et les deltas
+- Gestion des appareils enrôlés:
+  - liste des devices du compte utilisateur
+  - renommage d'un device
+  - révocation d'un device
+  - révocation globale des devices du compte
+
+### 5.ter Enrôlement device (upload)
+
+- À l'ouverture du lien QR, le navigateur:
+  - tente de réutiliser un `device_token` persistant (`localStorage`)
+  - sinon déclenche un enrôlement initial (clé device + fingerprint)
+- Chaque requête upload/status envoie le header `X-Device-Token`.
+- Le backend applique:
+  - fast-path local (signature + rétention),
+  - validation backend forte à l'initialisation de session (détection rapide des révocations),
+  - puis validation asynchrone backend périodique.
+- Si la validation backend échoue au-delà de la fenêtre configurée, les requêtes sont refusées avec message explicite de rescanner/régénérer un code.
 
 ### 6. Sécurité API interne
 
@@ -401,6 +420,10 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté file-puller |
 | `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max des fichiers importés côté intranet avant purge |
 | `PULL_REQUEST_TIMEOUT_SECONDS` | `90` | Timeout HTTP (secondes) de `file-mover` vers `file-puller` |
+| `DEVICE_TOKEN_RETENTION_HOURS` | `168` | Durée de rétention d'un enrôlement device (zone interne) |
+| `DEVICE_REVALIDATE_INTERVAL_SECONDS` | `14400` | Intervalle de revalidation asynchrone des device tokens côté upload |
+| `DEVICE_REVALIDATE_MAX_FAILURE_SECONDS` | `14400` | Fenêtre max d'échec backend avant refus des requêtes device |
+| `DEVICE_API_PROXY_BASE_URL` | `http://code-generator:8080` | URL du proxy API device utilisé par upload-portal |
 | `NORMALIZATION_CACHE_TTL_SECONDS` | `3600` | Durée du cache des métriques de normalisation côté admin |
 | `NORMALIZATION_MAX_COMPUTE_PER_REFRESH` | `0` | Nombre max d'analyses de normalisation lancées par refresh dashboard (0 = non bloquant) |
 | `NORMALIZATION_ANALYSIS_MAX_SECONDS` | `180` | Durée max de l'échantillon analysé pour l'impact de normalisation (page QR/interne) |
@@ -473,3 +496,10 @@ flowchart TD
 ## Licence
 
 Apache-2.0
+
+## Validation enrôlement device
+
+- Cahier de tests: `tests/TEST_PLAN_DEVICE_ENROLLMENT.md`
+- Test unitaire token device: `tests/unit/test_device_token.py`
+- Scénario simulé: `tests/scenarios/device_enrollment_sequence.sh`
+- Synthèse couverture/statut: `tests/TEST_COVERAGE_STATUS.md`

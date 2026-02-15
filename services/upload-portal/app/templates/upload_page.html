@@ -116,6 +116,11 @@
             <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
             Vous pouvez revenir sur cette page pour vérifier l'avancement.
         </div>
+        <div class="security-banner" id="device-enroll-banner" style="margin-bottom:0.75rem;">
+            <strong>Enrolement appareil:</strong> pour un acces durable, vous pouvez ajouter cette page a l'ecran d'accueil (mode PWA).
+            Le token appareil restera persistant et verifie regulierement.
+        </div>
+        <div class="warning-banner" id="device-warning-banner" style="display:none;"></div>
 
         <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
             <div class="upload-icon">🎤</div>
@@ -181,6 +186,114 @@
 const qrToken = "{{ qr_token }}";
 let remaining = {{ remaining }};
 const canUpload = {{ 'true' if can_upload else 'false' }};
+const deviceRevalidateIntervalSeconds = {{ device_revalidate_interval_seconds }};
+const deviceMaxValidationFailureSeconds = {{ device_revalidate_max_failure_seconds }};
+const deviceStorageKey = `upload_device_token:${qrToken}`;
+const deviceKeyStorageKey = `upload_device_key:${qrToken}`;
+let deviceSessionTimer = null;
+
+function getDeviceToken() {
+    return localStorage.getItem(deviceStorageKey) || '';
+}
+
+function setDeviceToken(token) {
+    if (token) localStorage.setItem(deviceStorageKey, token);
+}
+
+function clearDeviceToken() {
+    localStorage.removeItem(deviceStorageKey);
+}
+
+function getOrCreateDeviceKey() {
+    let v = localStorage.getItem(deviceKeyStorageKey);
+    if (v) return v;
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    v = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(deviceKeyStorageKey, v);
+    return v;
+}
+
+function deviceFingerprint() {
+    return [
+        navigator.userAgent || '',
+        navigator.platform || '',
+        navigator.language || '',
+        String(screen.width || ''),
+        String(screen.height || ''),
+        String(Intl.DateTimeFormat().resolvedOptions().timeZone || ''),
+    ].join('|').slice(0, 900);
+}
+
+function setDeviceWarning(message) {
+    const el = document.getElementById('device-warning-banner');
+    if (!el) return;
+    if (!message) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+    }
+    el.style.display = 'block';
+    el.textContent = message;
+}
+
+function disableUpload(reason) {
+    if (uploadZone) {
+        uploadZone.classList.add('disabled');
+        uploadZone.onclick = null;
+    }
+    setDeviceWarning(reason);
+}
+
+async function deviceFetch(url, options = {}) {
+    const opts = { ...options };
+    opts.headers = { ...(opts.headers || {}) };
+    const t = getDeviceToken();
+    if (t) opts.headers['X-Device-Token'] = t;
+    return fetch(url, opts);
+}
+
+async function bootstrapDeviceSession() {
+    try {
+        const r = await deviceFetch(`/api/device/session/${qrToken}`);
+        const data = await r.json();
+        if (!r.ok) {
+            disableUpload(data.error || 'Impossible de verifier la session device.');
+            return false;
+        }
+        if (data.status === 'enrolled') {
+            setDeviceWarning('');
+            return true;
+        }
+        if (data.status === 'session_unavailable') {
+            disableUpload(data.session_reason || 'Session indisponible.');
+            return false;
+        }
+        const enrollResp = await fetch(`/api/device/enroll/${qrToken}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                device_key: getOrCreateDeviceKey(),
+                device_fingerprint: deviceFingerprint(),
+                device_name: (navigator.platform || 'Device'),
+            }),
+        });
+        const enrollData = await enrollResp.json();
+        if (!enrollResp.ok || !enrollData.device_token) {
+            disableUpload(
+                enrollData.error ||
+                'Enrolement impossible. Retournez au backend pour regenerer/scanner un code.'
+            );
+            return false;
+        }
+        setDeviceToken(enrollData.device_token);
+        setDeviceWarning('');
+        return true;
+    } catch (e) {
+        disableUpload('Validation device indisponible. Reessayez plus tard.');
+        return false;
+    }
+}
 
 // ─── WebSocket ────────────────────────────────────────
 const socket = io();
@@ -245,6 +358,8 @@ async function uploadFile(file) {
     try {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `/api/upload/${qrToken}`);
+        const token = getDeviceToken();
+        if (token) xhr.setRequestHeader('X-Device-Token', token);
 
         xhr.upload.onprogress = (e) => {
             if (e.lengthComputable && progressFill) {
@@ -381,7 +496,7 @@ function escapeHtml(text) {
 // Auto-refresh status every 10s (fallback if WebSocket fails)
 setInterval(async () => {
     try {
-        const resp = await fetch(`/api/status/${qrToken}`);
+        const resp = await deviceFetch(`/api/status/${qrToken}`);
         if (resp.ok) {
             const data = await resp.json();
             data.files.forEach(f => updateFileStatus({
@@ -393,9 +508,17 @@ setInterval(async () => {
                 remaining = data.remaining;
                 updateRemainingText();
             }
+        } else if (resp.status === 401) {
+            clearDeviceToken();
+            disableUpload('Token appareil invalide/revoque. Retournez au backend pour regenerer un code et scanner/saisir.');
         }
     } catch (e) {}
 }, 10000);
+
+bootstrapDeviceSession();
+deviceSessionTimer = setInterval(() => {
+    bootstrapDeviceSession();
+}, Math.max(60, deviceRevalidateIntervalSeconds) * 1000);
 </script>
 </body>
 </html>

@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+import requests as req
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from uuid import uuid4
@@ -31,6 +32,7 @@ from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.s3_helper import upload_fileobj, ensure_bucket, delete_object
 from libs.shared.app.queue_helper import publish_message, QUEUE_AV_SCAN, RabbitMQConfig
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
+from libs.shared.app.device_token import verify_device_token, utc_now_ts
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -51,6 +53,13 @@ _purge_thread_started = False
 EXTERNAL_PURGE_INTERVAL_SECONDS = max(60, int(os.getenv("EXTERNAL_PURGE_INTERVAL_SECONDS", "86400")))
 EXTERNAL_PURGE_MAX_AGE_HOURS = max(1, int(os.getenv("EXTERNAL_PURGE_MAX_AGE_HOURS", "12")))
 EXTERNAL_PURGE_LOCK_ID = int(os.getenv("EXTERNAL_PURGE_LOCK_ID", "810018001"))
+DEVICE_API_PROXY_BASE_URL = os.getenv("DEVICE_API_PROXY_BASE_URL", "http://code-generator:8080").rstrip("/")
+TOKEN_ISSUER_ENROLL_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/enroll-proxy"
+TOKEN_ISSUER_VALIDATE_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/validate-proxy"
+DEVICE_REVALIDATE_INTERVAL_SECONDS = max(60, int(os.getenv("DEVICE_REVALIDATE_INTERVAL_SECONDS", "14400")))
+DEVICE_REVALIDATE_MAX_FAILURE_SECONDS = max(300, int(os.getenv("DEVICE_REVALIDATE_MAX_FAILURE_SECONDS", "14400")))
+_device_validation_state = {}
+_device_validation_lock = threading.Lock()
 
 
 # ─── Helpers ────────────────────────────────────────────────
@@ -114,6 +123,218 @@ def allowed_file(filename: str) -> bool:
         return False
     ext = filename.rsplit(".", 1)[1].lower()
     return ext in ALLOWED_AUDIO_EXTENSIONS
+
+
+def _extract_device_token() -> str:
+    return (request.headers.get("X-Device-Token") or "").strip()
+
+
+def _set_validation_state(device_id: str, ok: bool):
+    now_ts = utc_now_ts()
+    with _device_validation_lock:
+        state = _device_validation_state.get(device_id, {})
+        if ok:
+            _device_validation_state[device_id] = {
+                "last_ok_ts": now_ts,
+                "last_check_ts": now_ts,
+                "last_error": "",
+                "first_failure_ts": None,
+                "backend_invalid": False,
+                "backend_reason": "",
+            }
+            return
+        first_failure_ts = state.get("first_failure_ts") or now_ts
+        _device_validation_state[device_id] = {
+            "last_ok_ts": state.get("last_ok_ts"),
+            "last_check_ts": now_ts,
+            "last_error": "validate_failed",
+            "first_failure_ts": first_failure_ts,
+            "backend_invalid": False,
+            "backend_reason": "",
+        }
+
+
+def _set_validation_state_invalid(device_id: str, reason: str):
+    now_ts = utc_now_ts()
+    with _device_validation_lock:
+        state = _device_validation_state.get(device_id, {})
+        _device_validation_state[device_id] = {
+            "last_ok_ts": state.get("last_ok_ts"),
+            "last_check_ts": now_ts,
+            "last_error": "backend_invalid",
+            "first_failure_ts": None,
+            "backend_invalid": True,
+            "backend_reason": (reason or "invalid").strip(),
+        }
+
+
+def _get_validation_state(device_id: str) -> dict:
+    with _device_validation_lock:
+        return dict(_device_validation_state.get(device_id, {}))
+
+
+def _async_validate_device(device_token: str, qr_token: str):
+    payload = {"device_token": device_token, "qr_token": qr_token}
+    try:
+        resp = req.post(
+            TOKEN_ISSUER_VALIDATE_DEVICE_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=6,
+        )
+        if resp.status_code >= 400:
+            reason = ""
+            try:
+                body = resp.json()
+                reason = str(body.get("reason") or body.get("error") or "").strip()
+            except Exception:
+                reason = ""
+            try:
+                device_id = verify_device_token(device_token, INTERNAL_API_TOKEN).get("device_id", "")
+            except Exception:
+                return
+            # 4xx with explicit device-invalid reasons should block immediately.
+            definitive_reasons = {
+                "revoked",
+                "not_found",
+                "token_mismatch",
+                "qr_expired",
+                "retention_expired",
+                "invalid_signature",
+                "invalid_payload",
+            }
+            if resp.status_code < 500 and reason in definitive_reasons:
+                _set_validation_state_invalid(device_id, reason)
+            else:
+                _set_validation_state(device_id, ok=False)
+            return
+        data = resp.json()
+        device_id = str(data.get("device_id") or "")
+        if device_id:
+            if bool(data.get("valid")):
+                _set_validation_state(device_id, ok=True)
+            else:
+                _set_validation_state_invalid(device_id, str(data.get("reason") or "invalid"))
+    except Exception:
+        try:
+            device_id = verify_device_token(device_token, INTERNAL_API_TOKEN).get("device_id", "")
+        except Exception:
+            return
+        if device_id:
+            _set_validation_state(device_id, ok=False)
+
+
+def _sync_validate_device_once(device_token: str, qr_token: str) -> tuple[bool, bool, str]:
+    """Best-effort strong backend validation on session bootstrap."""
+    try:
+        resp = req.post(
+            TOKEN_ISSUER_VALIDATE_DEVICE_URL,
+            json={"device_token": device_token, "qr_token": qr_token},
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=6,
+        )
+    except Exception:
+        try:
+            device_id = str(verify_device_token(device_token, INTERNAL_API_TOKEN).get("device_id") or "")
+        except Exception:
+            device_id = ""
+        if device_id:
+            _set_validation_state(device_id, ok=False)
+        return False, True, "backend_unavailable"
+
+    reason = ""
+    data = {}
+    try:
+        data = resp.json()
+        reason = str(data.get("reason") or data.get("error") or "").strip()
+    except Exception:
+        reason = ""
+
+    try:
+        device_id = str(verify_device_token(device_token, INTERNAL_API_TOKEN).get("device_id") or "")
+    except Exception:
+        device_id = ""
+
+    if resp.status_code >= 500:
+        if device_id:
+            _set_validation_state(device_id, ok=False)
+        return False, True, "backend_unavailable"
+
+    if bool(data.get("valid")):
+        if device_id:
+            _set_validation_state(device_id, ok=True)
+        return True, True, "ok"
+
+    if device_id:
+        _set_validation_state_invalid(device_id, reason or "invalid")
+    return True, False, reason or "invalid"
+
+
+def _validate_device_fast_path(qr_token: str, device_token: str) -> tuple[bool, dict]:
+    if not device_token:
+        return False, {"reason": "missing_device_token", "message": "Appareil non enrole."}
+    try:
+        payload = verify_device_token(device_token, INTERNAL_API_TOKEN)
+    except Exception:
+        return False, {"reason": "invalid_device_token", "message": "Token appareil invalide."}
+
+    if str(payload.get("qr_token") or "").strip() != qr_token:
+        return False, {"reason": "token_scope_mismatch", "message": "Token appareil non associe a ce code."}
+
+    now_ts = utc_now_ts()
+    retention_until = int(payload.get("retention_until") or 0)
+    if retention_until and now_ts > retention_until:
+        return False, {"reason": "retention_expired", "message": "Enrolement expire. Scannez un nouveau code."}
+
+    device_id = str(payload.get("device_id") or "")
+    if not device_id:
+        return False, {"reason": "missing_device_id", "message": "Token appareil incomplet."}
+
+    state = _get_validation_state(device_id)
+    if bool(state.get("backend_invalid")):
+        reason = str(state.get("backend_reason") or "invalid")
+        message_by_reason = {
+            "revoked": "Appareil revoque. Retournez sur le backend et regenerez un code.",
+            "qr_expired": "Session expiree. Regenerer puis rescanner un nouveau code.",
+            "retention_expired": "Enrolement expire. Regenerer puis rescanner un nouveau code.",
+            "not_found": "Appareil inconnu. Veuillez re-enroler via un nouveau QR code.",
+            "token_mismatch": "Token appareil invalide pour cette session.",
+        }
+        return False, {
+            "reason": reason,
+            "message": message_by_reason.get(
+                reason,
+                "Appareil invalide. Retournez sur le backend et rescanner un nouveau code.",
+            ),
+        }
+
+    last_check_ts = int(state.get("last_check_ts") or 0)
+    first_failure_ts = state.get("first_failure_ts")
+    if first_failure_ts:
+        elapsed = now_ts - int(first_failure_ts)
+        if elapsed > DEVICE_REVALIDATE_MAX_FAILURE_SECONDS:
+            return False, {
+                "reason": "backend_validation_window_exceeded",
+                "message": (
+                    "Validation backend indisponible trop longtemps. "
+                    "Pour votre securite, retournez sur le backend et regenerez un code."
+                ),
+            }
+
+    retry_interval = DEVICE_REVALIDATE_INTERVAL_SECONDS
+    if first_failure_ts:
+        retry_interval = min(DEVICE_REVALIDATE_INTERVAL_SECONDS, 300)
+    if now_ts - last_check_ts >= retry_interval:
+        t = threading.Thread(target=_async_validate_device, args=(device_token, qr_token), daemon=True)
+        t.start()
+
+    return True, {"reason": "ok", "device_id": device_id}
 
 
 def run_external_purge_once():
@@ -249,7 +470,100 @@ def upload_page(qr_token):
         max_uploads=session_obj.max_uploads,
         uploads=upload_list,
         allowed_extensions=",".join(f".{e}" for e in ALLOWED_AUDIO_EXTENSIONS),
+        device_revalidate_interval_seconds=DEVICE_REVALIDATE_INTERVAL_SECONDS,
+        device_revalidate_max_failure_seconds=DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
     )
+
+
+@app.route("/api/device/session/<qr_token>")
+def api_device_session(qr_token):
+    """Session bootstrap for device enrollment flow."""
+    session_obj = get_session_by_token(qr_token)
+    if not session_obj:
+        return jsonify({"error": "Lien invalide ou introuvable."}), 404
+
+    valid, reason = is_session_valid(session_obj)
+    can_view = can_view_status(session_obj)
+    device_token = _extract_device_token()
+    ok, details = _validate_device_fast_path(qr_token, device_token)
+    if ok and device_token:
+        backend_available, backend_valid, backend_reason = _sync_validate_device_once(device_token, qr_token)
+        if backend_available and not backend_valid:
+            ok = False
+            details = {
+                "reason": backend_reason,
+                "message": "Appareil invalide/revoque. Retournez sur le backend et regenerez un code.",
+            }
+    status = "enrolled" if ok else "needs_enrollment"
+    if not valid and not can_view:
+        status = "session_unavailable"
+    if device_token and not ok and details.get("reason") != "missing_device_token":
+        return jsonify(
+            {
+                "status": status,
+                "can_upload": False,
+                "can_view": can_view,
+                "session_reason": "" if valid else reason,
+                "device_reason": details.get("reason"),
+                "device_message": details.get("message"),
+                "simple_code": session_obj.simple_code,
+                "expires_at": session_obj.expires_at.isoformat() if session_obj.expires_at else None,
+                "revalidate_interval_seconds": DEVICE_REVALIDATE_INTERVAL_SECONDS,
+                "max_validation_failure_seconds": DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
+            }
+        ), 401
+
+    return jsonify(
+        {
+            "status": status,
+            "can_upload": valid and (ok or not device_token),
+            "can_view": can_view,
+            "session_reason": "" if valid else reason,
+            "device_reason": details.get("reason"),
+            "device_message": details.get("message"),
+            "simple_code": session_obj.simple_code,
+            "expires_at": session_obj.expires_at.isoformat() if session_obj.expires_at else None,
+            "revalidate_interval_seconds": DEVICE_REVALIDATE_INTERVAL_SECONDS,
+            "max_validation_failure_seconds": DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
+        }
+    )
+
+
+@app.route("/api/device/enroll/<qr_token>", methods=["POST"])
+def api_device_enroll(qr_token):
+    """Enroll this browser/device for a QR session."""
+    session_obj = get_session_by_token(qr_token)
+    valid, reason = is_session_valid(session_obj)
+    if not valid:
+        return jsonify({"error": reason}), 400
+
+    data = request.get_json(silent=True) or {}
+    payload = {
+        "qr_token": qr_token,
+        "device_key": (data.get("device_key") or "").strip(),
+        "device_fingerprint": (data.get("device_fingerprint") or "").strip(),
+        "device_name": (data.get("device_name") or "").strip() or None,
+    }
+    if not payload["device_key"]:
+        return jsonify({"error": "device_key manquant"}), 400
+
+    try:
+        resp = req.post(
+            TOKEN_ISSUER_ENROLL_DEVICE_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=8,
+        )
+        body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
+        if resp.status_code >= 400:
+            return jsonify({"error": body.get("error", "enrollment_failed")}), resp.status_code
+        return jsonify(body)
+    except Exception:
+        logger.exception("Device enrollment failed for qr=%s", qr_token)
+        return jsonify({"error": "enrollment_unavailable"}), 503
 
 
 @app.route("/api/upload/<qr_token>", methods=["POST"])
@@ -260,6 +574,14 @@ def api_upload(qr_token):
 
     if not valid:
         return jsonify({"error": reason}), 400
+    ok, details = _validate_device_fast_path(qr_token, _extract_device_token())
+    if not ok:
+        return jsonify(
+            {
+                "error": details.get("message", "Device non enrole ou invalide."),
+                "device_reason": details.get("reason"),
+            }
+        ), 401
 
     if "file" not in request.files:
         return jsonify({"error": "Aucun fichier sélectionné."}), 400
@@ -356,6 +678,14 @@ def api_status(qr_token):
     session_obj = get_session_by_token(qr_token)
     if not session_obj or not can_view_status(session_obj):
         return jsonify({"error": "Session introuvable ou expirée."}), 404
+    ok, details = _validate_device_fast_path(qr_token, _extract_device_token())
+    if not ok:
+        return jsonify(
+            {
+                "error": details.get("message", "Device non enrole ou invalide."),
+                "device_reason": details.get("reason"),
+            }
+        ), 401
 
     db = SessionLocal()
     try:

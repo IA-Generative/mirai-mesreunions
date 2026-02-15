@@ -146,6 +146,40 @@ class IssuedToken(InternalBase):
     )
 
 
+class DeviceEnrollment(InternalBase):
+    """Persistent browser/device enrollment bound to an issued QR token."""
+    __tablename__ = "device_enrollments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_sub = Column(String(255), nullable=False, index=True)
+    qr_token = Column(String(64), nullable=False, index=True)
+    simple_code = Column(String(10), nullable=False, index=True)
+
+    device_key = Column(String(255), nullable=False, index=True, comment="Client-generated stable key")
+    device_fingerprint = Column(String(1024), nullable=True)
+    device_name = Column(String(255), nullable=True)
+    user_agent = Column(String(1024), nullable=True)
+
+    status = Column(String(32), nullable=False, default="active", index=True)  # active | revoked
+    revoked_reason = Column(String(255), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    retention_expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_device_user_status", "user_sub", "status"),
+        Index("ix_device_code_status", "simple_code", "status"),
+        Index("ix_device_qr_status", "qr_token", "status"),
+    )
+
+
 class UserAudioFile(InternalBase):
     """Fichier audio intégré dans le compte utilisateur (zone interne)."""
     __tablename__ = "user_audio_files"
