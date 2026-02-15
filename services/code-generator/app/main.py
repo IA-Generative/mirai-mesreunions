@@ -1213,22 +1213,31 @@ INDEX_TEMPLATE = """
         }
         .activity-inline {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 0.6rem;
+            flex-direction: column;
+            gap: 0.4rem;
             margin-bottom: 0.5rem;
+        }
+        .activity-description {
+            margin: 0;
+            font-size: 0.8rem;
+            color: #64748b;
+            line-height: 1.35;
+        }
+        .activity-main {
+            min-width: 0;
         }
         .activity-spinner {
             width: 14px;
             height: 14px;
             border: 2px solid #cbd5e1;
-            border-top-color: #2563eb;
+            border-top-color: #cbd5e1;
             border-radius: 999px;
             flex: 0 0 auto;
             opacity: 0.35;
         }
         .activity-spinner.active {
             opacity: 1;
+            border-top-color: #2563eb;
             animation: activity-spin 0.9s linear infinite;
         }
         @keyframes activity-spin {
@@ -1253,6 +1262,20 @@ INDEX_TEMPLATE = """
             align-items: center;
             gap: 0.18rem;
             width: 100%;
+        }
+        .activity-meta-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.6rem;
+            margin-top: 0.15rem;
+        }
+        .activity-status-inline {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-width: 0;
+            flex: 1;
         }
         .activity-dot {
             width: 14px;
@@ -1284,8 +1307,9 @@ INDEX_TEMPLATE = """
             font-size: 0.78rem;
             color: #64748b;
             text-decoration: none;
-            white-space: nowrap;
             border-bottom: 1px dotted #cbd5e1;
+            width: fit-content;
+            flex: 0 0 auto;
         }
         .activity-toggle-link:hover {
             color: #334155;
@@ -1302,11 +1326,11 @@ INDEX_TEMPLATE = """
 <body>
 <div class="container">
     <div class="card">
-        <h1>Upload Audio Sécurisé</h1>
-        <p class="subtitle">Générez un code pour uploader des fichiers audio depuis votre mobile</p>
+        <h1>MIrAI : Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
+        <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
         <div class="security-notice">
-            Information sécurité: Ne conservez pas durablement des fichiers professionnels
-            sur un téléphone personnel. Après la transcription, supprimez les fichiers du téléphone.
+            Pour limiter les risques en cas de perte ou vol de votre téléphone.
+            Supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.
         </div>
 
         <div class="user-info">
@@ -1327,6 +1351,7 @@ INDEX_TEMPLATE = """
                     <option value="240">4 heures</option>
                     <option value="1440">24 heures</option>
                     <option value="4320">3 jours</option>
+                    <option value="10080" selected>7 jours</option>
                 </select>
             </div>
             <div class="form-group">
@@ -1365,17 +1390,27 @@ INDEX_TEMPLATE = """
 
     <div class="card">
         <div class="activity-inline">
-            <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
-            <div class="activity-mini">
-                <span id="activity-mini-text" class="activity-mini-text">Activités: chargement...</span>
-                <div id="activity-rail" class="activity-rail">
-                    <span class="activity-dot">1</span><span class="activity-link"></span>
-                    <span class="activity-dot">2</span><span class="activity-link"></span>
-                    <span class="activity-dot">3</span>
+            <p class="activity-description">
+                Cet encadré donne une vue rapide des traitements en cours
+                (analyse, transcodage, transfert) avant le détail des sessions.
+            </p>
+            <div class="activity-main">
+                <div class="activity-mini">
+                    <div id="activity-rail" class="activity-rail">
+                        <span class="activity-dot">1</span><span class="activity-link"></span>
+                        <span class="activity-dot">2</span><span class="activity-link"></span>
+                        <span class="activity-dot">3</span>
+                    </div>
+                    <div class="activity-meta-row">
+                        <div class="activity-status-inline">
+                            <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
+                            <span id="activity-mini-text" class="activity-mini-text">Activités: chargement...</span>
+                        </div>
+                        <a href="#" id="toggle-activities-link" class="activity-toggle-link"
+                           onclick="toggleActivitiesPanel(); return false;">Voir activités</a>
+                    </div>
                 </div>
             </div>
-            <a href="#" id="toggle-activities-link" class="activity-toggle-link"
-               onclick="toggleActivitiesPanel(); return false;">Voir activités</a>
         </div>
         <div id="recent-activities-panel" class="recent-activities-panel">
             <div style="display:flex;justify-content:space-between;align-items:center;">

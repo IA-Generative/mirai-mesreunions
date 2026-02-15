@@ -85,7 +85,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 4. **3 stockages S3 séparés** — `upload-staging` (bruts), `processed-staging` (transcodés, zone bridge), `internal-storage` (comptes usagers, zone interne uniquement)
 
-5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 3 jours), limite de 5 uploads par session (configurable)
+5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 7 jours), limite de 5 uploads par session (configurable)
 
 6. **Analyse antivirale obligatoire** — Tout fichier passe par ClamAV. Fichiers infectés en quarantaine.
 
@@ -408,8 +408,8 @@ Variables d'environnement principales (`configs/.env.example`) :
 
 | Variable | Défaut | Description |
 |----------|--------|-------------|
-| `CODE_TTL_MINUTES` | `15` | Durée de validité des codes |
-| `CODE_TTL_MAX_MINUTES` | `4320` | TTL max (3 jours) |
+| `CODE_TTL_MINUTES` | `10080` | Durée de validité par défaut des codes (7 jours) |
+| `CODE_TTL_MAX_MINUTES` | `10080` | TTL max (7 jours) |
 | `ALLOW_SHORT_QR_TTL_SECONDS_TEST` | `false` | Autorise les TTL de test `15s`/`30s` |
 | `MAX_UPLOADS_PER_SESSION` | `5` | Uploads max par code |
 | `CODE_LENGTH` | `6` | Longueur du code simple |

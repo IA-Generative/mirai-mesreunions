@@ -177,8 +177,8 @@ services:
       EXT_DB_USER: audio_ext
       EXT_DB_PASSWORD: changeme-ext
       UPLOAD_PORTAL_BASE_URL: http://${PUBLIC_HOST:-localhost}:8081
-      CODE_TTL_MINUTES: "15"
-      CODE_TTL_MAX_MINUTES: "4320"
+      CODE_TTL_MINUTES: "10080"
+      CODE_TTL_MAX_MINUTES: "10080"
       ALLOW_SHORT_QR_TTL_SECONDS_TEST: "true"
       MAX_UPLOADS_PER_SESSION: "5"
       TOKEN_ISSUER_API_URL: http://token-issuer:8091/api/v1/issue-token
@@ -438,8 +438,8 @@ services:
       INT_DB_USER: audio_int
       INT_DB_PASSWORD: changeme-int
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
-      CODE_TTL_MINUTES: "15"
-      CODE_TTL_MAX_MINUTES: "4320"
+      CODE_TTL_MINUTES: "10080"
+      CODE_TTL_MAX_MINUTES: "10080"
       ALLOW_SHORT_QR_TTL_SECONDS_TEST: "true"
       MAX_UPLOADS_PER_SESSION: "5"
       CODE_LENGTH: "6"
