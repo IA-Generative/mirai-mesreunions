@@ -13,12 +13,16 @@ import logging
 import os
 import sys
 import json
+import base64
 import re
 import subprocess
 import tempfile
+import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import qrcode
@@ -29,13 +33,13 @@ from authlib.integrations.flask_client import OAuth
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
     OIDCConfig, load_ext_db, CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES,
-    MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed,
+    MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed, load_s3_internal,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
 )
 from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret
-from libs.shared.app.s3_helper import download_fileobj, delete_object
+from libs.shared.app.s3_helper import download_fileobj, delete_object, object_exists
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -49,6 +53,7 @@ oidc_cfg = OIDCConfig()
 db_cfg = load_ext_db()
 s3_upload_cfg = load_s3_upload()
 s3_processed_cfg = load_s3_processed()
+s3_internal_cfg = load_s3_internal()
 SessionLocal = None
 ALLOW_SHORT_QR_TTL_SECONDS_TEST = os.getenv("ALLOW_SHORT_QR_TTL_SECONDS_TEST", "").lower() in {"1", "true", "yes"}
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "").strip()
@@ -64,6 +69,7 @@ oauth.register(
     server_metadata_url=f"{oidc_cfg.issuer}/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
+oidc_internal_issuer = os.getenv("OIDC_INTERNAL_ISSUER", oidc_cfg.issuer).rstrip("/")
 
 
 # ─── Helpers ────────────────────────────────────────────────
@@ -126,6 +132,38 @@ def require_auth(f):
     return decorated
 
 
+def _decode_jwt_payload_unverified(token_value: str) -> dict:
+    """Best-effort JWT payload decode (no signature verification)."""
+    try:
+        parts = token_value.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        pad = "=" * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload + pad)
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _oidc_request_with_retry(method: str, url: str, *, max_attempts: int = 3, retry_delay: float = 0.7, **kwargs):
+    """Best-effort retry helper for intermittent OIDC network failures."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return req.request(method, url, **kwargs)
+        except req.RequestException as exc:
+            last_exc = exc
+            if attempt >= max_attempts:
+                raise
+            logger.warning("OIDC request failed (attempt %s/%s): %s", attempt, max_attempts, exc)
+            time.sleep(retry_delay)
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("OIDC request failed unexpectedly")
+
+
 def request_token_from_internal(
     user: dict, ttl_minutes: int, max_uploads: int, ttl_seconds: int | None = None
 ) -> dict:
@@ -181,6 +219,16 @@ def _resolve_transcoded_storage(file_obj: UploadedFile):
     return s3_processed_cfg, file_obj.transcoded_filename
 
 
+def _resolve_transferred_storage(db, file_obj: UploadedFile):
+    if not file_obj.transcoded_filename:
+        return None, None
+    session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+    if not session_obj:
+        return None, None
+    internal_key = f"{session_obj.user_sub}/{session_obj.simple_code}/{file_obj.transcoded_filename}"
+    return s3_internal_cfg, internal_key
+
+
 def _run_loudnorm_measure(input_path: str, target_i: float = -16.0, target_tp: float = -1.5, target_lra: float = 11.0):
     """
     Run a loudnorm analysis pass and return measured values.
@@ -223,26 +271,126 @@ def index():
 
 @app.route("/login")
 def login():
-    redirect_uri = oidc_cfg.redirect_uri
-    return oauth.keycloak.authorize_redirect(redirect_uri)
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    session["oidc_state"] = state
+    session["oidc_nonce"] = nonce
+    params = {
+        "response_type": "code",
+        "client_id": oidc_cfg.client_id,
+        "redirect_uri": oidc_cfg.redirect_uri,
+        "scope": "openid email profile",
+        "state": state,
+        "nonce": nonce,
+    }
+    auth_url = f"{oidc_cfg.issuer.rstrip('/')}/protocol/openid-connect/auth?{urlencode(params)}"
+    return redirect(auth_url)
 
 
 @app.route("/auth/callback")
 def auth_callback():
-    token = oauth.keycloak.authorize_access_token()
-    userinfo = token.get("userinfo", {})
+    # Callback can be hit twice by browser retry/prefetch. If already authenticated,
+    # skip token exchange to avoid reusing the one-time authorization code.
+    if session.get("user"):
+        session.pop("oidc_state", None)
+        session.pop("oidc_nonce", None)
+        return redirect(url_for("index"))
+
+    state = request.args.get("state", "")
+    code = request.args.get("code", "")
+    if not code or not state or state != session.get("oidc_state"):
+        return "OIDC callback invalide (state/code).", 400
+
+    try:
+        token_resp = _oidc_request_with_retry(
+            "POST",
+            f"{oidc_internal_issuer}/protocol/openid-connect/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": oidc_cfg.redirect_uri,
+                "client_id": oidc_cfg.client_id,
+                "client_secret": oidc_cfg.client_secret,
+            },
+            timeout=10,
+        )
+    except req.RequestException:
+        logger.exception("OIDC token endpoint unreachable")
+        return "OIDC indisponible (token endpoint). Réessaie.", 502
+
+    if token_resp.status_code >= 400:
+        body = (token_resp.text or "")[:500]
+        logger.warning(
+            "OIDC token exchange failed: status=%s body=%s",
+            token_resp.status_code,
+            body,
+        )
+        # Keycloak returns invalid_grant when an auth code is already consumed.
+        # Restarting login avoids blocking user on a stale callback URL.
+        if "invalid_grant" in body or "Code not valid" in body:
+            session.pop("oidc_state", None)
+            session.pop("oidc_nonce", None)
+            return redirect(url_for("login"))
+        return "Echec de connexion OIDC (code expiré ou déjà utilisé).", 400
+
+    try:
+        token = token_resp.json()
+    except Exception:
+        logger.warning("OIDC token response is not JSON: %s", (token_resp.text or "")[:300])
+        return "Réponse OIDC invalide (token).", 502
+
+    try:
+        userinfo_resp = _oidc_request_with_retry(
+            "GET",
+            f"{oidc_internal_issuer}/protocol/openid-connect/userinfo",
+            headers={"Authorization": f"Bearer {token.get('access_token', '')}"},
+            timeout=10,
+        )
+        if userinfo_resp.status_code >= 400:
+            logger.warning(
+                "OIDC userinfo failed: status=%s body=%s",
+                userinfo_resp.status_code,
+                (userinfo_resp.text or "")[:500],
+            )
+            userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
+            if not userinfo:
+                return "Echec de récupération du profil OIDC.", 400
+            logger.info("OIDC userinfo fallback to id_token claims")
+        else:
+            userinfo = userinfo_resp.json()
+    except Exception:
+        logger.exception("Failed to fetch userinfo from Keycloak")
+        userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
+        if not userinfo:
+            return "Erreur OIDC (userinfo). Réessaie.", 502
+        logger.info("OIDC userinfo exception fallback to id_token claims")
+
     session["user"] = {
         "sub": userinfo.get("sub", ""),
         "email": userinfo.get("email", ""),
         "name": userinfo.get("name", userinfo.get("preferred_username", "")),
     }
+    session["id_token"] = token.get("id_token", "")
+    session.pop("oidc_state", None)
+    session.pop("oidc_nonce", None)
     return redirect(url_for("index"))
 
 
 @app.route("/logout")
 def logout():
+    id_token_hint = session.get("id_token")
     session.clear()
-    return redirect(url_for("index"))
+
+    # RP-initiated logout on OIDC provider to avoid immediate SSO relogin.
+    post_logout_redirect_uri = oidc_cfg.redirect_uri.replace("/auth/callback", "/")
+    params = {
+        "post_logout_redirect_uri": post_logout_redirect_uri,
+        "client_id": oidc_cfg.client_id,
+    }
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    logout_url = f"{oidc_cfg.issuer.rstrip('/')}/protocol/openid-connect/logout?{urlencode(params)}"
+    return redirect(logout_url)
 
 
 @app.route("/api/generate-code", methods=["POST"])
@@ -341,10 +489,47 @@ def api_my_sessions():
             UploadSession.user_sub == user["sub"]
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
+        reconciled = 0
         result = []
         for s in sessions:
             uploads = []
             for f in s.uploads:
+                # Self-heal: if transfer callback was missed but object exists internally,
+                # promote the status to TRANSFERRED so the UI can resume correctly.
+                if f.status in {UploadStatus.READY_FOR_TRANSFER, UploadStatus.TRANSFERRING} and f.transcoded_filename:
+                    try:
+                        t_cfg, t_key = _resolve_transferred_storage(db, f)
+                        if t_cfg and t_key and object_exists(t_cfg, t_key):
+                            f.status = UploadStatus.TRANSFERRED
+                            f.status_message = "Fichier intégré à votre compte. Transcription en cours... (rattrapage auto)"
+                            if not f.transferred_at:
+                                f.transferred_at = datetime.now(timezone.utc)
+                            reconciled += 1
+                    except Exception:
+                        logger.debug("Unable to reconcile transfer status for %s", f.id, exc_info=True)
+
+                source_available = False
+                if f.stored_filename:
+                    try:
+                        source_available = object_exists(s3_upload_cfg, f.stored_filename)
+                    except Exception:
+                        logger.debug("Unable to verify source object presence for %s", f.id, exc_info=True)
+
+                transcoded_available = False
+                if f.transcoded_filename:
+                    try:
+                        transcoded_available = object_exists(s3_processed_cfg, f.transcoded_filename)
+                    except Exception:
+                        logger.debug("Unable to verify transcoded object presence for %s", f.id, exc_info=True)
+
+                transferred_available = False
+                if f.status == UploadStatus.TRANSFERRED and f.transcoded_filename:
+                    try:
+                        t_cfg, t_key = _resolve_transferred_storage(db, f)
+                        transferred_available = bool(t_cfg and t_key and object_exists(t_cfg, t_key))
+                    except Exception:
+                        logger.debug("Unable to verify transferred object presence for %s", f.id, exc_info=True)
+
                 uploads.append({
                     "id": str(f.id),
                     "original_filename": f.original_filename,
@@ -352,13 +537,18 @@ def api_my_sessions():
                     "status_message": f.status_message,
                     "audio_quality_score": f.audio_quality_score,
                     "created_at": f.created_at.isoformat(),
+                    "updated_at": f.updated_at.isoformat() if f.updated_at else None,
                     "download_url": f"/api/file/download/{f.id}",
                     "stream_url": f"/api/file/stream/{f.id}",
-                    "source_download_url": f"/api/file/download-source/{f.id}",
-                    "source_stream_url": f"/api/file/stream-source/{f.id}",
-                    "transcoded_available": bool(f.transcoded_filename),
-                    "transcoded_download_url": f"/api/file/download-transcoded/{f.id}" if f.transcoded_filename else None,
-                    "transcoded_stream_url": f"/api/file/stream-transcoded/{f.id}" if f.transcoded_filename else None,
+                    "source_available": source_available,
+                    "source_download_url": f"/api/file/download-source/{f.id}" if source_available else None,
+                    "source_stream_url": f"/api/file/stream-source/{f.id}" if source_available else None,
+                    "transcoded_available": transcoded_available,
+                    "transcoded_download_url": f"/api/file/download-transcoded/{f.id}" if transcoded_available else None,
+                    "transcoded_stream_url": f"/api/file/stream-transcoded/{f.id}" if transcoded_available else None,
+                    "transferred_available": transferred_available,
+                    "transferred_download_url": f"/api/file/download-transferred/{f.id}" if transferred_available else None,
+                    "transferred_stream_url": f"/api/file/stream-transferred/{f.id}" if transferred_available else None,
                     "impact_url": f"/api/file/normalization-impact/{f.id}",
                 })
             result.append({
@@ -371,6 +561,9 @@ def api_my_sessions():
                 "created_at": s.created_at.isoformat(),
                 "uploads": uploads,
             })
+        if reconciled:
+            db.commit()
+            logger.info("Auto-reconciled %s transfer status entries for user %s", reconciled, user.get("sub"))
         return jsonify(result)
     finally:
         db.close()
@@ -501,6 +694,52 @@ def api_file_stream_transcoded(file_id):
             mimetype="audio/wav",
             as_attachment=False,
             download_name=f"{Path(file_obj.original_filename).stem}_transcoded.wav",
+        )
+    finally:
+        db.close()
+
+
+@app.route("/api/file/download-transferred/<file_id>")
+@require_auth
+def api_file_download_transferred(file_id):
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        file_obj = _get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            abort(404, "File not found")
+        cfg, key = _resolve_transferred_storage(db, file_obj)
+        if not cfg or not key:
+            abort(404, "Transferred file not available")
+        data = download_fileobj(cfg, key)
+        return send_file(
+            data,
+            mimetype="audio/wav",
+            as_attachment=True,
+            download_name=f"{Path(file_obj.original_filename).stem}_transferred.wav",
+        )
+    finally:
+        db.close()
+
+
+@app.route("/api/file/stream-transferred/<file_id>")
+@require_auth
+def api_file_stream_transferred(file_id):
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        file_obj = _get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            abort(404, "File not found")
+        cfg, key = _resolve_transferred_storage(db, file_obj)
+        if not cfg or not key:
+            abort(404, "Transferred file not available")
+        data = download_fileobj(cfg, key)
+        return send_file(
+            data,
+            mimetype="audio/wav",
+            as_attachment=False,
+            download_name=f"{Path(file_obj.original_filename).stem}_transferred.wav",
         )
     finally:
         db.close()
@@ -699,6 +938,13 @@ INDEX_TEMPLATE = """
             vertical-align: bottom;
         }
         .file-links a { margin-right: 0.6rem; font-size: 0.78rem; }
+        .file-links .link-disabled {
+            margin-right: 0.6rem;
+            font-size: 0.78rem;
+            color: #94a3b8;
+            text-decoration: line-through;
+            cursor: not-allowed;
+        }
         .file-links-row {
             display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
         }
@@ -786,6 +1032,141 @@ INDEX_TEMPLATE = """
             border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.35rem;
             background: #fff;
         }
+        .security-notice {
+            margin: 0.75rem 0 1rem;
+            padding: 0.7rem 0.8rem;
+            border: 1px solid #fcd34d;
+            background: #fffbeb;
+            color: #92400e;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            line-height: 1.35;
+        }
+        .transfer-live {
+            margin: 0.25rem 0 0.8rem;
+            padding: 0.6rem 0.7rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background: #f8fafc;
+            font-size: 0.84rem;
+        }
+        .transfer-live-title {
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 0.35rem;
+        }
+        .transfer-live-list {
+            max-height: 160px;
+            overflow-y: auto;
+            display: grid;
+            gap: 0.3rem;
+        }
+        .transfer-live-row {
+            display: flex;
+            gap: 0.4rem;
+            align-items: center;
+            color: #334155;
+        }
+        .transfer-live-code {
+            color: #64748b;
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+        .transfer-live-name {
+            max-width: 210px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .transfer-live-empty {
+            color: #64748b;
+        }
+        .activity-inline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.6rem;
+            margin-bottom: 0.5rem;
+        }
+        .activity-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #cbd5e1;
+            border-top-color: #2563eb;
+            border-radius: 999px;
+            flex: 0 0 auto;
+            opacity: 0.35;
+        }
+        .activity-spinner.active {
+            opacity: 1;
+            animation: activity-spin 0.9s linear infinite;
+        }
+        @keyframes activity-spin {
+            to { transform: rotate(360deg); }
+        }
+        .activity-mini {
+            min-width: 0;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .activity-mini-text {
+            font-size: 0.8rem;
+            color: #475569;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .activity-rail {
+            display: flex;
+            align-items: center;
+            gap: 0.18rem;
+            width: 100%;
+        }
+        .activity-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 999px;
+            background: #e5e7eb;
+            color: #475569;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.62rem;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+        .activity-dot.active {
+            background: #2563eb;
+            color: #fff;
+        }
+        .activity-link {
+            width: 100%;
+            height: 2px;
+            border-radius: 999px;
+            background: #e5e7eb;
+        }
+        .activity-link.active {
+            background: #93c5fd;
+        }
+        .activity-toggle-link {
+            font-size: 0.78rem;
+            color: #64748b;
+            text-decoration: none;
+            white-space: nowrap;
+            border-bottom: 1px dotted #cbd5e1;
+        }
+        .activity-toggle-link:hover {
+            color: #334155;
+            border-bottom-color: #94a3b8;
+        }
+        .recent-activities-panel {
+            display: none;
+        }
+        .recent-activities-panel.open {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -793,6 +1174,10 @@ INDEX_TEMPLATE = """
     <div class="card">
         <h1>Upload Audio Sécurisé</h1>
         <p class="subtitle">Générez un code pour uploader des fichiers audio depuis votre mobile</p>
+        <div class="security-notice">
+            Information sécurité: Ne conservez pas durablement des fichiers professionnels
+            sur un téléphone personnel. Après la transcription, supprimez les fichiers du téléphone.
+        </div>
 
         <div class="user-info">
             <span>{{ user.name or user.email }}</span>
@@ -838,13 +1223,32 @@ INDEX_TEMPLATE = """
     </div>
 
     <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-            <h1 style="font-size:1.1rem;">Mes sessions récentes</h1>
-            <button id="purge-btn" class="btn-primary btn-danger-mini" disabled
-                    onclick="purgeSessions()">Purger liste + fichiers</button>
+        <div class="activity-inline">
+            <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
+            <div class="activity-mini">
+                <span id="activity-mini-text" class="activity-mini-text">Activités: chargement...</span>
+                <div id="activity-rail" class="activity-rail">
+                    <span class="activity-dot">1</span><span class="activity-link"></span>
+                    <span class="activity-dot">2</span><span class="activity-link"></span>
+                    <span class="activity-dot">3</span>
+                </div>
+            </div>
+            <a href="#" id="toggle-activities-link" class="activity-toggle-link"
+               onclick="toggleActivitiesPanel(); return false;">Voir activités</a>
         </div>
-        <div class="sessions-list" id="sessions-list">
-            <p style="color:#999; font-size:0.85rem;">Chargement...</p>
+        <div id="recent-activities-panel" class="recent-activities-panel">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <h1 style="font-size:1.1rem;">Mes sessions récentes</h1>
+                <button id="purge-btn" class="btn-primary btn-danger-mini" disabled
+                        onclick="purgeSessions()">Purger liste + fichiers</button>
+            </div>
+            <div class="transfer-live" id="transfer-live">
+                <div class="transfer-live-title">Transferts en cours</div>
+                <div class="transfer-live-empty">Chargement...</div>
+            </div>
+            <div class="sessions-list" id="sessions-list">
+                <p style="color:#999; font-size:0.85rem;">Chargement...</p>
+            </div>
         </div>
     </div>
 </div>
@@ -852,6 +1256,7 @@ INDEX_TEMPLATE = """
 <script>
 const impactCache = {};
 const impactLoading = new Set();
+let activitiesPanelOpen = false;
 
 function escapeHtml(v) {
     return (v || '').toString().replace(/[&<>"']/g, (s) => ({
@@ -881,7 +1286,24 @@ function statusLabel(status) {
     return labels[status] || status;
 }
 
-function pipelineProgress(status) {
+function transferProgressFromMessage(status, msg) {
+    if (status === 'transferred') return 100;
+    if (status === 'ready_for_transfer') return 10;
+    if (status !== 'transferring') return 0;
+    const text = (msg || '').toLowerCase();
+    const m = text.match(/(\d{1,3})\s*%/);
+    if (m) {
+        const v = Math.max(0, Math.min(100, parseInt(m[1], 10)));
+        return Number.isFinite(v) ? v : 50;
+    }
+    if (text.includes('notification')) return 20;
+    if (text.includes('téléchargement') || text.includes('telechargement')) return 45;
+    if (text.includes('copie')) return 70;
+    if (text.includes('finalisation')) return 90;
+    return 50;
+}
+
+function pipelineProgress(status, statusMessage) {
     const p = { scan: 0, transcode: 0, transfer: 0, error: false, blocked: false, active: 'analyse' };
     switch (status) {
         case 'pending':
@@ -913,13 +1335,13 @@ function pipelineProgress(status) {
         case 'ready_for_transfer':
             p.scan = 100;
             p.transcode = 100;
-            p.transfer = 10;
+            p.transfer = transferProgressFromMessage(status, statusMessage);
             p.active = 'transfert';
             break;
         case 'transferring':
             p.scan = 100;
             p.transcode = 100;
-            p.transfer = 50;
+            p.transfer = transferProgressFromMessage(status, statusMessage);
             p.active = 'transfert';
             break;
         case 'transferred':
@@ -984,6 +1406,14 @@ function resetForm() {
     document.getElementById('result').classList.remove('active');
 }
 
+function toggleActivitiesPanel() {
+    activitiesPanelOpen = !activitiesPanelOpen;
+    const panel = document.getElementById('recent-activities-panel');
+    const link = document.getElementById('toggle-activities-link');
+    if (panel) panel.classList.toggle('open', activitiesPanelOpen);
+    if (link) link.textContent = activitiesPanelOpen ? 'Masquer activités' : 'Voir activités';
+}
+
 async function purgeSessions() {
     const ok = confirm('Supprimer toutes vos sessions et les fichiers associés (S3 upload/processed) ?');
     if (!ok) return;
@@ -1002,7 +1432,118 @@ async function loadSessions() {
     try {
         const resp = await fetch('/api/my-sessions');
         const sessions = await resp.json();
+        if (!resp.ok) {
+            throw new Error((sessions && sessions.error) ? sessions.error : 'Erreur API sessions');
+        }
+        if (!Array.isArray(sessions)) {
+            throw new Error('Format API invalide');
+        }
         const container = document.getElementById('sessions-list');
+        const transferBox = document.getElementById('transfer-live');
+        const activityMiniText = document.getElementById('activity-mini-text');
+        const activityRail = document.getElementById('activity-rail');
+        const activitySpinner = document.getElementById('activity-spinner');
+
+        const activityStats = { analyse: 0, transcodage: 0, transfert: 0, done: 0, blocked: 0, total: 0 };
+        for (const s of sessions) {
+            for (const f of (s.uploads || [])) {
+                activityStats.total += 1;
+                switch (f.status) {
+                    case 'pending':
+                    case 'scanning':
+                    case 'scan_clean':
+                        activityStats.analyse += 1;
+                        break;
+                    case 'transcoding':
+                    case 'transcoded':
+                        activityStats.transcodage += 1;
+                        break;
+                    case 'ready_for_transfer':
+                    case 'transferring':
+                        activityStats.transfert += 1;
+                        break;
+                    case 'transferred':
+                        activityStats.done += 1;
+                        break;
+                    case 'scan_infected':
+                    case 'quarantined':
+                    case 'transcode_failed':
+                    case 'error':
+                        activityStats.blocked += 1;
+                        break;
+                    default:
+                        activityStats.analyse += 1;
+                        break;
+                }
+            }
+        }
+        if (activityMiniText) {
+            if (activityStats.total === 0) {
+                activityMiniText.textContent = 'Activités: aucune.';
+            } else {
+                const parts = [
+                    `A ${activityStats.analyse}`,
+                    `T ${activityStats.transcodage}`,
+                    `X ${activityStats.transfert}`,
+                ];
+                if (activityStats.blocked > 0) parts.push(`Q ${activityStats.blocked}`);
+                if (activityStats.done > 0) parts.push(`OK ${activityStats.done}`);
+                activityMiniText.textContent = `Activités: ${parts.join(' | ')}`;
+            }
+        }
+        if (activitySpinner) {
+            const active = (activityStats.analyse + activityStats.transcodage + activityStats.transfert) > 0;
+            activitySpinner.classList.toggle('active', active);
+            activitySpinner.title = active ? 'Activité en cours' : 'Aucune activité en cours';
+        }
+        if (activityRail) {
+            const analyseOn = activityStats.analyse > 0;
+            const transcodeOn = activityStats.transcodage > 0;
+            const transferOn = activityStats.transfert > 0;
+            activityRail.innerHTML = `
+                <span class="activity-dot ${analyseOn ? 'active' : ''}" title="Analyse: ${activityStats.analyse}">1</span>
+                <span class="activity-link ${(analyseOn || transcodeOn) ? 'active' : ''}"></span>
+                <span class="activity-dot ${transcodeOn ? 'active' : ''}" title="Transcodage: ${activityStats.transcodage}">2</span>
+                <span class="activity-link ${(transcodeOn || transferOn) ? 'active' : ''}"></span>
+                <span class="activity-dot ${transferOn ? 'active' : ''}" title="Transfert: ${activityStats.transfert}">3</span>
+            `;
+        }
+
+        const transfersInProgress = sessions.flatMap(s =>
+            ((s.uploads || []).map(f => ({
+                sessionCode: s.simple_code,
+                name: f.original_filename,
+                status: f.status,
+                message: f.status_message || '',
+                updatedAt: f.updated_at || f.created_at || null,
+            })))
+        ).filter(f => f.status === 'ready_for_transfer' || f.status === 'transferring');
+
+        if (transferBox) {
+            if (transfersInProgress.length === 0) {
+                transferBox.innerHTML = `
+                    <div class="transfer-live-title">Transferts en cours</div>
+                    <div class="transfer-live-empty">Aucun transfert en cours.</div>
+                `;
+            } else {
+                const now = Date.now();
+                transferBox.innerHTML = `
+                    <div class="transfer-live-title">Transferts en cours (${transfersInProgress.length})</div>
+                    <div class="transfer-live-list">
+                        ${transfersInProgress.map(t => `
+                            <div class="transfer-live-row" title="${escapeHtml(t.name)}">
+                                <span class="status-badge file-badge-${escapeHtml(t.status)}">${escapeHtml(statusLabel(t.status))}</span>
+                                <span class="transfer-live-code">${escapeHtml(t.sessionCode)}</span>
+                                <span class="transfer-live-name">${escapeHtml(t.name)}</span>
+                                <span style="color:${(t.updatedAt && (now - new Date(t.updatedAt).getTime()) > 180000) ? '#b91c1c' : '#64748b'};">
+                                  ${escapeHtml(t.message || 'Transfert en cours...')}
+                                </span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+        }
 
         if (sessions.length === 0) {
             container.innerHTML = '<p style="color:#999;font-size:0.85rem;">Aucune session</p>';
@@ -1016,11 +1557,11 @@ async function loadSessions() {
             const statusClass = isActive ? 'status-active' : 'status-expired';
             const sessionStatusLabel = isActive ? 'Actif' : 'Expiré';
 
-            const filesHtml = s.uploads.map(f => {
+            const filesHtml = (s.uploads || []).map(f => {
                 const quality = (f.audio_quality_score !== null && f.audio_quality_score !== undefined)
                     ? ` <span class="quality-help" title="Indice de qualité audio (1 à 5). Calculé automatiquement par le worker de transcodage selon le niveau RMS, la proportion de silence, la durée et la fréquence d'échantillonnage.">i</span> ${f.audio_quality_score.toFixed(1)}/5`
                     : '';
-                const progress = pipelineProgress(f.status);
+                const progress = pipelineProgress(f.status, f.status_message);
                 const fileStatusClass = `file-badge-${f.status || 'pending'}`;
                 const analyseClass = (progress.scan === 100 && !progress.blocked) ? 'done'
                     : (progress.active === 'analyse' ? (progress.blocked ? 'blocked' : 'active') : '');
@@ -1045,8 +1586,11 @@ async function loadSessions() {
                 const sourceLinks = `<div class="file-links file-links-block file-links-row">
                     <div class="file-links-actions">
                         <span class="file-links-title">Source</span>
-                        <a href="${f.source_download_url}" target="_blank" rel="noopener">Télécharger</a>
-                        <a href="${f.source_stream_url}" target="_blank" rel="noopener">Écouter</a>
+                        ${f.source_available
+                            ? `<a href="${f.source_download_url}" target="_blank" rel="noopener">Télécharger</a>
+                               <a href="${f.source_stream_url}" target="_blank" rel="noopener">Écouter</a>`
+                            : `<span class="link-disabled" title="Fichier source purgé">Télécharger</span>
+                               <span class="link-disabled" title="Fichier source purgé">Écouter</span>`}
                     </div>
                     ${impactIcon}
                 </div>`;
@@ -1055,6 +1599,13 @@ async function loadSessions() {
                         <span class="file-links-title">Transcodé</span>
                         <a href="${f.transcoded_download_url}" target="_blank" rel="noopener">Télécharger</a>
                         <a href="${f.transcoded_stream_url}" target="_blank" rel="noopener">Écouter</a>
+                    </div>`
+                    : '';
+                const transferredLinks = f.transferred_available
+                    ? `<div class="file-links file-links-block">
+                        <span class="file-links-title">Transféré (interne)</span>
+                        <a href="${f.transferred_download_url}" target="_blank" rel="noopener">Télécharger</a>
+                        <a href="${f.transferred_stream_url}" target="_blank" rel="noopener">Écouter</a>
                     </div>`
                     : '';
                 return `<div class="file-status">
@@ -1080,6 +1631,7 @@ async function loadSessions() {
                     </div>
                     ${sourceLinks}
                     ${transcodedLinks}
+                    ${transferredLinks}
                 </div>`;
             }).join('');
 
@@ -1097,8 +1649,17 @@ async function loadSessions() {
     } catch (e) {
         console.error('Failed to load sessions', e);
         const container = document.getElementById('sessions-list');
+        const activityMiniText = document.getElementById('activity-mini-text');
+        const activitySpinner = document.getElementById('activity-spinner');
         if (container) {
             container.innerHTML = '<p style="color:#b91c1c;font-size:0.85rem;">Erreur chargement sessions. Rechargez la page.</p>';
+        }
+        if (activityMiniText) {
+            activityMiniText.textContent = 'Activités: indisponibles.';
+        }
+        if (activitySpinner) {
+            activitySpinner.classList.remove('active');
+            activitySpinner.title = 'Activités indisponibles';
         }
     }
 }
@@ -1155,5 +1716,8 @@ application = create_app()
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("CODE_GENERATOR_PORT", 8080))
+    port_value = os.getenv("CODE_GENERATOR_BIND_PORT") or os.getenv("CODE_GENERATOR_PORT", "8080")
+    if isinstance(port_value, str) and port_value.startswith("tcp://"):
+        port_value = os.getenv("CODE_GENERATOR_BIND_PORT", "8080")
+    port = int(port_value)
     application.run(host="0.0.0.0", port=port, debug=os.getenv("ENVIRONMENT") == "development")

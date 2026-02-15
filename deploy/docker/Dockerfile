@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy shared library
 COPY libs/shared /app/libs/shared
+# Copy service code for Kubernetes/runtime images
+COPY services /app/services
 
 # Default: overridden per service
 CMD ["python", "-m", "app.main"]

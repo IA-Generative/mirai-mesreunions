@@ -56,6 +56,27 @@ EXTERNAL_CALLBACK_URL = os.getenv(
 )
 
 
+def notify_external_status(file_id: str, status: str, message: str, timeout: int = 5) -> None:
+    """Push transfer progression/status back to external portal."""
+    try:
+        resp = req.post(
+            EXTERNAL_CALLBACK_URL,
+            json={
+                "file_id": file_id,
+                "status": status,
+                "message": message,
+            },
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("Failed to callback external zone (%s): %s", status, e)
+
+
 def verify_token():
     auth = request.headers.get("Authorization", "")
     return verify_bearer_token(auth, INTERNAL_API_TOKEN)
@@ -159,21 +180,47 @@ def pull_file():
     user_sub = data["user_sub"]
     transcoded_filename = data["transcoded_filename"]
     simple_code = data["simple_code"]
+    internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
 
     logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
 
     try:
+        # Idempotency guard: if already imported, acknowledge success and stop.
+        db = SessionLocal()
+        try:
+            existing = (
+                db.query(UserAudioFile)
+                .filter(UserAudioFile.stored_filename == internal_key)
+                .first()
+            )
+        finally:
+            db.close()
+        if existing:
+            logger.info("Idempotent replay detected for %s, key already present: %s", file_id, internal_key)
+            notify_external_status(
+                file_id,
+                "transferred",
+                "Fichier déjà intégré (idempotence). Transcription en cours... (100%)",
+            )
+            return jsonify({
+                "status": "already_pulled",
+                "file_id": file_id,
+                "internal_key": internal_key,
+            })
+
         # ── PULL the file from processed-staging S3 ──
+        notify_external_status(file_id, "transferring", "Transfert: téléchargement depuis la zone de transit (45%)")
         logger.info("Pulling from processed-staging: %s", transcoded_filename)
         file_data = download_fileobj(s3_processed_cfg, transcoded_filename)
         file_size = file_data.getbuffer().nbytes
 
         # ── Store in internal S3 under user directory ──
-        internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
+        notify_external_status(file_id, "transferring", "Transfert: copie vers la zone interne (70%)")
         upload_fileobj(s3_internal_cfg, internal_key, file_data, "audio/wav")
         logger.info("Stored internally: %s (%d bytes)", internal_key, file_size)
 
         # ── Create internal DB record ──
+        notify_external_status(file_id, "transferring", "Transfert: finalisation et indexation (90%)")
         db = SessionLocal()
         try:
             audio_file = UserAudioFile(
@@ -208,17 +255,7 @@ def pull_file():
             db.close()
 
         # ── Notify external zone of successful transfer ──
-        try:
-            req.post(EXTERNAL_CALLBACK_URL, json={
-                "file_id": file_id,
-                "status": "transferred",
-                "message": "Fichier intégré à votre compte. Transcription en cours...",
-            }, headers={
-                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
-                "Content-Type": "application/json",
-            }, timeout=5)
-        except Exception as e:
-            logger.warning("Failed to callback external zone: %s", e)
+        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
 
         return jsonify({
             "status": "pulled",

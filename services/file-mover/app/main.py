@@ -32,6 +32,7 @@ db_cfg = load_ext_db()
 rabbit_cfg = RabbitMQConfig()
 
 UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://upload-portal:8081")
+PULL_REQUEST_TIMEOUT_SECONDS = max(15, int(os.getenv("PULL_REQUEST_TIMEOUT_SECONDS", "90")))
 
 
 def notify_portal(session_obj, file_obj, status_msg):
@@ -77,7 +78,7 @@ def notify_internal_zone(message: dict) -> bool:
                 "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
                 "Content-Type": "application/json",
             },
-            timeout=30,
+            timeout=PULL_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         logger.info("Internal zone notified for file %s", message["file_id"])
@@ -114,7 +115,7 @@ def process_file_ready(message: dict) -> bool:
 
         if success:
             file_obj.status = UploadStatus.TRANSFERRING
-            file_obj.status_message = "Transfert en cours vers la zone sécurisée..."
+            file_obj.status_message = "Transfert démarré côté interne (20%)"
             db.commit()
             notify_portal(session_obj, file_obj, file_obj.status_message)
         else:

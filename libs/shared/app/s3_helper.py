@@ -33,6 +33,16 @@ def ensure_bucket(cfg: S3Config):
         return
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"403", "AccessDenied"}:
+            # Some managed S3 policies deny HeadBucket while allowing object-level
+            # operations on pre-created buckets. Don't block service startup.
+            logger.warning(
+                "HeadBucket denied for %s on %s (%s); skipping bucket existence check.",
+                cfg.bucket,
+                cfg.endpoint,
+                code,
+            )
+            return
         if code not in {"404", "NoSuchBucket", "NotFound"}:
             raise
 
@@ -72,6 +82,23 @@ def delete_object(cfg: S3Config, key: str):
     """Delete an object from S3."""
     client = get_s3_client(cfg)
     client.delete_object(Bucket=cfg.bucket, Key=key)
+
+
+def object_exists(cfg: S3Config, key: str) -> bool:
+    """Check whether an object exists in S3."""
+    client = get_s3_client(cfg)
+    try:
+        client.head_object(Bucket=cfg.bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        if code in {"403", "AccessDenied"}:
+            # Some S3 policies allow GetObject but deny HeadObject.
+            # Treat as "not verifiable" and hide the direct link in UI.
+            return False
+        raise
 
 
 def generate_presigned_url(cfg: S3Config, key: str, expires_in: int = 3600) -> str:

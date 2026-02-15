@@ -74,6 +74,30 @@ spec:
         - protocol: TCP
           port: 8091
 ---
+# ── Network Policy: Allow admin-portal to reach internal Postgres (read-only dashboard needs) ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-admin-portal-to-internal-postgres
+  namespace: audio-internal
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres-internal
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              zone: external
+          podSelector:
+            matchLabels:
+              app: admin-portal
+      ports:
+        - protocol: TCP
+          port: 5432
+---
 # ── Network Policy: Internal pods can talk to each other ──
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -108,3 +132,5 @@ spec:
           port: 8080
         - protocol: TCP
           port: 8081
+        - protocol: TCP
+          port: 8082

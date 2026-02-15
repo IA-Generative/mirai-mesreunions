@@ -10,3 +10,11 @@
 .env
 .env.*
 !.env.example
+
+# Local Kubernetes secrets (never commit)
+deploy/kubernetes/shared/secrets.local.yaml
+deploy/kubernetes/shared/secrets.*.local.yaml
+
+# Local helper scripts/env (never commit)
+deploy/kubernetes/scripts/*.local.sh
+deploy/kubernetes/scripts/*.local.env

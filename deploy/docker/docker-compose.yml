@@ -166,6 +166,7 @@ services:
       LOG_LEVEL: DEBUG
       SECRET_KEY: dev-secret-key-change-in-prod
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8180/realms/audio-upload
+      OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/audio-upload
       OIDC_CLIENT_ID: audio-upload-app
       OIDC_CLIENT_SECRET: dev-client-secret
       OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:8080/auth/callback
@@ -183,6 +184,10 @@ services:
       TOKEN_ISSUER_API_URL: http://token-issuer:8091/api/v1/issue-token
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
       NORMALIZATION_ANALYSIS_MAX_SECONDS: "180"
+      S3_INTERNAL_ENDPOINT: http://minio-internal:9000
+      S3_INTERNAL_ACCESS_KEY: minioadmin
+      S3_INTERNAL_SECRET_KEY: minioadmin
+      S3_INTERNAL_BUCKET: internal-storage
     depends_on:
       postgres-external:
         condition: service_healthy
@@ -193,6 +198,7 @@ services:
     networks:
       - external-net
       - dmz-net  # Bridge pour appeler le token-issuer (zone interne)
+      - internal-net
 
   # --- Admin Portal (OIDC + Monitoring) ---
   admin-portal:

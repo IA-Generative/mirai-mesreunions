@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import time
 from typing import Callable, Optional
 
 import pika
@@ -18,7 +20,12 @@ QUEUE_TRANSCRIPTION = "transcription"
 
 
 def get_connection(cfg: RabbitMQConfig) -> pika.BlockingConnection:
-    """Create a blocking connection to RabbitMQ."""
+    """
+    Create a blocking connection to RabbitMQ with retry/backoff.
+    Env:
+      RABBITMQ_CONNECT_RETRY_DELAY_SECONDS (default: 3)
+      RABBITMQ_CONNECT_MAX_RETRIES (default: 0 => infinite)
+    """
     credentials = pika.PlainCredentials(cfg.user, cfg.password)
     params = pika.ConnectionParameters(
         host=cfg.host,
@@ -28,7 +35,26 @@ def get_connection(cfg: RabbitMQConfig) -> pika.BlockingConnection:
         heartbeat=600,
         blocked_connection_timeout=300,
     )
-    return pika.BlockingConnection(params)
+    retry_delay = max(1, int(os.getenv("RABBITMQ_CONNECT_RETRY_DELAY_SECONDS", "3")))
+    max_retries = max(0, int(os.getenv("RABBITMQ_CONNECT_MAX_RETRIES", "0")))
+
+    attempt = 0
+    while True:
+        try:
+            return pika.BlockingConnection(params)
+        except Exception:
+            attempt += 1
+            if max_retries and attempt >= max_retries:
+                logger.exception(
+                    "RabbitMQ connection failed after %s attempt(s): %s:%s vhost=%s",
+                    attempt, cfg.host, cfg.port, cfg.vhost
+                )
+                raise
+            logger.warning(
+                "RabbitMQ unavailable (attempt %s): %s:%s vhost=%s; retrying in %ss",
+                attempt, cfg.host, cfg.port, cfg.vhost, retry_delay
+            )
+            time.sleep(retry_delay)
 
 
 def declare_queues(cfg: RabbitMQConfig):

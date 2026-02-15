@@ -15,12 +15,15 @@ import subprocess
 import tempfile
 import threading
 import time
+import socket
 from datetime import timezone
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlencode
 import secrets
 import requests as req
+import boto3
+from botocore.config import Config as BotoConfig
 
 from authlib.integrations.flask_client import OAuth
 from flask import Flask, abort, jsonify, redirect, render_template_string, request, send_file, session, url_for
@@ -44,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 NORMALIZATION_CACHE_TTL_SECONDS = max(60, int(os.getenv("NORMALIZATION_CACHE_TTL_SECONDS", "3600")))
 NORMALIZATION_MAX_COMPUTE_PER_REFRESH = max(0, int(os.getenv("NORMALIZATION_MAX_COMPUTE_PER_REFRESH", "0")))
+ADMIN_S3_LIST_CONNECT_TIMEOUT_SECONDS = max(1, int(os.getenv("ADMIN_S3_LIST_CONNECT_TIMEOUT_SECONDS", "2")))
+ADMIN_S3_LIST_READ_TIMEOUT_SECONDS = max(1, int(os.getenv("ADMIN_S3_LIST_READ_TIMEOUT_SECONDS", "3")))
 
 
 def _parse_allowed_users() -> set[str]:
@@ -111,6 +116,15 @@ def create_app() -> Flask:
 
     # Keep OAuth object for compatibility, but use explicit OIDC flow below for reliability in Docker networking.
     oauth = OAuth(app)
+    base_path_raw = (os.getenv("ADMIN_BASE_PATH", "") or "").strip()
+    if base_path_raw and not base_path_raw.startswith("/"):
+        base_path_raw = f"/{base_path_raw}"
+    base_path = base_path_raw.rstrip("/")
+
+    def _with_base(path: str) -> str:
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"{base_path}{path}" if base_path else path
 
     def current_user():
         return session.get("user")
@@ -133,7 +147,7 @@ def create_app() -> Flask:
             if not user:
                 if request.path.startswith("/api/"):
                     return jsonify({"error": "unauthorized"}), 401
-                return redirect(url_for("login"))
+                return redirect(_with_base(url_for("login")))
             if not is_admin(user):
                 if request.path.startswith("/api/"):
                     return jsonify({"error": "forbidden"}), 403
@@ -144,7 +158,20 @@ def create_app() -> Flask:
 
     def bucket_overview(name: str, cfg, sample_limit: int = 20):
         try:
-            client = get_s3_client(cfg)
+            # Keep dashboard responsive even when one bucket is slow/unreachable.
+            client = boto3.client(
+                "s3",
+                endpoint_url=cfg.endpoint,
+                aws_access_key_id=cfg.access_key,
+                aws_secret_access_key=cfg.secret_key,
+                region_name=cfg.region,
+                config=BotoConfig(
+                    signature_version="s3v4",
+                    connect_timeout=ADMIN_S3_LIST_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=ADMIN_S3_LIST_READ_TIMEOUT_SECONDS,
+                    retries={"max_attempts": 1, "mode": "standard"},
+                ),
+            )
             response = client.list_objects_v2(Bucket=cfg.bucket, MaxKeys=sample_limit)
             items = response.get("Contents", [])
             object_count = response.get("KeyCount", len(items))
@@ -287,8 +314,20 @@ def create_app() -> Flask:
                     .all()
                 )
 
+            int_db_available = True
+            try:
+                with socket.create_connection((int_db_cfg.host, int_db_cfg.port), timeout=2):
+                    pass
+            except OSError:
+                int_db_available = False
+                logger.warning(
+                    "Internal DB unreachable from admin-portal: host=%s port=%s",
+                    int_db_cfg.host,
+                    int_db_cfg.port,
+                )
+
             internal_files = []
-            if simple_codes:
+            if int_db_available and simple_codes:
                 internal_files = (
                     int_db.query(UserAudioFile)
                     .filter(UserAudioFile.original_session_code.in_(simple_codes))
@@ -369,10 +408,12 @@ def create_app() -> Flask:
             }
             s3_summary["sample_total_size_human"] = _format_size(s3_summary["sample_total_size_bytes"])
 
-            events_query = int_db.query(TranscriptionEvent).order_by(TranscriptionEvent.created_at.desc())
-            if simple_codes:
-                events_query = events_query.filter(TranscriptionEvent.original_session_code.in_(simple_codes))
-            events = events_query.limit(100).all()
+            events = []
+            if int_db_available:
+                events_query = int_db.query(TranscriptionEvent).order_by(TranscriptionEvent.created_at.desc())
+                if simple_codes:
+                    events_query = events_query.filter(TranscriptionEvent.original_session_code.in_(simple_codes))
+                events = events_query.limit(100).all()
             events_payload = []
             for e in events:
                 meta = {}
@@ -489,6 +530,12 @@ def create_app() -> Flask:
 
     @app.route("/auth/callback")
     def auth_callback():
+        # Callback may be replayed by browser/reload. Avoid second token exchange.
+        if session.get("user"):
+            session.pop("oidc_state", None)
+            session.pop("oidc_nonce", None)
+            return redirect(url_for("index"))
+
         state = request.args.get("state", "")
         code = request.args.get("code", "")
         if not code or not state or state != session.get("oidc_state"):
@@ -510,11 +557,16 @@ def create_app() -> Flask:
             return "OIDC indisponible (token endpoint). Réessaie.", 502
 
         if token_resp.status_code >= 400:
+            body = (token_resp.text or "")[:500]
             logger.warning(
                 "OIDC token exchange failed: status=%s body=%s",
                 token_resp.status_code,
-                (token_resp.text or "")[:500],
+                body,
             )
+            if "invalid_grant" in body or "Code not valid" in body:
+                session.pop("oidc_state", None)
+                session.pop("oidc_nonce", None)
+                return redirect(url_for("login"))
             return "Echec de connexion OIDC (code expiré ou déjà utilisé).", 400
 
         try:
@@ -552,14 +604,25 @@ def create_app() -> Flask:
             "name": userinfo.get("name", userinfo.get("preferred_username", "")),
             "preferred_username": userinfo.get("preferred_username", ""),
         }
+        session["id_token"] = token.get("id_token", "")
         session.pop("oidc_state", None)
         session.pop("oidc_nonce", None)
-        return redirect(url_for("index"))
+        return redirect(_with_base(url_for("index")))
 
     @app.route("/logout")
     def logout():
+        id_token_hint = session.get("id_token")
         session.clear()
-        return redirect(url_for("index"))
+
+        post_logout_redirect_uri = oidc_cfg.redirect_uri.replace("/auth/callback", "/")
+        params = {
+            "post_logout_redirect_uri": post_logout_redirect_uri,
+            "client_id": oidc_cfg.client_id,
+        }
+        if id_token_hint:
+            params["id_token_hint"] = id_token_hint
+        logout_url = f"{oidc_public_issuer}/protocol/openid-connect/logout?{urlencode(params)}"
+        return redirect(logout_url)
 
     @app.route("/api/dashboard")
     @require_auth
@@ -755,7 +818,7 @@ INDEX_TEMPLATE = """
       </div>
       <div style=\"display:flex;align-items:center;gap:10px\">
         <button id=\"purge-all-btn\" style=\"font-size:12px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;cursor:pointer\">Purger tous les fichiers</button>
-        <a href=\"/logout\">Se deconnecter</a>
+        <a id=\"logout-link\" href=\"logout\">Se deconnecter</a>
       </div>
     </div>
 
@@ -815,7 +878,7 @@ function renderS3(s3) {
     const objects = (b.objects || []).map(o => `
       <div class=\"obj\">
         <div><strong>${esc(o.key)}</strong></div>
-        <div class=\"muted\">${esc(o.size_human)} | ${esc(o.last_modified || '-')} | <a href=\"/api/s3/download?bucket=${encodeURIComponent(b.name)}&key=${encodeURIComponent(o.key)}\">Download</a></div>
+        <div class=\"muted\">${esc(o.size_human)} | ${esc(o.last_modified || '-')} | <a href=\"api/s3/download?bucket=${encodeURIComponent(b.name)}&key=${encodeURIComponent(o.key)}\">Download</a></div>
       </div>
     `).join('');
     return `
@@ -864,10 +927,10 @@ function renderSessions(data) {
         ${f.transcription_preview ? `<div class=\"muted\">transcription: ${esc(f.transcription_preview)}</div>` : ''}
         ${f.internal_key ? `
           <div class=\"file-actions muted\">
-            <a href=\"/api/s3/download?bucket=${encodeURIComponent(f.internal_bucket)}&key=${encodeURIComponent(f.internal_key)}\">Telecharger</a>
+            <a href=\"api/s3/download?bucket=${encodeURIComponent(f.internal_bucket)}&key=${encodeURIComponent(f.internal_key)}\">Telecharger</a>
             <a href=\"#\" onclick=\"purgeOneFile('${esc(f.file_id)}','${esc((f.name || '').replace(/'/g, '’'))}'); return false;\" style=\"color:#b42318\">Purger ce fichier</a>
           </div>
-          <audio controls preload=\"none\" src=\"/api/s3/stream?bucket=${encodeURIComponent(f.internal_bucket)}&key=${encodeURIComponent(f.internal_key)}\"></audio>
+          <audio controls preload=\"none\" src=\"api/s3/stream?bucket=${encodeURIComponent(f.internal_bucket)}&key=${encodeURIComponent(f.internal_key)}\"></audio>
         ` : `
           <div class=\"file-actions muted\">
             <a href=\"#\" onclick=\"purgeOneFile('${esc(f.file_id)}','${esc((f.name || '').replace(/'/g, '’'))}'); return false;\" style=\"color:#b42318\">Purger ce fichier</a>
@@ -915,7 +978,7 @@ async function purgeOneFile(fileId, fileName) {
   const ok = window.confirm(`Supprimer definitivement le fichier: ${fileName || fileId} ?`);
   if (!ok) return;
   try {
-    const r = await fetch('/api/purge-file', {
+    const r = await fetch('api/purge-file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ file_id: fileId }),
@@ -937,7 +1000,7 @@ async function purgeAllFiles() {
     btn.textContent = 'Purge en cours...';
   }
   try {
-    const r = await fetch('/api/purge-all-files', { method: 'POST' });
+    const r = await fetch('api/purge-all-files', { method: 'POST' });
     const data = await r.json();
     if (!r.ok || !data.ok) throw new Error(data.error || 'purge_all_failed');
     await loadData();
@@ -952,15 +1015,18 @@ async function purgeAllFiles() {
 }
 
 async function loadData() {
+  if (window.__dashboardInFlight) return;
+  window.__dashboardInFlight = true;
   try {
     const hasActivePlayback = Array.from(document.querySelectorAll('audio'))
       .some(a => !a.paused && !a.ended);
     if (hasActivePlayback) {
+      window.__dashboardInFlight = false;
       return;
     }
-    const r = await fetch('/api/dashboard');
+    const r = await fetch('api/dashboard');
     if (r.status === 401) {
-      window.location.href = '/login';
+      window.location.href = 'login';
       return;
     }
     if (r.status === 403) throw new Error('forbidden');
@@ -980,12 +1046,20 @@ async function loadData() {
     document.getElementById('sessions').innerHTML = '<div class=\"muted warn\">Erreur chargement dashboard.</div>';
     document.getElementById('s3-buckets').innerHTML = '<div class=\"muted warn\">Erreur chargement S3.</div>';
     document.getElementById('stt-events').innerHTML = '<div class=\"muted warn\">Erreur chargement journal transcription.</div>';
+  } finally {
+    window.__dashboardInFlight = false;
   }
 }
 
 loadData();
 document.getElementById('purge-all-btn')?.addEventListener('click', purgeAllFiles);
-setInterval(loadData, 5000);
+let dashboardTimer = setInterval(loadData, 5000);
+document.getElementById('logout-link')?.addEventListener('click', () => {
+  if (dashboardTimer) {
+    clearInterval(dashboardTimer);
+    dashboardTimer = null;
+  }
+});
 </script>
 </body>
 </html>

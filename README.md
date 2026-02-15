@@ -8,81 +8,54 @@
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                          ZONE EXTERNE (DMZ)                              │
-│                                                                          │
-│   ┌─────────────────┐         ┌─────────────────┐                        │
-│   │  Code Generator  │────────▶│  Upload Portal   │                       │
-│   │  (OIDC/Keycloak) │  QR url │  (page mobile)   │                       │
-│   └────────┬────────┘         └────────┬─────────┘                       │
-│            │                           │                                  │
-│   demande  │                   upload  │                                  │
-│   token    │                   fichier │                                  │
-│            │                           ▼                                  │
-│            │                  ┌─────────────────┐                         │
-│            │                  │ S3: upload-staging│                        │
-│            │                  └────────┬─────────┘                        │
-│            │                           │                                  │
-│            │                  ┌────────▼─────────┐  ┌──────────────────┐  │
-│            │                  │   AV Worker       │  │ Transcode Worker │  │
-│            │                  │   (ClamAV)        │─▶│ (FFmpeg)         │  │
-│            │                  └──────────────────┘  └────────┬─────────┘  │
-│            │                                                  │           │
-│            │                                         ┌────────▼────────┐  │
-│            │                                         │S3: processed-   │  │
-│            │                                         │    staging      │  │
-│            │                                         └────────┬────────┘  │
-│            │                                                  │           │
-│            │                                         ┌────────▼────────┐  │
-│            │                                         │  File Mover     │  │
-│            │                                         │  (notificateur) │  │
-│            │                                         └────────┬────────┘  │
-└────────────┼──────────────────────────────────────────────────┼───────────┘
-             │                                                  │
-        API token                                        NOTIFY (metadata)
-      (bearer auth)                                     (bearer auth)
-             │                                                  │
-┌────────────▼──────────────────────────────────────────────────▼───────────┐
-│                           ZONE INTERNE                                    │
-│                                                                           │
-│   ┌─────────────────┐                                                     │
-│   │  Token Issuer    │◀── Seule autorité de génération                    │
-│   │  (simple_code +  │    des tokens de session                           │
-│   │   qr_token)      │                                                    │
-│   └─────────────────┘                                                     │
-│                                                                           │
-│   ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐  │
-│   │  File Puller     │───▶│ S3: internal-    │───▶│ Transcription Stub  │  │
-│   │  (PULL depuis    │    │     storage      │    │ (simule API STT)    │  │
-│   │   processed S3)  │    └──────────────────┘    └─────────────────────┘  │
-│   └─────────────────┘                                                     │
-│                                                                           │
-│   ┌─────────────────┐    ┌──────────────────┐                             │
-│   │ PostgreSQL       │    │ RabbitMQ         │                             │
-│   │ (interne)        │    │ (interne)        │                             │
-│   └─────────────────┘    └──────────────────┘                             │
-└───────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph EXT["ZONE EXTERNE (DMZ)"]
+    CG["Code Generator<br/>(OIDC/Keycloak)"]
+    UP["Upload Portal<br/>(mobile)"]
+    S3U["S3 upload-staging"]
+    AV["AV Worker<br/>(ClamAV)"]
+    TR["Transcode Worker<br/>(FFmpeg)"]
+    S3P["S3 processed-staging"]
+    FM["File Mover<br/>(notificateur)"]
+
+    CG -->|"QR url"| UP
+    UP -->|"upload fichier"| S3U
+    S3U --> AV --> TR --> S3P --> FM
+  end
+
+  subgraph INT["ZONE INTERNE"]
+    TI["Token Issuer<br/>(autorité unique token)"]
+    FP["File Puller<br/>(PULL depuis processed S3)"]
+    S3I["S3 internal-storage"]
+    STT["Transcription Stub"]
+    DB["PostgreSQL"]
+    MQ["RabbitMQ"]
+
+    FP --> S3I --> STT
+  end
+
+  CG -->|"API token<br/>(Bearer auth)"| TI
+  FM -->|"NOTIFY metadata<br/>(Bearer auth)"| FP
 ```
 
 ## Flux de génération de token (interne → externe)
 
-```
- Utilisateur          Code Generator (ext)         Token Issuer (int)         PostgreSQL (int)
-     │                        │                            │                        │
-     │── login OIDC ─────────▶│                            │                        │
-     │                        │                            │                        │
-     │── "Générer un code" ──▶│                            │                        │
-     │                        │── POST /issue-token ──────▶│                        │
-     │                        │   {user_sub, ttl, max}     │── generate code ──────▶│
-     │                        │                            │── generate qr_token ──▶│
-     │                        │                            │── INSERT issued_tokens ▶│
-     │                        │◀─ {simple_code, qr_token} ─│                        │
-     │                        │                            │                        │
-     │                        │── INSERT upload_sessions   │                        │
-     │                        │   (copie locale, suivi)    │                        │
-     │                        │                            │                        │
-     │◀── QR code + code ────│                            │                        │
+```mermaid
+sequenceDiagram
+  participant U as Utilisateur
+  participant CG as Code Generator (ext)
+  participant TI as Token Issuer (int)
+  participant PG as PostgreSQL (int)
+
+  U->>CG: login OIDC
+  U->>CG: Générer un code
+  CG->>TI: POST /issue-token {user_sub, ttl, max}
+  TI->>PG: generate code + qr_token
+  TI->>PG: INSERT issued_tokens
+  TI-->>CG: {simple_code, qr_token}
+  CG->>PG: INSERT upload_sessions (copie locale/suivi)
+  CG-->>U: QR code + code
 ```
 
 Le code-generator **ne contient aucune logique de génération de token**. Il délègue à 100% au token-issuer via API authentifiée (bearer token). La table `issued_tokens` en zone interne fait foi.
@@ -95,7 +68,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 | **upload-portal** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
 | **antivirus-worker** | Externe | — | Scan ClamAV, quarantaine si virus |
 | **transcode-worker** | Externe | — | FFmpeg : loudnorm dual-pass (linear), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
-| **file-mover** | Externe | — | Notifie la zone interne qu'un fichier est prêt (metadata uniquement) |
+| **file-mover** | Externe | — | Notifie la zone interne qu'un fichier est prêt (metadata uniquement), avec retries RabbitMQ |
 | **token-issuer** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
 | **file-puller** | Interne | 8090 | Tire les fichiers transcodés depuis S3 processed-staging |
 | **transcription-stub** | Interne | — | Simule la transcription STT (remplaçable par Whisper/Azure) |
@@ -115,6 +88,8 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 3 jours), limite de 5 uploads par session (configurable)
 
 6. **Analyse antivirale obligatoire** — Tout fichier passe par ClamAV. Fichiers infectés en quarantaine.
+
+7. **Transfert idempotent** — Si une notification `file_ready` est rejouée (retry réseau/queue), le `file-puller` détecte le fichier déjà importé et répond `already_pulled` sans doublonner les données.
 
 ## Démarrage rapide
 
@@ -167,6 +142,12 @@ docker buildx imagetools inspect <image:tag> | sed -n '1,6p'
 
 ```bash
 docker compose -f deploy/docker/docker-compose.yml up -d --build
+```
+
+Ou avec détection automatique de l'IP hôte (recommandé pour tests mobile/LAN):
+
+```bash
+./deploy/scripts/compose-up.sh
 ```
 
 Pour forcer les URLs générées (QR/code) sur l'IP publique ou LAN du serveur :
@@ -244,6 +225,41 @@ curl -sS http://localhost:8091/health
 - Les services refusent de démarrer si `INTERNAL_API_TOKEN` est faible (minimum 32 caractères, pas de placeholder
   type `change-me`, `dev-`, `test-`, etc.).
 
+### 7. Créer des comptes de test Keycloak (script local non versionné)
+
+Un wrapper local est fourni pour éviter d'exposer des credentials admin dans Git.
+
+1. Copier le fichier d'exemple :
+
+```bash
+cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
+   deploy/kubernetes/scripts/create-keycloak-test-users.local.env
+```
+
+2. Modifier localement `deploy/kubernetes/scripts/create-keycloak-test-users.local.env`
+   avec les vraies valeurs `KEYCLOAK_ADMIN_USER` et `KEYCLOAK_ADMIN_PASSWORD`.
+
+3. Lancer la création des comptes :
+
+```bash
+./deploy/kubernetes/scripts/create-keycloak-test-users.local.sh
+```
+
+Le script crée/met à jour par défaut `testuser01` à `testuser10`.
+
+### 8. Scénario de test bout-en-bout (E2E)
+
+1. Générer une session/QR via `https://import-audio.fake-domain.name`.
+2. Depuis mobile, ouvrir le lien QR et uploader un audio court.
+3. Vérifier la progression du statut : `uploaded` -> `scanned` -> `transcoded` -> `transferred`.
+4. Contrôler côté admin (`http://localhost:8082`) que la session apparaît avec ses événements.
+5. Vérifier la présence des objets dans les buckets :
+   - `audio-upload` / `ingate-audio` pour l'entrée,
+   - `audio-processed` pour le transcodé,
+   - `audio-internal` après transfert interne.
+6. Tester lecture et téléchargement des fichiers source/transcodé depuis l'interface.
+7. Vérifier la transcription stub et le journal des appels dans l'admin.
+
 ### Accès local (sans exposer d'information sensible)
 
 | Service | URL | Authentification |
@@ -298,6 +314,43 @@ kubectl apply -f deploy/kubernetes/external-zone/
 kubectl apply -f deploy/kubernetes/internal-zone/
 ```
 
+Autoscaling Kubernetes configuré:
+- `transcode-worker` via KEDA sur la queue `transcode` (jusqu'à 50 replicas)
+- `file-mover` via KEDA sur la queue `file_ready` (jusqu'à 50 replicas)
+- `transcription-stub` via KEDA sur la queue `transcription` (jusqu'à 20 replicas)
+- `file-puller` via HPA CPU/Mémoire (1 à 20 replicas)
+
+### Runbook debug transfert (Kubernetes)
+
+Quand un fichier reste bloqué en `transferring` ou `transcoded`, vérifier dans cet ordre:
+
+```bash
+# 1) Santé pods
+kubectl -n audio-external get pods
+kubectl -n audio-internal get pods
+
+# 2) Autoscaling actif
+kubectl -n audio-external get scaledobject
+kubectl -n audio-internal get scaledobject
+kubectl -n audio-internal get hpa
+
+# 3) Backlog RabbitMQ (queue file_ready/transcode/transcription)
+kubectl -n audio-external logs deploy/rabbitmq --tail=200
+
+# 4) Chaîne de transfert
+kubectl -n audio-external logs deploy/file-mover --tail=200
+kubectl -n audio-internal logs deploy/file-puller --tail=200
+
+# 5) Redémarrage ciblé (si nécessaire)
+kubectl -n audio-external rollout restart deploy/file-mover
+kubectl -n audio-internal rollout restart deploy/file-puller
+```
+
+Points à confirmer:
+- `file-mover` publie bien la notification interne (pas d'erreur HTTP vers `file-puller`).
+- `file-puller` répond `already_pulled` en cas de rejeu (idempotence), sans créer de doublon.
+- Les secrets S3 sont présents et identiques dans les namespaces `audio-external` et `audio-internal`.
+
 ## Isolation réseau
 
 ### Docker Compose (3 réseaux)
@@ -310,11 +363,24 @@ kubectl apply -f deploy/kubernetes/internal-zone/
 
 ### Kubernetes (NetworkPolicies)
 
-```yaml
-# Zone interne : deny-all par défaut
-# Exception 1 : token-issuer:8091 ← code-generator (audio-external)
-# Exception 2 : file-puller:8090  ← file-mover (audio-external)
-# Trafic intra-zone interne : autorisé
+```mermaid
+flowchart LR
+  EXTNS["Namespace audio-external"]
+  INTNS["Namespace audio-internal (deny-all par défaut)"]
+  CG["code-generator"]
+  FM["file-mover"]
+  TI["token-issuer:8091"]
+  FP["file-puller:8090"]
+  INTRA["Trafic intra-zone interne autorisé"]
+
+  EXTNS --- CG
+  EXTNS --- FM
+  INTNS --- TI
+  INTNS --- FP
+  INTNS --- INTRA
+
+  CG -->|"Exception 1 autorisée"| TI
+  FM -->|"Exception 2 autorisée"| FP
 ```
 
 ## Configuration
@@ -334,6 +400,7 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `EXTERNAL_PURGE_MAX_AGE_HOURS` | `12` | Âge max des fichiers externes avant purge |
 | `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté file-puller |
 | `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max des fichiers importés côté intranet avant purge |
+| `PULL_REQUEST_TIMEOUT_SECONDS` | `90` | Timeout HTTP (secondes) de `file-mover` vers `file-puller` |
 | `NORMALIZATION_CACHE_TTL_SECONDS` | `3600` | Durée du cache des métriques de normalisation côté admin |
 | `NORMALIZATION_MAX_COMPUTE_PER_REFRESH` | `0` | Nombre max d'analyses de normalisation lancées par refresh dashboard (0 = non bloquant) |
 | `NORMALIZATION_ANALYSIS_MAX_SECONDS` | `180` | Durée max de l'échantillon analysé pour l'impact de normalisation (page QR/interne) |
@@ -367,26 +434,13 @@ python deploy/scripts/measure_normalization_impact.py \
 
 ## Pipeline de traitement audio
 
-```
-Upload mobile → S3 upload-staging → ClamAV scan
-                                        │
-                              ┌─────────┴──────────┐
-                              │                     │
-                           CLEAN                 INFECTED
-                              │                     │
-                        FFmpeg transcode        Quarantaine
-                        (loudnorm EBU R128 dual-pass,
-                         highpass 80Hz, lowpass 7kHz,
-                         limiter anti-pics,
-                         16kHz mono WAV)
-                              │
-                        Score qualité 1-5
-                              │
-                     S3 processed-staging
-                              │
-                    NOTIFY → PULL → S3 internal-storage
-                                        │
-                                  Transcription STT
+```mermaid
+flowchart TD
+  U["Upload mobile"] --> S3U["S3 upload-staging"] --> AV["Scan ClamAV"]
+  AV -->|CLEAN| TR["FFmpeg transcode<br/>loudnorm dual-pass -> highpass 80Hz -> lowpass 7kHz -> alimiter<br/>16kHz mono WAV"]
+  AV -->|INFECTED| Q["Quarantaine"]
+  TR --> QL["Score qualité 1-5"] --> S3P["S3 processed-staging"]
+  S3P --> N["NOTIFY"] --> P["PULL"] --> S3I["S3 internal-storage"] --> STT["Transcription STT"]
 ```
 
 ## Formats audio supportés
@@ -395,46 +449,27 @@ MP3, WAV, OGG, FLAC, M4A, AAC, WMA, OPUS, WEBM
 
 ## Arborescence du projet
 
-```
-secure-audio-upload/
-├── configs/.env.example
-├── deploy/
-│   ├── docker/
-│   │   ├── docker-compose.yml          # 3 réseaux isolés
-│   │   └── keycloak-realm.json         # Realm Keycloak dev
-│   └── kubernetes/
-│       ├── shared/
-│       │   ├── namespaces.yaml         # Namespaces + NetworkPolicies
-│       │   └── secrets.yaml
-│       ├── external-zone/
-│       │   └── deployments.yaml        # code-gen, upload-portal, workers, ClamAV, Ingress
-│       └── internal-zone/
-│           └── deployments.yaml        # token-issuer, file-puller, transcription, PostgreSQL
-├── docs/ARCHITECTURE.md
-├── libs/shared/app/
-│   ├── config.py                       # Config centralisée
-│   ├── models.py                       # SQLAlchemy (IssuedToken, UploadSession, UploadedFile, UserAudioFile)
-│   ├── database.py                     # Session factories
-│   ├── s3_helper.py                    # Opérations S3/MinIO
-│   └── queue_helper.py                 # RabbitMQ publish/consume
-├── services/
-│   ├── code-generator/app/main.py      # OIDC + appel token-issuer + QR
-│   ├── upload-portal/app/
-│   │   ├── main.py                     # Upload API + WebSocket
-│   │   └── templates/                  # Pages HTML mobile
-│   ├── antivirus-worker/app/main.py    # ClamAV consumer
-│   ├── transcode-worker/app/main.py    # FFmpeg consumer
-│   ├── file-mover/app/
-│   │   ├── main.py                     # Notificateur (zone ext)
-│   │   └── puller.py                   # File Puller API (zone int)
-│   ├── token-issuer/app/main.py        # Génération tokens (zone int)
-│   └── transcription-stub/app/main.py  # Stub STT (zone int)
-├── deploy/scripts/setup.sh
-├── deploy/docker/Dockerfile
-├── requirements.txt
-└── README.md
+```mermaid
+flowchart TD
+  R["secure-audio-upload/"]
+  R --> C["configs/.env.example"]
+  R --> D["deploy/"]
+  D --> DD["docker/"]
+  DD --> DDC["docker-compose.yml"]
+  DD --> DDK["keycloak-realm.json"]
+  D --> DK["kubernetes/"]
+  DK --> DKS["shared/namespaces.yaml + secrets.yaml"]
+  DK --> DKE["external-zone/deployments.yaml"]
+  DK --> DKI["internal-zone/deployments.yaml"]
+  R --> DOC["docs/ARCHITECTURE.md"]
+  R --> L["libs/shared/app/ (config, models, DB, S3, queue)"]
+  R --> S["services/ (code-generator, upload-portal, workers, token-issuer, file-puller, transcription-stub)"]
+  R --> DS["deploy/scripts/setup.sh"]
+  R --> DF["deploy/docker/Dockerfile"]
+  R --> REQ["requirements.txt"]
+  R --> RMD["README.md"]
 ```
 
 ## Licence
 
-MIT
+Apache-2.0

@@ -90,7 +90,7 @@ def load_s3_upload() -> S3Config:
         access_key=_str("S3_UPLOAD_ACCESS_KEY", "minioadmin"),
         secret_key=_str("S3_UPLOAD_SECRET_KEY", "minioadmin"),
         bucket=_str("S3_UPLOAD_BUCKET", "upload-staging"),
-        region=_str("S3_UPLOAD_REGION", "us-east-1"),
+        region=_str("S3_UPLOAD_REGION", _str("AWS_REGION", "us-east-1")),
     )
 
 
@@ -100,7 +100,7 @@ def load_s3_processed() -> S3Config:
         access_key=_str("S3_PROCESSED_ACCESS_KEY", "minioadmin"),
         secret_key=_str("S3_PROCESSED_SECRET_KEY", "minioadmin"),
         bucket=_str("S3_PROCESSED_BUCKET", "processed-staging"),
-        region=_str("S3_PROCESSED_REGION", "us-east-1"),
+        region=_str("S3_PROCESSED_REGION", _str("AWS_REGION", "us-east-1")),
     )
 
 
@@ -110,7 +110,7 @@ def load_s3_internal() -> S3Config:
         access_key=_str("S3_INTERNAL_ACCESS_KEY", "minioadmin"),
         secret_key=_str("S3_INTERNAL_SECRET_KEY", "minioadmin"),
         bucket=_str("S3_INTERNAL_BUCKET", "internal-storage"),
-        region=_str("S3_INTERNAL_REGION", "us-east-1"),
+        region=_str("S3_INTERNAL_REGION", _str("AWS_REGION", "us-east-1")),
     )
 
 
