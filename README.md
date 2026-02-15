@@ -109,7 +109,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 3. Admin / Compte-rendu (suivi transcription)
 
-![Capture 3 - Admin](docs/screenshots/capture-03-admin.png)
+![Capture 3 - Admin](captures/admin-panel.png)
 
 ### Docker Compose
 
