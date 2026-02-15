@@ -36,7 +36,9 @@ from libs.shared.app.config import (
     MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed, load_s3_internal,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
 )
-from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
+from libs.shared.app.models import (
+    ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus, UploadTokenOption
+)
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.s3_helper import download_fileobj, delete_object, object_exists
@@ -165,7 +167,11 @@ def _oidc_request_with_retry(method: str, url: str, *, max_attempts: int = 3, re
 
 
 def request_token_from_internal(
-    user: dict, ttl_minutes: int, max_uploads: int, ttl_seconds: int | None = None
+    user: dict,
+    ttl_minutes: int,
+    max_uploads: int,
+    ttl_seconds: int | None = None,
+    auto_transcribe: bool = True,
 ) -> dict:
     """
     Appelle le token-issuer en zone INTERNE pour obtenir un (simple_code, qr_token).
@@ -177,6 +183,7 @@ def request_token_from_internal(
         "user_display_name": user.get("name"),
         "ttl_minutes": ttl_minutes,
         "max_uploads": max_uploads,
+        "auto_transcribe": bool(auto_transcribe),
     }
     if ttl_seconds is not None:
         payload["ttl_seconds"] = ttl_seconds
@@ -451,10 +458,17 @@ def api_generate_code():
         max(int(data.get("max_uploads", MAX_UPLOADS_PER_SESSION)), 1),
         50,
     )
+    auto_transcribe = bool(data.get("auto_transcribe", True))
 
     # ── Appel au token-issuer INTERNE ──
     try:
-        token_data = request_token_from_internal(user, ttl_minutes, max_uploads, ttl_seconds=ttl_seconds)
+        token_data = request_token_from_internal(
+            user,
+            ttl_minutes,
+            max_uploads,
+            ttl_seconds=ttl_seconds,
+            auto_transcribe=auto_transcribe,
+        )
     except req.RequestException as e:
         logger.exception("Failed to request token from internal zone")
         return jsonify({"error": "Service de génération de token indisponible. Réessayez."}), 503
@@ -480,6 +494,14 @@ def api_generate_code():
     db = SessionLocal()
     try:
         db.add(upload_session)
+        db.add(
+            UploadTokenOption(
+                id=uuid4(),
+                qr_token=qr_token,
+                simple_code=simple_code,
+                auto_transcribe=auto_transcribe,
+            )
+        )
         db.commit()
     finally:
         db.close()
@@ -495,6 +517,7 @@ def api_generate_code():
         "ttl_minutes": ttl_minutes,
         "ttl_seconds": token_data.get("ttl_seconds"),
         "max_uploads": max_uploads,
+        "auto_transcribe": auto_transcribe,
     })
 
 
@@ -600,16 +623,77 @@ def api_my_sessions():
 @require_auth
 def api_my_devices():
     user = get_current_user()
+    db = SessionLocal()
     try:
         devices = request_internal_device_api(
             "GET",
             "/api/v1/devices",
             params={"user_sub": user.get("sub", "")},
         )
-        return jsonify(devices if isinstance(devices, list) else [])
+        devices = devices if isinstance(devices, list) else []
+
+        # Enrich device list with recent upload counters from external DB sessions.
+        now = datetime.now(timezone.utc)
+        day_ago = now - timedelta(hours=24)
+        sessions = (
+            db.query(UploadSession)
+            .filter(UploadSession.user_sub == user.get("sub", ""))
+            .all()
+        )
+        session_by_qr = {}
+        for s in sessions:
+            token = (s.qr_token or "").strip()
+            if not token:
+                continue
+            prev = session_by_qr.get(token)
+            if prev is None or (s.created_at and prev.created_at and s.created_at > prev.created_at):
+                session_by_qr[token] = s
+
+        enriched = []
+        for d in devices:
+            item = dict(d) if isinstance(d, dict) else {}
+            qr_token = (item.get("qr_token") or "").strip()
+            s = session_by_qr.get(qr_token)
+            if s is not None:
+                recent_uploads_24h = 0
+                for f in (s.uploads or []):
+                    created = f.created_at
+                    if created is None:
+                        continue
+                    created_utc = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+                    if created_utc >= day_ago:
+                        recent_uploads_24h += 1
+                remaining_uploads = max(0, int(s.max_uploads or 0) - int(s.upload_count or 0))
+                session_max_uploads = int(s.max_uploads or 0)
+                session_upload_count = int(s.upload_count or 0)
+                expires_at = s.expires_at
+                expiring_soon = False
+                if expires_at:
+                    exp_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+                    expiring_soon = exp_utc <= (now + timedelta(days=2))
+                item["recent_uploads_24h"] = recent_uploads_24h
+                item["remaining_uploads"] = remaining_uploads
+                item["session_max_uploads"] = session_max_uploads
+                item["session_upload_count"] = session_upload_count
+                item["session_simple_code"] = s.simple_code
+                item["session_expiring_soon"] = expiring_soon
+                item["session_expires_at"] = expires_at.isoformat() if expires_at else None
+            else:
+                item["recent_uploads_24h"] = 0
+                item["remaining_uploads"] = 0
+                item["session_max_uploads"] = 0
+                item["session_upload_count"] = 0
+                item["session_simple_code"] = None
+                item["session_expiring_soon"] = False
+                item["session_expires_at"] = None
+            enriched.append(item)
+
+        return jsonify(enriched)
     except Exception:
         logger.exception("Failed to list enrolled devices for user %s", user.get("sub"))
         return jsonify({"error": "device_list_unavailable"}), 503
+    finally:
+        db.close()
 
 
 @app.route("/api/my-devices/<device_id>/rename", methods=["POST"])
@@ -662,6 +746,198 @@ def api_revoke_all_devices():
     except Exception:
         logger.exception("Failed to revoke all devices for user %s", user.get("sub"))
         return jsonify({"error": "device_revoke_all_failed"}), 500
+
+
+@app.route("/api/my-token/renew-7d", methods=["POST"])
+@require_auth
+def api_renew_token_7d():
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    qr_token = (payload.get("qr_token") or "").strip()
+    if not qr_token:
+        return jsonify({"error": "qr_token_required"}), 400
+    ttl_raw = str(payload.get("ttl_minutes", "")).strip()
+    ttl_minutes = None
+    ttl_seconds = None
+    if ttl_raw:
+        if ttl_raw.endswith("s"):
+            if not ALLOW_SHORT_QR_TTL_SECONDS_TEST:
+                return jsonify({"error": "Short TTL test mode is disabled"}), 400
+            try:
+                ttl_seconds = int(ttl_raw[:-1])
+            except ValueError:
+                return jsonify({"error": "Invalid ttl format"}), 400
+            if ttl_seconds not in {15, 30}:
+                return jsonify({"error": "Allowed ttl_seconds values are 15 or 30"}), 400
+            ttl_minutes = 1
+        else:
+            try:
+                ttl_minutes = min(max(int(ttl_raw), 1), CODE_TTL_MAX_MINUTES)
+            except ValueError:
+                return jsonify({"error": "Invalid ttl format"}), 400
+    add_uploads = min(max(int(payload.get("add_uploads", 0) or 0), 0), 500)
+
+    db = SessionLocal()
+    try:
+        data = request_internal_device_api(
+            "POST",
+            "/api/v1/tokens/extend-7d",
+            json_body={
+                "user_sub": user["sub"],
+                "qr_token": qr_token,
+                "ttl_minutes": ttl_minutes,
+                "ttl_seconds": ttl_seconds,
+                "add_uploads": add_uploads,
+            },
+        )
+        new_expires_raw = data.get("expires_at")
+        if not new_expires_raw:
+            raise ValueError("missing expires_at from internal API")
+
+        new_expires_at = datetime.fromisoformat(str(new_expires_raw))
+        if new_expires_at.tzinfo is None:
+            new_expires_at = new_expires_at.replace(tzinfo=timezone.utc)
+        new_status_view_raw = data.get("status_view_expires_at")
+        if new_status_view_raw:
+            new_status_view = datetime.fromisoformat(str(new_status_view_raw))
+            if new_status_view.tzinfo is None:
+                new_status_view = new_status_view.replace(tzinfo=timezone.utc)
+        else:
+            new_status_view = new_expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES)
+
+        session_obj = (
+            db.query(UploadSession)
+            .filter(UploadSession.user_sub == user["sub"], UploadSession.qr_token == qr_token)
+            .first()
+        )
+        if session_obj:
+            session_obj.expires_at = new_expires_at
+            session_obj.status_view_expires_at = new_status_view
+            session_obj.status = SessionStatus.ACTIVE
+            if add_uploads > 0:
+                session_obj.max_uploads = min(1000, int(session_obj.max_uploads or 0) + add_uploads)
+            db.commit()
+        else:
+            db.rollback()
+
+        return jsonify(
+            {
+                "ok": True,
+                "expires_at": new_expires_at.isoformat(),
+                "renew_days": int(data.get("renew_days", 7)),
+                "max_uploads": int(data.get("max_uploads", 0) or 0),
+            }
+        )
+    except req.HTTPError as err:
+        db.rollback()
+        if err.response is not None:
+            try:
+                body = err.response.json()
+            except Exception:
+                body = {"error": "internal_api_error"}
+            return jsonify({"error": body.get("error", "renew_failed")}), err.response.status_code
+        return jsonify({"error": "renew_failed"}), 502
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to renew token for user %s", user.get("sub"))
+        return jsonify({"error": "renew_failed"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/my-sessions/<session_id>/renew-7d", methods=["POST"])
+@require_auth
+def api_renew_session_7d(session_id):
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        session_obj = (
+            db.query(UploadSession)
+            .filter(UploadSession.id == session_id, UploadSession.user_sub == user["sub"])
+            .first()
+        )
+        if not session_obj:
+            return jsonify({"error": "session_not_found"}), 404
+
+        payload = request.get_json(silent=True) or {}
+        ttl_raw = str(payload.get("ttl_minutes", "")).strip()
+        ttl_minutes = None
+        ttl_seconds = None
+        if ttl_raw:
+            if ttl_raw.endswith("s"):
+                if not ALLOW_SHORT_QR_TTL_SECONDS_TEST:
+                    return jsonify({"error": "Short TTL test mode is disabled"}), 400
+                try:
+                    ttl_seconds = int(ttl_raw[:-1])
+                except ValueError:
+                    return jsonify({"error": "Invalid ttl format"}), 400
+                if ttl_seconds not in {15, 30}:
+                    return jsonify({"error": "Allowed ttl_seconds values are 15 or 30"}), 400
+                ttl_minutes = 1
+            else:
+                try:
+                    ttl_minutes = min(max(int(ttl_raw), 1), CODE_TTL_MAX_MINUTES)
+                except ValueError:
+                    return jsonify({"error": "Invalid ttl format"}), 400
+        add_uploads = min(max(int(payload.get("add_uploads", 0) or 0), 0), 500)
+
+        data = request_internal_device_api(
+            "POST",
+            "/api/v1/tokens/extend-7d",
+            json_body={
+                "user_sub": user["sub"],
+                "qr_token": session_obj.qr_token,
+                "ttl_minutes": ttl_minutes,
+                "ttl_seconds": ttl_seconds,
+                "add_uploads": add_uploads,
+            },
+        )
+        new_expires_raw = data.get("expires_at")
+        if not new_expires_raw:
+            raise ValueError("missing expires_at from internal API")
+
+        new_expires_at = datetime.fromisoformat(str(new_expires_raw))
+        if new_expires_at.tzinfo is None:
+            new_expires_at = new_expires_at.replace(tzinfo=timezone.utc)
+        new_status_view_raw = data.get("status_view_expires_at")
+        if new_status_view_raw:
+            new_status_view = datetime.fromisoformat(str(new_status_view_raw))
+            if new_status_view.tzinfo is None:
+                new_status_view = new_status_view.replace(tzinfo=timezone.utc)
+        else:
+            new_status_view = new_expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES)
+
+        session_obj.expires_at = new_expires_at
+        session_obj.status_view_expires_at = new_status_view
+        session_obj.status = SessionStatus.ACTIVE
+        if add_uploads > 0:
+            session_obj.max_uploads = min(1000, int(session_obj.max_uploads or 0) + add_uploads)
+        db.commit()
+
+        return jsonify(
+            {
+                "ok": True,
+                "session_id": str(session_obj.id),
+                "expires_at": session_obj.expires_at.isoformat(),
+                "renew_days": int(data.get("renew_days", 7)),
+                "max_uploads": int(data.get("max_uploads", 0) or 0),
+            }
+        )
+    except req.HTTPError as err:
+        db.rollback()
+        if err.response is not None:
+            try:
+                body = err.response.json()
+            except Exception:
+                body = {"error": "internal_api_error"}
+            return jsonify({"error": body.get("error", "renew_failed")}), err.response.status_code
+        return jsonify({"error": "renew_failed"}), 502
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to renew session %s for user %s", session_id, user.get("sub"))
+        return jsonify({"error": "renew_failed"}), 500
+    finally:
+        db.close()
 
 
 @app.route("/api/device/enroll-proxy", methods=["POST"])
@@ -976,28 +1252,46 @@ INDEX_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Générateur de Code d'Upload Audio</title>
+    <title>MIrAI - Téléversement audio facilité et sécurisé</title>
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/pwa-icon-192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/pwa-icon-180.png">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/utility/icons/icons-system/icons-system.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f2f5; color: #1a1a2e; min-height: 100vh;
-            display: flex; justify-content: center; align-items: flex-start;
-            padding: 2rem 1rem;
+            background: #f6f6f6; color: #161616; min-height: 100vh;
         }
-        .container { max-width: 520px; width: 100%; }
+        .page-shell { padding: 1.5rem 0 2rem; }
+        .container { max-width: 760px; width: 100%; }
         .card {
-            background: white; border-radius: 16px; padding: 2rem;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 1.5rem;
+            background: #fff; border-radius: 0.5rem; padding: 1.5rem;
+            border: 1px solid #e5e5e5; margin-bottom: 1rem;
         }
         h1 { font-size: 1.3rem; margin-bottom: 0.5rem; color: #1a1a2e; }
         .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }
-        .user-info {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 0.75rem 1rem; background: #f8f9fa; border-radius: 8px;
-            margin-bottom: 1.5rem; font-size: 0.9rem;
+        .header-user {
+            margin-left: auto;
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.15rem;
         }
-        .user-info a { color: #e74c3c; text-decoration: none; font-size: 0.85rem; }
+        .header-user-name {
+            font-size: 0.86rem;
+            font-weight: 600;
+            color: #161616;
+            line-height: 1.2;
+            max-width: 17rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .header-user .fr-link {
+            font-size: 0.8rem;
+            line-height: 1.2;
+        }
         .form-group { margin-bottom: 1rem; }
         label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #444; }
         select, input[type=number] {
@@ -1005,17 +1299,82 @@ INDEX_TEMPLATE = """
             font-size: 0.95rem; background: white;
         }
         .btn-primary {
-            width: 100%; padding: 0.8rem; border: none; border-radius: 10px;
-            background: #2563eb; color: white; font-size: 1rem; font-weight: 600;
-            cursor: pointer; transition: background 0.2s;
+            width: auto;
+            padding: 0.45rem 0.75rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.86rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
-        .btn-primary:hover { background: #1d4ed8; }
         .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
         .btn-danger-mini {
-            width: auto; padding: 0.2rem 0.45rem; background: #dc2626;
-            font-size: 0.72rem; line-height: 1.1; border-radius: 7px;
+            width: auto;
+            min-height: 1.1rem;
+            padding: 0.06rem 0.32rem;
+            background: #b86464 !important;
+            color: #ffffff !important;
+            border: 1px solid #a95959 !important;
+            font-size: 0.62rem;
+            line-height: 1;
+            border-radius: 6px;
+        }
+        .btn-danger-mini:hover,
+        .btn-danger-mini.fr-btn:hover,
+        .btn-danger-mini.fr-btn:active,
+        .btn-danger-mini.fr-btn:focus {
+            background: #ab5c5c !important;
+            border-color: #9d5050 !important;
+            color: #ffffff !important;
+            box-shadow: none;
         }
         .btn-danger-mini:disabled { background: #cbd5e1; color: #64748b; cursor: not-allowed; }
+        .btn-renew-mini {
+            min-height: 1.38rem !important;
+            padding: 0.08rem 0.42rem !important;
+            font-size: 0.62rem !important;
+            line-height: 1 !important;
+            border-radius: 6px !important;
+            margin-left: 0.35rem;
+        }
+        .btn-renew-alert {
+            animation: renewPulse 1.15s ease-in-out infinite;
+            box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45);
+        }
+        @keyframes renewPulse {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45); }
+            70% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+        }
+        .btn-rename-mini {
+            min-height: 0.8rem !important;
+            padding: 0.04rem 0.24rem !important;
+            font-size: 0.62rem !important;
+            line-height: 1 !important;
+            border-radius: 6px !important;
+        }
+        .device-filter-btn {
+            font-size: 0.64rem !important;
+            min-height: 1.05rem !important;
+            padding: 0.04rem 0.34rem !important;
+            line-height: 1 !important;
+            border-radius: 5px !important;
+        }
+        .device-row-revoked {
+            background: #f1f5f9;
+            border-color: #cbd5e1 !important;
+            opacity: 0.92;
+        }
+        .device-row-revoked .device-name {
+            color: #475569 !important;
+        }
+        .device-row-revoked .device-meta {
+            color: #64748b !important;
+        }
         .result { display: none; text-align: center; }
         .result.active { display: block; }
         .simple-code {
@@ -1036,6 +1395,7 @@ INDEX_TEMPLATE = """
             margin-bottom: 0.5rem; font-size: 0.85rem;
         }
         .session-item .code { font-weight: 700; font-family: monospace; color: #2563eb; }
+        .device-token-code { font-weight: 700; font-family: monospace; color: #2563eb; }
         .status-badge {
             display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
             font-size: 0.75rem; font-weight: 600;
@@ -1321,27 +1681,63 @@ INDEX_TEMPLATE = """
         .recent-activities-panel.open {
             display: block;
         }
+        .dsfr-inline-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .dsfr-inline-actions .fr-btn { width: auto; }
+        .fr-header__service-tagline {
+            max-width: 48rem;
+        }
+        .fr-header__body-row {
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
     </style>
 </head>
 <body>
+<header role="banner" class="fr-header">
+  <div class="fr-header__body">
+    <div class="fr-container">
+      <div class="fr-header__body-row">
+        <div class="fr-header__brand fr-enlarge-link">
+          <div class="fr-header__brand-top">
+            <div class="fr-header__logo">
+              <p class="fr-logo">
+                République
+                <br>Française
+              </p>
+            </div>
+          </div>
+          <div class="fr-header__service">
+            <a href="#" title="Accueil MIrAI Upload">
+              <p class="fr-header__service-title">MIrAI - Téléversement audio facilité et sécurisé</p>
+            </a>
+            <p class="fr-header__service-tagline">Enrôlement mobile et téléversement sécurisé</p>
+          </div>
+        </div>
+        <div class="header-user">
+          <span class="header-user-name">{{ user.name or user.email }}</span>
+          <a class="fr-link" href="/logout">Déconnexion</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="fr-container page-shell">
 <div class="container">
     <div class="card">
-        <h1>MIrAI : Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
+        <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
         <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
-        <div class="security-notice">
-            Pour limiter les risques en cas de perte ou vol de votre téléphone.
-            Supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.
-        </div>
-
-        <div class="user-info">
-            <span>{{ user.name or user.email }}</span>
-            <a href="/logout">Déconnexion</a>
-        </div>
 
         <div id="generate-form">
-            <div class="form-group">
-                <label for="ttl">Durée de validité</label>
-                <select id="ttl">
+            <div class="form-group fr-select-group">
+                <label class="fr-label" for="ttl">Durée de validité</label>
+                <select id="ttl" class="fr-select">
                     {% if short_ttl_enabled %}
                     <option value="15s">15 secondes (test)</option>
                     <option value="30s">30 secondes (test)</option>
@@ -1354,13 +1750,26 @@ INDEX_TEMPLATE = """
                     <option value="10080" selected>7 jours</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label for="max-uploads">Nombre max de fichiers</label>
-                <input type="number" id="max-uploads" value="5" min="1" max="50">
+            <div class="form-group fr-input-group">
+                <label class="fr-label" for="max-uploads">Nombre maximal de fichiers par période de validité du token</label>
+                <input class="fr-input" type="number" id="max-uploads" value="15" min="1" max="50">
             </div>
-            <button class="btn-primary" id="btn-generate" onclick="generateCode()">
+            <div class="form-group fr-checkbox-group">
+                <input type="checkbox" id="auto-transcribe" checked>
+                <label class="fr-label" for="auto-transcribe">
+                    Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu
+                </label>
+                <p style="margin-top:0.2rem;color:#64748b;font-size:0.78rem;">
+                    Dans tous les cas, les fichiers d'enregistrement seront optimisés pour la voix.
+                </p>
+            </div>
+            <button class="btn-primary fr-btn fr-btn--sm" id="btn-generate" onclick="generateCode()">
                 Générer un code
             </button>
+        </div>
+
+        <div class="fr-alert fr-alert--warning fr-mt-2w">
+            <p>Pour limiter les risques en cas de perte ou vol de votre téléphone. Supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.</p>
         </div>
 
         <div class="result" id="result">
@@ -1372,15 +1781,20 @@ INDEX_TEMPLATE = """
                 <img id="qr-img" width="200" height="200" alt="QR Code">
             </div>
             <p class="expires" id="display-expires"></p>
-            <button class="btn-primary" style="margin-top:1rem; background:#64748b;"
+            <p class="expires" id="display-remaining"></p>
+            <button class="btn-primary fr-btn fr-btn--secondary fr-btn--sm" style="margin-top:1rem;"
                     onclick="resetForm()">Générer un nouveau code</button>
         </div>
     </div>
 
     <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:0.6rem;">
+        <div class="dsfr-inline-actions">
             <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
-            <button class="btn-primary btn-danger-mini" id="revoke-all-devices-btn" onclick="revokeAllDevices()">Révoquer tous</button>
+            <div style="display:flex;align-items:center;gap:0.35rem;">
+                <button id="device-filter-btn" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary device-filter-btn"
+                        onclick="toggleDeviceScope()">Voir révoqués</button>
+                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" id="revoke-all-devices-btn" onclick="revokeAllDevices()">Révoquer tous</button>
+            </div>
         </div>
         <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
             Ces appareils peuvent uploader sans rescanner tant que leur enrôlement est valide.
@@ -1392,7 +1806,7 @@ INDEX_TEMPLATE = """
         <div class="activity-inline">
             <p class="activity-description">
                 Cet encadré donne une vue rapide des traitements en cours
-                (analyse, transcodage, transfert) avant le détail des sessions.
+                (analyse, transcodage, transfert)
             </p>
             <div class="activity-main">
                 <div class="activity-mini">
@@ -1413,9 +1827,9 @@ INDEX_TEMPLATE = """
             </div>
         </div>
         <div id="recent-activities-panel" class="recent-activities-panel">
-            <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes sessions récentes</h1>
-                <button id="purge-btn" class="btn-primary btn-danger-mini" disabled
+                <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
                         onclick="purgeSessions()">Purger liste + fichiers</button>
             </div>
             <div class="transfer-live" id="transfer-live">
@@ -1428,11 +1842,13 @@ INDEX_TEMPLATE = """
         </div>
     </div>
 </div>
+</main>
 
 <script>
 const impactCache = {};
 const impactLoading = new Set();
 let activitiesPanelOpen = false;
+let showAllDevices = false;
 
 function escapeHtml(v) {
     return (v || '').toString().replace(/[&<>"']/g, (s) => ({
@@ -1460,6 +1876,51 @@ function statusLabel(status) {
         error: 'Erreur',
     };
     return labels[status] || status;
+}
+
+function tokenValidityDaysLabel(retentionExpiresAt) {
+    if (!retentionExpiresAt) return '-';
+    const endMs = new Date(retentionExpiresAt).getTime();
+    if (!Number.isFinite(endMs)) return '-';
+    const diffMs = endMs - Date.now();
+    if (diffMs <= 0) return 'expiré';
+    const days = diffMs / (24 * 60 * 60 * 1000);
+    if (days < 1) return '< 1 jour';
+    return `${Math.ceil(days)} jour(s)`;
+}
+
+function formatDateTimeShort(isoValue) {
+    if (!isoValue) return '-';
+    const d = new Date(isoValue);
+    if (!Number.isFinite(d.getTime())) return '-';
+    return d.toLocaleString('fr-FR', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+function tokenIdShort(tokenValue) {
+    const raw = (tokenValue || '').toString().trim();
+    if (!raw) return '-';
+    if (raw.length <= 12) return raw;
+    return `${raw.slice(0, 6)}...${raw.slice(-4)}`;
+}
+
+function deviceTokenStateLabel(device) {
+    const rawStatus = (device && device.status ? String(device.status) : '').toLowerCase();
+    if (rawStatus === 'revoked') return 'révoqué';
+    const endMs = new Date((device && (device.retention_expires_at || device.session_expires_at)) || '').getTime();
+    if (Number.isFinite(endMs) && endMs <= Date.now()) return 'expiré';
+    return 'active';
+}
+
+function deviceTokenStateColor(stateLabel) {
+    if (stateLabel === 'révoqué') return '#b91c1c';
+    if (stateLabel === 'expiré') return '#b45309';
+    return '#166534';
 }
 
 function transferProgressFromMessage(status, msg) {
@@ -1552,6 +2013,7 @@ async function generateCode() {
             body: JSON.stringify({
                 ttl_minutes: document.getElementById('ttl').value,
                 max_uploads: parseInt(document.getElementById('max-uploads').value),
+                auto_transcribe: !!(document.getElementById('auto-transcribe') && document.getElementById('auto-transcribe').checked),
             }),
         });
         if (!resp.ok) {
@@ -1564,6 +2026,8 @@ async function generateCode() {
         document.getElementById('qr-img').src = '/api/qr-image/' + data.qr_token;
         document.getElementById('display-expires').textContent =
             'Valide jusqu\\'au ' + new Date(data.expires_at).toLocaleString('fr-FR');
+        document.getElementById('display-remaining').textContent =
+            `Téléchargements restants: ${data.max_uploads}`;
 
         document.getElementById('generate-form').style.display = 'none';
         document.getElementById('result').classList.add('active');
@@ -1583,6 +2047,18 @@ function resetForm() {
     document.getElementById('result').classList.remove('active');
 }
 
+function updateDeviceFilterButton() {
+    const btn = document.getElementById('device-filter-btn');
+    if (!btn) return;
+    btn.textContent = showAllDevices ? 'Masquer révoqués' : 'Voir révoqués';
+}
+
+function toggleDeviceScope() {
+    showAllDevices = !showAllDevices;
+    updateDeviceFilterButton();
+    loadDevices();
+}
+
 async function loadDevices() {
     const container = document.getElementById('devices-list');
     if (!container) return;
@@ -1591,32 +2067,78 @@ async function loadDevices() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Erreur chargement devices');
         const devices = Array.isArray(data) ? data : [];
-        if (!devices.length) {
-            container.innerHTML = '<span style="color:#64748b">Aucun appareil enrôle.</span>';
+        const nowMs = Date.now();
+        const oneDayMs = 24 * 60 * 60 * 1000;
+
+        const nonRevokedCount = devices.filter((d) => (d.status || '').toLowerCase() !== 'revoked').length;
+        const visibleDevices = devices.filter((d) => {
+            const status = (d.status || '').toLowerCase();
+            if (status !== 'revoked') {
+                return true;
+            }
+            const revokedAtRaw = d.revoked_at || d.updated_at || d.created_at;
+            if (!revokedAtRaw) {
+                return showAllDevices;
+            }
+            const revokedAtMs = new Date(revokedAtRaw).getTime();
+            if (!Number.isFinite(revokedAtMs)) {
+                return showAllDevices;
+            }
+            const age = nowMs - revokedAtMs;
+            if (age >= oneDayMs) return false; // hide after 24h in UI, keep in DB
+            return showAllDevices;
+        });
+
+        if (!visibleDevices.length) {
+            if (showAllDevices) {
+                container.innerHTML = `<span style="color:#64748b">Aucun appareil affichable. Appareils enrôlés non révoqués: <strong>${nonRevokedCount}</strong>.</span>`;
+            } else {
+                container.innerHTML = `<span style="color:#64748b">Aucun appareil enrôlé non révoqué. Compteur: <strong>${nonRevokedCount}</strong>.</span>`;
+            }
             return;
         }
-        container.innerHTML = devices.map((d) => `
-            <div style="border:1px solid #e2e8f0;border-radius:8px;padding:0.55rem 0.6rem;margin-bottom:0.5rem;">
+        container.innerHTML = visibleDevices.map((d) => {
+            const status = (d.status || '').toLowerCase();
+            const isRevoked = status === 'revoked';
+            const recentUploads24h = Number(d.recent_uploads_24h || 0);
+            const remainingUploads = Number(d.remaining_uploads || 0);
+            const sessionMaxUploads = Number(d.session_max_uploads || 0);
+            const renewNeedsAttention = !isRevoked && (!!d.session_expiring_soon || remainingUploads < 2);
+            const stateLabel = deviceTokenStateLabel(d);
+            const stateColor = deviceTokenStateColor(stateLabel);
+            const tokenShort = (d.session_simple_code || '').trim() || tokenIdShort(d.qr_token);
+            return `
+            <div data-device-row="${escapeHtml(d.device_id)}" class="${isRevoked ? 'device-row-revoked' : ''}" style="border:1px solid #e2e8f0;border-radius:8px;padding:0.55rem 0.6rem;margin-bottom:0.5rem;">
                 <div style="display:flex;justify-content:space-between;gap:0.5rem;align-items:center;">
                     <div style="min-width:0;">
-                        <div style="font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                        <div class="device-name" style="font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
                             ${escapeHtml(d.device_name || 'Appareil sans nom')}
+                            <span class="device-token-code" style="margin-left:0.35rem;" title="${escapeHtml(d.qr_token || '')}">${escapeHtml(tokenShort)}</span>
+                            <span data-device-status="${escapeHtml(d.device_id)}" style="font-weight:600;color:${escapeHtml(stateColor)};margin-left:0.35rem;">(${escapeHtml(stateLabel)})</span>
                         </div>
-                        <div style="font-size:0.74rem;color:#64748b;">
-                            ${escapeHtml(d.status)} | vu: ${escapeHtml(d.last_seen_at || '-')}
+                        <div class="device-meta" style="font-size:0.74rem;color:#64748b;" data-device-meta="${escapeHtml(d.device_id)}">
+                            validité token: ${escapeHtml(tokenValidityDaysLabel(d.retention_expires_at))} | restants: ${remainingUploads}/${sessionMaxUploads} | récents 24h: ${recentUploads24h} | vu: ${escapeHtml(formatDateTimeShort(d.last_seen_at))}
                         </div>
                     </div>
-                    <button class="btn-primary btn-danger-mini" onclick="revokeDevice('${escapeHtml(d.device_id)}')">Révoquer</button>
+                    <div style="display:flex;gap:0.35rem;align-items:center;">
+                        <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
+                                onclick="renewTokenByQr('${escapeHtml(d.qr_token || '')}')">Renouveller</button>
+                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                data-device-revoke="${escapeHtml(d.device_id)}"
+                                onclick="revokeDevice('${escapeHtml(d.device_id)}')"
+                                ${d.status === 'revoked' ? 'disabled' : ''}>Révoquer</button>
+                    </div>
                 </div>
                 <div style="display:flex;gap:0.4rem;margin-top:0.45rem;">
                     <input id="dev-name-${escapeHtml(d.device_id)}" type="text"
                            style="flex:1;padding:0.35rem 0.45rem;border:1px solid #cbd5e1;border-radius:6px;font-size:0.8rem;"
                            placeholder="Renommer l'appareil" value="${escapeHtml(d.device_name || '')}">
-                    <button class="btn-primary" style="width:auto;padding:0.35rem 0.5rem;font-size:0.78rem;"
+                    <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-rename-mini"
                             onclick="renameDevice('${escapeHtml(d.device_id)}')">Renommer</button>
                 </div>
             </div>
-        `).join('');
+        `;
+        }).join('');
     } catch (e) {
         container.innerHTML = '<span style="color:#b91c1c">Erreur chargement appareils.</span>';
     }
@@ -1643,12 +2165,21 @@ async function renameDevice(deviceId) {
 
 async function revokeDevice(deviceId) {
     if (!confirm('Révoquer cet appareil ?')) return;
+    const revokeBtn = document.querySelector(`[data-device-revoke="${deviceId}"]`);
+    if (revokeBtn) revokeBtn.disabled = true;
     try {
         const resp = await fetch(`/api/my-devices/${deviceId}/revoke`, { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || 'revoke_failed');
-        loadDevices();
+        const statusEl = document.querySelector(`[data-device-status="${deviceId}"]`);
+        if (statusEl) {
+            statusEl.textContent = '(révoqué)';
+            statusEl.style.color = deviceTokenStateColor('révoqué');
+        }
+        // Keep the device visible in list, refresh in background for consistency.
+        setTimeout(loadDevices, 250);
     } catch (e) {
+        if (revokeBtn) revokeBtn.disabled = false;
         alert('Echec révocation appareil.');
     }
 }
@@ -1663,6 +2194,35 @@ async function revokeAllDevices() {
         loadDevices();
     } catch (e) {
         alert('Echec révocation globale.');
+    }
+}
+
+async function renewTokenByQr(qrToken) {
+    if (!qrToken) {
+        alert('Token introuvable pour cet appareil.');
+        return;
+    }
+    if (!confirm('Renouveler ce token de 7 jours ?')) return;
+    try {
+        const ttlValue = document.getElementById('ttl') ? document.getElementById('ttl').value : '';
+        const addUploadsValue = document.getElementById('max-uploads')
+            ? parseInt(document.getElementById('max-uploads').value || '0', 10)
+            : 0;
+        const resp = await fetch('/api/my-token/renew-7d', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                qr_token: qrToken,
+                ttl_minutes: ttlValue,
+                add_uploads: addUploadsValue,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'renew_failed');
+        loadSessions();
+        loadDevices();
+    } catch (e) {
+        alert('Echec renouvellement token.');
     }
 }
 
@@ -1686,6 +2246,29 @@ async function purgeSessions() {
         loadDevices();
     } catch (e) {
         alert('Erreur: ' + e.message);
+    }
+}
+
+async function renewSession(sessionId) {
+    if (!confirm('Renouveler cette session de 7 jours ?')) return;
+    try {
+        const ttlValue = document.getElementById('ttl') ? document.getElementById('ttl').value : '';
+        const addUploadsValue = document.getElementById('max-uploads')
+            ? parseInt(document.getElementById('max-uploads').value || '0', 10)
+            : 0;
+        const resp = await fetch(`/api/my-sessions/${sessionId}/renew-7d`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ttl_minutes: ttlValue,
+                add_uploads: addUploadsValue,
+            }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'renew_failed');
+        loadSessions();
+    } catch (e) {
+        alert('Echec renouvellement de la session.');
     }
 }
 
@@ -1817,6 +2400,16 @@ async function loadSessions() {
             const isActive = s.status === 'active' && new Date(s.expires_at) > new Date();
             const statusClass = isActive ? 'status-active' : 'status-expired';
             const sessionStatusLabel = isActive ? 'Actif' : 'Expiré';
+            const remainingDownloads = Math.max(0, (s.max_uploads || 0) - (s.upload_count || 0));
+            const recentUploadsCount = (s.uploads || []).filter((f) => {
+                const created = new Date(f.created_at || f.updated_at || 0).getTime();
+                if (!Number.isFinite(created) || created <= 0) return false;
+                return (Date.now() - created) <= (24 * 60 * 60 * 1000);
+            }).length;
+            const expiresAtMs = new Date(s.expires_at).getTime();
+            const expiringSoon = Number.isFinite(expiresAtMs)
+                && (expiresAtMs - Date.now()) <= (2 * 24 * 60 * 60 * 1000);
+            const renewNeedsAttention = remainingDownloads < 2 || expiringSoon;
 
             const filesHtml = (s.uploads || []).map(f => {
                 const quality = (f.audio_quality_score !== null && f.audio_quality_score !== undefined)
@@ -1896,10 +2489,12 @@ async function loadSessions() {
                 </div>`;
             }).join('');
 
-            return `<div class="session-item">
+                return `<div class="session-item">
                 <span class="code">${s.simple_code}</span>
                 <span class="status-badge ${statusClass}">${sessionStatusLabel}</span>
-                <span style="float:right;color:#888;">${s.upload_count}/${s.max_uploads} fichiers</span>
+                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
+                        onclick="renewSession('${s.id}')">Renouveller</button>
+                <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>
                 ${filesHtml}
             </div>`;
         }).join('');
@@ -1955,10 +2550,13 @@ async function loadNormalizationImpact(fileId) {
 }
 
 loadSessions();
+updateDeviceFilterButton();
 loadDevices();
 setInterval(loadSessions, 15000);
 setInterval(loadDevices, 30000);
 </script>
+<script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
+<script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
 </body>
 </html>
 """

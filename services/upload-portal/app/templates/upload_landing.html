@@ -3,18 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Upload Audio</title>
+    <title>MIrAI - Téléversement audio facilité et sécurisé</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/utility/icons/icons-system/icons-system.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f2f5; color: #1a1a2e;
-            min-height: 100vh; display: flex; justify-content: center; align-items: center;
-            padding: 1rem;
+            background: #f6f6f6; color: #161616;
+            min-height: 100vh;
         }
+        .page-shell { padding: 1.5rem 0 2rem; }
         .card {
-            background: white; border-radius: 16px; padding: 2rem;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08); max-width: 400px; width: 100%;
+            background: white; border-radius: 12px; padding: 2rem;
+            border: 1px solid #e5e5e5; max-width: 560px; width: 100%;
             text-align: center;
         }
         h1 { font-size: 1.3rem; margin-bottom: 0.5rem; }
@@ -37,23 +38,49 @@
     </style>
 </head>
 <body>
+<header role="banner" class="fr-header">
+  <div class="fr-header__body">
+    <div class="fr-container">
+      <div class="fr-header__body-row">
+        <div class="fr-header__brand fr-enlarge-link">
+          <div class="fr-header__brand-top">
+            <div class="fr-header__logo">
+              <p class="fr-logo">République<br>Française</p>
+            </div>
+          </div>
+          <div class="fr-header__service">
+            <p class="fr-header__service-title">MIrAI - Téléversement audio facilité et sécurisé</p>
+            <p class="fr-header__service-tagline">Portail agents de téléversement sécurisé</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="fr-container page-shell">
 <div class="card">
-    <h1>Upload Audio Sécurisé</h1>
-    <p class="subtitle">Saisissez le code affiché sur l'écran de votre poste de travail</p>
+    <h1>MIrAI - Téléversement audio facilité et sécurisé</h1>
+    <p class="subtitle">Saisissez le code affiché sur votre poste de travail</p>
 
     {% if error %}
-    <p class="error">{{ error }}</p>
+    <div class="fr-alert fr-alert--error fr-mb-2w">
+        <p>{{ error }}</p>
+    </div>
     {% endif %}
 
     <form method="POST" action="/code">
-        <input type="text" name="code" class="code-input" placeholder="ABC123"
+        <input type="text" name="code" class="code-input fr-input" placeholder="ABC123"
                maxlength="10" autocomplete="off" autofocus>
-        <button type="submit" class="btn">Accéder</button>
+        <button type="submit" class="btn fr-btn">Accéder</button>
     </form>
 
     <p class="help-text">
         Vous avez scanné un QR code ? Vous serez redirigé automatiquement.
     </p>
 </div>
+</main>
+<script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
+<script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
 </body>
 </html>

@@ -11,12 +11,13 @@ import os
 import sys
 import threading
 import time
+import json
 import requests as req
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from uuid import uuid4
 
-from flask import Flask, request, jsonify, render_template, abort, redirect, url_for
+from flask import Flask, request, jsonify, render_template, abort, redirect, url_for, send_from_directory
 from flask_socketio import SocketIO, emit, join_room
 from sqlalchemy import text
 from werkzeug.utils import secure_filename
@@ -87,6 +88,7 @@ def is_session_valid(session_obj, for_upload: bool = False) -> tuple:
         return False, "Code invalide ou introuvable."
 
     now = datetime.now(timezone.utc)
+    renewal_hint = "Veuillez renouveler votre token (durée + téléchargements) dans l'interface admin."
 
     expires_at = session_obj.expires_at.replace(tzinfo=timezone.utc)
     if for_upload and UPLOAD_EXPIRY_GRACE_SECONDS > 0:
@@ -95,15 +97,19 @@ def is_session_valid(session_obj, for_upload: bool = False) -> tuple:
     if expires_at < now:
         if for_upload and UPLOAD_EXPIRY_GRACE_SECONDS > 0:
             return False, (
-                f"Ce code a expiré (fenêtre de grâce de {UPLOAD_EXPIRY_GRACE_SECONDS}s dépassée)."
+                f"Token expiré (fenêtre de grâce de {UPLOAD_EXPIRY_GRACE_SECONDS}s dépassée). "
+                f"{renewal_hint}"
             )
-        return False, "Ce code a expiré."
+        return False, f"Token expiré. {renewal_hint}"
 
     if session_obj.status != SessionStatus.ACTIVE:
-        return False, "Cette session n'est plus active."
+        return False, f"Token révoqué ou inactif. {renewal_hint}"
 
     if session_obj.upload_count >= session_obj.max_uploads:
-        return False, f"Nombre maximum de fichiers atteint ({session_obj.max_uploads})."
+        return False, (
+            f"Nombre maximal de téléchargements atteint ({session_obj.max_uploads}/{session_obj.max_uploads}). "
+            f"{renewal_hint}"
+        )
 
     return True, "OK"
 
@@ -299,18 +305,19 @@ def _validate_device_fast_path(qr_token: str, device_token: str) -> tuple[bool, 
     state = _get_validation_state(device_id)
     if bool(state.get("backend_invalid")):
         reason = str(state.get("backend_reason") or "invalid")
+        renewal_hint = "Veuillez renouveler votre token (durée + téléchargements) dans l'interface admin."
         message_by_reason = {
-            "revoked": "Appareil revoque. Retournez sur le backend et regenerez un code.",
-            "qr_expired": "Session expiree. Regenerer puis rescanner un nouveau code.",
-            "retention_expired": "Enrolement expire. Regenerer puis rescanner un nouveau code.",
-            "not_found": "Appareil inconnu. Veuillez re-enroler via un nouveau QR code.",
-            "token_mismatch": "Token appareil invalide pour cette session.",
+            "revoked": f"Token révoqué. {renewal_hint}",
+            "qr_expired": f"Token expiré. {renewal_hint}",
+            "retention_expired": f"Token expiré. {renewal_hint}",
+            "not_found": f"Appareil inconnu pour ce token. {renewal_hint}",
+            "token_mismatch": f"Token invalide pour cette session. {renewal_hint}",
         }
         return False, {
             "reason": reason,
             "message": message_by_reason.get(
                 reason,
-                "Appareil invalide. Retournez sur le backend et rescanner un nouveau code.",
+                f"Token invalide. {renewal_hint}",
             ),
         }
 
@@ -423,6 +430,53 @@ def index():
     return render_template("upload_landing.html")
 
 
+@app.route("/manifest/<qr_token>.webmanifest")
+def upload_manifest(qr_token: str):
+    """Dynamic manifest bound to a specific QR token upload page."""
+    session_obj = get_session_by_token(qr_token)
+    if not session_obj:
+        abort(404)
+    start_url = url_for("upload_page", qr_token=qr_token)
+    data = {
+        "name": "MIrAI - Televersement audio",
+        "short_name": "MIrAI Audio",
+        "description": "Televersement audio facilite et securise.",
+        "start_url": start_url,
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#f6f6f6",
+        "theme_color": "#000091",
+        "icons": [
+            {
+                "src": url_for("static", filename="icons/pwa-icon-192.png"),
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
+                "src": url_for("static", filename="icons/pwa-icon-512.png"),
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+        ],
+    }
+    return app.response_class(
+        json.dumps(data, ensure_ascii=True),
+        mimetype="application/manifest+json",
+    )
+
+
+@app.route("/sw.js")
+def service_worker():
+    """Serve service worker at root scope for PWA install."""
+    return send_from_directory(
+        os.path.join(os.path.dirname(__file__), "static"),
+        "sw.js",
+        mimetype="application/javascript",
+    )
+
+
 @app.route("/code", methods=["POST"])
 def code_lookup():
     """Redirect to upload page from simple code."""
@@ -492,7 +546,10 @@ def api_device_session(qr_token):
             ok = False
             details = {
                 "reason": backend_reason,
-                "message": "Appareil invalide/revoque. Retournez sur le backend et regenerez un code.",
+                "message": (
+                    "Token invalide, expiré ou révoqué. "
+                    "Veuillez renouveler votre token (durée + téléchargements) dans l'interface admin."
+                ),
             }
     status = "enrolled" if ok else "needs_enrollment"
     if not valid and not can_view:

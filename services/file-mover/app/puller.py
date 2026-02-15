@@ -180,6 +180,7 @@ def pull_file():
     user_sub = data["user_sub"]
     transcoded_filename = data["transcoded_filename"]
     simple_code = data["simple_code"]
+    auto_transcribe = bool(data.get("auto_transcribe", True))
     internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
 
     logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
@@ -233,29 +234,35 @@ def pull_file():
                 file_size_bytes=file_size,
                 audio_quality_score=data.get("quality_score"),
                 audio_duration_seconds=data.get("duration_seconds"),
-                transcription_status="pending",
+                transcription_status="pending" if auto_transcribe else "disabled",
             )
             db.add(audio_file)
             db.commit()
 
-            # ── Trigger transcription ──
-            try:
-                publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
-                    "audio_file_id": str(audio_file.id),
-                    "user_sub": user_sub,
-                    "stored_filename": internal_key,
-                    "original_filename": data.get("original_filename"),
-                    "simple_code": simple_code,
-                })
-                logger.info("Transcription enqueued for %s", audio_file.id)
-            except Exception as e:
-                logger.warning("Failed to enqueue transcription: %s", e)
+            # ── Trigger transcription (optional by token flag) ──
+            if auto_transcribe:
+                try:
+                    publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
+                        "audio_file_id": str(audio_file.id),
+                        "user_sub": user_sub,
+                        "stored_filename": internal_key,
+                        "original_filename": data.get("original_filename"),
+                        "simple_code": simple_code,
+                    })
+                    logger.info("Transcription enqueued for %s", audio_file.id)
+                except Exception as e:
+                    logger.warning("Failed to enqueue transcription: %s", e)
+            else:
+                logger.info("Transcription disabled by token flag for %s", audio_file.id)
 
         finally:
             db.close()
 
         # ── Notify external zone of successful transfer ──
-        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
+        if auto_transcribe:
+            notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
+        else:
+            notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription automatique désactivée pour ce code. (100%)")
 
         return jsonify({
             "status": "pulled",

@@ -3,25 +3,140 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Upload Audio - {{ simple_code }}</title>
+    <title>MIrAI - Téléversement audio facilité et sécurisé - {{ simple_code }}</title>
+    <link rel="manifest" href="{{ url_for('upload_manifest', qr_token=qr_token) }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icons/pwa-icon-192.png') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='icons/pwa-icon-180.png') }}">
+    <meta name="theme-color" content="#000091">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/utility/icons/icons-system/icons-system.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f2f5; color: #1a1a2e;
-            min-height: 100vh; padding: 1rem;
+            background: #f6f6f6; color: #1a1a2e;
+            min-height: 100vh; padding: 0;
         }
-        .container { max-width: 480px; margin: 0 auto; }
+        .upload-topbar {
+            background: #fff;
+            border-bottom: 1px solid #d6d6d6;
+        }
+        .upload-topbar-row {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            grid-template-areas: "logo service meta";
+            align-items: center;
+            gap: 1.25rem;
+            padding: 0.75rem 0;
+            width: 100%;
+        }
+        .upload-topbar-logo {
+            grid-area: logo;
+            margin-top: 0.1rem;
+            flex-shrink: 0;
+        }
+        .rf-mark {
+            display: inline-flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.2rem;
+            color: #161616;
+        }
+        .rf-flag {
+            width: 26px;
+            height: 14px;
+            border-radius: 2px;
+            background: linear-gradient(90deg, #000091 0 33.33%, #ffffff 33.33% 66.66%, #e1000f 66.66% 100%);
+            border: 1px solid #d6d6d6;
+        }
+        .rf-title {
+            font-size: 0.9rem;
+            line-height: 1.05;
+            font-weight: 800;
+            letter-spacing: 0.01em;
+        }
+        .rf-subtitle {
+            font-size: 0.62rem;
+            line-height: 1.1;
+            color: #666;
+        }
+        .upload-topbar-service {
+            grid-area: service;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .upload-topbar-service-title {
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 700;
+            line-height: 1.25;
+        }
+        .upload-topbar-service-tagline {
+            margin: 0.15rem 0 0;
+            color: #666;
+            font-size: 0.95rem;
+        }
+        .upload-topbar-service-title,
+        .upload-topbar-service-tagline {
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        .page-shell { padding: 1.5rem 0 2rem; }
+        .container { max-width: 760px; margin: 0 auto; }
+        .header-session-meta {
+            grid-area: meta;
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.25rem;
+            justify-content: flex-start;
+            padding-top: 0.1rem;
+        }
+        .header-session-meta .code-display {
+            font-size: 1rem;
+            font-weight: 800;
+            color: #2563eb;
+            font-family: monospace;
+            letter-spacing: 0.2em;
+            background: #f3f4f6;
+            border-radius: 6px;
+            padding: 0.2rem 0.45rem;
+        }
+        .change-code-link {
+            font-size: 0.78rem;
+            color: #666;
+            text-decoration: underline;
+        }
+        @media (max-width: 52rem) {
+            .upload-topbar-row {
+                grid-template-columns: auto minmax(0, 1fr);
+                grid-template-areas:
+                    "logo service"
+                    ". meta";
+                gap: 0.5rem;
+            }
+            .header-session-meta {
+                flex-direction: row;
+                align-items: flex-start;
+                text-align: left;
+                padding-top: 0;
+                gap: 0.5rem;
+            }
+            .upload-topbar-service-title {
+                font-size: 1.05rem;
+            }
+            .upload-topbar-service-tagline {
+                font-size: 0.9rem;
+            }
+        }
         .card {
-            background: white; border-radius: 16px; padding: 1.5rem;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 1rem;
+            background: white; border-radius: 12px; padding: 1.5rem;
+            border: 1px solid #e5e5e5; margin-bottom: 1rem;
         }
         h2 { font-size: 1.15rem; margin-bottom: 0.5rem; }
-        .code-display {
-            font-size: 1.5rem; font-weight: 800; color: #2563eb;
-            font-family: monospace; letter-spacing: 0.2em;
-        }
 
         /* Upload zone */
         .upload-zone {
@@ -63,10 +178,45 @@
             padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
             font-size: 0.85rem; color: #991b1b; margin-bottom: 1rem;
         }
+        .renew-code-link {
+            margin-top: 0.5rem;
+        }
         .security-banner {
             background: #dbeafe; border-left: 4px solid #3b82f6;
             padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
             font-size: 0.85rem; color: #1e40af;
+        }
+        .security-banner-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+        }
+        .security-banner-close {
+            border: 0;
+            background: transparent;
+            color: #1e3a8a;
+            cursor: pointer;
+            font-size: 0.9rem;
+            line-height: 1;
+            padding: 0.1rem 0.25rem;
+            border-radius: 4px;
+        }
+        .security-banner-close:hover {
+            background: rgba(30, 58, 138, 0.12);
+        }
+        .pwa-install-actions {
+            margin-top: 0.5rem;
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .pwa-install-help {
+            margin-top: 0.35rem;
+            font-size: 0.78rem;
+            color: #1e3a8a;
+            display: block;
         }
 
         /* File list */
@@ -85,6 +235,7 @@
             display: inline-block; width: 8px; height: 8px; border-radius: 50%;
             margin-right: 4px; vertical-align: middle;
         }
+        .status-dot.hidden { display: none; }
         .dot-pending { background: #f59e0b; }
         .dot-scanning { background: #f59e0b; animation: pulse 1s infinite; }
         .dot-clean { background: #10b981; }
@@ -92,6 +243,12 @@
         .dot-transcoding { background: #3b82f6; animation: pulse 1s infinite; }
         .dot-transcoded, .dot-ready, .dot-transferred { background: #10b981; }
         .dot-error { background: #ef4444; }
+        .status-text.alert-left {
+            display: inline-block;
+            margin-left: 0;
+            color: #991b1b;
+            font-weight: 600;
+        }
 
         .remaining { color: #666; font-size: 0.85rem; text-align: center; margin-top: 0.5rem; }
 
@@ -100,30 +257,61 @@
             50% { opacity: 0.4; }
         }
 
-        .quality-stars { color: #f59e0b; font-size: 0.85rem; }
+        .quality-stars {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            color: #b45309;
+            font-size: 0.8rem;
+            margin-top: 0.25rem;
+        }
+        .quality-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1rem;
+            height: 1rem;
+            border-radius: 50%;
+            background: #fef3c7;
+            color: #92400e;
+            font-size: 0.7rem;
+            font-weight: 700;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+        .safety-alert {
+            margin-bottom: 0.75rem;
+        }
     </style>
 </head>
 <body>
+<header role="banner" class="upload-topbar">
+  <div class="fr-container">
+    <div class="upload-topbar-row">
+      <div class="upload-topbar-logo">
+        <div class="rf-mark" aria-label="République Française">
+          <span class="rf-flag" aria-hidden="true"></span>
+          <span class="rf-title">RÉPUBLIQUE<br>FRANÇAISE</span>
+          <span class="rf-subtitle">Liberté<br>Égalité<br>Fraternité</span>
+        </div>
+      </div>
+      <div class="upload-topbar-service">
+        <p class="upload-topbar-service-title">MIrAI - Téléversement audio facilité et sécurisé</p>
+        <p class="upload-topbar-service-tagline">Téléversement sécurisé</p>
+      </div>
+      <div class="header-session-meta">
+        <span class="code-display">{{ simple_code }}</span>
+        <a class="change-code-link" href="/">Changer le code</a>
+      </div>
+    </div>
+  </div>
+</header>
+<main class="fr-container page-shell">
 <div class="container">
     <div class="card">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <h2>Upload Audio</h2>
-            <span class="code-display">{{ simple_code }}</span>
-        </div>
-
         {% if can_upload %}
-        <div class="info-banner">
-            <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
-            Vous pouvez revenir sur cette page pour vérifier l'avancement.
-        </div>
-        <div class="security-banner" id="device-enroll-banner" style="margin-bottom:0.75rem;">
-            <strong>Enrolement appareil:</strong> pour un acces durable, vous pouvez ajouter cette page a l'ecran d'accueil (mode PWA).
-            Le token appareil restera persistant et verifie regulierement.
-        </div>
-        <div class="warning-banner" id="device-warning-banner" style="display:none;"></div>
-
         <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
-            <div class="upload-icon">🎤</div>
+            <div class="upload-icon">🎙️</div>
             <div class="upload-text">
                 <strong>Touchez pour sélectionner</strong> un fichier audio<br>
                 ou glissez-déposez ici
@@ -142,6 +330,28 @@
             {{ remaining }} fichier(s) restant(s) sur {{ max_uploads }}
         </p>
 
+        <div class="info-banner" style="margin-top:0.9rem;">
+            <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
+            Vous pouvez revenir sur cette page pour vérifier l'avancement.
+        </div>
+        <div class="security-banner" id="device-enroll-banner" style="margin-bottom:0.75rem;">
+            <div class="security-banner-head">
+                <strong>Enrolement appareil:</strong>
+                <button id="pwa-banner-close" type="button" class="security-banner-close" aria-label="Fermer l'alerte">✕</button>
+            </div>
+            pour un acces durable, vous pouvez ajouter cette page a l'ecran d'accueil (mode PWA).
+            Le token appareil restera persistant et verifie regulierement.
+            <div class="pwa-install-actions">
+                <button id="install-app-btn" type="button" class="fr-btn fr-btn--secondary fr-btn--sm">
+                    Ajouter a l'ecran d'accueil
+                </button>
+            </div>
+            <div id="install-app-help" class="pwa-install-help">
+                iPhone/iPad (Safari): touchez Partager puis "Sur l'ecran d'accueil".
+            </div>
+        </div>
+        <div class="warning-banner" id="device-warning-banner" style="display:none;"></div>
+
         {% elif can_view %}
         <div class="warning-banner">
             {{ reason }}<br>
@@ -154,19 +364,24 @@
         {% endif %}
     </div>
 
+    <div class="fr-alert fr-alert--warning fr-mt-2w safety-alert">
+        <p>Pour limiter les risques en cas de perte ou vol de votre téléphone. Supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.</p>
+    </div>
+
     <div class="card" id="files-card" style="{% if not uploads %}display:none{% endif %}">
         <h2>Fichiers</h2>
         <div id="files-list">
             {% for f in uploads %}
             <div class="file-item" data-file-id="{{ f.id }}">
-                <div class="file-icon">🎵</div>
+                <div class="file-icon">🎙️</div>
                 <div class="file-info">
                     <div class="file-name">{{ f.name }}</div>
                     <div class="file-status-text">
-                        <span class="status-dot dot-{{ f.status }}"></span>
-                        <span class="status-text">{{ f.message }}</span>
-                        {% if f.quality %}
-                        <span class="quality-stars">i {{ '%.1f'|format(f.quality) }}/5</span>
+                        <span class="status-dot dot-{{ f.status }} {% if f.status in ['scan_infected', 'quarantined'] %}hidden{% endif %}"></span>
+                        <span class="status-text {% if f.status in ['scan_infected', 'quarantined'] %}alert-left{% endif %}">{{ f.message }}</span>
+                        {% if f.quality is not none %}
+                        <br>
+                        <span class="quality-stars"><span class="quality-icon" aria-hidden="true">i</span>Qualité {{ '%.1f'|format(f.quality) }}/5</span>
                         {% endif %}
                     </div>
                 </div>
@@ -174,13 +389,8 @@
             {% endfor %}
         </div>
     </div>
-
-    <div class="card security-banner">
-        <strong>Rappel de sécurité :</strong> Les fichiers audio professionnels ne doivent
-        pas rester stockés sur un téléphone personnel. Une fois l'upload terminé et confirmé,
-        pensez à supprimer les fichiers de votre appareil.
-    </div>
 </div>
+</main>
 
 <script>
 const qrToken = "{{ qr_token }}";
@@ -190,7 +400,9 @@ const deviceRevalidateIntervalSeconds = {{ device_revalidate_interval_seconds }}
 const deviceMaxValidationFailureSeconds = {{ device_revalidate_max_failure_seconds }};
 const deviceStorageKey = `upload_device_token:${qrToken}`;
 const deviceKeyStorageKey = `upload_device_key:${qrToken}`;
+const pwaBannerDismissKey = `pwa_install_banner_dismissed:${qrToken}`;
 let deviceSessionTimer = null;
+let deferredInstallPrompt = null;
 
 function getDeviceToken() {
     return localStorage.getItem(deviceStorageKey) || '';
@@ -230,7 +442,7 @@ function setDeviceWarning(message) {
     if (!el) return;
     if (!message) {
         el.style.display = 'none';
-        el.textContent = '';
+        el.innerHTML = '';
         return;
     }
     el.style.display = 'block';
@@ -282,7 +494,7 @@ async function bootstrapDeviceSession() {
         if (!enrollResp.ok || !enrollData.device_token) {
             disableUpload(
                 enrollData.error ||
-                'Enrolement impossible. Retournez au backend pour regenerer/scanner un code.'
+                "Enrolement impossible. Veuillez renouveler votre token (durée + téléchargements) dans l'interface admin."
             );
             return false;
         }
@@ -290,7 +502,7 @@ async function bootstrapDeviceSession() {
         setDeviceWarning('');
         return true;
     } catch (e) {
-        disableUpload('Validation device indisponible. Reessayez plus tard.');
+        disableUpload("Validation device indisponible. Si le problème persiste, renouvelez le token dans l'interface admin.");
         return false;
     }
 }
@@ -421,12 +633,12 @@ function addFileToList(fileId, name, status, message) {
     item.className = 'file-item';
     item.dataset.fileId = fileId;
     item.innerHTML = `
-        <div class="file-icon">🎵</div>
+        <div class="file-icon">🎙️</div>
         <div class="file-info">
             <div class="file-name">${escapeHtml(name)}</div>
             <div class="file-status-text">
-                <span class="status-dot dot-${status}"></span>
-                <span class="status-text">${escapeHtml(message)}</span>
+                <span class="status-dot dot-${status} ${isAlertStatus(status) ? 'hidden' : ''}"></span>
+                <span class="status-text ${isAlertStatus(status) ? 'alert-left' : ''}">${escapeHtml(message)}</span>
             </div>
         </div>
     `;
@@ -444,19 +656,30 @@ function updateFileStatus(data) {
     const text = item.querySelector('.status-text');
 
     // Reset dot class
-    dot.className = 'status-dot dot-' + data.status;
+    dot.className = 'status-dot dot-' + data.status + (isAlertStatus(data.status) ? ' hidden' : '');
+    text.classList.toggle('alert-left', isAlertStatus(data.status));
     text.textContent = data.message || statusLabel(data.status);
 
     // Add quality if available
-    if (data.quality) {
+    if (data.quality !== undefined && data.quality !== null) {
         let qualityEl = item.querySelector('.quality-stars');
         if (!qualityEl) {
             qualityEl = document.createElement('span');
             qualityEl.className = 'quality-stars';
-            item.querySelector('.file-status-text').appendChild(qualityEl);
+            qualityEl.innerHTML = '<span class="quality-icon" aria-hidden="true">i</span><span class="quality-value"></span>';
+            const statusWrap = item.querySelector('.file-status-text');
+            statusWrap.appendChild(document.createElement('br'));
+            statusWrap.appendChild(qualityEl);
         }
-        qualityEl.textContent = ' i ' + data.quality.toFixed(1) + '/5';
+        const valueEl = qualityEl.querySelector('.quality-value');
+        if (valueEl) {
+            valueEl.textContent = 'Qualité ' + data.quality.toFixed(1) + '/5';
+        }
     }
+}
+
+function isAlertStatus(status) {
+    return status === 'scan_infected' || status === 'quarantined';
 }
 
 function updateRemainingText() {
@@ -493,6 +716,109 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function isIosMobile() {
+    const ua = navigator.userAgent || '';
+    const platform = navigator.platform || '';
+    const maxTouchPoints = navigator.maxTouchPoints || 0;
+    const classicIos = /iPhone|iPad|iPod/.test(ua);
+    // iPadOS 13+ can expose a desktop-like UA ("Macintosh"), keep touch heuristic.
+    const iPadOsDesktopMode = platform === 'MacIntel' && maxTouchPoints > 1;
+    return classicIos || iPadOsDesktopMode;
+}
+
+function isSafariBrowser() {
+    const ua = navigator.userAgent || '';
+    const isSafari = /Safari/i.test(ua);
+    const isOtherWebkitShell = /CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo/i.test(ua);
+    return isSafari && !isOtherWebkitShell;
+}
+
+function isStandalone() {
+    return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+function setupPwaInstall() {
+    const installBtn = document.getElementById('install-app-btn');
+    const helpEl = document.getElementById('install-app-help');
+    const bannerEl = document.getElementById('device-enroll-banner');
+    const closeBtn = document.getElementById('pwa-banner-close');
+    if (!installBtn || !helpEl || !bannerEl || !closeBtn) return;
+
+    installBtn.style.display = 'inline-flex';
+    helpEl.style.display = 'block';
+
+    closeBtn.addEventListener('click', () => {
+        try {
+            localStorage.setItem(pwaBannerDismissKey, '1');
+        } catch (e) {}
+        bannerEl.style.display = 'none';
+    });
+
+    if (isStandalone()) {
+        // In installed PWA mode, this hint is no longer useful.
+        bannerEl.style.display = 'none';
+        return;
+    }
+
+    try {
+        if (localStorage.getItem(pwaBannerDismissKey) === '1') {
+            bannerEl.style.display = 'none';
+            return;
+        }
+    } catch (e) {
+        // Ignore storage errors and keep banner visible.
+    }
+
+    closeBtn.style.display = 'inline-flex';
+
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredInstallPrompt = e;
+        installBtn.style.display = 'inline-flex';
+        helpEl.style.display = 'none';
+    });
+
+    const iosSafari = isIosMobile() && isSafariBrowser();
+    if (iosSafari) {
+        installBtn.style.display = 'inline-flex';
+        helpEl.style.display = 'block';
+        helpEl.textContent = "Safari iPhone/iPad: touchez Partager puis 'Sur l'ecran d'accueil'.";
+    } else if (!deferredInstallPrompt) {
+        helpEl.textContent = "Si l'installation automatique n'apparait pas, utilisez le menu du navigateur puis 'Ajouter a l'ecran d'accueil'.";
+    }
+
+    installBtn.addEventListener('click', async () => {
+        if (iosSafari) {
+            if (navigator.share) {
+                try {
+                    await navigator.share({
+                        title: 'MIrAI - Televersement audio',
+                        text: 'Ajouter cette application a l ecran d accueil',
+                        url: window.location.href,
+                    });
+                } catch (e) {
+                    // User cancelled or share unavailable.
+                }
+            }
+            helpEl.style.display = 'block';
+            helpEl.textContent = "Dans le menu Partager, choisissez 'Sur l'ecran d'accueil'.";
+            return;
+        }
+
+        if (deferredInstallPrompt) {
+            deferredInstallPrompt.prompt();
+            try {
+                await deferredInstallPrompt.userChoice;
+            } catch (e) {}
+            deferredInstallPrompt = null;
+            installBtn.style.display = isIosMobile() ? 'inline-flex' : 'none';
+            return;
+        }
+        helpEl.style.display = 'block';
+        helpEl.textContent = "Android/Chrome: utilisez le menu du navigateur puis 'Installer l'application' ou 'Ajouter a l’ecran d’accueil'.";
+    });
+}
+
 // Auto-refresh status every 10s (fallback if WebSocket fails)
 setInterval(async () => {
     try {
@@ -510,7 +836,7 @@ setInterval(async () => {
             }
         } else if (resp.status === 401) {
             clearDeviceToken();
-            disableUpload('Token appareil invalide/revoque. Retournez au backend pour regenerer un code et scanner/saisir.');
+            disableUpload("Token invalide, expiré ou révoqué. Veuillez renouveler votre token dans l'interface admin.");
         }
     } catch (e) {}
 }, 10000);
@@ -519,6 +845,14 @@ bootstrapDeviceSession();
 deviceSessionTimer = setInterval(() => {
     bootstrapDeviceSession();
 }, Math.max(60, deviceRevalidateIntervalSeconds) * 1000);
+setupPwaInstall();
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+}
 </script>
+<script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
+<script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
 </body>
 </html>

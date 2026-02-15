@@ -115,6 +115,22 @@ class UploadedFile(ExternalBase):
     )
 
 
+class UploadTokenOption(ExternalBase):
+    """Per-token behavior flags for external zone processing."""
+    __tablename__ = "upload_token_options"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    qr_token = Column(String(64), nullable=False, unique=True, index=True)
+    simple_code = Column(String(10), nullable=False, index=True)
+    auto_transcribe = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 # ─── Zone Interne ───────────────────────────────────────────
 
 class IssuedToken(InternalBase):
@@ -143,6 +159,23 @@ class IssuedToken(InternalBase):
     __table_args__ = (
         Index("ix_token_expires", "expires_at"),
         Index("ix_token_code", "simple_code"),
+    )
+
+
+class IssuedTokenOption(InternalBase):
+    """Per-token behavior flags stored in internal trust zone."""
+    __tablename__ = "issued_token_options"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    qr_token = Column(String(64), nullable=False, unique=True, index=True)
+    simple_code = Column(String(10), nullable=False, index=True)
+    user_sub = Column(String(255), nullable=False, index=True)
+    auto_transcribe = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
 

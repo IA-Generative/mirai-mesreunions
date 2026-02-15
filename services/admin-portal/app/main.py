@@ -871,9 +871,13 @@ INDEX_TEMPLATE = """
   <meta charset=\"UTF-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
   <title>Admin Portal</title>
+  <link rel=\"icon\" type=\"image/png\" sizes=\"192x192\" href=\"/static/icons/pwa-icon-192.png\" />
+  <link rel=\"apple-touch-icon\" sizes=\"180x180\" href=\"/static/icons/pwa-icon-180.png\" />
+  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css\">
+  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/utility/icons/icons-system/icons-system.min.css\">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; background: #f6f7fb; color: #101827; }
-    .wrap { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+    body { margin: 0; background: #f6f6f6; color: #161616; }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 16px; }
     .top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
     .card { background: #fff; border-radius: 12px; padding: 14px; box-shadow: 0 1px 8px rgba(0,0,0,.06); margin-bottom: 12px; }
     .summary { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
@@ -893,16 +897,36 @@ INDEX_TEMPLATE = """
   </style>
 </head>
 <body>
+  <header role=\"banner\" class=\"fr-header\">
+    <div class=\"fr-header__body\">
+      <div class=\"fr-container\">
+        <div class=\"fr-header__body-row\">
+          <div class=\"fr-header__brand fr-enlarge-link\">
+            <div class=\"fr-header__brand-top\">
+              <div class=\"fr-header__logo\">
+                <p class=\"fr-logo\">République<br>Française</p>
+              </div>
+            </div>
+            <div class=\"fr-header__service\">
+              <p class=\"fr-header__service-title\">MIrAI - Téléversement audio facilité et sécurisé</p>
+              <p class=\"fr-header__service-tagline\">Supervision des sessions, S3, transcription et devices</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+  <main class=\"fr-container\">
   <div class=\"wrap\">
     <div class=\"top\">
       <div>
-        <h2 style=\"margin:0\">Administration Pipeline Audio</h2>
+        <h2 style=\"margin:0\">MIrAI - Téléversement audio facilité et sécurisé (Administration)</h2>
         <div class=\"muted\">Connecte: {{ user.email or user.preferred_username or user.sub }}</div>
       </div>
       <div style=\"display:flex;align-items:center;gap:10px\">
-        <button id=\"revoke-all-devices-btn\" style=\"font-size:12px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;cursor:pointer\">Révoquer tous les devices</button>
-        <button id=\"purge-all-btn\" style=\"font-size:12px;padding:4px 8px;border:1px solid #d0d5dd;border-radius:8px;background:#fff;cursor:pointer\">Purger tous les fichiers</button>
-        <a id=\"logout-link\" href=\"logout\">Se deconnecter</a>
+        <button id=\"revoke-all-devices-btn\" class=\"fr-btn fr-btn--sm fr-btn--tertiary-no-outline\">Révoquer tous les devices</button>
+        <button id=\"purge-all-btn\" class=\"fr-btn fr-btn--sm fr-btn--tertiary-no-outline\">Purger tous les fichiers</button>
+        <a id=\"logout-link\" class=\"fr-link\" href=\"logout\">Se deconnecter</a>
       </div>
     </div>
 
@@ -937,6 +961,7 @@ INDEX_TEMPLATE = """
       <div id=\"sessions\" style=\"margin-top:10px\"></div>
     </div>
   </div>
+  </main>
 
 <script>
 function esc(v) { return (v || '').toString().replace(/[&<>\"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[s])); }
@@ -1212,6 +1237,8 @@ document.getElementById('logout-link')?.addEventListener('click', () => {
   }
 });
 </script>
+<script type=\"module\" src=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js\"></script>
+<script nomodule src=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js\"></script>
 </body>
 </html>
 """

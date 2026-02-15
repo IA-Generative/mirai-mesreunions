@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
     load_ext_db, RabbitMQConfig, INTERNAL_API_URL, INTERNAL_API_TOKEN,
 )
-from libs.shared.app.models import ExternalBase, UploadedFile, UploadSession, UploadStatus
+from libs.shared.app.models import ExternalBase, UploadedFile, UploadSession, UploadStatus, UploadTokenOption
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.queue_helper import consume_queue, declare_queues, QUEUE_FILE_READY, RabbitMQConfig
 from libs.shared.app.security import require_strong_shared_secret
@@ -68,6 +68,7 @@ def notify_internal_zone(message: dict) -> bool:
         "transcoded_filename": message["transcoded_filename"],
         "quality_score": message.get("quality_score"),
         "duration_seconds": message.get("duration_seconds"),
+        "auto_transcribe": bool(message.get("auto_transcribe", True)),
     }
 
     try:
@@ -103,6 +104,13 @@ def process_file_ready(message: dict) -> bool:
             return True
 
         session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+        token_opt = None
+        if session_obj:
+            token_opt = (
+                db.query(UploadTokenOption)
+                .filter(UploadTokenOption.qr_token == session_obj.qr_token)
+                .first()
+            )
 
         # Mark as ready for transfer
         file_obj.status = UploadStatus.READY_FOR_TRANSFER
@@ -111,7 +119,9 @@ def process_file_ready(message: dict) -> bool:
         notify_portal(session_obj, file_obj, file_obj.status_message)
 
         # Notify internal zone (PULL pattern - only metadata, not the file)
-        success = notify_internal_zone(message)
+        msg = dict(message)
+        msg["auto_transcribe"] = bool(token_opt.auto_transcribe) if token_opt is not None else True
+        success = notify_internal_zone(msg)
 
         if success:
             file_obj.status = UploadStatus.TRANSFERRING

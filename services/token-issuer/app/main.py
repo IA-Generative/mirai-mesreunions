@@ -33,7 +33,7 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment
+from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -47,6 +47,7 @@ db_cfg = load_int_db()
 SessionLocal = None
 ALLOW_SHORT_QR_TTL_SECONDS_TEST = os.getenv("ALLOW_SHORT_QR_TTL_SECONDS_TEST", "").lower() in {"1", "true", "yes"}
 DEVICE_TOKEN_RETENTION_HOURS = max(1, int(os.getenv("DEVICE_TOKEN_RETENTION_HOURS", "168")))
+TOKEN_RENEW_DAYS = max(1, int(os.getenv("TOKEN_RENEW_DAYS", "7")))
 
 
 # ─── Helpers ────────────────────────────────────────────────
@@ -91,6 +92,7 @@ def issue_token():
     user_sub = data.get("user_sub")
     if not user_sub:
         return jsonify({"error": "Missing user_sub"}), 400
+    auto_transcribe = bool(data.get("auto_transcribe", True))
 
     now = datetime.now(timezone.utc)
 
@@ -146,6 +148,15 @@ def issue_token():
             status_view_expires_at=expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES),
         )
         db.add(token_record)
+        db.add(
+            IssuedTokenOption(
+                id=uuid4(),
+                qr_token=qr_token,
+                simple_code=simple_code,
+                user_sub=user_sub,
+                auto_transcribe=auto_transcribe,
+            )
+        )
         db.commit()
 
         logger.info(
@@ -161,6 +172,7 @@ def issue_token():
             "ttl_minutes": ttl_minutes,
             "ttl_seconds": ttl_seconds,
             "max_uploads": max_uploads,
+            "auto_transcribe": auto_transcribe,
         })
 
     except Exception:
@@ -202,6 +214,86 @@ def validate_token(simple_code):
             "expires_at": token.expires_at.isoformat(),
         })
 
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/tokens/extend-7d", methods=["POST"])
+def extend_token_7d():
+    """Extend a QR token validity and optionally increase upload quota."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    qr_token = (data.get("qr_token") or "").strip()
+    if not user_sub or not qr_token:
+        return jsonify({"error": "user_sub and qr_token are required"}), 400
+    ttl_minutes_raw = data.get("ttl_minutes")
+    ttl_seconds_raw = data.get("ttl_seconds")
+    add_uploads_raw = data.get("add_uploads", 0)
+
+    ttl_seconds = None
+    ttl_minutes = TOKEN_RENEW_DAYS * 24 * 60
+    if ttl_seconds_raw is not None:
+        try:
+            ttl_seconds = int(ttl_seconds_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "ttl_seconds must be an integer"}), 400
+        if not ALLOW_SHORT_QR_TTL_SECONDS_TEST:
+            return jsonify({"error": "Short TTL test mode is disabled"}), 400
+        if ttl_seconds not in {15, 30}:
+            return jsonify({"error": "Allowed ttl_seconds values are 15 or 30"}), 400
+        ttl_minutes = max(1, math.ceil(ttl_seconds / 60))
+    elif ttl_minutes_raw is not None:
+        try:
+            ttl_minutes = int(ttl_minutes_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "ttl_minutes must be an integer"}), 400
+        ttl_minutes = min(max(ttl_minutes, 1), CODE_TTL_MAX_MINUTES)
+
+    try:
+        add_uploads = int(add_uploads_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "add_uploads must be an integer"}), 400
+    add_uploads = max(add_uploads, 0)
+
+    db = SessionLocal()
+    try:
+        token = db.query(IssuedToken).filter(IssuedToken.qr_token == qr_token).first()
+        if not token:
+            return jsonify({"error": "not_found"}), 404
+        if token.user_sub != user_sub:
+            return jsonify({"error": "forbidden"}), 403
+
+        now = datetime.now(timezone.utc)
+        base = token.expires_at.replace(tzinfo=timezone.utc)
+        if base < now:
+            base = now
+        if ttl_seconds is not None:
+            token.expires_at = base + timedelta(seconds=ttl_seconds)
+        else:
+            token.expires_at = base + timedelta(minutes=ttl_minutes)
+        token.status_view_expires_at = token.expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES)
+        if add_uploads > 0:
+            token.max_uploads = min(1000, int(token.max_uploads or 0) + add_uploads)
+        db.commit()
+
+        return jsonify({
+            "ok": True,
+            "qr_token": token.qr_token,
+            "expires_at": token.expires_at.isoformat(),
+            "status_view_expires_at": token.status_view_expires_at.isoformat() if token.status_view_expires_at else None,
+            "renew_days": TOKEN_RENEW_DAYS,
+            "ttl_minutes": ttl_minutes,
+            "ttl_seconds": ttl_seconds,
+            "max_uploads": token.max_uploads,
+            "add_uploads": add_uploads,
+        })
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to extend token validity")
+        return jsonify({"error": "internal_error"}), 500
     finally:
         db.close()
 
@@ -378,9 +470,12 @@ def list_devices():
                     "device_name": d.device_name,
                     "device_fingerprint": d.device_fingerprint,
                     "status": d.status,
+                    "revoked_at": d.revoked_at.isoformat() if d.revoked_at else None,
+                    "revoked_reason": d.revoked_reason,
                     "retention_expires_at": d.retention_expires_at.isoformat() if d.retention_expires_at else None,
                     "last_seen_at": d.last_seen_at.isoformat() if d.last_seen_at else None,
                     "created_at": d.created_at.isoformat() if d.created_at else None,
+                    "updated_at": d.updated_at.isoformat() if d.updated_at else None,
                 }
                 for d in devices
             ]
