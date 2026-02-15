@@ -160,6 +160,13 @@ docker buildx imagetools inspect <image:tag> | sed -n '1,6p'
 
 ## Mode d'emploi
 
+### 0. Si la stack est déjà installée 
+
+>Exécuter le cahier de tests suivant pour bien comprendre
+
+[tests/TEST_PLAN_DEVICE_ENROLLMENT.md](tests/TEST_PLAN_DEVICE_ENROLLMENT.md)
+
+
 ### 1. Démarrer la stack
 
 ```bash
