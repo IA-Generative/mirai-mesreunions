@@ -1,138 +1,145 @@
-# Architecture & Sécurité
+# Architecture & Securite
 
-## Vue d'ensemble
+## Objectif
 
-Le système est conçu autour d'un principe de **cloisonnement strict** entre deux zones d'exécution :
+Le systeme applique un cloisonnement strict entre zone externe et zone interne pour proteger l'identite utilisateur, les tokens de session et les fichiers audio importes.
 
-### Zone Externe (DMZ)
-Exposée à Internet, elle gère l'authentification, la génération de codes, l'upload des fichiers audio, et leur traitement initial (antivirus + transcodage).
+## Parcours De Lecture
 
-### Zone Interne
-Isolée du réseau externe, elle stocke les fichiers validés dans les comptes utilisateurs et gère la transcription. **Aucun flux de données ne peut être poussé** depuis l'extérieur vers cette zone.
+1. `README.md` pour la vue d'ensemble et l'exploitation.
+2. `docs/ARCHITECTURE.md` (ce fichier) pour les flux de securite.
+3. `tests/DISCOVERY_TEST_PLAN.md` pour la validation utilisateur.
+4. `tests/TEST_COVERAGE_STATUS.md` pour le statut de couverture.
 
-## Pattern PULL : Sécurité du transfert inter-zones
+## Architecture Logique
 
-```
-Zone Externe                    DMZ Bridge              Zone Interne
-┌──────────────┐               ┌──────────┐            ┌──────────────┐
-│ File Mover   │── NOTIFY ────▶│          │── NOTIFY ─▶│ File Puller  │
-│              │   (metadata   │ Network  │  (API)     │              │
-│              │    seulement) │ Policy   │            │   PULL ──────┼──▶ S3 Processed
-│              │               └──────────┘            │   fichier    │    (lecture seule)
-└──────────────┘                                       │              │
-                                                       │   STORE ─────┼──▶ S3 Internal
-                                                       └──────────────┘
-```
+```mermaid
+flowchart LR
+  subgraph EXT["Zone Externe (DMZ)"]
+    CG["Code Generator\nOIDC / QR"]
+    UP["Upload Portal\nMobile"]
+    EOPT["upload_token_options\nauto_transcribe"]
+    S3U["S3 upload-staging"]
+    AV["Antivirus Worker"]
+    TR["Transcode Worker"]
+    S3P["S3 processed-staging"]
+    FM["File Mover"]
+  end
 
-Le File Mover (zone externe) envoie uniquement des **métadonnées** (ID fichier, utilisateur, nom) via une API authentifiée. Le File Puller (zone interne) **initie le téléchargement** depuis le S3 processed-staging.
+  subgraph INT["Zone Interne"]
+    TI["Token Issuer"]
+    IOPT["issued_token_options\nauto_transcribe"]
+    FP["File Puller"]
+    S3I["S3 internal-storage"]
+    STT["Transcription Stub\n(conditionnel)"]
+    DBI["PostgreSQL interne"]
+    MQI["RabbitMQ"]
+  end
 
-Jamais un octet de fichier n'est poussé de l'extérieur vers l'intérieur.
-
-## Pipeline de traitement
-
-```
-Upload          Queue         ClamAV        Queue        FFmpeg         Queue
-Mobile ───▶ S3 Upload ───▶ AV Worker ───▶ Transcode ───▶ Worker ───▶ File Ready
-            Staging         │                              │
-            (brut)          ▼ virus?                       ▼
-                         Quarantaine                  S3 Processed
-                                                     (transcodé)
-                                                         │
-                                                    NOTIFY ───▶ PULL ───▶ S3 Internal
-                                                                          │
-                                                                     Transcription
-```
-
-## Stockage S3 (3 instances séparées)
-
-| Bucket | Zone | Contenu | Politique |
-|--------|------|---------|-----------|
-| `upload-staging` | Externe | Fichiers bruts uploadés | Écriture par Upload Portal, lecture par workers |
-| `processed-staging` | Externe/Bridge | Fichiers transcodés | Écriture par Transcode Worker, lecture par File Puller (interne) |
-| `internal-storage` | Interne | Fichiers validés dans comptes usagers | Écriture par File Puller uniquement |
-
-## Files de messages (RabbitMQ)
-
-| Queue | Producteur | Consommateur | Contenu |
-|-------|-----------|-------------|---------|
-| `av_scan` | Upload Portal | AV Worker | Demande de scan antiviral |
-| `transcode` | AV Worker | Transcode Worker | Fichier sain à transcoder |
-| `file_ready` | Transcode Worker | File Mover | Fichier prêt pour transfert |
-| `transcription` | File Puller | Transcription Stub | Fichier à transcrire |
-
-Toutes les queues sont **durables** avec **acknowledgement manuel** pour garantir le traitement.
-
-## Authentification & Codes
-
-### Flux OIDC (Code Generator)
-1. L'utilisateur se connecte via Keycloak (OIDC Authorization Code Flow)
-2. Son identité (`sub`, `email`, `name`) est stockée dans la session Flask
-3. Le code-generator appelle le **token-issuer** (zone interne) via API authentifiée
-4. Le token-issuer génère le couple (simple_code, qr_token) et l'enregistre en base interne
-5. Le code-generator reçoit les tokens et stocke une copie en base externe pour le suivi
-
-### Pourquoi générer côté interne ?
-- La zone interne est **l'autorité de confiance** : elle maîtrise l'identifiant de liaison
-- La zone externe ne peut pas forger de tokens → pas d'usurpation possible
-- Le matching fichier ↔ utilisateur est vérifiable par la zone interne (table `issued_tokens`)
-- En cas de compromission de la zone externe, les tokens existants restent valides mais aucun nouveau token frauduleux ne peut être créé
-
-```
-Code Generator (ext)                Token Issuer (int)
-       │                                    │
-       │── POST /api/v1/issue-token ──────▶│
-       │   {user_sub, ttl, max_uploads}     │
-       │                                    │── generate simple_code
-       │                                    │── generate qr_token (crypto)
-       │                                    │── INSERT issued_tokens
-       │◀── {simple_code, qr_token} ───────│
-       │                                    │
-       │── INSERT upload_sessions           │
-       │   (copie locale pour suivi)        │
-       │── Affiche QR + code               │
+  CG -->|"issue-token"| TI
+  CG --> EOPT
+  TI --> IOPT
+  UP --> S3U --> AV --> TR --> S3P --> FM
+  FM -->|"notify metadata + auto_transcribe"| FP
+  FP --> S3I
+  FP -->|"si auto_transcribe=true"| STT
 ```
 
-### Code simple & QR Code
-- **Code simple** : `ABCDEF` — facile à taper sur mobile
-- **QR Code** : URL complète `https://upload.outgate-claude.synchro.fake-domain.name/upload/{qr_token}`
-- **Token QR** : 32 bytes URL-safe (cryptographiquement sûr, généré côté interne)
-- **TTL configurable** : 15 min → 3 jours
-- **Limite d'uploads** : configurable (défaut : 5)
+## Pattern PULL Inter-Zones
 
-### Matching fichier ↔ utilisateur
-Le nom de fichier stocké en S3 porte le code simple : `{CODE}_{uuid}_{filename}.ext`
-Le File Puller utilise ce code + les métadonnées de la notification pour router vers le bon compte.
-La table `issued_tokens` en zone interne fait foi pour la vérification.
+```mermaid
+sequenceDiagram
+  participant FM as File Mover (ext)
+  participant FP as File Puller (int)
+  participant S3P as S3 processed-staging
+  participant S3I as S3 internal-storage
 
-## Transcodage Audio
-
-### Pipeline FFmpeg
+  FM->>FP: POST /api/v1/pull (metadata + auto_transcribe)
+  FP->>S3P: GET objet transcode
+  FP->>S3I: PUT objet interne
+  alt auto_transcribe = true
+    FP->>FP: publish queue transcription
+  else auto_transcribe = false
+    FP->>FP: pas d'enqueue transcription
+  end
 ```
-Input (tout format) → Highpass 80Hz → Lowpass 8kHz → Loudnorm EBU R128 → WAV 16kHz mono
+
+## Flux Generation Token
+
+```mermaid
+sequenceDiagram
+  participant U as Utilisateur
+  participant CG as Code Generator
+  participant TI as Token Issuer
+  participant PGI as PostgreSQL interne
+  participant PGE as PostgreSQL externe
+
+  U->>CG: Login OIDC
+  U->>CG: Generer code (TTL, quota, auto_transcribe)
+  CG->>TI: POST /api/v1/issue-token
+  TI->>PGI: INSERT issued_tokens
+  TI->>PGI: INSERT issued_token_options
+  TI-->>CG: simple_code + qr_token + token_id
+  CG->>PGE: INSERT upload_sessions
+  CG->>PGE: INSERT upload_token_options
+  CG-->>U: QR code + code court
 ```
 
-- **Bandpass 80-8000 Hz** : Fréquences vocales, élimine bruit basse/haute fréquence
-- **Loudnorm** : Normalisation loudness (I=-16 LUFS, TP=-1.5 dB, LRA=11 LU)
-- **Sortie** : WAV PCM 16-bit, 16 kHz, mono
+## Pipeline Audio
 
-### Score de qualité (1-5)
-Calculé à partir de :
-- Niveau RMS moyen (voix optimale : -25 à -8 dB)
-- Ratio silence/signal
-- Durée de l'enregistrement
-- Taux d'échantillonnage source
+```mermaid
+flowchart TD
+  U["Upload mobile"] --> S3U["S3 upload-staging"] --> AV["Scan ClamAV"]
+  AV -->|"clean"| TR["Transcode voix\n(optimisation systematique)"]
+  AV -->|"infected"| Q["Quarantaine"]
+  TR --> S3P["S3 processed-staging"]
+  S3P --> FM["file_ready"] --> FP["PULL interne"] --> S3I["S3 internal-storage"]
+  FP --> CHK{"auto_transcribe ?"}
+  CHK -->|"oui"| STT["Queue transcription -> Stub"]
+  CHK -->|"non"| SKIP["Pas de transcription"]
+```
 
-## Sécurité Kubernetes
+## Reseau Et Politiques
 
-### Network Policies
-- **Zone interne** : `deny-all-ingress` par défaut
-- **Exception 1** : File Puller accepte le trafic du File Mover (port 8090)
-- **Exception 2** : Token Issuer accepte le trafic du Code Generator (port 8091)
-- **Zone externe** : Ingress limité aux ports 8080/8081 pour les services frontend
+```mermaid
+flowchart LR
+  EXTNS["namespace audio-external"]
+  INTNS["namespace audio-internal\n(deny-all ingress)"]
+  CG["code-generator"]
+  FM["file-mover"]
+  TI["token-issuer:8091"]
+  FP["file-puller:8090"]
 
-### Isolation réseau Docker Compose
-- `external-net` : Services zone externe
-- `internal-net` : Services zone interne
-- `dmz-net` : Bridge limité pour les 2 flux inter-zones :
-  - Code Generator (ext) → Token Issuer (int) : demande de token
-  - File Mover (ext) → File Puller (int) : notification de fichier prêt
+  EXTNS --- CG
+  EXTNS --- FM
+  INTNS --- TI
+  INTNS --- FP
+
+  CG -->|"exception autorisee"| TI
+  FM -->|"exception autorisee"| FP
+```
+
+## Modeles De Donnees Utiles
+
+- Zone interne:
+  - `issued_tokens` (source de verite des tokens)
+  - `issued_token_options` (flag `auto_transcribe`)
+- Zone externe:
+  - `upload_sessions` (suivi d'usage et statut)
+  - `upload_token_options` (copie flag `auto_transcribe`)
+
+## Comportement Du Flag auto_transcribe
+
+- Valeur fixee a la creation du token via la checkbox QR.
+- Propagee jusqu'a `file-puller` via metadata NOTIFY.
+- Effet:
+  - `true`: la transcription est mise en file (stub).
+  - `false`: pas de mise en file transcription.
+- Dans tous les cas, l'audio est optimise pour la voix (antivirus + transcodage).
+
+## Captures Associees
+
+- QR generator: `docs/screenshots/qr-code-gen.png`
+- Suivi activite: `docs/screenshots/activity-follow.png`
+- Upload mobile: `docs/screenshots/upload-mobile.png`
+- Admin: `docs/screenshots/admin-panel.png`

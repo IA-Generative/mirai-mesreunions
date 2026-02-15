@@ -15,7 +15,7 @@
 - Scénario simulé:
   - `tests/scenarios/device_enrollment_sequence.sh`
 - Cahier de validation:
-  - `tests/TEST_PLAN_DEVICE_ENROLLMENT.md`
+  - `tests/DISCOVERY_TEST_PLAN.md`
 
 ## Résultats
 - Unitaires:

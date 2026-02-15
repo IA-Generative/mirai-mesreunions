@@ -1,5 +1,10 @@
 # Test de Découverte du produit - Processus Enrôlement téléphone & Upload
 
+## Références
+- `README.md`
+- `docs/ARCHITECTURE.md`
+- `tests/TEST_COVERAGE_STATUS.md`
+
 ## But
 Évaluer, avec un utilisateur réel, la compréhension du processus de bout en bout:
 - génération du QR,

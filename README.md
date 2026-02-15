@@ -2,6 +2,13 @@
 
 > Système sécurisé d'upload audio par QR code avec cloisonnement zone externe / zone interne, génération de tokens côté interne, analyse antivirale, transcodage et transcription optionnelle.
 
+## Parcours De Lecture Recommandé
+
+1. `README.md` (vue d'ensemble + mode d'emploi)
+2. `docs/ARCHITECTURE.md` (architecture détaillée + sécurité + flux)
+3. `tests/DISCOVERY_TEST_PLAN.md` (test humain guidé)
+4. `tests/TEST_COVERAGE_STATUS.md` (statut de couverture et résultats)
+
 ## Principe fondamental
 
 **La zone interne est l'autorité de confiance.** Aucun identifiant de session n'est généré côté externe. Le `token-issuer` (zone interne) est la seule source de vérité pour les codes d'upload. La zone externe ne fait que relayer et consommer ces tokens — elle ne peut en aucun cas en forger.
@@ -101,19 +108,19 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 ## Démarrage rapide
 
-## Captures d'écran
+## Captures D'écran
 
-1. QR Generator (création de code + options)
+1. QR Generator (création de code, options token, suivi activité)
+![QR Generator](docs/screenshots/qr-code-gen.png)
+![Activité](docs/screenshots/activity-follow.png)
 
-![Capture 1 - QR Generator](captures/qr-code-gen.png) ![Capture 1 - QR Generator](captures/activity-follow.png) 
+2. Upload mobile (code court, upload, application PWA)
+![Code court mobile](docs/screenshots/enter-small-code.png)
+![Upload mobile](docs/screenshots/upload-mobile.png)
+![Application mobile](docs/screenshots/mobile-application.jpeg)
 
-2. Upload mobile (suivi du traitement et application PWA )
-
-![Capture 2 - Upload Mobile](captures/enter-small-code.png)  ![Capture 1 - QR Generator](captures/upload-mobile.png)  ![Capture 1 - QR Generator](captures/mobile-application.jpeg) 
-
-3. Admin / Compte-rendu (suivi transcription)
-
-![Capture 3 - Admin](captures/admin-panel.png)
+3. Admin / Compte-rendu (suivi pipeline et transcription)
+![Admin panel](docs/screenshots/admin-panel.png)
 
 ### Docker Compose
 
@@ -160,11 +167,11 @@ docker buildx imagetools inspect <image:tag> | sed -n '1,6p'
 
 ## Mode d'emploi
 
-### 0. Si la stack est déjà installée 
+### 0. Si la stack est déjà installée
 
->Exécuter le cahier de tests suivant pour bien comprendre
+> Exécuter d'abord le cahier de test humain pour valider les parcours.
 
-[tests/TEST_PLAN_DEVICE_ENROLLMENT.md](tests/TEST_PLAN_DEVICE_ENROLLMENT.md)
+[tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md)
 
 
 ### 1. Démarrer la stack
