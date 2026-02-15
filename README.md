@@ -1,6 +1,6 @@
 # Secure Audio Upload Pipeline
 
-> Système sécurisé d'upload audio par QR code avec cloisonnement zone externe / zone interne, génération de tokens côté interne, analyse antivirale, transcodage et transcription automatique.
+> Système sécurisé d'upload audio par QR code avec cloisonnement zone externe / zone interne, génération de tokens côté interne, analyse antivirale, transcodage et transcription optionnelle.
 
 ## Principe fondamental
 
@@ -94,6 +94,22 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 8. **Enrôlement persistant device navigateur** — Le portail upload enrôle le navigateur (token device persistant), vérifie sa validité à chaque initialisation et permet la révocation unitaire/globale côté QR interne et admin.
 
 ## Démarrage rapide
+
+## Captures d'écran
+
+> Espace réservé pour 3 copies d'écran.
+
+1. QR Generator (création de code + options)
+
+![Capture 1 - QR Generator](docs/screenshots/capture-01-qr-generator.png)
+
+2. Upload mobile (suivi du traitement)
+
+![Capture 2 - Upload Mobile](docs/screenshots/capture-02-upload-mobile.png)
+
+3. Admin / Compte-rendu (suivi transcription)
+
+![Capture 3 - Admin](docs/screenshots/capture-03-admin.png)
 
 ### Docker Compose
 
@@ -207,10 +223,14 @@ curl -sS http://localhost:8091/health
 
 ### 5.bis Interface code generator (QR)
 
+- Formulaire de génération:
+  - checkbox `Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu`
+  - cette option est associée au token généré et pilote l'appel du stub de transcription en fin de pipeline
+  - dans tous les cas, les fichiers audio restent optimisés pour la voix (analyse + transcodage)
 - Dans la liste des fichiers:
   - le nom long est forcé à la ligne pour rester lisible dans le bloc gris clair
   - `Télécharger` et `Écouter` sont disponibles pour chaque fichier
-- `2.5/5 (valeur maximale)` = indice de qualité audio (score 1 à 5)
+- `2.5/5` = indice de qualité audio (score 1 à 5)
   - un infobulle `i` décrit le calcul (RMS, ratio de silence, durée, fréquence d'échantillonnage)
 - Bouton `Purger liste + fichiers`:
   - supprime la liste de sessions côté utilisateur
@@ -218,10 +238,18 @@ curl -sS http://localhost:8091/health
 - Bouton `Impact normalisation` (par fichier transcodé):
   - affiche une comparaison avant/après (`LUFS`, `True Peak`, `LRA`) et les deltas
 - Gestion des appareils enrôlés:
-  - liste des devices du compte utilisateur
+  - liste des devices du compte utilisateur (avec validité restante en jours)
+  - affichage du compteur d'appareils actifs
+  - bouton `Voir révoqués` / `Masquer révoqués` pour alterner entre vue active et vue complète
   - renommage d'un device
   - révocation d'un device
+  - renouvellement d'un device `+7j` (prolonge la validité et ajoute un quota de téléchargements)
   - révocation globale des devices du compte
+  - le bouton `Renouveller` est mis en évidence si le token expire dans moins de 2 jours ou s'il reste moins de 2 uploads
+- Sur les sessions:
+  - affichage `téléchargements restants` et `utilisés/max`
+  - affichage `récents 24h`
+  - renouvellement `+7 jours` possible depuis l'interface
 
 ### 5.ter Enrôlement device (upload)
 
@@ -233,7 +261,7 @@ curl -sS http://localhost:8091/health
   - fast-path local (signature + rétention),
   - validation backend forte à l'initialisation de session (détection rapide des révocations),
   - puis validation asynchrone backend périodique.
-- Si la validation backend échoue au-delà de la fenêtre configurée, les requêtes sont refusées avec message explicite de rescanner/régénérer un code.
+- Si la validation backend échoue au-delà de la fenêtre configurée, les requêtes sont refusées avec message explicite invitant à renouveler le token (durée + téléchargements) dans l'interface admin/QR.
 
 ### 6. Sécurité API interne
 
@@ -277,7 +305,9 @@ Le script crée/met à jour par défaut `testuser01` à `testuser10`.
    - `audio-processed` pour le transcodé,
    - `audio-internal` après transfert interne.
 6. Tester lecture et téléchargement des fichiers source/transcodé depuis l'interface.
-7. Vérifier la transcription stub et le journal des appels dans l'admin.
+7. Vérifier la transcription selon le flag:
+   - checkbox activée: stub appelé et journal visible dans l'admin,
+   - checkbox désactivée: aucune mise en file transcription (stub non appelé).
 
 ### Accès local (sans exposer d'information sensible)
 

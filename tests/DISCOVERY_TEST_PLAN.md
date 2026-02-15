@@ -9,6 +9,7 @@
 - compréhension des messages en cas de blocage.
 
 Ce test vise surtout la **clarté**, la **fluidité** et la **confiance utilisateur**.
+Il couvre aussi la compréhension du **renouvellement token (+7 jours + quota)**.
 
 ## Format recommandé
 - Durée: 30 à 45 minutes
@@ -33,11 +34,15 @@ Ce test vise surtout la **clarté**, la **fluidité** et la **confiance utilisat
 
 ### 1. Génération et compréhension initiale (5 min)
 1. Demander au testeur de générer un QR/code.
-2. Question: “À quoi sert ce QR selon vous ?”
-3. Observer si le rôle du code et sa durée sont compris.
+2. Vérifier l'affichage de la durée de validité et du quota max de téléchargements.
+3. Vérifier la checkbox `Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu`.
+4. Question: “À quoi sert ce QR selon vous ?”
+5. Observer si le rôle du code, sa durée, sa limite d'usage et l'option de retranscription sont compris.
 
 Critères:
 - Le testeur comprend qu’il s’agit d’un accès temporaire.
+- Le testeur comprend qu’un quota de téléchargements s’applique.
+- Le testeur comprend que l'optimisation voix est toujours active, même si la retranscription est désactivée.
 - Le testeur comprend où aller ensuite.
 
 ### 2. Enrôlement device automatique (8 min)
@@ -50,13 +55,15 @@ Critères:
 - Le message PWA est compris (utile / pas intrusif).
 
 ### 3. Upload + suivi (8 min)
-1. Uploader un fichier audio.
+1. Uploader un fichier audio avec la checkbox de retranscription activée.
 2. Observer la compréhension des statuts (analyse, transcodage, transfert).
-3. Demander au testeur d’expliquer l’état en cours avec ses mots.
+3. Générer un second code avec checkbox désactivée et uploader un second fichier.
+4. Demander au testeur d’expliquer la différence perçue entre les deux parcours.
 
 Critères:
 - Le testeur sait dire “où en est le fichier”.
 - Le feedback visuel est jugé suffisant.
+- Le testeur comprend l'impact du flag de retranscription automatique.
 
 ### 4. Persistance device (5 min)
 1. Recharger la page.
@@ -67,18 +74,23 @@ Critères:
 
 ### 5. Gestion device côté QR interne (8 min)
 1. Aller sur la section “Appareils enrôlés”.
-2. Renommer le device courant.
-3. Révoquer ce device.
-4. Revenir sur l’upload et observer le blocage.
+2. Tester le bouton `Voir révoqués` / `Masquer révoqués`.
+3. Vérifier les informations visibles (date courte, validité restante).
+4. Renommer le device courant.
+5. Renouveler le token du device (`+7j`) et vérifier la mise à jour visuelle.
+6. Révoquer ce device.
+7. Revenir sur l’upload et observer le blocage.
 
 Critères:
-- Le testeur comprend ce qu’il vient de révoquer.
-- Le message de blocage est clair (rescanner/regénérer).
+- Le testeur comprend ce qu’il vient de renouveler puis révoquer.
+- Le message de blocage est clair (renouvellement du token côté admin/QR).
+- Le testeur repère visuellement quand le bouton `Renouveller` doit attirer l'attention (token < 2 jours ou uploads restants < 2).
 
 ### 6. Vérification admin (5 min)
 1. Ouvrir l’admin.
 2. Vérifier qu’on retrouve les devices.
-3. Tester révocation globale (optionnel en fin de session).
+3. Vérifier révocation unitaire et révocation globale.
+4. Vérifier la cohérence des messages de renouvellement avec l’upload.
 
 Critères:
 - Cohérence entre portail utilisateur et admin.
@@ -105,6 +117,7 @@ Questions ouvertes:
 - Le testeur comprend-il seul le “prochain clic” ?
 - Lit-il les messages ou les ignore-t-il ?
 - Comprend-il la différence “session expirée” vs “device révoqué” ?
+- Comprend-il quand utiliser “renouveler +7j” au lieu de régénérer un nouveau code ?
 - Sait-il retrouver la section devices sans aide ?
 - Réagit-il positivement ou négativement au message PWA ?
 
