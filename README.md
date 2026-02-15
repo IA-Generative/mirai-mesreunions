@@ -103,13 +103,11 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 ## Captures d'écran
 
-> Espace réservé pour 3 copies d'écran.
-
 1. QR Generator (création de code + options)
 
 ![Capture 1 - QR Generator](captures/qr-code-gen.png) ![Capture 1 - QR Generator](captures/activity-follow.png) 
 
-2. Upload mobile (suivi du traitement)
+2. Upload mobile (suivi du traitement et application PWA )
 
 ![Capture 2 - Upload Mobile](captures/enter-small-code.png)  ![Capture 1 - QR Generator](captures/upload-mobile.png)  ![Capture 1 - QR Generator](captures/mobile-application.jpeg) 
 
