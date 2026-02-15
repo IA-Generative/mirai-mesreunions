@@ -1,4 +1,4 @@
-# Test Humain Découverte - Processus Enrôlement & Upload
+# Test de Découverte du produit - Processus Enrôlement téléphone & Upload
 
 ## But
 Évaluer, avec un utilisateur réel, la compréhension du processus de bout en bout:

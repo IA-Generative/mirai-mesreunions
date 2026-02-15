@@ -13,6 +13,7 @@ flowchart LR
   subgraph EXT["ZONE EXTERNE (DMZ)"]
     CG["Code Generator<br/>(OIDC/Keycloak)"]
     UP["Upload Portal<br/>(mobile)"]
+    EOPT["upload_token_options<br/>(auto_transcribe)"]
     S3U["S3 upload-staging"]
     AV["AV Worker<br/>(ClamAV)"]
     TR["Transcode Worker<br/>(FFmpeg)"]
@@ -20,23 +21,27 @@ flowchart LR
     FM["File Mover<br/>(notificateur)"]
 
     CG -->|"QR url"| UP
+    CG --> EOPT
     UP -->|"upload fichier"| S3U
     S3U --> AV --> TR --> S3P --> FM
   end
 
   subgraph INT["ZONE INTERNE"]
     TI["Token Issuer<br/>(autorité unique token)"]
+    IOPT["issued_token_options<br/>(auto_transcribe)"]
     FP["File Puller<br/>(PULL depuis processed S3)"]
     S3I["S3 internal-storage"]
-    STT["Transcription Stub"]
+    STT["Transcription Stub<br/>(conditionnel)"]
     DB["PostgreSQL"]
     MQ["RabbitMQ"]
 
-    FP --> S3I --> STT
+    TI --> IOPT
+    FP --> S3I
+    FP -->|"si auto_transcribe=true"| STT
   end
 
   CG -->|"API token<br/>(Bearer auth)"| TI
-  FM -->|"NOTIFY metadata<br/>(Bearer auth)"| FP
+  FM -->|"NOTIFY metadata + auto_transcribe<br/>(Bearer auth)"| FP
 ```
 
 ## Flux de génération de token (interne → externe)
@@ -46,15 +51,16 @@ sequenceDiagram
   participant U as Utilisateur
   participant CG as Code Generator (ext)
   participant TI as Token Issuer (int)
-  participant PG as PostgreSQL (int)
+  participant PGI as PostgreSQL interne
+  participant PGE as PostgreSQL externe
 
   U->>CG: login OIDC
-  U->>CG: Générer un code
-  CG->>TI: POST /issue-token {user_sub, ttl, max}
-  TI->>PG: generate code + qr_token
-  TI->>PG: INSERT issued_tokens
-  TI-->>CG: {simple_code, qr_token}
-  CG->>PG: INSERT upload_sessions (copie locale/suivi)
+  U->>CG: Générer un code (+ auto_transcribe)
+  CG->>TI: POST /issue-token {user_sub, ttl, max, auto_transcribe}
+  TI->>PGI: generate code + qr_token
+  TI->>PGI: INSERT issued_tokens + issued_token_options
+  TI-->>CG: {simple_code, qr_token, auto_transcribe}
+  CG->>PGE: INSERT upload_sessions + upload_token_options
   CG-->>U: QR code + code
 ```
 
@@ -493,7 +499,10 @@ flowchart TD
   AV -->|CLEAN| TR["FFmpeg transcode<br/>loudnorm dual-pass -> highpass 80Hz -> lowpass 7kHz -> alimiter<br/>16kHz mono WAV"]
   AV -->|INFECTED| Q["Quarantaine"]
   TR --> QL["Score qualité 1-5"] --> S3P["S3 processed-staging"]
-  S3P --> N["NOTIFY"] --> P["PULL"] --> S3I["S3 internal-storage"] --> STT["Transcription STT"]
+  S3P --> N["NOTIFY (+ auto_transcribe)"] --> P["PULL"] --> S3I["S3 internal-storage"]
+  P --> C{"auto_transcribe ?"}
+  C -->|oui| STT["Transcription STT (stub)"]
+  C -->|non| SKIP["Pas de transcription<br/>(audio optimisé voix conservé)"]
 ```
 
 ## Formats audio supportés
