@@ -643,10 +643,22 @@ async function uploadFile(file) {
         const response = await new Promise((resolve, reject) => {
             xhr.onload = () => {
                 if (xhr.status === 200) {
-                    resolve(JSON.parse(xhr.responseText));
-                } else {
+                    try {
+                        resolve(JSON.parse(xhr.responseText));
+                    } catch (e) {
+                        reject(new Error("Réponse serveur invalide pendant l'upload."));
+                    }
+                    return;
+                }
+                if (xhr.status === 413) {
+                    reject(new Error("Fichier trop volumineux (>256 Mo). Réduisez la taille ou découpez l'audio."));
+                    return;
+                }
+                try {
                     const err = JSON.parse(xhr.responseText);
                     reject(new Error(err.error || 'Erreur upload'));
+                } catch (e) {
+                    reject(new Error(`Erreur upload (HTTP ${xhr.status})`));
                 }
             };
             xhr.onerror = () => reject(new Error('Erreur réseau'));

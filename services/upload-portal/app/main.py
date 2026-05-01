@@ -21,6 +21,7 @@ from flask import Flask, request, jsonify, render_template, abort, redirect, url
 from flask_socketio import SocketIO, emit, join_room
 from sqlalchemy import text
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
@@ -68,6 +69,13 @@ _device_validation_lock = threading.Lock()
 @app.route("/healthz")
 def healthz():
     return jsonify({"status": "ok", "service": "upload-portal", "zone": "external"}), 200
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_request_entity_too_large(_err):
+    return jsonify({
+        "error": f"Fichier trop volumineux. Taille maximale autorisée: {UPLOAD_MAX_FILE_SIZE_MB} Mo."
+    }), 413
 
 
 # ─── Helpers ────────────────────────────────────────────────
