@@ -36,3 +36,14 @@ deploy/kubernetes/shared/secrets.*.local.yaml
 # Local helper scripts/env (never commit)
 deploy/kubernetes/scripts/*.local.sh
 deploy/kubernetes/scripts/*.local.env
+
+# Kubernetes kubeconfigs (NEVER commit — contain cluster CA + user tokens)
+deploy/kubernetes/kubeconfigs/*
+!deploy/kubernetes/kubeconfigs/.gitkeep
+!deploy/kubernetes/kubeconfigs/README.md
+*.kubeconfig
+.kube/
+
+# Environment-specific local overrides
+deploy/kubernetes/environments/**/*.local.yaml
+deploy/kubernetes/environments/**/*.local.env
