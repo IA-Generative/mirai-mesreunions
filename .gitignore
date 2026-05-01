@@ -44,6 +44,9 @@ deploy/kubernetes/kubeconfigs/*
 *.kubeconfig
 .kube/
 
-# Environment-specific local overrides
+# Environment-specific local overrides (manifests, env files, sensitive notes)
 deploy/kubernetes/environments/**/*.local.yaml
 deploy/kubernetes/environments/**/*.local.env
+deploy/kubernetes/environments/**/*.local.md
+deploy/kubernetes/environments/**/*.local.sh
+**/*.local.md

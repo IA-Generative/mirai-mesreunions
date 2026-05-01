@@ -1,23 +1,35 @@
 #!/usr/bin/env bash
-# Test depuis un cluster k8s si SSO Mirai (<sso-host>) est atteignable.
-# Permet de déterminer si le cluster joue la zone externe (peut atteindre le SSO) ou
-# la zone interne (égress restreint, ne peut pas).
+# Test depuis un cluster k8s si un hôte SSO/OIDC cible est atteignable au niveau TLS.
+# Permet de différencier la zone externe (qui doit pouvoir atteindre le SSO de la cible
+# d'intégration) et la zone interne (égress restreint, ne doit pas).
+#
+# L'hôte cible n'a pas de valeur par défaut : il est lu dans la variable d'environnement
+# CDS_TARGET_HOST ou passé en deuxième argument. Cela évite d'inscrire les hôtes
+# d'intégration spécifiques dans un repo public.
 #
 # Usage:
-#   ./check-cluster-sso.sh <chemin-kubeconfig>
-#   ./check-cluster-sso.sh <chemin-kubeconfig> <hostname-cible>      # override hostname
+#   CDS_TARGET_HOST=<sso-host> ./check-cluster-sso.sh <chemin-kubeconfig>
+#   ./check-cluster-sso.sh <chemin-kubeconfig> <hostname-cible>
 #
 # Exemple:
-#   ./check-cluster-sso.sh deploy/kubernetes/kubeconfigs/<external-cluster>.kubeconfig
+#   CDS_TARGET_HOST=sso.example.org ./check-cluster-sso.sh \
+#     deploy/kubernetes/kubeconfigs/<kubeconfig>.yaml
 
 set -euo pipefail
 
 KUBECONFIG_PATH="${1:-}"
-TARGET_HOST="${2:-<sso-host>}"
+TARGET_HOST="${2:-${CDS_TARGET_HOST:-}}"
 
 if [[ -z "${KUBECONFIG_PATH}" ]]; then
   echo "Usage: $0 <kubeconfig-path> [target-hostname]" >&2
-  echo "  default target-hostname: <sso-host>" >&2
+  echo "  alternatively, set CDS_TARGET_HOST env var" >&2
+  exit 2
+fi
+
+if [[ -z "${TARGET_HOST}" ]]; then
+  echo "ERROR: target hostname required" >&2
+  echo "  pass as second argument or via CDS_TARGET_HOST env var" >&2
+  echo "  (intentionally no default — target hosts live in *.local files)" >&2
   exit 2
 fi
 
