@@ -57,7 +57,12 @@ Il couvre aussi la compréhension du **renouvellement token (+7 jours + quota)**
 
 5. Vue application mobile (étapes 2-4)
 
+>Le sytème propose d'installer une pseudo application mobile ( mettre sur l'écran d'accueil )
+
 ![Application mobile](../docs/screenshots/mobile-application.jpeg)
+![Android - installation PWA](../docs/screenshots/install-android.png)
+![Android - bouton installation](../docs/screenshots/install-android-button.png)
+![Android - application](../docs/screenshots/mobile-app-android.png)
 
 6. Portail admin / compte-rendu (étape 6)
 

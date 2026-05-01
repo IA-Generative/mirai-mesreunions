@@ -118,6 +118,9 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 ![Code court mobile](docs/screenshots/enter-small-code.png)
 ![Upload mobile](docs/screenshots/upload-mobile.png)
 ![Application mobile](docs/screenshots/mobile-application.jpeg)
+![Android - installation PWA](docs/screenshots/install-android.png)
+![Android - bouton installation](docs/screenshots/install-android-button.png)
+![Android - application](docs/screenshots/mobile-app-android.png)
 
 3. Admin / Compte-rendu (suivi pipeline et transcription)
 ![Admin panel](docs/screenshots/admin-panel.png)
