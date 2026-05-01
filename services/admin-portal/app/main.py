@@ -898,6 +898,20 @@ INDEX_TEMPLATE = """
     .warn { color: #92400e; }
     .bucket { border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; margin-bottom: 8px; }
     .obj { padding: 6px; background: #f9fafb; border-radius: 8px; margin-top: 6px; font-size: 12px; }
+    .beta-badge {
+      display: inline-block;
+      margin-left: 0.45rem;
+      padding: 0.08rem 0.35rem;
+      border-radius: 0.35rem;
+      background: #e1000f;
+      color: #fff;
+      font-size: 0.66rem;
+      font-weight: 700;
+      line-height: 1.1;
+      transform: rotate(-12deg);
+      transform-origin: center;
+      vertical-align: top;
+    }
   </style>
 </head>
 <body>
@@ -912,7 +926,7 @@ INDEX_TEMPLATE = """
               </div>
             </div>
             <div class=\"fr-header__service\">
-              <p class=\"fr-header__service-title\">MIrAI - Téléversement audio facilité et sécurisé</p>
+              <p class=\"fr-header__service-title\">MIrAI - Téléversement audio facilité et sécurisé <span class=\"beta-badge\">Bêta</span></p>
               <p class=\"fr-header__service-tagline\">Supervision des sessions, S3, transcription et devices</p>
             </div>
           </div>
