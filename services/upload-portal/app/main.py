@@ -467,6 +467,19 @@ def upload_manifest(qr_token: str):
                 "purpose": "any maskable",
             },
         ],
+        "share_target": {
+            "action": f"/share-target/{qr_token}",
+            "method": "POST",
+            "enctype": "multipart/form-data",
+            "params": {
+                "files": [
+                    {
+                        "name": "shared_audio",
+                        "accept": ["audio/*"],
+                    }
+                ]
+            },
+        },
     }
     return app.response_class(
         json.dumps(data, ensure_ascii=True),
@@ -533,7 +546,20 @@ def upload_page(qr_token):
         allowed_extensions=",".join(f".{e}" for e in ALLOWED_AUDIO_EXTENSIONS),
         device_revalidate_interval_seconds=DEVICE_REVALIDATE_INTERVAL_SECONDS,
         device_revalidate_max_failure_seconds=DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
+        shared_manual=request.args.get("shared_manual") == "1",
     )
+
+
+@app.route("/share-target/<qr_token>", methods=["GET", "POST"])
+def share_target_fallback(qr_token):
+    """
+    Fallback endpoint when Web Share Target is not intercepted by Service Worker.
+    We redirect to upload page and display manual instructions.
+    """
+    session_obj = get_session_by_token(qr_token)
+    if not session_obj:
+        return render_template("upload_error.html", message="Lien invalide ou introuvable."), 404
+    return redirect(url_for("upload_page", qr_token=qr_token, shared_manual=1))
 
 
 @app.route("/api/device/session/<qr_token>")

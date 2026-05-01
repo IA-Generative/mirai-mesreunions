@@ -212,6 +212,18 @@
             flex-wrap: wrap;
             align-items: center;
         }
+        .pwa-open-browser-link {
+            font-size: 0.78rem;
+            color: #1d4ed8;
+            text-decoration: underline;
+            background: transparent;
+            border: 0;
+            padding: 0.2rem 0.1rem;
+            cursor: pointer;
+        }
+        .pwa-open-browser-link:hover {
+            color: #1e3a8a;
+        }
         .pwa-install-help {
             margin-top: 0.35rem;
             font-size: 0.78rem;
@@ -282,6 +294,28 @@
         .safety-alert {
             margin-bottom: 0.75rem;
         }
+        .mobile-share-banner {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .mobile-share-actions {
+            display: flex;
+            justify-content: flex-end;
+        }
+        .mobile-share-reset-btn {
+            border: 0;
+            background: transparent;
+            color: #92400e;
+            font-size: 0.75rem;
+            text-decoration: underline;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1.1;
+        }
+        .mobile-share-reset-btn:hover {
+            color: #78350f;
+        }
     </style>
 </head>
 <body>
@@ -320,7 +354,7 @@
                 Formats : MP3, WAV, OGG, FLAC, M4A, AAC, OPUS...
             </div>
         </div>
-        <input type="file" id="file-input" accept="{{ allowed_extensions }}" multiple>
+        <input type="file" id="file-input" accept="audio/*,{{ allowed_extensions }}" multiple>
 
         <div class="progress-bar" id="progress-bar">
             <div class="fill" id="progress-fill" style="width: 0%"></div>
@@ -333,7 +367,27 @@
         <div class="info-banner" style="margin-top:0.9rem;">
             <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
             Vous pouvez revenir sur cette page pour vérifier l'avancement.
+            Utilisez le Wi-Fi dès que possible pour un transfert plus fiable et plus rapide.
         </div>
+        <div class="info-banner mobile-share-banner" style="margin-top:0.5rem;" id="mobile-share-banner">
+            <div id="mobile-share-banner-text">
+                <strong>Android:</strong> depuis l'enregistreur vocal, utilisez <em>Partager</em> puis choisissez
+                cette application. Si l'option n'apparait pas, ouvrez l'application puis sélectionnez le fichier
+                via "Touchez pour sélectionner".
+            </div>
+            <div class="mobile-share-actions">
+                <button type="button" id="mobile-share-reset-btn" class="mobile-share-reset-btn">
+                    Réinitialiser l'app
+                </button>
+            </div>
+        </div>
+        {% if shared_manual %}
+        <div class="warning-banner" style="margin-top:0.5rem;">
+            Partage direct non disponible sur ce navigateur.
+            Procédure manuelle: ouvrez l'enregistreur vocal, exportez vers Fichiers si besoin,
+            revenez ici puis utilisez "Touchez pour sélectionner".
+        </div>
+        {% endif %}
         <div class="security-banner" id="device-enroll-banner" style="margin-bottom:0.75rem;">
             <div class="security-banner-head">
                 <strong>Enrolement appareil:</strong>
@@ -344,6 +398,9 @@
             <div class="pwa-install-actions">
                 <button id="install-app-btn" type="button" class="fr-btn fr-btn--secondary fr-btn--sm">
                     Ajouter a l'ecran d'accueil
+                </button>
+                <button id="open-browser-btn" type="button" class="pwa-open-browser-link">
+                    Ouvrir dans le navigateur
                 </button>
             </div>
             <div id="install-app-help" class="pwa-install-help">
@@ -401,8 +458,12 @@ const deviceMaxValidationFailureSeconds = {{ device_revalidate_max_failure_secon
 const deviceStorageKey = `upload_device_token:${qrToken}`;
 const deviceKeyStorageKey = `upload_device_key:${qrToken}`;
 const pwaBannerDismissKey = `pwa_install_banner_dismissed:${qrToken}`;
+const pwaForceShowKey = `pwa_install_force_show:${qrToken}`;
 let deviceSessionTimer = null;
 let deferredInstallPrompt = null;
+const sharedIdsParam = new URLSearchParams(window.location.search).get('share_ids') || '';
+const sharedIds = sharedIdsParam ? sharedIdsParam.split(',').map(s => s.trim()).filter(Boolean) : [];
+const isShareLaunch = new URLSearchParams(window.location.search).get('share') === '1';
 
 function getDeviceToken() {
     return localStorage.getItem(deviceStorageKey) || '';
@@ -611,6 +672,33 @@ async function uploadFile(file) {
     }
 }
 
+async function uploadSharedFilesFromPwa() {
+    if (!sharedIds.length || !canUpload) return;
+    let uploaded = 0;
+    for (const id of sharedIds) {
+        if (remaining <= 0) break;
+        try {
+            const resp = await fetch(`/__shared/${encodeURIComponent(id)}`);
+            if (!resp.ok) continue;
+            const blob = await resp.blob();
+            const fileName = resp.headers.get('X-Shared-Filename') || `partage-${id}.audio`;
+            const file = new File([blob], fileName, { type: blob.type || 'audio/*' });
+            await uploadFile(file);
+            uploaded += 1;
+        } catch (e) {
+            // continue with next shared file
+        }
+    }
+    if (uploaded > 0) {
+        const cleaned = new URL(window.location.href);
+        cleaned.searchParams.delete('share_ids');
+        cleaned.searchParams.delete('share');
+        history.replaceState({}, '', cleaned.pathname + cleaned.search);
+    } else if (isShareLaunch) {
+        setDeviceWarning("Partage reçu mais aucun fichier exploitable. Utilisez 'Touchez pour sélectionner' en mode manuel.");
+    }
+}
+
 function addFileToList(fileId, name, status, message) {
     if (fileId) {
         const existing = document.querySelector(`[data-file-id="${fileId}"]`);
@@ -726,6 +814,10 @@ function isIosMobile() {
     return classicIos || iPadOsDesktopMode;
 }
 
+function isAndroidMobile() {
+    return /Android/i.test(navigator.userAgent || '');
+}
+
 function isSafariBrowser() {
     const ua = navigator.userAgent || '';
     const isSafari = /Safari/i.test(ua);
@@ -737,36 +829,93 @@ function isStandalone() {
     return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
 
+function setupMobileShareBanner() {
+    const textEl = document.getElementById('mobile-share-banner-text');
+    const resetBtn = document.getElementById('mobile-share-reset-btn');
+    if (!textEl || !resetBtn) return;
+
+    const ios = isIosMobile();
+    if (ios) {
+        textEl.innerHTML = "<strong>iPhone/iPad:</strong> dans l'enregistreur vocal, utilisez <em>Partager</em> puis <em>Enregistrer dans Fichiers</em>. Revenez ici et touchez <em>Touchez pour sélectionner</em>. Pour installer l'app, utilisez Safari puis <em>Sur l'ecran d'accueil</em>.";
+    } else {
+        textEl.innerHTML = "<strong>Android:</strong> depuis l'enregistreur vocal, utilisez <em>Partager</em> puis choisissez cette application. Si l'option n'apparait pas, ouvrez l'application puis sélectionnez le fichier via <em>Touchez pour sélectionner</em>.";
+    }
+
+    resetBtn.addEventListener('click', async () => {
+        const ok = confirm("Réinitialiser l'application locale (cache, service worker, données locales) ?");
+        if (!ok) return;
+        try {
+            Object.keys(localStorage).forEach((k) => {
+                if (
+                    k.startsWith('upload_device_token:') ||
+                    k.startsWith('upload_device_key:') ||
+                    k.startsWith('pwa_install_banner_dismissed:') ||
+                    k.startsWith('pwa_install_force_show:')
+                ) {
+                    localStorage.removeItem(k);
+                }
+            });
+            // Force one-time re-display of install guidance after reset.
+            localStorage.setItem(pwaForceShowKey, '1');
+        } catch (e) {}
+        try {
+            if ('serviceWorker' in navigator) {
+                const regs = await navigator.serviceWorker.getRegistrations();
+                for (const r of regs) {
+                    try { await r.unregister(); } catch (e) {}
+                }
+            }
+        } catch (e) {}
+        try {
+            if ('caches' in window) {
+                const names = await caches.keys();
+                await Promise.all(names.map((n) => caches.delete(n)));
+            }
+        } catch (e) {}
+        alert("Application locale réinitialisée. Si l'icône est installée, désinstallez-la puis réinstallez-la depuis le navigateur.");
+        window.location.replace(window.location.pathname + window.location.search);
+    });
+}
+
 function setupPwaInstall() {
     const installBtn = document.getElementById('install-app-btn');
+    const openBrowserBtn = document.getElementById('open-browser-btn');
     const helpEl = document.getElementById('install-app-help');
     const bannerEl = document.getElementById('device-enroll-banner');
     const closeBtn = document.getElementById('pwa-banner-close');
-    if (!installBtn || !helpEl || !bannerEl || !closeBtn) return;
+    if (!installBtn || !openBrowserBtn || !helpEl || !bannerEl || !closeBtn) return;
+    let forceShow = false;
+    const android = isAndroidMobile();
+    const standalone = isStandalone();
+    let dismissed = false;
 
     installBtn.style.display = 'inline-flex';
+    openBrowserBtn.style.display = 'none';
     helpEl.style.display = 'block';
 
     closeBtn.addEventListener('click', () => {
         try {
             localStorage.setItem(pwaBannerDismissKey, '1');
+            localStorage.removeItem(pwaForceShowKey);
         } catch (e) {}
         bannerEl.style.display = 'none';
     });
 
-    if (isStandalone()) {
-        // In installed PWA mode, this hint is no longer useful.
-        bannerEl.style.display = 'none';
-        return;
-    }
-
     try {
-        if (localStorage.getItem(pwaBannerDismissKey) === '1') {
+        forceShow = localStorage.getItem(pwaForceShowKey) === '1';
+        dismissed = localStorage.getItem(pwaBannerDismissKey) === '1';
+        if (dismissed && !(android && !standalone) && !forceShow) {
             bannerEl.style.display = 'none';
             return;
         }
     } catch (e) {
         // Ignore storage errors and keep banner visible.
+    }
+
+    if (standalone && !forceShow) {
+        // In installed PWA mode, this hint is usually no longer useful.
+        bannerEl.style.display = 'none';
+        return;
     }
 
     closeBtn.style.display = 'inline-flex';
@@ -779,13 +928,29 @@ function setupPwaInstall() {
     });
 
     const iosSafari = isIosMobile() && isSafariBrowser();
+    if (android) {
+        openBrowserBtn.style.display = 'inline-flex';
+    }
     if (iosSafari) {
         installBtn.style.display = 'inline-flex';
+        openBrowserBtn.style.display = 'none';
         helpEl.style.display = 'block';
         helpEl.textContent = "Safari iPhone/iPad: touchez Partager puis 'Sur l'ecran d'accueil'.";
     } else if (!deferredInstallPrompt) {
-        helpEl.textContent = "Si l'installation automatique n'apparait pas, utilisez le menu du navigateur puis 'Ajouter a l'ecran d'accueil'.";
+        if (android && standalone) {
+            helpEl.textContent = "Vous etes dans l'app installee. Touchez 'Ouvrir dans le navigateur' pour retrouver le menu puis installer.";
+        } else {
+            helpEl.textContent = "Si l'installation automatique n'apparait pas, utilisez le menu du navigateur puis 'Ajouter a l'ecran d'accueil'.";
+        }
     }
+
+    openBrowserBtn.addEventListener('click', () => {
+        const browserUrl = window.location.origin + window.location.pathname + window.location.search + window.location.hash;
+        const opened = window.open(browserUrl, '_blank', 'noopener,noreferrer');
+        if (!opened) {
+            window.location.href = browserUrl;
+        }
+    });
 
     installBtn.addEventListener('click', async () => {
         if (iosSafari) {
@@ -811,7 +976,20 @@ function setupPwaInstall() {
                 await deferredInstallPrompt.userChoice;
             } catch (e) {}
             deferredInstallPrompt = null;
+            try {
+                localStorage.removeItem(pwaForceShowKey);
+            } catch (e) {}
             installBtn.style.display = isIosMobile() ? 'inline-flex' : 'none';
+            return;
+        }
+        if (android && standalone) {
+            const browserUrl = window.location.origin + window.location.pathname + window.location.search + window.location.hash;
+            const opened = window.open(browserUrl, '_blank', 'noopener,noreferrer');
+            if (!opened) {
+                window.location.href = browserUrl;
+            }
+            helpEl.style.display = 'block';
+            helpEl.textContent = "Navigateur ouvert. Utilisez son menu puis 'Installer l'application' ou 'Ajouter a l'ecran d'accueil'.";
             return;
         }
         helpEl.style.display = 'block';
@@ -841,11 +1019,16 @@ setInterval(async () => {
     } catch (e) {}
 }, 10000);
 
-bootstrapDeviceSession();
+bootstrapDeviceSession().then((ok) => {
+    if (ok) {
+        uploadSharedFilesFromPwa();
+    }
+});
 deviceSessionTimer = setInterval(() => {
     bootstrapDeviceSession();
 }, Math.max(60, deviceRevalidateIntervalSeconds) * 1000);
 setupPwaInstall();
+setupMobileShareBanner();
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('/sw.js').catch(() => {});
