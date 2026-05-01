@@ -292,6 +292,11 @@ def _run_loudnorm_measure(input_path: str, target_i: float = -16.0, target_tp: f
 
 # ─── Routes ─────────────────────────────────────────────────
 
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok", "service": "code-generator"}), 200
+
+
 @app.route("/")
 @require_auth
 def index():

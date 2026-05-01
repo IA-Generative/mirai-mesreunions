@@ -96,6 +96,10 @@ def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = SECRET_KEY
 
+    @app.route("/healthz")
+    def healthz():
+        return jsonify({"status": "ok", "service": "admin-portal", "zone": "external"}), 200
+
     oidc_cfg = OIDCConfig()
     allowed_users = _parse_allowed_users()
 

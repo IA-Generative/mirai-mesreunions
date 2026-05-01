@@ -63,6 +63,13 @@ _device_validation_state = {}
 _device_validation_lock = threading.Lock()
 
 
+# ─── Health ─────────────────────────────────────────────────
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok", "service": "upload-portal", "zone": "external"}), 200
+
+
 # ─── Helpers ────────────────────────────────────────────────
 
 def get_session_by_token(qr_token: str):

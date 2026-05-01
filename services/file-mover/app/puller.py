@@ -157,6 +157,11 @@ def health():
     return jsonify({"status": "ok", "zone": "internal"})
 
 
+@app.route("/healthz")
+def healthz():
+    return health()
+
+
 @app.route("/api/v1/pull", methods=["POST"])
 def pull_file():
     """

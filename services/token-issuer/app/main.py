@@ -75,6 +75,11 @@ def health():
     return jsonify({"status": "ok", "service": "token-issuer", "zone": "internal"})
 
 
+@app.route("/healthz")
+def healthz():
+    return health()
+
+
 @app.route("/api/v1/issue-token", methods=["POST"])
 def issue_token():
     """
