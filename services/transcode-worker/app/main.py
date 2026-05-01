@@ -2,7 +2,7 @@
 Transcode Worker
 ================
 Consumes files from the transcode queue, applies:
-- Audio format normalization (→ WAV 16kHz mono)
+- Audio format normalization (→ MP4/AAC 16kHz mono)
 - Loudness normalization (EBU R128)
 - Voice frequency filtering (80Hz-8kHz bandpass)
 - Audio quality scoring (1-5)
@@ -176,7 +176,7 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
     - Bandpass filter 80Hz-8kHz (voice frequencies)
     - Loudness normalization (EBU R128)
     - Mono, 16kHz sample rate
-    - Output as WAV
+    - Output as MP4 (AAC)
     """
     def run_ffmpeg(cmd, timeout=300):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -210,8 +210,9 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
                 "-af", post_chain(),
                 "-ar", str(TRANSCODE_SAMPLE_RATE),
                 "-ac", str(TRANSCODE_CHANNELS),
-                "-sample_fmt", "s16",
-                "-c:a", "pcm_s16le",
+                "-c:a", "aac",
+                "-b:a", "64k",
+                "-movflags", "+faststart",
                 output_path,
             ]
             logger.info("Transcode command (no loudnorm): %s", " ".join(cmd))
@@ -264,8 +265,9 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
             "-af", final_af,
             "-ar", str(TRANSCODE_SAMPLE_RATE),
             "-ac", str(TRANSCODE_CHANNELS),
-            "-sample_fmt", "s16",
-            "-c:a", "pcm_s16le",
+            "-c:a", "aac",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
             output_path,
         ]
         logger.info("Transcode command (2-pass loudnorm linear=true)")
@@ -286,8 +288,9 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
             "-af", stable_filter,
             "-ar", str(TRANSCODE_SAMPLE_RATE),
             "-ac", str(TRANSCODE_CHANNELS),
-            "-sample_fmt", "s16",
-            "-c:a", "pcm_s16le",
+            "-c:a", "aac",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
             output_path,
         ]
         logger.info("Transcode fallback command (stable no-dynamic-loudnorm)")
@@ -336,7 +339,7 @@ def process_transcode(message: dict) -> bool:
             quality = analyze_audio_quality(input_path)
 
             # Transcode
-            output_name = Path(stored_filename).stem + ".wav"
+            output_name = Path(stored_filename).stem + ".mp4"
             output_path = os.path.join(tmpdir, output_name)
 
             success = transcode_audio(input_path, output_path)
@@ -350,7 +353,7 @@ def process_transcode(message: dict) -> bool:
 
             # Upload transcoded file to processed-staging S3
             with open(output_path, "rb") as f:
-                upload_fileobj(s3_processed_cfg, output_name, BytesIO(f.read()), "audio/wav")
+                upload_fileobj(s3_processed_cfg, output_name, BytesIO(f.read()), "audio/mp4")
 
             # Update DB
             file_obj.status = UploadStatus.TRANSCODED

@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from uuid import uuid4
+from pathlib import Path
 
 import requests as req
 from flask import Flask, request, jsonify
@@ -80,6 +81,19 @@ def notify_external_status(file_id: str, status: str, message: str, timeout: int
 def verify_token():
     auth = request.headers.get("Authorization", "")
     return verify_bearer_token(auth, INTERNAL_API_TOKEN)
+
+
+def _guess_audio_mime(filename: str) -> str:
+    ext = Path(filename or "").suffix.lower()
+    if ext == ".mp4":
+        return "audio/mp4"
+    if ext == ".m4a":
+        return "audio/mp4"
+    if ext == ".wav":
+        return "audio/wav"
+    if ext == ".ogg":
+        return "audio/ogg"
+    return "application/octet-stream"
 
 
 def run_internal_purge_once():
@@ -222,7 +236,7 @@ def pull_file():
 
         # ── Store in internal S3 under user directory ──
         notify_external_status(file_id, "transferring", "Transfert: copie vers la zone interne (70%)")
-        upload_fileobj(s3_internal_cfg, internal_key, file_data, "audio/wav")
+        upload_fileobj(s3_internal_cfg, internal_key, file_data, _guess_audio_mime(transcoded_filename))
         logger.info("Stored internally: %s (%d bytes)", internal_key, file_size)
 
         # ── Create internal DB record ──

@@ -247,6 +247,21 @@ def _resolve_source_storage(file_obj: UploadedFile):
     return s3_upload_cfg, file_obj.stored_filename
 
 
+def _guess_audio_mime_from_key(key: str) -> str:
+    ext = Path(key or "").suffix.lower()
+    if ext in {".mp4", ".m4a"}:
+        return "audio/mp4"
+    if ext == ".wav":
+        return "audio/wav"
+    if ext == ".ogg":
+        return "audio/ogg"
+    if ext == ".opus":
+        return "audio/ogg"
+    if ext == ".mp3":
+        return "audio/mpeg"
+    return "application/octet-stream"
+
+
 def _resolve_transcoded_storage(file_obj: UploadedFile):
     if not file_obj.transcoded_filename:
         return None, None
@@ -1077,11 +1092,12 @@ def api_file_download_transcoded(file_id):
         if not cfg or not key:
             abort(404, "Transcoded file not available")
         data = download_fileobj(cfg, key)
+        suffix = Path(key).suffix or ".bin"
         return send_file(
             data,
-            mimetype="audio/wav",
+            mimetype=_guess_audio_mime_from_key(key),
             as_attachment=True,
-            download_name=f"{Path(file_obj.original_filename).stem}_transcoded.wav",
+            download_name=f"{Path(file_obj.original_filename).stem}_transcoded{suffix}",
         )
     finally:
         db.close()
@@ -1100,11 +1116,12 @@ def api_file_stream_transcoded(file_id):
         if not cfg or not key:
             abort(404, "Transcoded file not available")
         data = download_fileobj(cfg, key)
+        suffix = Path(key).suffix or ".bin"
         return send_file(
             data,
-            mimetype="audio/wav",
+            mimetype=_guess_audio_mime_from_key(key),
             as_attachment=False,
-            download_name=f"{Path(file_obj.original_filename).stem}_transcoded.wav",
+            download_name=f"{Path(file_obj.original_filename).stem}_transcoded{suffix}",
         )
     finally:
         db.close()
@@ -1123,11 +1140,12 @@ def api_file_download_transferred(file_id):
         if not cfg or not key:
             abort(404, "Transferred file not available")
         data = download_fileobj(cfg, key)
+        suffix = Path(key).suffix or ".bin"
         return send_file(
             data,
-            mimetype="audio/wav",
+            mimetype=_guess_audio_mime_from_key(key),
             as_attachment=True,
-            download_name=f"{Path(file_obj.original_filename).stem}_transferred.wav",
+            download_name=f"{Path(file_obj.original_filename).stem}_transferred{suffix}",
         )
     finally:
         db.close()
@@ -1146,11 +1164,12 @@ def api_file_stream_transferred(file_id):
         if not cfg or not key:
             abort(404, "Transferred file not available")
         data = download_fileobj(cfg, key)
+        suffix = Path(key).suffix or ".bin"
         return send_file(
             data,
-            mimetype="audio/wav",
+            mimetype=_guess_audio_mime_from_key(key),
             as_attachment=False,
-            download_name=f"{Path(file_obj.original_filename).stem}_transferred.wav",
+            download_name=f"{Path(file_obj.original_filename).stem}_transferred{suffix}",
         )
     finally:
         db.close()
