@@ -9,21 +9,23 @@ from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
-from .config import S3Config
+from .config import S3Config, UPLOAD_MAX_FILE_SIZE_MB
 
 logger = logging.getLogger(__name__)
 
 
-# Force single-PUT instead of multipart upload. Our managed-S3 segmented IAM
-# (Scaleway CDS hardening, prod-bêta) grants the writer key only `s3:PutObject`,
-# not the four multipart actions. boto3 silently switches to multipart above
-# 8 MB, which then fails with AccessDenied on CreateMultipartUpload. Capping the
-# threshold above our largest accepted file (UPLOAD_MAX_FILE_SIZE_MB=256) keeps
-# every upload in a single PUT — Scaleway accepts up to 5 GB single-PUT, so
-# this is well within bounds. The bucket policy now also lists multipart
-# actions explicitly for defense in depth, but this client-side cap is what
-# unblocks the pipeline without requiring an IAM apply.
-_NO_MULTIPART = TransferConfig(multipart_threshold=5 * 1024 * 1024 * 1024)
+# Pin boto3's multipart_threshold just above the pipeline's accepted file cap so
+# every legitimate upload goes through a single PUT and only needs s3:PutObject.
+# Rationale: boto3's default 8 MB threshold splits most of our files into
+# multipart, which on a hardened S3 (MinIO with strict bucket policy, AWS S3
+# with separate IAM grants for CreateMultipartUpload/UploadPart/...) would
+# require a broader IAM allowlist. Coupling the threshold to
+# UPLOAD_MAX_FILE_SIZE_MB means: if someone raises the upload cap above this
+# threshold without revisiting IAM, multipart kicks back in and the failure is
+# loud rather than silent. The +64 MB headroom absorbs re-encoding overhead
+# (transcoded files can grow slightly versus the original).
+_SINGLE_PUT_THRESHOLD_BYTES = (UPLOAD_MAX_FILE_SIZE_MB + 64) * 1024 * 1024
+_NO_MULTIPART = TransferConfig(multipart_threshold=_SINGLE_PUT_THRESHOLD_BYTES)
 
 
 def get_s3_client(cfg: S3Config):
