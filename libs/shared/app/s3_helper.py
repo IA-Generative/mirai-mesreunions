@@ -5,12 +5,25 @@ from io import BytesIO
 from typing import Optional
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
 from .config import S3Config
 
 logger = logging.getLogger(__name__)
+
+
+# Force single-PUT instead of multipart upload. Our managed-S3 segmented IAM
+# (Scaleway CDS hardening, prod-bêta) grants the writer key only `s3:PutObject`,
+# not the four multipart actions. boto3 silently switches to multipart above
+# 8 MB, which then fails with AccessDenied on CreateMultipartUpload. Capping the
+# threshold above our largest accepted file (UPLOAD_MAX_FILE_SIZE_MB=256) keeps
+# every upload in a single PUT — Scaleway accepts up to 5 GB single-PUT, so
+# this is well within bounds. The bucket policy now also lists multipart
+# actions explicitly for defense in depth, but this client-side cap is what
+# unblocks the pipeline without requiring an IAM apply.
+_NO_MULTIPART = TransferConfig(multipart_threshold=5 * 1024 * 1024 * 1024)
 
 
 def get_s3_client(cfg: S3Config):
@@ -64,6 +77,7 @@ def upload_fileobj(cfg: S3Config, key: str, data: BytesIO, content_type: str = "
         cfg.bucket,
         key,
         ExtraArgs={"ContentType": content_type},
+        Config=_NO_MULTIPART,
     )
     logger.info("Uploaded %s to %s/%s", key, cfg.bucket, key)
     return key
