@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 import pika
 
@@ -17,6 +17,28 @@ QUEUE_AV_SCAN = "av_scan"
 QUEUE_TRANSCODE = "transcode"
 QUEUE_FILE_READY = "file_ready"
 QUEUE_TRANSCRIPTION = "transcription"
+
+RETRY_HEADER = "x-retry-count"
+DEFAULT_MAX_RETRIES = max(0, int(os.getenv("QUEUE_MAX_RETRIES", "5")))
+
+
+def next_retry_decision(headers: Optional[dict], max_retries: int) -> Tuple[bool, dict, int]:
+    """
+    Decide whether a failed message should be retried.
+
+    Returns (should_retry, new_headers_for_republish, current_retry_count).
+    Pure function so it can be unit-tested without pika.
+    """
+    current = dict(headers or {})
+    try:
+        retry_count = int(current.get(RETRY_HEADER, 0))
+    except (TypeError, ValueError):
+        retry_count = 0
+    if retry_count >= max_retries:
+        return False, current, retry_count
+    next_headers = dict(current)
+    next_headers[RETRY_HEADER] = retry_count + 1
+    return True, next_headers, retry_count + 1
 
 
 def get_connection(cfg: RabbitMQConfig) -> pika.BlockingConnection:
@@ -85,28 +107,84 @@ def publish_message(cfg: RabbitMQConfig, queue: str, message: dict):
     conn.close()
 
 
-def consume_queue(cfg: RabbitMQConfig, queue: str, callback: Callable[[dict], bool], prefetch: int = 1):
+def consume_queue(
+    cfg: RabbitMQConfig,
+    queue: str,
+    callback: Callable[[dict], bool],
+    prefetch: int = 1,
+    max_retries: Optional[int] = None,
+    on_give_up: Optional[Callable[[dict, int], None]] = None,
+):
     """
     Consume messages from a queue. callback receives the parsed message dict.
-    If callback returns True, message is acked. If False or exception, nacked with requeue.
+
+    Retry policy: instead of basic_nack(requeue=True) on failure (which loops
+    forever and lets a single poisoned message monopolise a worker), each
+    failure republishes the message with an incremented x-retry-count header
+    and acks the original delivery. After max_retries attempts the message is
+    dropped (acked) and on_give_up is invoked if provided so the application
+    can mark the underlying record as failed.
+
+    max_retries defaults to QUEUE_MAX_RETRIES env var (5).
     """
+    if max_retries is None:
+        max_retries = DEFAULT_MAX_RETRIES
+
     conn = get_connection(cfg)
     channel = conn.channel()
     channel.queue_declare(queue=queue, durable=True)
     channel.basic_qos(prefetch_count=prefetch)
 
+    def _republish_or_drop(ch, method, properties, body, message):
+        headers = (properties.headers if properties else None)
+        should_retry, new_headers, count = next_retry_decision(headers, max_retries)
+        if should_retry:
+            ch.basic_publish(
+                exchange="",
+                routing_key=queue,
+                body=body,
+                properties=pika.BasicProperties(
+                    delivery_mode=2,
+                    content_type=(properties.content_type if properties else "application/json"),
+                    headers=new_headers,
+                ),
+            )
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            logger.warning(
+                "Republished to %s for retry %d/%d: file_id=%s",
+                queue, count, max_retries, message.get("file_id", "?"),
+            )
+            return
+        # Out of retries: drop and notify the application so it can record failure.
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+        logger.error(
+            "Dropping message from %s after %d retries: file_id=%s",
+            queue, count, message.get("file_id", "?"),
+        )
+        if on_give_up is not None:
+            try:
+                on_give_up(message, count)
+            except Exception:
+                logger.exception("on_give_up callback raised for %s", queue)
+
     def _on_message(ch, method, properties, body):
         try:
             message = json.loads(body)
-            logger.info("Consuming from %s: %s", queue, message.get("file_id", "?"))
+        except Exception:
+            # Unparseable payload: drop immediately, no retry value.
+            logger.exception("Unparseable message on %s, dropping", queue)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
+        logger.info("Consuming from %s: %s", queue, message.get("file_id", "?"))
+        try:
             success = callback(message)
-            if success:
-                ch.basic_ack(delivery_tag=method.delivery_tag)
-            else:
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
         except Exception:
             logger.exception("Error processing message from %s", queue)
-            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+            success = False
+        if success:
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            return
+        _republish_or_drop(ch, method, properties, body, message)
 
     channel.basic_consume(queue=queue, on_message_callback=_on_message)
     logger.info("Waiting for messages on %s...", queue)
