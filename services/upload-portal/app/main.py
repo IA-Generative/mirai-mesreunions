@@ -28,6 +28,7 @@ from libs.shared.app.config import (
     load_ext_db, load_s3_upload, load_s3_processed, RabbitMQConfig, SECRET_KEY,
     MAX_UPLOADS_PER_SESSION, UPLOAD_MAX_FILE_SIZE_MB, ALLOWED_AUDIO_EXTENSIONS,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, INTERNAL_API_TOKEN, UPLOAD_EXPIRY_GRACE_SECONDS,
+    MYDEVICES_PORTAL_URL, TOKEN_EXPIRY_WARNING_DAYS,
 )
 from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
@@ -447,11 +448,27 @@ def index():
 
 @app.route("/manifest/<qr_token>.webmanifest")
 def upload_manifest(qr_token: str):
-    """Dynamic manifest bound to a specific QR token upload page."""
+    """
+    Dynamic manifest bound to a specific QR token upload page.
+
+    A `?dk=<device_key>` query param, when present, is propagated to the
+    manifest's start_url. This is how we keep the same device_key between
+    the browser and the PWA installed from it: at install time the OS fetches
+    this manifest, sees ?dk= in start_url, and on PWA launch the client JS
+    seeds localStorage from the URL — both contexts then enrol with the same
+    device_key, so the server-side fusion produces a single device row.
+    """
     session_obj = get_session_by_token(qr_token)
     if not session_obj:
         abort(404)
+    dk = (request.args.get("dk") or "").strip()
+    # Hex-only allowlist matches the client-side hex(24 bytes). Defensive cap
+    # at 64 chars in case format changes; anything else is silently dropped.
+    if dk and (len(dk) > 64 or not all(c in "0123456789abcdef" for c in dk.lower())):
+        dk = ""
     start_url = url_for("upload_page", qr_token=qr_token)
+    if dk:
+        start_url = f"{start_url}?dk={dk}"
     data = {
         "name": "MIrAI - Televersement audio",
         "short_name": "MIrAI Audio",
@@ -555,6 +572,9 @@ def upload_page(qr_token):
         device_revalidate_interval_seconds=DEVICE_REVALIDATE_INTERVAL_SECONDS,
         device_revalidate_max_failure_seconds=DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
         shared_manual=request.args.get("shared_manual") == "1",
+        session_expires_at=session_obj.expires_at.isoformat() if session_obj.expires_at else None,
+        mydevices_portal_url=MYDEVICES_PORTAL_URL,
+        token_expiry_warning_days=TOKEN_EXPIRY_WARNING_DAYS,
     )
 
 
@@ -657,7 +677,10 @@ def api_device_enroll(qr_token):
         )
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
         if resp.status_code >= 400:
-            return jsonify({"error": body.get("error", "enrollment_failed")}), resp.status_code
+            # Prefer the upstream's human-readable `message` (e.g. session_already_bound)
+            # over the machine-readable `error` code so the user sees something useful.
+            err = body.get("message") or body.get("error") or "enrollment_failed"
+            return jsonify({"error": err}), resp.status_code
         return jsonify(body)
     except Exception:
         logger.exception("Device enrollment failed for qr=%s", qr_token)

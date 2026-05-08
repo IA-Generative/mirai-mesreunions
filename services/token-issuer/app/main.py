@@ -37,6 +37,7 @@ from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, 
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
+from libs.shared.app.device_fingerprint import compute_fp_hash
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ SessionLocal = None
 ALLOW_SHORT_QR_TTL_SECONDS_TEST = os.getenv("ALLOW_SHORT_QR_TTL_SECONDS_TEST", "").lower() in {"1", "true", "yes"}
 DEVICE_TOKEN_RETENTION_HOURS = max(1, int(os.getenv("DEVICE_TOKEN_RETENTION_HOURS", "168")))
 TOKEN_RENEW_DAYS = max(1, int(os.getenv("TOKEN_RENEW_DAYS", "7")))
+DEVICE_FUSION_WINDOW_MINUTES = max(1, int(os.getenv("DEVICE_FUSION_WINDOW_MINUTES", "15")))
+DEVICE_PENDING_PURGE_SECONDS = max(60, int(os.getenv("DEVICE_PENDING_PURGE_SECONDS", "120")))
 
 
 # ─── Helpers ────────────────────────────────────────────────
@@ -66,6 +69,23 @@ def generate_qr_token() -> str:
 def verify_token():
     auth = request.headers.get("Authorization", "")
     return verify_bearer_token(auth, INTERNAL_API_TOKEN)
+
+
+def purge_expired_pending(db) -> int:
+    """Delete `pending` device rows whose purge_at has elapsed. Returns row count."""
+    now = datetime.now(timezone.utc)
+    deleted = (
+        db.query(DeviceEnrollment)
+        .filter(
+            DeviceEnrollment.status == "pending",
+            DeviceEnrollment.purge_at.isnot(None),
+            DeviceEnrollment.purge_at < now,
+        )
+        .delete(synchronize_session=False)
+    )
+    if deleted:
+        db.commit()
+    return int(deleted or 0)
 
 
 # ─── Routes ─────────────────────────────────────────────────
@@ -305,7 +325,19 @@ def extend_token_7d():
 
 @app.route("/api/v1/enroll-device", methods=["POST"])
 def enroll_device():
-    """Enroll a browser/device for a valid QR session."""
+    """
+    Enroll a browser/device for a valid QR session.
+
+    Lookup order (1 QR = 1 device, with browser↔PWA fusion):
+      1. Same (qr_token, device_key)         → idempotent re-enroll, reuse row.
+      2. Same qr_token + matching fp_hash    → fusion (browser → PWA install).
+         Only within DEVICE_FUSION_WINDOW_MINUTES from the existing row's
+         created_at, regardless of pending/active. Returns the existing row's
+         token; the caller's device_key is ignored server-side.
+      3. Confirmed device exists on qr_token → reject (409 already_bound).
+      4. Otherwise                           → create new pending row, with a
+         short purge_at so dead enrolments disappear quickly.
+    """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -317,8 +349,17 @@ def enroll_device():
     if not qr_token or not device_key:
         return jsonify({"error": "qr_token and device_key are required"}), 400
 
+    fp_hash = compute_fp_hash(device_fingerprint)
+    user_agent = (request.headers.get("User-Agent", "") or "")[:1024]
+
     db = SessionLocal()
     try:
+        # Opportunistic cleanup of any expired pending rows on every enrol.
+        try:
+            purge_expired_pending(db)
+        except Exception:
+            db.rollback()
+
         now = datetime.now(timezone.utc)
         issued = db.query(IssuedToken).filter(IssuedToken.qr_token == qr_token).first()
         if not issued:
@@ -326,6 +367,12 @@ def enroll_device():
         if issued.expires_at.replace(tzinfo=timezone.utc) < now:
             return jsonify({"error": "qr_token_expired"}), 410
 
+        retention_expires_at = now + timedelta(hours=DEVICE_TOKEN_RETENTION_HOURS)
+        purge_at = now + timedelta(seconds=DEVICE_PENDING_PURGE_SECONDS)
+        fusion_cutoff = now - timedelta(minutes=DEVICE_FUSION_WINDOW_MINUTES)
+        enroll_reason = "fresh"
+
+        # 1. Idempotent re-enroll: same (qr_token, device_key)
         rec = (
             db.query(DeviceEnrollment)
             .filter(
@@ -334,18 +381,62 @@ def enroll_device():
             )
             .first()
         )
-        retention_expires_at = now + timedelta(hours=DEVICE_TOKEN_RETENTION_HOURS)
+        if rec and rec.status == "revoked":
+            return jsonify({"error": "device_revoked"}), 403
         if rec:
-            rec.status = "active"
-            rec.revoked_at = None
-            rec.revoked_reason = None
-            rec.device_fingerprint = device_fingerprint or rec.device_fingerprint
-            rec.device_name = device_name or rec.device_name
-            rec.user_agent = request.headers.get("User-Agent", "")[:1024]
+            enroll_reason = "idempotent"
+
+        # 2. Fusion (browser → PWA install): same qr_token, matching fp_hash,
+        #    within fusion window. Skip revoked rows.
+        if not rec and fp_hash:
+            rec = (
+                db.query(DeviceEnrollment)
+                .filter(
+                    DeviceEnrollment.qr_token == qr_token,
+                    DeviceEnrollment.fp_hash == fp_hash,
+                    DeviceEnrollment.status != "revoked",
+                    DeviceEnrollment.created_at > fusion_cutoff,
+                )
+                .order_by(DeviceEnrollment.created_at.desc())
+                .first()
+            )
+            if rec:
+                enroll_reason = "fused_fp_window"
+
+        if rec:
+            # Refresh metadata; do NOT change confirmed_at here (only heartbeat
+            # or upload confirms). Extend retention/purge windows.
+            rec.device_fingerprint = device_fingerprint[:1024] or rec.device_fingerprint
+            if not rec.fp_hash and fp_hash:
+                rec.fp_hash = fp_hash
+            rec.device_name = (device_name[:255] if device_name else rec.device_name)
+            rec.user_agent = user_agent or rec.user_agent
             rec.last_seen_at = now
             rec.retention_expires_at = retention_expires_at
             rec.updated_at = now
+            if rec.status == "pending":
+                rec.purge_at = purge_at
         else:
+            # 3. Reject if a confirmed device already owns this qr_token.
+            confirmed = (
+                db.query(DeviceEnrollment)
+                .filter(
+                    DeviceEnrollment.qr_token == qr_token,
+                    DeviceEnrollment.status == "active",
+                    DeviceEnrollment.confirmed_at.isnot(None),
+                )
+                .first()
+            )
+            if confirmed:
+                return jsonify({
+                    "error": "session_already_bound",
+                    "message": (
+                        "Cette session est deja liee a un autre appareil. "
+                        "Pour changer d'appareil, revoquez l'enrolement depuis le portail mydevices."
+                    ),
+                }), 409
+
+            # 4. New pending enrolment.
             rec = DeviceEnrollment(
                 id=uuid4(),
                 user_sub=issued.user_sub,
@@ -353,15 +444,23 @@ def enroll_device():
                 simple_code=issued.simple_code,
                 device_key=device_key[:255],
                 device_fingerprint=device_fingerprint[:1024],
+                fp_hash=fp_hash or None,
                 device_name=device_name[:255] if device_name else None,
-                user_agent=(request.headers.get("User-Agent", "") or "")[:1024],
-                status="active",
+                user_agent=user_agent,
+                status="pending",
+                confirmed_at=None,
+                purge_at=purge_at,
                 retention_expires_at=retention_expires_at,
                 last_seen_at=now,
             )
             db.add(rec)
 
         db.commit()
+        logger.info(
+            "Device enrol: qr=%s reason=%s status=%s device_id=%s fp_hash=%s",
+            qr_token, enroll_reason, rec.status, rec.id, (fp_hash or "-")[:8],
+        )
+
         payload = {
             "device_id": str(rec.id),
             "user_sub": rec.user_sub,
@@ -378,6 +477,8 @@ def enroll_device():
                 "device_id": str(rec.id),
                 "retention_until": payload["retention_until"],
                 "device_name": rec.device_name,
+                "status": rec.status,
+                "enroll_reason": enroll_reason,
             }
         )
     except Exception:
@@ -418,7 +519,7 @@ def validate_device():
         rec = db.query(DeviceEnrollment).filter(DeviceEnrollment.id == device_id).first()
         if not rec:
             return jsonify({"valid": False, "reason": "not_found"}), 404
-        if rec.status != "active":
+        if rec.status == "revoked":
             return jsonify({"valid": False, "reason": "revoked"}), 403
         if rec.qr_token != qr_token:
             return jsonify({"valid": False, "reason": "token_mismatch"}), 403
@@ -431,6 +532,26 @@ def validate_device():
         if not issued or issued.expires_at.replace(tzinfo=timezone.utc) < now:
             return jsonify({"valid": False, "reason": "qr_expired"}), 410
 
+        # Pending → active transition on first heartbeat. The first device to
+        # reach this point owns the qr_token; concurrent pending peers are
+        # rejected here and will be purged at their purge_at deadline.
+        if rec.status == "pending":
+            other_active = (
+                db.query(DeviceEnrollment)
+                .filter(
+                    DeviceEnrollment.qr_token == qr_token,
+                    DeviceEnrollment.status == "active",
+                    DeviceEnrollment.confirmed_at.isnot(None),
+                    DeviceEnrollment.id != rec.id,
+                )
+                .first()
+            )
+            if other_active:
+                return jsonify({"valid": False, "reason": "session_already_bound"}), 409
+            rec.status = "active"
+            rec.confirmed_at = now
+            rec.purge_at = None
+
         rec.last_seen_at = now
         db.commit()
         return jsonify(
@@ -440,6 +561,8 @@ def validate_device():
                 "user_sub": rec.user_sub,
                 "retention_until": int(rec.retention_expires_at.timestamp()),
                 "device_name": rec.device_name,
+                "status": rec.status,
+                "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else None,
             }
         )
     finally:
@@ -457,6 +580,12 @@ def list_devices():
 
     db = SessionLocal()
     try:
+        # Lazy purge of expired pending rows so callers never see them.
+        try:
+            purge_expired_pending(db)
+        except Exception:
+            db.rollback()
+
         devices = (
             db.query(DeviceEnrollment)
             .filter(DeviceEnrollment.user_sub == user_sub)
@@ -474,7 +603,10 @@ def list_devices():
                     "device_key": d.device_key,
                     "device_name": d.device_name,
                     "device_fingerprint": d.device_fingerprint,
+                    "fp_hash": d.fp_hash,
                     "status": d.status,
+                    "confirmed_at": d.confirmed_at.isoformat() if d.confirmed_at else None,
+                    "purge_at": d.purge_at.isoformat() if d.purge_at else None,
                     "revoked_at": d.revoked_at.isoformat() if d.revoked_at else None,
                     "revoked_reason": d.revoked_reason,
                     "retention_expires_at": d.retention_expires_at.isoformat() if d.retention_expires_at else None,

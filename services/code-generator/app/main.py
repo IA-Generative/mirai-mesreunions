@@ -969,6 +969,14 @@ def api_device_enroll_proxy():
     try:
         data = request_internal_device_api("POST", "/api/v1/enroll-device", json_body=payload)
         return jsonify(data)
+    except req.HTTPError as err:
+        # Preserve upstream's error code + human message (e.g. session_already_bound).
+        if err.response is not None:
+            try:
+                return jsonify(err.response.json()), err.response.status_code
+            except Exception:
+                return jsonify({"error": "device_enroll_proxy_failed"}), err.response.status_code
+        return jsonify({"error": "device_enroll_proxy_failed"}), 502
     except Exception:
         logger.exception("Device enroll proxy failed")
         return jsonify({"error": "device_enroll_proxy_failed"}), 502
@@ -1950,6 +1958,7 @@ function tokenIdShort(tokenValue) {
 function deviceTokenStateLabel(device) {
     const rawStatus = (device && device.status ? String(device.status) : '').toLowerCase();
     if (rawStatus === 'revoked') return 'révoqué';
+    if (rawStatus === 'pending') return 'initialisation…';
     const endMs = new Date((device && (device.retention_expires_at || device.session_expires_at)) || '').getTime();
     if (Number.isFinite(endMs) && endMs <= Date.now()) return 'expiré';
     return 'active';
@@ -1958,6 +1967,7 @@ function deviceTokenStateLabel(device) {
 function deviceTokenStateColor(stateLabel) {
     if (stateLabel === 'révoqué') return '#b91c1c';
     if (stateLabel === 'expiré') return '#b45309';
+    if (stateLabel === 'initialisation…') return '#64748b';
     return '#166534';
 }
 
@@ -2097,6 +2107,25 @@ function toggleDeviceScope() {
     loadDevices();
 }
 
+let pendingDevicesPollTimer = null;
+
+function schedulePendingDevicesPoll(devices) {
+    const hasPending = (devices || []).some((d) => (d && d.status ? String(d.status).toLowerCase() : '') === 'pending');
+    if (pendingDevicesPollTimer) {
+        clearTimeout(pendingDevicesPollTimer);
+        pendingDevicesPollTimer = null;
+    }
+    if (hasPending) {
+        // Poll until pending devices either confirm (heartbeat) or are purged
+        // server-side. 15s matches the upload-portal heartbeat cadence so the
+        // user sees the state transition shortly after it happens.
+        pendingDevicesPollTimer = setTimeout(() => {
+            pendingDevicesPollTimer = null;
+            loadDevices();
+        }, 15000);
+    }
+}
+
 async function loadDevices() {
     const container = document.getElementById('devices-list');
     if (!container) return;
@@ -2105,6 +2134,7 @@ async function loadDevices() {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Erreur chargement devices');
         const devices = Array.isArray(data) ? data : [];
+        schedulePendingDevicesPoll(devices);
         const nowMs = Date.now();
         const oneDayMs = 24 * 60 * 60 * 1000;
 

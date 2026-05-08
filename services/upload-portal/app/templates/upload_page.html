@@ -200,6 +200,16 @@
             padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
             font-size: 0.85rem; color: #1e40af;
         }
+        .expiry-banner {
+            display: none;
+            background: #fef3c7; border-left: 4px solid #f59e0b;
+            padding: 0.75rem 1rem; border-radius: 0 8px 8px 0;
+            font-size: 0.85rem; color: #92400e; margin-bottom: 0.75rem;
+        }
+        .expiry-banner.expiry-urgent {
+            background: #fee2e2; border-left-color: #ef4444; color: #991b1b;
+        }
+        .expiry-banner a { color: inherit; font-weight: 600; text-decoration: underline; }
         .security-banner-head {
             display: flex;
             align-items: center;
@@ -374,10 +384,6 @@
             <div class="fill" id="progress-fill" style="width: 0%"></div>
         </div>
 
-        <p class="remaining" id="remaining-text">
-            {{ remaining }} fichier(s) restant(s) sur {{ max_uploads }}
-        </p>
-
         <div class="info-banner" style="margin-top:0.9rem;">
             <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
             Vous pouvez revenir sur cette page pour vérifier l'avancement.
@@ -402,6 +408,7 @@
             revenez ici puis utilisez "Touchez pour sélectionner".
         </div>
         {% endif %}
+        <div class="expiry-banner" id="expiry-banner" role="status"></div>
         <div class="security-banner" id="device-enroll-banner" style="margin-bottom:0.75rem;">
             <div class="security-banner-head">
                 <strong>Enrolement appareil:</strong>
@@ -469,6 +476,9 @@ let remaining = {{ remaining }};
 const canUpload = {{ 'true' if can_upload else 'false' }};
 const deviceRevalidateIntervalSeconds = {{ device_revalidate_interval_seconds }};
 const deviceMaxValidationFailureSeconds = {{ device_revalidate_max_failure_seconds }};
+const sessionExpiresAtRaw = {{ (session_expires_at | tojson) if session_expires_at else 'null' }};
+const myDevicesPortalUrl = {{ mydevices_portal_url | tojson }};
+const tokenExpiryWarningDays = {{ token_expiry_warning_days }};
 const deviceStorageKey = `upload_device_token:${qrToken}`;
 const deviceKeyStorageKey = `upload_device_key:${qrToken}`;
 const pwaBannerDismissKey = `pwa_install_banner_dismissed:${qrToken}`;
@@ -491,6 +501,25 @@ function clearDeviceToken() {
     localStorage.removeItem(deviceStorageKey);
 }
 
+function seedDeviceKeyFromUrl() {
+    // When the page is opened as PWA via a manifest start_url that contains
+    // ?dk=<device_key>, transplant it into localStorage so this PWA context
+    // shares the same device_key as the browser that produced the manifest.
+    // Browser side: localStorage usually already has the key, so the URL value
+    // is a no-op. PWA side: storage is partitioned, so this is what enables
+    // server-side fusion via matching device_key.
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const fromUrl = (params.get('dk') || '').trim();
+        if (!fromUrl) return;
+        if (!/^[0-9a-f]{1,64}$/i.test(fromUrl)) return;
+        const existing = localStorage.getItem(deviceKeyStorageKey);
+        if (!existing) {
+            localStorage.setItem(deviceKeyStorageKey, fromUrl);
+        }
+    } catch (e) {}
+}
+
 function getOrCreateDeviceKey() {
     let v = localStorage.getItem(deviceKeyStorageKey);
     if (v) return v;
@@ -500,6 +529,23 @@ function getOrCreateDeviceKey() {
     localStorage.setItem(deviceKeyStorageKey, v);
     return v;
 }
+
+function refreshManifestLinkWithDeviceKey() {
+    // The OS fetches the manifest only when the user triggers an install. We
+    // make sure the <link rel="manifest"> URL carries our current device_key
+    // by the time that happens, so the manifest's start_url contains it too.
+    try {
+        const link = document.querySelector('link[rel="manifest"]');
+        if (!link) return;
+        const dk = getOrCreateDeviceKey();
+        if (!dk) return;
+        const base = link.getAttribute('href').split('?')[0];
+        link.setAttribute('href', `${base}?dk=${encodeURIComponent(dk)}`);
+    } catch (e) {}
+}
+
+seedDeviceKeyFromUrl();
+refreshManifestLinkWithDeviceKey();
 
 function deviceFingerprint() {
     return [
@@ -797,10 +843,6 @@ function isAlertStatus(status) {
 }
 
 function updateRemainingText() {
-    const el = document.getElementById('remaining-text');
-    if (el) {
-        el.textContent = `${remaining} fichier(s) restant(s) sur {{ max_uploads }}`;
-    }
     if (remaining <= 0 && uploadZone) {
         uploadZone.classList.add('disabled');
         uploadZone.onclick = null;
@@ -1044,6 +1086,33 @@ setInterval(async () => {
         }
     } catch (e) {}
 }, 10000);
+
+function updateExpiryBanner() {
+    const banner = document.getElementById('expiry-banner');
+    if (!banner || !sessionExpiresAtRaw) return;
+    const expiresMs = Date.parse(sessionExpiresAtRaw);
+    if (!Number.isFinite(expiresMs)) return;
+    const remainingMs = expiresMs - Date.now();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const days = Math.ceil(remainingMs / oneDayMs);
+    if (remainingMs <= 0 || days > tokenExpiryWarningDays) {
+        banner.style.display = 'none';
+        return;
+    }
+    const dayLabel = days <= 1 ? 'moins de 24 heures' : `${days} jours`;
+    const isUrgent = days <= 2;
+    banner.classList.toggle('expiry-urgent', isUrgent);
+    let html = `<strong>Accès bientôt expiré :</strong> votre token est encore valide pendant ${dayLabel}.`;
+    if (myDevicesPortalUrl) {
+        html += ` Au-delà, retournez sur le <a href="${myDevicesPortalUrl}" target="_blank" rel="noopener">portail mydevices</a> pour le revalider.`;
+    } else {
+        html += ` Au-delà, retournez sur le portail mydevices pour le revalider.`;
+    }
+    banner.innerHTML = html;
+    banner.style.display = 'block';
+}
+updateExpiryBanner();
+setInterval(updateExpiryBanner, 60 * 60 * 1000);
 
 bootstrapDeviceSession().then((ok) => {
     if (ok) {

@@ -190,12 +190,18 @@ class DeviceEnrollment(InternalBase):
 
     device_key = Column(String(255), nullable=False, index=True, comment="Client-generated stable key")
     device_fingerprint = Column(String(1024), nullable=True)
+    fp_hash = Column(String(64), nullable=True, index=True,
+                     comment="Server-side normalized fingerprint hash, used for browser↔PWA fusion")
     device_name = Column(String(255), nullable=True)
     user_agent = Column(String(1024), nullable=True)
 
-    status = Column(String(32), nullable=False, default="active", index=True)  # active | revoked
+    status = Column(String(32), nullable=False, default="pending", index=True)  # pending | active | revoked
     revoked_reason = Column(String(255), nullable=True)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    confirmed_at = Column(DateTime(timezone=True), nullable=True,
+                          comment="Set on first heartbeat or upload — transitions pending → active")
+    purge_at = Column(DateTime(timezone=True), nullable=True, index=True,
+                      comment="Auto-purge time for status='pending' rows that never confirm")
 
     retention_expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
@@ -210,6 +216,8 @@ class DeviceEnrollment(InternalBase):
         Index("ix_device_user_status", "user_sub", "status"),
         Index("ix_device_code_status", "simple_code", "status"),
         Index("ix_device_qr_status", "qr_token", "status"),
+        Index("ix_device_qr_fphash", "qr_token", "fp_hash"),
+        Index("ix_device_status_purge", "status", "purge_at"),
     )
 
 
