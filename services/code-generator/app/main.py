@@ -2126,10 +2126,11 @@ INDEX_TEMPLATE = """
                     <option value="10080" selected>7 jours</option>
                 </select>
             </div>
-            <div class="form-group fr-input-group">
-                <label class="fr-label" for="max-uploads">Nombre maximal de fichiers par période de validité du token</label>
-                <input class="fr-input" type="number" id="max-uploads" value="15" min="1" max="50">
-            </div>
+            <!-- Le quota max-uploads/token n'est plus exposé à l'utilisateur (cf. mydevices UX
+                 simplification). Reste en hidden input pour que le JS continue de lire la
+                 valeur sans casser le flow. Default 15 = MAX_UPLOADS_PER_SESSION côté serveur,
+                 plafonné serveur de toute façon. -->
+            <input type="hidden" id="max-uploads" value="15">
             <div class="form-group fr-checkbox-group">
                 <input type="checkbox" id="auto-transcribe" checked>
                 <label class="fr-label" for="auto-transcribe">
