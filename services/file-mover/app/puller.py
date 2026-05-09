@@ -54,6 +54,7 @@ from libs.shared.app.config import (
     KEVENT_MEETING_ANALYSIS_ENABLED,
     KEVENT_GLOSSARY_CORRECTION_ENABLED, KEVENT_GLOSSARY_DIR,
     KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+    KEVENT_FILENAME_SUGGESTION_ENABLED,
     KEVENT_HTTP_TIMEOUT_SECONDS,
     LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
     LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
@@ -254,7 +255,8 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
     Optional kwargs accepted: ``mcr_meeting_id``, ``transcription_engine``,
     ``transcription_text``, ``transcription_language``, ``diarization_json``,
     ``speaker_tagged_text``, ``glossary_corrected_text``, ``cleaned_text``,
-    ``reformulated_text``, ``meeting_analysis_json``.
+    ``reformulated_text``, ``meeting_analysis_json``,
+    ``suggested_filename``, ``key_points_summary``.
     """
     allowed = {
         "mcr_meeting_id",
@@ -267,6 +269,8 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "cleaned_text",
         "reformulated_text",
         "meeting_analysis_json",
+        "suggested_filename",
+        "key_points_summary",
     }
     db = SessionLocal()
     try:
@@ -409,6 +413,20 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             base_for_llm = corrected  # downstream steps see the corrected text
         # No status downgrade if no relevant terms (None) — glossary is
         # opportunistic, not a required step.
+
+    # 3b-ter. Suggested filename + 3-5 key points via the small LLM (one
+    # chat_json call → cheapest LLM step in the pipeline). Used by the
+    # user-facing downloads to produce filenames like "Réunion budget Q3
+    # 2026-05-09.docx" and to render a subtitle in the mydevices file list.
+    if KEVENT_FILENAME_SUGGESTION_ENABLED and llm is not None:
+        meta = mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL)
+        if meta:
+            if meta.get("title"):
+                updates["suggested_filename"] = meta["title"]
+            kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
+            if kp_serialized:
+                updates["key_points_summary"] = kp_serialized
+        # No status downgrade — metadata is opportunistic.
 
     # 3c. Out-of-band cleaning (medium model).
     if KEVENT_OOB_CLEANING_ENABLED and llm is not None:
@@ -787,6 +805,67 @@ def pull_file():
         logger.exception("Failed to pull file %s", data.get("file_id"))
         return jsonify({"error": "Internal error during pull"}), 500
     return jsonify(result)
+
+
+@app.route("/api/v1/audio/lookup", methods=["POST"])
+def audio_lookup():
+    """Return all transcription/diarization outputs for a user audio file.
+
+    Identified by ``(user_sub, original_session_code, stored_filename)``.
+    Used by code-generator to back the user-facing download endpoints
+    (transcript .txt/.md/.docx/.odt, meeting-cr .json/.md/.docx/.odt).
+    Auth = INTERNAL_API_TOKEN bearer (same as ``/api/v1/pull``) — only
+    callable from the internal zone.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    simple_code = (data.get("simple_code") or "").strip()
+    filename = (data.get("stored_filename") or "").strip()
+    if not user_sub or not simple_code or not filename:
+        return jsonify({"error": "user_sub, simple_code, stored_filename required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_not_ready"}), 503
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(UserAudioFile)
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.original_session_code == simple_code,
+                UserAudioFile.stored_filename == filename,
+            )
+            .first()
+        )
+        if row is None:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({
+            "id": str(row.id),
+            "transcription_status": row.transcription_status,
+            "transcription_engine": row.transcription_engine,
+            "transcription_language": row.transcription_language,
+            "transcription_text": row.transcription_text,
+            "speaker_tagged_text": row.speaker_tagged_text,
+            "glossary_corrected_text": row.glossary_corrected_text,
+            "cleaned_text": row.cleaned_text,
+            "reformulated_text": row.reformulated_text,
+            "meeting_analysis_json": row.meeting_analysis_json,
+            "diarization_json": row.diarization_json,
+            "audio_quality_score": row.audio_quality_score,
+            "audio_duration_seconds": row.audio_duration_seconds,
+            "transcription_completed_at": (
+                row.transcription_completed_at.isoformat()
+                if row.transcription_completed_at else None
+            ),
+            "suggested_filename": row.suggested_filename,
+            "key_points_summary": row.key_points_summary,
+        })
+    except Exception:
+        logger.exception("audio_lookup failed")
+        return jsonify({"error": "internal_error"}), 500
+    finally:
+        db.close()
 
 
 @app.route("/api/v1/pull-trigger", methods=["POST"])

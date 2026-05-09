@@ -178,6 +178,54 @@ def analyse_meeting(transcript: str, llm: LLMClient, model: str) -> Optional[dic
         return None
 
 
+_FORBIDDEN_FILENAME_CHARS_RE = __import__("re").compile(r'[\\/:<>|?*"]')
+
+
+def suggest_metadata(transcript: str, llm: LLMClient, model: str) -> Optional[dict]:
+    """Ask a small LLM to produce a short title + 3-5 key points in one JSON call.
+
+    Returns ``{"title": "...", "key_points": ["...", ...]}`` on success, or
+    None on any failure / unparseable response. Best-effort like the other
+    steps. Single chat_json call against the small model — cheapest LLM step
+    in the kevent pipeline.
+    """
+    if not transcript.strip():
+        return None
+    prompt = _render(_load_prompt("suggest_metadata"), transcript)
+    try:
+        out = llm.chat_json(model, [{"role": "user", "content": prompt}])
+    except LLMError:
+        logger.warning("suggest_metadata: LLM call failed", exc_info=True)
+        return None
+    if not isinstance(out, dict):
+        logger.warning("suggest_metadata: LLM returned %r, expected dict", type(out))
+        return None
+    title = (out.get("title") or "").strip()
+    # Sanitize : strip forbidden chars + length cap. Empty → "Compte-rendu"
+    title = _FORBIDDEN_FILENAME_CHARS_RE.sub(" ", title)
+    title = " ".join(title.split())[:80]  # collapse whitespace + cap to 80 chars
+    if not title:
+        title = "Compte-rendu"
+    key_points = out.get("key_points") or []
+    if not isinstance(key_points, list):
+        key_points = []
+    cleaned_points = [
+        str(kp).strip() for kp in key_points
+        if isinstance(kp, str) and kp.strip()
+    ][:5]  # cap at 5 points to control downstream rendering
+    return {"title": title, "key_points": cleaned_points}
+
+
+def serialize_key_points(key_points: list[str] | None) -> Optional[str]:
+    """Render the key_points list as a Markdown bullet list for DB storage.
+
+    Returns None for empty/None input so the column stays NULL.
+    """
+    if not key_points:
+        return None
+    return "\n".join(f"- {p}" for p in key_points)
+
+
 def serialize_analysis(analysis: Optional[dict]) -> Optional[str]:
     """Convert the analysis dict to a JSON string suitable for DB storage."""
     if analysis is None:

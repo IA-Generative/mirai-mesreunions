@@ -210,6 +210,31 @@ def request_token_from_internal(
     return resp.json()
 
 
+def request_file_puller_api(path: str, *, json_body=None, timeout: int = 10) -> dict | None:
+    """POST to file-puller's internal API. Returns the parsed JSON or None on 404.
+
+    Used by the user-facing transcript download endpoints to fetch the
+    user_audio_files row that lives in postgres-internal. Auth =
+    INTERNAL_API_TOKEN (same bearer file-puller uses for /api/v1/pull).
+    """
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://file-puller:8090").rstrip("/")
+    resp = req.post(
+        f"{base}{path}",
+        json=json_body,
+        headers={
+            "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        timeout=timeout,
+    )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code >= 400:
+        raise req.HTTPError(f"file-puller {path} → {resp.status_code}: {resp.text[:200]}",
+                            response=resp)
+    return resp.json()
+
+
 def request_internal_device_api(method: str, path: str, *, json_body=None, timeout: int = 10, params=None) -> dict:
     base = os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://token-issuer:8091").rstrip("/")
     resp = req.request(
@@ -285,6 +310,35 @@ def _resolve_transferred_storage(db, file_obj: UploadedFile):
         return None, None
     internal_key = f"{session_obj.user_sub}/{session_obj.simple_code}/{file_obj.transcoded_filename}"
     return s3_internal_cfg, internal_key
+
+
+def _lookup_audio_outputs(db, file_obj: UploadedFile) -> dict | None:
+    """Fetch the kevent / mcr / stub outputs for a file from file-puller.
+
+    Returns the parsed JSON (transcription_text, speaker_tagged_text,
+    glossary_corrected_text, meeting_analysis_json, etc.) or None if the
+    user_audio_files row hasn't been created yet (file still in pipeline).
+
+    Internal call — bearer-authenticated. Failure is logged but the caller
+    surfaces a user-friendly error.
+    """
+    if not file_obj.transcoded_filename:
+        return None
+    session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+    if not session_obj:
+        return None
+    try:
+        return request_file_puller_api(
+            "/api/v1/audio/lookup",
+            json_body={
+                "user_sub": session_obj.user_sub,
+                "simple_code": session_obj.simple_code,
+                "stored_filename": file_obj.transcoded_filename,
+            },
+        )
+    except req.RequestException:
+        logger.exception("file-puller lookup failed for file_id=%s", file_obj.id)
+        return None
 
 
 def _run_loudnorm_measure(input_path: str, target_i: float = -16.0, target_tp: float = -1.5, target_lra: float = 11.0):
@@ -713,7 +767,9 @@ def api_my_devices():
                 expiring_soon = False
                 if expires_at:
                     exp_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-                    expiring_soon = exp_utc <= (now + timedelta(days=2))
+                    # Saillance plus tôt (7j) que la valeur initiale 2j — l'utilisateur
+                    # a le temps de prolonger sans urgence.
+                    expiring_soon = exp_utc <= (now + timedelta(days=7))
                 item["recent_uploads_24h"] = recent_uploads_24h
                 item["remaining_uploads"] = remaining_uploads
                 item["session_max_uploads"] = session_max_uploads
@@ -1158,6 +1214,214 @@ def api_file_stream_transcoded(file_id):
         db.close()
 
 
+def _send_text_attachment(text: str, filename: str, mime: str = "text/plain"):
+    """Tiny helper to wrap text into a downloadable file response."""
+    if not isinstance(text, str):
+        text = json.dumps(text, ensure_ascii=False, indent=2)
+    return send_file(
+        BytesIO(text.encode("utf-8")),
+        mimetype=mime,
+        as_attachment=True,
+        download_name=filename,
+    )
+
+
+def _maybe_prepend_key_points(body: str, key_points_md: str | None, fmt: str) -> str:
+    """Prefix the body with a 'Points clés' section for rendered formats.
+
+    Only applied to md/docx/odt — plain .txt stays untouched. The CR
+    (meeting analysis) endpoint skips this since its sections already cover
+    decisions/recommendations.
+    """
+    if not key_points_md or fmt not in ("md", "docx", "odt"):
+        return body
+    return f"## Points clés\n\n{key_points_md}\n\n---\n\n{body}"
+
+
+def _build_download_basename(file_obj: UploadedFile, audio: dict | None, slot: str) -> str:
+    """Build the user-visible filename for a transcript/CR download.
+
+    Priority for the human-readable stem:
+      1. ``audio["suggested_filename"]`` produced by the LLM-based renamer
+         (kevent pipeline) — falls back to original_filename otherwise.
+      2. Date suffix (short YYYY-MM-DD) derived from ``transcription_completed_at``
+         (same source as the LLM rename), else the file's created_at.
+
+    The slot describes which output is being served (e.g. ``transcript``,
+    ``transcript-tagged``, ``transcript-corrected``, ``meeting-cr``) — used
+    only as a contextual suffix when no LLM-suggested filename is available.
+    """
+    stem = ""
+    if audio and audio.get("suggested_filename"):
+        stem = audio["suggested_filename"].strip()
+    if not stem:
+        stem = Path(file_obj.original_filename or "audio").stem
+        if slot:
+            stem = f"{stem}_{slot}"
+    # Date suffix
+    date_src = None
+    if audio and audio.get("transcription_completed_at"):
+        try:
+            date_src = audio["transcription_completed_at"][:10]  # YYYY-MM-DD
+        except Exception:
+            date_src = None
+    if not date_src and file_obj.created_at:
+        date_src = file_obj.created_at.strftime("%Y-%m-%d")
+    if date_src and date_src not in stem:
+        stem = f"{stem} {date_src}"
+    return stem
+
+
+def _audio_or_404(db, user_sub: str, file_id: str):
+    """Resolve an UploadedFile owned by the user and its audio outputs.
+
+    Returns ``(file_obj, audio_dict_or_none)`` or aborts 404 if the file
+    isn't owned by the caller. ``audio_dict_or_none`` is None when the
+    user_audio_files row hasn't been created yet (transcription pending).
+    """
+    file_obj = _get_owned_file(db, user_sub, file_id)
+    if not file_obj:
+        abort(404, "File not found")
+    return file_obj, _lookup_audio_outputs(db, file_obj)
+
+
+# ─── Transcription / CR downloads (Feature 3) ───────────────────────────────
+# Each route serves one output format. file-puller is queried once per call —
+# acceptable since the user only clicks one download at a time.
+# TODO follow-up: route `/api/file/transcript-to-drive/<file_id>` to drop the
+# generated document into the user's personal Drive folder (Google Drive or
+# any provider configured per-tenant). Out of scope for this PR — needs OAuth
+# scope + per-user Drive credentials.
+
+_TRANSCRIPT_KIND_TO_COLUMN = {
+    "transcript": "transcription_text",
+    "transcript-tagged": "speaker_tagged_text",
+    "transcript-corrected": "glossary_corrected_text",
+    "transcript-cleaned": "cleaned_text",
+    "transcript-reformulated": "reformulated_text",
+}
+
+
+@app.route("/api/file/transcript/<kind>/<ext>/<file_id>")
+@require_auth
+def api_file_transcript_download(kind, ext, file_id):
+    """Serve transcription / speaker-tagged / corrected / cleaned / reformulated text.
+
+    ``kind`` ∈ ``transcript`` | ``transcript-tagged`` | ``transcript-corrected``
+              | ``transcript-cleaned`` | ``transcript-reformulated``
+    ``ext``  ∈ ``txt`` | ``md`` | ``docx`` | ``odt``
+
+    Returns 404 if the file isn't owned by the user, 503 if file-puller is
+    unreachable, 410 if the requested output is empty (the corresponding
+    sub-toggle was off or the LLM step failed).
+    """
+    if kind not in _TRANSCRIPT_KIND_TO_COLUMN:
+        abort(404)
+    if ext not in ("txt", "md", "docx", "odt"):
+        abort(404)
+
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        file_obj, audio = _audio_or_404(db, user["sub"], file_id)
+        if audio is None:
+            return jsonify({"error": "transcript_not_ready"}), 503
+        column = _TRANSCRIPT_KIND_TO_COLUMN[kind]
+        text = audio.get(column)
+        if not text:
+            return jsonify({"error": f"{kind}_unavailable"}), 410
+        stem = _build_download_basename(file_obj, audio, kind)
+        body = _maybe_prepend_key_points(text, audio.get("key_points_summary"), ext)
+        if ext == "txt":
+            return _send_text_attachment(body, f"{stem}.txt", "text/plain; charset=utf-8")
+        if ext == "md":
+            return _send_text_attachment(body, f"{stem}.md", "text/markdown; charset=utf-8")
+        from app.transcript_formats import text_to_docx_bytes, text_to_odt_bytes
+        if ext == "docx":
+            blob = text_to_docx_bytes(body, title=stem)
+            return send_file(BytesIO(blob),
+                             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             as_attachment=True, download_name=f"{stem}.docx")
+        if ext == "odt":
+            blob = text_to_odt_bytes(body, title=stem)
+            return send_file(BytesIO(blob),
+                             mimetype="application/vnd.oasis.opendocument.text",
+                             as_attachment=True, download_name=f"{stem}.odt")
+    finally:
+        db.close()
+
+
+@app.route("/api/file/meeting-cr/<ext>/<file_id>")
+@require_auth
+def api_file_meeting_cr_download(ext, file_id):
+    """Serve the meeting analysis (5-section CR) in the requested format.
+
+    ``ext`` ∈ ``json`` | ``md`` | ``docx`` | ``odt``.
+    """
+    if ext not in ("json", "md", "docx", "odt"):
+        abort(404)
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        file_obj, audio = _audio_or_404(db, user["sub"], file_id)
+        if audio is None:
+            return jsonify({"error": "transcript_not_ready"}), 503
+        raw = audio.get("meeting_analysis_json")
+        if not raw:
+            return jsonify({"error": "meeting_cr_unavailable"}), 410
+        stem = _build_download_basename(file_obj, audio, "meeting-cr")
+        if ext == "json":
+            # Pass the JSON through directly so users can re-process it.
+            return _send_text_attachment(raw, f"{stem}.json",
+                                         "application/json; charset=utf-8")
+        from app.transcript_formats import (
+            meeting_analysis_to_markdown, text_to_docx_bytes, text_to_odt_bytes,
+        )
+        md = meeting_analysis_to_markdown(raw)
+        if ext == "md":
+            return _send_text_attachment(md, f"{stem}.md", "text/markdown; charset=utf-8")
+        if ext == "docx":
+            blob = text_to_docx_bytes(md, title=stem)
+            return send_file(BytesIO(blob),
+                             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                             as_attachment=True, download_name=f"{stem}.docx")
+        if ext == "odt":
+            blob = text_to_odt_bytes(md, title=stem)
+            return send_file(BytesIO(blob),
+                             mimetype="application/vnd.oasis.opendocument.text",
+                             as_attachment=True, download_name=f"{stem}.odt")
+    finally:
+        db.close()
+
+
+@app.route("/api/file/transcript-status/<file_id>")
+@require_auth
+def api_file_transcript_status(file_id):
+    """Return which transcript outputs are available for a file (UI uses this
+    to decide which download buttons to render). 404 if not owned, 200 with
+    ``{"available": false}`` if the user_audio_files row doesn't exist yet.
+    """
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        file_obj, audio = _audio_or_404(db, user["sub"], file_id)
+        if audio is None:
+            return jsonify({"available": False, "reason": "not_ready"})
+        flags = {k: bool(audio.get(col)) for k, col in _TRANSCRIPT_KIND_TO_COLUMN.items()}
+        flags["meeting-cr"] = bool(audio.get("meeting_analysis_json"))
+        return jsonify({
+            "available": True,
+            "transcription_status": audio.get("transcription_status"),
+            "transcription_engine": audio.get("transcription_engine"),
+            "transcription_language": audio.get("transcription_language"),
+            "outputs": flags,
+            "suggested_filename": audio.get("suggested_filename"),
+            "key_points_summary": audio.get("key_points_summary"),
+        })
+    finally:
+        db.close()
+
+
 @app.route("/api/file/download-transferred/<file_id>")
 @require_auth
 def api_file_download_transferred(file_id):
@@ -1490,6 +1754,17 @@ INDEX_TEMPLATE = """
             text-decoration: line-through;
             cursor: not-allowed;
         }
+        .transcript-section { margin-top: 0.55rem; padding-top: 0.45rem; border-top: 1px dashed #e2e8f0; }
+        .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
+        .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; margin-bottom: 0.15rem; }
+        .transcript-meta-keypoints { margin: 0; font-family: inherit; white-space: pre-wrap; font-size: 0.76rem; color: #475569; }
+        .transcript-download-block { font-size: 0.76rem; }
+        .transcript-download-title { font-size: 0.74rem; color: #64748b; margin-bottom: 0.2rem; }
+        .transcript-download-row { display: flex; justify-content: space-between; align-items: center; padding: 0.15rem 0; gap: 0.5rem; flex-wrap: wrap; }
+        .transcript-download-label { color: #334155; font-size: 0.78rem; min-width: 0; flex: 1; }
+        .transcript-download-buttons { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+        .transcript-fmt-btn { display: inline-block; padding: 0.08rem 0.4rem; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.7rem; color: #1e293b; background: #fff; text-decoration: none; }
+        .transcript-fmt-btn:hover { background: #e0e7ff; border-color: #6366f1; }
         .file-links-row {
             display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
         }
@@ -1799,9 +2074,20 @@ INDEX_TEMPLATE = """
 
 <main class="fr-container page-shell">
 <div class="container">
-    <div class="card">
+    <div class="card" id="enrollment-card">
         <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
         <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
+
+        <!-- Hidden by default; revealed by loadDevices() if no active device is enrolled.
+             When at least one active device exists, we show #enrollment-collapsed
+             instead so the user isn't presented with a form they don't need. -->
+        <div id="enrollment-collapsed" style="display:none;padding:0.45rem 0;">
+            <p style="margin:0;font-size:0.88rem;color:#475569;">
+                Vous avez déjà au moins un appareil enrôlé. Vous pouvez uploader directement depuis lui.
+            </p>
+            <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary" style="margin-top:0.5rem;"
+                    onclick="showEnrollmentForm()">Enrôler un nouvel appareil</button>
+        </div>
 
         <div id="generate-form">
             <div class="form-group fr-select-group">
@@ -2149,6 +2435,36 @@ function schedulePendingDevicesPoll(devices) {
     }
 }
 
+// True after the user clicks "Enrôler un nouvel appareil" or after a generate.
+// Persists per browser session so the form stays open while the user iterates.
+let userRequestedEnrollmentForm = sessionStorage.getItem('userRequestedEnrollmentForm') === '1';
+
+function showEnrollmentForm() {
+    userRequestedEnrollmentForm = true;
+    sessionStorage.setItem('userRequestedEnrollmentForm', '1');
+    const form = document.getElementById('generate-form');
+    const collapsed = document.getElementById('enrollment-collapsed');
+    if (form) form.style.display = '';
+    if (collapsed) collapsed.style.display = 'none';
+}
+
+function applyEnrollmentFormVisibility(devices) {
+    const form = document.getElementById('generate-form');
+    const collapsed = document.getElementById('enrollment-collapsed');
+    if (!form || !collapsed) return;
+    const hasActiveDevice = (devices || []).some((d) => {
+        const status = (d.status || '').toLowerCase();
+        return status !== 'revoked' && status !== 'expired';
+    });
+    if (hasActiveDevice && !userRequestedEnrollmentForm) {
+        form.style.display = 'none';
+        collapsed.style.display = '';
+    } else {
+        form.style.display = '';
+        collapsed.style.display = 'none';
+    }
+}
+
 async function loadDevices() {
     const container = document.getElementById('devices-list');
     if (!container) return;
@@ -2158,6 +2474,7 @@ async function loadDevices() {
         if (!resp.ok) throw new Error(data.error || 'Erreur chargement devices');
         const devices = Array.isArray(data) ? data : [];
         schedulePendingDevicesPoll(devices);
+        applyEnrollmentFormVisibility(devices);
         const nowMs = Date.now();
         const oneDayMs = 24 * 60 * 60 * 1000;
 
@@ -2577,6 +2894,7 @@ async function loadSessions() {
                     ${sourceLinks}
                     ${transcodedLinks}
                     ${transferredLinks}
+                    <div class="transcript-section" data-transcript-file-id="${f.id}"></div>
                 </div>`;
             }).join('');
 
@@ -2593,6 +2911,17 @@ async function loadSessions() {
         const fileCount = sessions.reduce((acc, s) => acc + ((s.uploads || []).length), 0);
         const purgeBtn = document.getElementById('purge-btn');
         if (purgeBtn) purgeBtn.disabled = fileCount === 0;
+
+        // Lazy fetch transcript metadata for each file row to populate the
+        // download section + key_points subtitle. Throttled by browser parallel
+        // limit; fired and forgotten — failures leave the section empty.
+        document.querySelectorAll('[data-transcript-file-id]').forEach((el) => {
+            const fid = el.dataset.transcriptFileId;
+            if (fid && !el.dataset.loaded) {
+                el.dataset.loaded = '1';
+                loadTranscriptStatus(fid, el);
+            }
+        });
     } catch (e) {
         console.error('Failed to load sessions', e);
         const container = document.getElementById('sessions-list');
@@ -2608,6 +2937,94 @@ async function loadSessions() {
             activitySpinner.classList.remove('active');
             activitySpinner.title = 'Activités indisponibles';
         }
+    }
+}
+
+// ─── Transcript / CR downloads (Feature 3) ─────────────────────────────────
+// For each file row we lazy-load the available outputs (transcript, corrected,
+// CR) and render a download row + key_points subtitle. One HTTP per file —
+// acceptable since we display ~10-20 files and the endpoint is internal-only.
+//
+// TODO follow-up: button to send the rendered document to the user's Drive
+// folder. Out of scope for this PR — needs OAuth scope + Drive provider config.
+
+const TRANSCRIPT_KIND_LABELS = {
+    'transcript':              'Transcription brute',
+    'transcript-tagged':       'Transcription par locuteur',
+    'transcript-corrected':    'Transcription (sigles corrigés)',
+    'transcript-cleaned':      'Transcription nettoyée',
+    'transcript-reformulated': 'Discours indirect',
+};
+
+const TRANSCRIPT_KIND_FORMATS = {
+    'transcript':              ['txt', 'md', 'docx', 'odt'],
+    'transcript-tagged':       ['md', 'docx', 'odt'],
+    'transcript-corrected':    ['md', 'docx', 'odt'],
+    'transcript-cleaned':      ['txt', 'md', 'docx', 'odt'],
+    'transcript-reformulated': ['md', 'docx', 'odt'],
+};
+
+const CR_FORMATS = ['md', 'docx', 'odt', 'json'];
+
+function renderDownloadRow(label, fileId, kind, formats, isCR) {
+    const buttons = formats.map((ext) => {
+        const url = isCR
+            ? `/api/file/meeting-cr/${ext}/${fileId}`
+            : `/api/file/transcript/${kind}/${ext}/${fileId}`;
+        return `<a class="transcript-fmt-btn" href="${url}" target="_blank" rel="noopener" download>.${ext}</a>`;
+    }).join('');
+    return `<div class="transcript-download-row">
+        <span class="transcript-download-label">${escapeHtml(label)}</span>
+        <span class="transcript-download-buttons">${buttons}</span>
+    </div>`;
+}
+
+async function loadTranscriptStatus(fileId, container) {
+    try {
+        const resp = await fetch(`/api/file/transcript-status/${fileId}`);
+        if (!resp.ok) {
+            container.innerHTML = '';
+            return;
+        }
+        const data = await resp.json();
+        if (!data.available) {
+            container.innerHTML = '';
+            return;
+        }
+        const outputs = data.outputs || {};
+        const kp = data.key_points_summary || '';
+        const title = data.suggested_filename || '';
+        const subtitle = (title || kp)
+            ? `<div class="transcript-meta">
+                ${title ? `<div class="transcript-meta-title">${escapeHtml(title)}</div>` : ''}
+                ${kp ? `<pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>` : ''}
+              </div>`
+            : '';
+        const downloads = [];
+        for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
+            if (outputs[kind]) {
+                downloads.push(renderDownloadRow(
+                    TRANSCRIPT_KIND_LABELS[kind], fileId, kind,
+                    TRANSCRIPT_KIND_FORMATS[kind], false,
+                ));
+            }
+        }
+        if (outputs['meeting-cr']) {
+            downloads.push(renderDownloadRow(
+                'Compte-rendu structuré', fileId, 'meeting-cr', CR_FORMATS, true,
+            ));
+        }
+        if (!downloads.length && !subtitle) {
+            container.innerHTML = '';
+            return;
+        }
+        container.innerHTML = `${subtitle}${downloads.length ? `
+            <div class="transcript-download-block">
+                <div class="transcript-download-title">Téléchargements</div>
+                ${downloads.join('')}
+            </div>` : ''}`;
+    } catch (e) {
+        container.innerHTML = '';
     }
 }
 

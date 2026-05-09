@@ -108,6 +108,8 @@ Tous validés depuis la VM build-vm — cf
 | `cleaned_text` | TEXT | version OOB-cleaned par LLM |
 | `reformulated_text` | TEXT | discours indirect par LLM |
 | `meeting_analysis_json` | TEXT | analyse 5 sections sérialisée |
+| `suggested_filename` | VARCHAR(255) | titre court LLM (4-8 mots) — nom de fichier humain pour les downloads (cf migration 006) |
+| `key_points_summary` | TEXT | résumé 3-5 puces Markdown — affiché en sous-titre dans mydevices et inséré en tête des transcripts téléchargés |
 
 ## Variables d'environnement
 
@@ -126,6 +128,7 @@ Tous validés depuis la VM build-vm — cf
 | `KEVENT_GLOSSARY_CORRECTION_ENABLED` | `false` | active la correction LLM des sigles via glossaire (cf section *Glossaire* ci-dessous) |
 | `KEVENT_GLOSSARY_DIR` | `/app/glossaire` | dossier des fichiers de glossaire (`.md`/`.txt`/`.json`) lus au démarrage du worker |
 | `KEVENT_GLOSSARY_MAX_TERMS_PER_CALL` | `200` | nombre max de termes pertinents passés au LLM par appel (filtre `glossary_loader.filter_relevant`) |
+| `KEVENT_FILENAME_SUGGESTION_ENABLED` | `false` | active la step LLM (small) qui produit titre court + 3-5 points clés en JSON, utilisés pour les noms de fichiers téléchargés et le sous-titre UI mydevices |
 | `KEVENT_HTTP_TIMEOUT_SECONDS` | `600` | timeout par appel Kevent (long pour fichiers volumineux) |
 | `LITELLM_BASE_URL` | `""` | LiteLLM (chat hub) base URL |
 | `LITELLM_API_KEY` | `""` | bearer LiteLLM (cf K8s Secret, clé `litellm_api_key`) |
@@ -136,9 +139,11 @@ Tous validés depuis la VM build-vm — cf
 
 ## Activation séquencée en production
 
-1. **Apply migrations 004 + 005** sur postgres-internal :
+1. **Apply migrations 004 + 005 + 006** sur postgres-internal :
    ```bash
-   for m in 004_kevent_transcription.sql 005_kevent_glossary_correction.sql; do
+   for m in 004_kevent_transcription.sql \
+            005_kevent_glossary_correction.sql \
+            006_kevent_suggested_filename.sql; do
      kubectl --kubeconfig=$INT exec deploy/postgres-internal -- \
        psql -U audio_int -d audio_upload_int \
        -f /app/migrations/internal/$m
@@ -169,6 +174,10 @@ Tous validés depuis la VM build-vm — cf
    - `KEVENT_GLOSSARY_CORRECTION_ENABLED=true` (après migration 005) →
      `glossary_corrected_text` rempli quand des sigles MI sont détectés
      phonétiquement dans la transcription (cf section *Glossaire*)
+   - `KEVENT_FILENAME_SUGGESTION_ENABLED=true` (après migration 006) →
+     `suggested_filename` + `key_points_summary` remplis (1 appel LLM
+     `chat-small`, le moins coûteux). Utilisés par mydevices pour les
+     noms de fichiers téléchargés et le sous-titre par fichier.
    - `KEVENT_OOB_CLEANING_ENABLED=true` → `cleaned_text` rempli
    - `KEVENT_REFORMULATION_ENABLED=true` → `reformulated_text` rempli
    - `KEVENT_MEETING_ANALYSIS_ENABLED=true` → `meeting_analysis_json` rempli

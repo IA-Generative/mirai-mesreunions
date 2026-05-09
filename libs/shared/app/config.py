@@ -207,6 +207,10 @@ KEVENT_MEETING_ANALYSIS_ENABLED = _bool("KEVENT_MEETING_ANALYSIS_ENABLED", False
 KEVENT_GLOSSARY_CORRECTION_ENABLED = _bool("KEVENT_GLOSSARY_CORRECTION_ENABLED", False)
 KEVENT_GLOSSARY_DIR = _str("KEVENT_GLOSSARY_DIR", "/app/glossaire")
 KEVENT_GLOSSARY_MAX_TERMS_PER_CALL = _int("KEVENT_GLOSSARY_MAX_TERMS_PER_CALL", 200)
+# LLM-based filename suggestion (small model, 1 cheap call) — produces a short
+# title used as the stem of user-facing download filenames. NULL = fallback to
+# original filename + slot suffix.
+KEVENT_FILENAME_SUGGESTION_ENABLED = _bool("KEVENT_FILENAME_SUGGESTION_ENABLED", False)
 KEVENT_HTTP_TIMEOUT_SECONDS = _int("KEVENT_HTTP_TIMEOUT_SECONDS", 600)
 
 # LiteLLM Mirai (chat backend used by the kevent meeting-intelligence steps).

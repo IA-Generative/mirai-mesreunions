@@ -273,6 +273,10 @@ class UserAudioFile(InternalBase):
                                comment="indirect-speech reformulation: 'X a dit que…, Y a répondu…'")
     meeting_analysis_json = Column(Text, nullable=True,
                                    comment="5-section structured analysis: actors/themes/decisions/gaps/recommendations")
+    suggested_filename = Column(String(255), nullable=True,
+                                comment="LLM-suggested short title (4-8 words), used by user-facing downloads as filename stem; NULL if KEVENT_FILENAME_SUGGESTION_ENABLED off or step failed")
+    key_points_summary = Column(Text, nullable=True,
+                                comment="LLM-generated 3-5 bullet summary of the meeting key points (one short sentence each); displayed as subtitle in mydevices UI; NULL if step disabled or failed")
 
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
