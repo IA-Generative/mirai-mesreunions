@@ -85,6 +85,19 @@ POST /v1/audio/diarizations       model=pyannote-diarization
                                   multipart : file, model
                                   → { segments: [{speaker, start, end}], num_speakers, duration }
 
+──── Async / job-based mode (KEVENT_ASYNC_MODE=true) ────
+POST /jobs/{service_type}         multipart : file, model, operation, …
+                                  → 202 { job_id, service_type, model, status: "pending" }
+
+GET  /jobs/{service_type}/{id}    → { status: pending|processing|completed|failed,
+                                       result?, error?, created_at, updated_at }
+                                  ⚠️ le gateway DELETE le job après pickup d'un
+                                  status=completed → 1 seul GET final, pas de re-poll
+
+  service_type        : "audio" (Whisper + pyannote partagent ce type)
+  operation           : "transcription" | "translation" | "diarization"
+  model               : surcharge le défaut du type (optionnel)
+
 LiteLLM (chat for post-processing) :
 Base URL  : https://llm.api.ai.fake-domain.name
 Auth      : header "Authorization: Bearer <sk-…>"  (standard OpenAI)
@@ -130,6 +143,12 @@ Tous validés depuis la VM build-vm — cf
 | `KEVENT_GLOSSARY_MAX_TERMS_PER_CALL` | `200` | nombre max de termes pertinents passés au LLM par appel (filtre `glossary_loader.filter_relevant`) |
 | `KEVENT_FILENAME_SUGGESTION_ENABLED` | `false` | active la step LLM (small) qui produit titre court + 3-5 points clés en JSON, utilisés pour les noms de fichiers téléchargés et le sous-titre UI mydevices |
 | `KEVENT_HTTP_TIMEOUT_SECONDS` | `600` | timeout par appel Kevent (long pour fichiers volumineux) |
+| `KEVENT_ASYNC_MODE` | `false` | bascule sur le mode `POST /jobs/audio` + polling au lieu des endpoints sync. Statuts intermédiaires `kevent_queued` / `kevent_processing` poussés dans la DB pour l'UI mydevices. |
+| `KEVENT_ASYNC_SERVICE_TYPE` | `audio` | type enregistré côté gateway (cf `config.yaml` Mirai) — `audio` couvre Whisper + pyannote |
+| `KEVENT_ASYNC_TRANSCRIPTION_OPERATION` | `transcription` | sélecteur d'opération dans le service `audio` |
+| `KEVENT_ASYNC_DIARIZATION_OPERATION` | `diarization` | idem pour pyannote |
+| `KEVENT_ASYNC_POLL_INTERVAL_SECONDS` | `3.0` | intervalle entre 2 GET `/jobs/{type}/{id}` |
+| `KEVENT_ASYNC_TIMEOUT_SECONDS` | `0` (= reuse `KEVENT_HTTP_TIMEOUT_SECONDS`) | deadline du polling. Au-delà → `KeventTimeoutError` (sous-classe de `KeventTransientError` → la queue retry handle) |
 | `LITELLM_BASE_URL` | `""` | LiteLLM (chat hub) base URL |
 | `LITELLM_API_KEY` | `""` | bearer LiteLLM (cf K8s Secret, clé `litellm_api_key`) |
 | `LLM_MODEL_SMALL` | `chat-small` | modèle pour speaker naming |
@@ -276,6 +295,38 @@ l'analyse 5 sections voient les bons sigles. Best-effort comme les
 autres steps : un échec LLM ou l'absence de termes pertinents laisse
 `glossary_corrected_text = NULL` et la pipeline continue avec le texte
 original.
+
+## Mode async vs sync — quand basculer ?
+
+**Sync** (défaut) : 1 connexion HTTP qui bloque pendant toute l'inférence
+(~5-30 s pour Whisper sur fichier 1 min, peut atteindre plusieurs minutes
+sur fichier long). Simple, mais **risque de coupure** par un load-balancer
+ou proxy intermédiaire avec timeout court.
+
+**Async** (`KEVENT_ASYNC_MODE=true`) : POST `/jobs/audio` court (~100ms)
+qui retourne un `job_id`, puis polling GET `/jobs/audio/<id>` toutes les
+3 s jusqu'à `status=completed` ou `failed`. Le résultat est inliné dans
+le body du dernier GET.
+
+| Critère | Sync | Async |
+|---|---|---|
+| Connexions par fichier | 1 longue | 1 court submit + N courts GET (typiquement 3-15) |
+| Survit à un timeout LB | ❌ | ✅ |
+| Latence ajoutée | aucune | ~poll_interval/2 en moyenne |
+| Feedback UI intermédiaire | non | oui (`kevent_queued` → `kevent_processing` → `kevent_completed`) |
+| Compteur de jobs Mirai | inactif | incrémente `kevent_jobs_by_consumer_total` |
+
+**Recommandation** : activer `KEVENT_ASYNC_MODE=true` dès que les
+fichiers traités dépassent ~2 min, OU dès qu'un LB intermédiaire impose
+un timeout < `KEVENT_HTTP_TIMEOUT_SECONDS`. Le passage est purement env,
+pas de migration DB.
+
+> **Pickup-once** : le gateway supprime le job de Redis + S3 dès
+> qu'il sert le résultat sur un GET avec `status=completed`. Le client
+> respecte cette contrainte (1 seul GET final, jamais de re-poll après
+> terminal status). Si pour une raison quelconque le worker crash entre
+> le `wait_for_job` et le commit DB, le job est perdu — la queue
+> retry pousse alors un nouveau pull qui re-soumet un nouveau job.
 
 ## Sécurité et résilience
 

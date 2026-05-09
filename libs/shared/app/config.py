@@ -211,6 +211,20 @@ KEVENT_GLOSSARY_MAX_TERMS_PER_CALL = _int("KEVENT_GLOSSARY_MAX_TERMS_PER_CALL", 
 # title used as the stem of user-facing download filenames. NULL = fallback to
 # original filename + slot suffix.
 KEVENT_FILENAME_SUGGESTION_ENABLED = _bool("KEVENT_FILENAME_SUGGESTION_ENABLED", False)
+# Async / job-based mode for Kevent transcribe + diarize. When true, file-puller
+# uses POST /jobs/{service_type} + GET /jobs/{type}/{id} polling instead of the
+# blocking sync endpoints. Useful for long files where the sync HTTP connection
+# could be killed by a load-balancer or proxy.
+KEVENT_ASYNC_MODE = _bool("KEVENT_ASYNC_MODE", False)
+# `service_type` registered in the gateway config.yaml — defaults to `audio` for
+# both Whisper and pyannote (they share the type, dispatched via `operation`).
+KEVENT_ASYNC_SERVICE_TYPE = _str("KEVENT_ASYNC_SERVICE_TYPE", "audio")
+KEVENT_ASYNC_TRANSCRIPTION_OPERATION = _str("KEVENT_ASYNC_TRANSCRIPTION_OPERATION", "transcription")
+KEVENT_ASYNC_DIARIZATION_OPERATION = _str("KEVENT_ASYNC_DIARIZATION_OPERATION", "diarization")
+KEVENT_ASYNC_POLL_INTERVAL_SECONDS = float(_str("KEVENT_ASYNC_POLL_INTERVAL_SECONDS", "3.0"))
+# Reuses KEVENT_HTTP_TIMEOUT_SECONDS as the polling deadline by default —
+# operators wanting a different timeout can set this explicitly.
+KEVENT_ASYNC_TIMEOUT_SECONDS = float(_str("KEVENT_ASYNC_TIMEOUT_SECONDS", "0")) or None
 KEVENT_HTTP_TIMEOUT_SECONDS = _int("KEVENT_HTTP_TIMEOUT_SECONDS", 600)
 
 # LiteLLM Mirai (chat backend used by the kevent meeting-intelligence steps).

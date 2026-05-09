@@ -242,7 +242,8 @@ class UserAudioFile(InternalBase):
                                   comment=(
                                       "stub: pending|disabled|processing|completed|failed | "
                                       "mcr: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
-                                      "kevent: kevent_transcribing|kevent_completed|"
+                                      "kevent: kevent_transcribing|kevent_queued|"
+                                      "kevent_processing|kevent_completed|"
                                       "kevent_partially_completed|kevent_failed"
                                   ))
     transcription_text = Column(Text, nullable=True)

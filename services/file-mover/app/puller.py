@@ -55,6 +55,9 @@ from libs.shared.app.config import (
     KEVENT_GLOSSARY_CORRECTION_ENABLED, KEVENT_GLOSSARY_DIR,
     KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
     KEVENT_FILENAME_SUGGESTION_ENABLED,
+    KEVENT_ASYNC_MODE, KEVENT_ASYNC_SERVICE_TYPE,
+    KEVENT_ASYNC_TRANSCRIPTION_OPERATION, KEVENT_ASYNC_DIARIZATION_OPERATION,
+    KEVENT_ASYNC_POLL_INTERVAL_SECONDS, KEVENT_ASYNC_TIMEOUT_SECONDS,
     KEVENT_HTTP_TIMEOUT_SECONDS,
     LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
     LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
@@ -314,13 +317,61 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     audio_bytes = file_data.read()
     content_type = "audio/mp4"  # transcoded files are always .mp4
 
-    # ── Step 1 — transcription (always) ────────────────────────────────
-    try:
-        transcription = client.transcribe(
+    async_timeout = KEVENT_ASYNC_TIMEOUT_SECONDS or float(KEVENT_HTTP_TIMEOUT_SECONDS)
+
+    def _on_kevent_status(kevent_status: str):
+        """Map kevent job statuses → our DB transcription_status so the
+        mydevices UI can show 'queued' / 'processing' while polling."""
+        mapped = {
+            "pending": "kevent_queued",
+            "processing": "kevent_processing",
+        }.get(kevent_status)
+        if mapped:
+            try:
+                _set_user_audio_status(audio_file_id, mapped,
+                                       transcription_engine="kevent")
+            except Exception:
+                logger.exception("Failed to push intermediate status %s", mapped)
+
+    def _kevent_transcribe():
+        if KEVENT_ASYNC_MODE:
+            return client.transcribe_async(
+                audio_bytes=audio_bytes,
+                filename=transcoded_filename,
+                content_type=content_type,
+                service_type=KEVENT_ASYNC_SERVICE_TYPE,
+                operation=KEVENT_ASYNC_TRANSCRIPTION_OPERATION,
+                poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
+                timeout=async_timeout,
+                on_status=_on_kevent_status,
+            )
+        return client.transcribe(
             audio_bytes=audio_bytes,
             filename=transcoded_filename,
             content_type=content_type,
         )
+
+    def _kevent_diarize():
+        if KEVENT_ASYNC_MODE:
+            return client.diarize_async(
+                audio_bytes=audio_bytes,
+                filename=transcoded_filename,
+                content_type=content_type,
+                service_type=KEVENT_ASYNC_SERVICE_TYPE,
+                operation=KEVENT_ASYNC_DIARIZATION_OPERATION,
+                poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
+                timeout=async_timeout,
+                on_status=_on_kevent_status,
+            )
+        return client.diarize(
+            audio_bytes=audio_bytes,
+            filename=transcoded_filename,
+            content_type=content_type,
+        )
+
+    # ── Step 1 — transcription (always) ────────────────────────────────
+    try:
+        transcription = _kevent_transcribe()
     except KeventAuthError:
         logger.exception("Kevent auth error on transcription for %s", audio_file_id)
         _set_user_audio_status(audio_file_id, "kevent_failed",
@@ -352,9 +403,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     diarization: Optional[dict] = None
     if KEVENT_DIARIZATION_ENABLED:
         try:
-            diarization = client.diarize(audio_bytes=audio_bytes,
-                                         filename=transcoded_filename,
-                                         content_type=content_type)
+            diarization = _kevent_diarize()
             logger.info(
                 "Kevent diarize: %d segments, num_speakers=%s",
                 len(diarization.get("segments") or []),
