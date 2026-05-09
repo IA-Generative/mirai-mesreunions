@@ -1,29 +1,48 @@
 """
 File Mover Service (Zone Externe)
 =================================
-Consumes from the file-ready queue and NOTIFIES the internal zone
-that a file is ready to be pulled.
+Consumes from the file-ready queue and notifies the internal zone that a
+file is ready to be pulled. The notification is a durable AMQP message on
+the `internal_pull` queue (the source of truth) plus an optional best-effort
+HTTP trigger to wake the puller up immediately.
 
-CRITICAL SECURITY: This service NEVER pushes files to the internal zone.
-It only sends a notification (file metadata) via API. The internal zone's
-File Puller then initiates the data transfer (PULL pattern).
+CRITICAL SECURITY: this service NEVER pushes file content into the internal
+zone. The notification carries metadata only; the internal zone's File
+Puller is responsible for downloading the file from S3 once it sees the
+message — that "PULL pattern" is what justifies the cross-zone trust break.
 """
 
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from typing import Optional
 
 import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
-    load_ext_db, RabbitMQConfig, INTERNAL_API_URL, INTERNAL_API_TOKEN,
+    load_ext_db,
+    RabbitMQConfig,
+    INTERNAL_API_TOKEN,
+    INTERNAL_PUSH_TRIGGER_URL,
 )
-from libs.shared.app.models import ExternalBase, UploadedFile, UploadSession, UploadStatus, UploadTokenOption
+from libs.shared.app.models import (
+    ExternalBase,
+    UploadedFile,
+    UploadSession,
+    UploadStatus,
+    UploadTokenOption,
+)
 from libs.shared.app.database import create_session_factory, init_tables
-from libs.shared.app.queue_helper import consume_queue, declare_queues, QUEUE_FILE_READY, RabbitMQConfig
+from libs.shared.app.queue_helper import (
+    consume_queue,
+    declare_queues,
+    publish_message,
+    QUEUE_FILE_READY,
+    QUEUE_INTERNAL_PULL,
+)
 from libs.shared.app.security import require_strong_shared_secret
+from libs.shared.app.trigger_url import resolved_trigger_url
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -32,33 +51,44 @@ db_cfg = load_ext_db()
 rabbit_cfg = RabbitMQConfig()
 
 UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://upload-portal:8081")
-PULL_REQUEST_TIMEOUT_SECONDS = max(15, int(os.getenv("PULL_REQUEST_TIMEOUT_SECONDS", "90")))
+PULL_TRIGGER_HTTP_TIMEOUT_SECONDS = max(1, int(os.getenv("PULL_TRIGGER_HTTP_TIMEOUT_SECONDS", "3")))
+INTERNAL_PUSH_TRIGGER_TOKEN = os.getenv("INTERNAL_PUSH_TRIGGER_TOKEN", "")
+
+# Resolved once at import time so the boot log is unambiguous. Tests can
+# override by re-reading the env var via _resolve_trigger_url_from_env().
+_TRIGGER_URL: Optional[str] = resolved_trigger_url(INTERNAL_PUSH_TRIGGER_URL)
+
+
+def _resolve_trigger_url_from_env() -> Optional[str]:
+    """Helper for tests to re-read the env var after monkey-patching."""
+    return resolved_trigger_url(os.getenv("INTERNAL_PUSH_TRIGGER_URL", ""))
 
 
 def notify_portal(session_obj, file_obj, status_msg):
     """Notify the upload portal of a status change."""
     try:
-        requests.post(f"{UPLOAD_PORTAL_URL}/api/notify-status", json={
-            "qr_token": session_obj.qr_token if session_obj else None,
-            "file_id": str(file_obj.id),
-            "filename": file_obj.original_filename,
-            "status": file_obj.status.value,
-            "message": status_msg,
-            "quality": file_obj.audio_quality_score,
-        }, headers={
-            "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
-            "Content-Type": "application/json",
-        }, timeout=5)
+        requests.post(
+            f"{UPLOAD_PORTAL_URL}/api/notify-status",
+            json={
+                "qr_token": session_obj.qr_token if session_obj else None,
+                "file_id": str(file_obj.id),
+                "filename": file_obj.original_filename,
+                "status": file_obj.status.value,
+                "message": status_msg,
+                "quality": file_obj.audio_quality_score,
+            },
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=5,
+        )
     except Exception as e:
         logger.warning("Failed to notify portal: %s", e)
 
 
-def notify_internal_zone(message: dict) -> bool:
-    """
-    Send a NOTIFICATION (not the file) to the internal zone's File Puller.
-    The internal zone will then PULL the file from processed-staging S3.
-    """
-    payload = {
+def _build_pull_payload(message: dict) -> dict:
+    return {
         "file_id": message["file_id"],
         "session_id": message["session_id"],
         "user_sub": message["user_sub"],
@@ -71,22 +101,50 @@ def notify_internal_zone(message: dict) -> bool:
         "auto_transcribe": bool(message.get("auto_transcribe", True)),
     }
 
+
+def _send_http_trigger(payload: dict) -> bool:
+    """Best-effort wake-up POST. Never raises — caller is told only via bool."""
+    if _TRIGGER_URL is None:
+        return False
+    headers = {"Content-Type": "application/json"}
+    if INTERNAL_PUSH_TRIGGER_TOKEN:
+        headers["Authorization"] = f"Bearer {INTERNAL_PUSH_TRIGGER_TOKEN}"
     try:
         resp = requests.post(
-            INTERNAL_API_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            timeout=PULL_REQUEST_TIMEOUT_SECONDS,
+            _TRIGGER_URL,
+            json={"file_id": payload.get("file_id")},
+            headers=headers,
+            timeout=PULL_TRIGGER_HTTP_TIMEOUT_SECONDS,
         )
-        resp.raise_for_status()
-        logger.info("Internal zone notified for file %s", message["file_id"])
+        if resp.status_code >= 400:
+            logger.warning(
+                "Pull trigger HTTP returned %s for file_id=%s; queue will catch up",
+                resp.status_code, payload.get("file_id"),
+            )
+            return False
         return True
-    except requests.RequestException as e:
-        logger.error("Failed to notify internal zone: %s", e)
+    except Exception as e:
+        logger.warning(
+            "Pull trigger HTTP call failed (%s); queue will catch up", e,
+        )
         return False
+
+
+def publish_internal_pull(message: dict) -> bool:
+    """
+    Publish a durable AMQP notification on internal_pull, then optionally
+    fire the HTTP wake-up. The AMQP publish is the success criterion: if it
+    succeeds, the message is guaranteed to be processed eventually (via
+    polling at worst); the HTTP call is just a latency optimisation.
+    """
+    payload = _build_pull_payload(message)
+    try:
+        publish_message(rabbit_cfg, QUEUE_INTERNAL_PULL, payload)
+    except Exception:
+        logger.exception("Failed to publish internal_pull for %s", payload.get("file_id"))
+        return False
+    _send_http_trigger(payload)  # best-effort, ignore outcome
+    return True
 
 
 def process_file_ready(message: dict) -> bool:
@@ -118,19 +176,18 @@ def process_file_ready(message: dict) -> bool:
         db.commit()
         notify_portal(session_obj, file_obj, file_obj.status_message)
 
-        # Notify internal zone (PULL pattern - only metadata, not the file)
+        # Notify internal zone via AMQP (and optionally HTTP trigger).
         msg = dict(message)
         msg["auto_transcribe"] = bool(token_opt.auto_transcribe) if token_opt is not None else True
-        success = notify_internal_zone(msg)
+        published = publish_internal_pull(msg)
 
-        if success:
+        if published:
             file_obj.status = UploadStatus.TRANSFERRING
             file_obj.status_message = "Transfert démarré côté interne (20%)"
             db.commit()
             notify_portal(session_obj, file_obj, file_obj.status_message)
         else:
-            # Will be retried by RabbitMQ
-            logger.warning("Internal notification failed, will retry")
+            logger.warning("Internal_pull publish failed for %s, retrying via queue", file_id)
             return False
 
         return True
@@ -147,6 +204,13 @@ def main():
     require_strong_shared_secret("INTERNAL_API_TOKEN")
     init_tables(db_cfg, ExternalBase)
     declare_queues(rabbit_cfg)
+    if _TRIGGER_URL is not None:
+        logger.info("Pull HTTP trigger ENABLED towards %s", _TRIGGER_URL)
+    else:
+        logger.info(
+            "Pull HTTP trigger DISABLED (INTERNAL_PUSH_TRIGGER_URL is empty or "
+            "not a valid http(s) URL); internal puller will catch up via polling"
+        )
     consume_queue(rabbit_cfg, QUEUE_FILE_READY, process_file_ready)
 
 

@@ -17,6 +17,7 @@ QUEUE_AV_SCAN = "av_scan"
 QUEUE_TRANSCODE = "transcode"
 QUEUE_FILE_READY = "file_ready"
 QUEUE_TRANSCRIPTION = "transcription"
+QUEUE_INTERNAL_PULL = "internal_pull"
 
 RETRY_HEADER = "x-retry-count"
 DEFAULT_MAX_RETRIES = max(0, int(os.getenv("QUEUE_MAX_RETRIES", "5")))
@@ -83,7 +84,13 @@ def declare_queues(cfg: RabbitMQConfig):
     """Declare all queues with durability."""
     conn = get_connection(cfg)
     channel = conn.channel()
-    for queue_name in [QUEUE_AV_SCAN, QUEUE_TRANSCODE, QUEUE_FILE_READY, QUEUE_TRANSCRIPTION]:
+    for queue_name in [
+        QUEUE_AV_SCAN,
+        QUEUE_TRANSCODE,
+        QUEUE_FILE_READY,
+        QUEUE_TRANSCRIPTION,
+        QUEUE_INTERNAL_PULL,
+    ]:
         channel.queue_declare(queue=queue_name, durable=True)
         logger.info("Declared queue: %s", queue_name)
     conn.close()
@@ -189,3 +196,86 @@ def consume_queue(
     channel.basic_consume(queue=queue, on_message_callback=_on_message)
     logger.info("Waiting for messages on %s...", queue)
     channel.start_consuming()
+
+
+def drain_queue_once(
+    cfg: RabbitMQConfig,
+    queue: str,
+    callback: Callable[[dict], bool],
+    max_retries: Optional[int] = None,
+    on_give_up: Optional[Callable[[dict, int], None]] = None,
+) -> int:
+    """
+    Drain a queue with basic.get until empty, then close. Returns the number
+    of messages handled (acked + republished combined).
+
+    Used for periodic polling on the consumer side: a worker can call this
+    every N seconds in a thread instead of running a long-lived basic.consume.
+    The same retry-counter / republish / give-up policy as consume_queue
+    applies — keep the two paths semantically identical so messages behave
+    the same whether they were delivered via push subscription or pull poll.
+    """
+    if max_retries is None:
+        max_retries = DEFAULT_MAX_RETRIES
+
+    conn = get_connection(cfg)
+    channel = conn.channel()
+    channel.queue_declare(queue=queue, durable=True)
+
+    handled = 0
+    try:
+        while True:
+            method, properties, body = channel.basic_get(queue=queue, auto_ack=False)
+            if method is None:
+                break
+            handled += 1
+            try:
+                message = json.loads(body)
+            except Exception:
+                logger.exception("Unparseable message on %s, dropping", queue)
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                continue
+            logger.info("Drained from %s: %s", queue, message.get("file_id", "?"))
+            try:
+                success = callback(message)
+            except Exception:
+                logger.exception("Error processing drained message from %s", queue)
+                success = False
+            if success:
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                continue
+            headers = (properties.headers if properties else None)
+            should_retry, new_headers, count = next_retry_decision(headers, max_retries)
+            if should_retry:
+                channel.basic_publish(
+                    exchange="",
+                    routing_key=queue,
+                    body=body,
+                    properties=pika.BasicProperties(
+                        delivery_mode=2,
+                        content_type=(properties.content_type if properties else "application/json"),
+                        headers=new_headers,
+                    ),
+                )
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                logger.warning(
+                    "Republished to %s for retry %d/%d: file_id=%s",
+                    queue, count, max_retries, message.get("file_id", "?"),
+                )
+                continue
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+            logger.error(
+                "Dropping message from %s after %d retries: file_id=%s",
+                queue, count, message.get("file_id", "?"),
+            )
+            if on_give_up is not None:
+                try:
+                    on_give_up(message, count)
+                except Exception:
+                    logger.exception("on_give_up callback raised for %s", queue)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("Failed to close drain connection cleanly", exc_info=True)
+    return handled

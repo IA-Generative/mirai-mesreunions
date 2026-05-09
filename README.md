@@ -21,10 +21,10 @@ flowchart LR
     CG["Code Generator<br/>(OIDC/Keycloak)"]
     UP["Upload Portal<br/>(mobile)"]
     EOPT["upload_token_options<br/>(auto_transcribe)"]
-    S3U["S3 upload-staging"]
+    S3U["S3 audio-upload<br/>(brut)"]
     AV["AV Worker<br/>(ClamAV)"]
     TR["Transcode Worker<br/>(FFmpeg)"]
-    S3P["S3 processed-staging"]
+    S3P["S3 audio-processed<br/>(guichet DMZ ↔ interne)"]
     FM["File Mover<br/>(notificateur)"]
 
     CG -->|"QR url"| UP
@@ -36,20 +36,29 @@ flowchart LR
   subgraph INT["ZONE INTERNE"]
     TI["Token Issuer<br/>(autorité unique token)"]
     IOPT["issued_token_options<br/>(auto_transcribe)"]
-    FP["File Puller<br/>(PULL depuis processed S3)"]
-    S3I["S3 internal-storage"]
+    FP["File Puller<br/>(PULL depuis audio-processed)"]
+    S3I["S3 audio-internal<br/>(zone protégée)"]
     STT["Transcription Stub<br/>(conditionnel)"]
     DB["PostgreSQL"]
-    MQ["RabbitMQ"]
 
     TI --> IOPT
     FP --> S3I
     FP -->|"si auto_transcribe=true"| STT
   end
 
+  MQ["RabbitMQ<br/>(broker, en zone EXT)"]
+  EXT --- MQ
+
   CG -->|"API token<br/>(Bearer auth)"| TI
-  FM -->|"NOTIFY metadata + auto_transcribe<br/>(Bearer auth)"| FP
+  FM -->|"publish internal_pull"| MQ
+  FP -->|"consume internal_pull<br/>(socket sortante)"| MQ
+  FM -.->|"trigger HTTP optionnel<br/>(Bearer + ACL nginx)"| FP
 ```
+
+> Le broker RabbitMQ vit côté DMZ et la zone interne ouvre une socket
+> sortante pour publier *et* consommer ses queues. Aucune connexion HTTP
+> entrante n'atteint la zone interne hors du chemin `pull-trigger.…` qui
+> est filtré par ACL IP au niveau nginx puis bearer applicatif.
 
 ## Flux de génération de token (interne → externe)
 
@@ -81,24 +90,24 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 | **upload-portal** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
 | **antivirus-worker** | Externe | — | Scan ClamAV, quarantaine si virus |
 | **transcode-worker** | Externe | — | FFmpeg : loudnorm dual-pass (linear), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
-| **file-mover** | Externe | — | Notifie la zone interne qu'un fichier est prêt (metadata uniquement), avec retries RabbitMQ |
+| **file-mover** | Externe | — | Publie une notification *fichier prêt* sur la queue durable `internal_pull` (AMQP) ; trigger HTTP optionnel pour ramener la latence quasi-zéro |
 | **token-issuer** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
-| **file-puller** | Interne | 8090 | Tire les fichiers transcodés depuis S3 processed-staging |
+| **file-puller** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
 | **transcription-stub** | Interne | — | Simule la transcription STT (remplaçable par Whisper/Azure) |
 
 ## Principes de sécurité
 
 1. **Tokens générés côté interne** — Le `token-issuer` est la seule autorité. La zone externe ne peut pas forger de codes de session. En cas de compromission DMZ, aucun token frauduleux ne peut être créé.
 
-2. **Pattern PULL strict** — Les données ne sont jamais poussées vers l'intérieur. La zone externe *notifie* (metadata JSON), la zone interne *tire* le fichier depuis S3.
+2. **Pattern PULL strict (notification + données)** — Aucune donnée ni notification n'est *poussée* vers la zone interne. La zone externe publie sur la queue AMQP `internal_pull` ; la zone interne ouvre une socket sortante vers le broker pour la consommer, puis tire le fichier depuis S3. Le wake-up HTTP optionnel est purement une optimisation de latence et fonctionne sous bearer + ACL nginx — sa rotation n'a aucun impact fonctionnel grâce au polling de la queue.
 
-3. **Deux points d'entrée contrôlés** — La zone interne n'expose que deux services via NetworkPolicy :
-   - `token-issuer:8091` ← accessible uniquement par `code-generator`
-   - `file-puller:8090` ← accessible uniquement par `file-mover`
+3. **Surface d'entrée contrôlée vers la zone interne** — La zone interne n'expose que deux services :
+   - `token-issuer:8091` ← accessible uniquement par `code-generator` via NetworkPolicy intra-cluster
+   - `file-puller` via Ingress public restreint `pull-trigger.fake-domain.name` : annotation `whitelist-source-range` (IP NAT egress du file-mover + IPs admins), bearer `INTERNAL_PUSH_TRIGGER_TOKEN`, et 4e couche optionnelle d'ACL applicative. Le port 8090 intra-cluster ne sert plus qu'aux probes Kubernetes (`/healthz`).
 
-4. **3 stockages S3 séparés** — `upload-staging` (bruts), `processed-staging` (transcodés, zone bridge), `internal-storage` (comptes usagers, zone interne uniquement)
+4. **3 stockages S3 séparés** — `audio-upload` (bruts, DMZ), `audio-processed` (transcodés, *guichet* DMZ↔interne avec IAM segmenté writer/reader), `audio-internal` (comptes usagers, zone protégée uniquement)
 
-5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 7 jours), limite de 5 uploads par session (configurable)
+5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 7 jours), limite d'uploads par session configurable (299 par défaut, plafond serveur silencieux côté pipeline)
 
 6. **Analyse antivirale obligatoire** — Tout fichier passe par ClamAV. Fichiers infectés en quarantaine.
 
@@ -462,7 +471,7 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `CODE_TTL_MINUTES` | `10080` | Durée de validité par défaut des codes (7 jours) |
 | `CODE_TTL_MAX_MINUTES` | `10080` | TTL max (7 jours) |
 | `ALLOW_SHORT_QR_TTL_SECONDS_TEST` | `false` | Autorise les TTL de test `15s`/`30s` |
-| `MAX_UPLOADS_PER_SESSION` | `5` | Uploads max par code |
+| `MAX_UPLOADS_PER_SESSION` | `299` | Uploads max par code (plafond silencieux côté serveur) |
 | `CODE_LENGTH` | `6` | Longueur du code simple |
 | `UPLOAD_STATUS_VIEW_TTL_MINUTES` | `60` | Durée de consultation du statut après expiration |
 | `UPLOAD_EXPIRY_GRACE_SECONDS` | `300` | Fenêtre de grâce pour terminer un upload après expiration du code |
@@ -470,7 +479,12 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `EXTERNAL_PURGE_MAX_AGE_HOURS` | `12` | Âge max des fichiers externes avant purge |
 | `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté file-puller |
 | `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max des fichiers importés côté intranet avant purge |
-| `PULL_REQUEST_TIMEOUT_SECONDS` | `90` | Timeout HTTP (secondes) de `file-mover` vers `file-puller` |
+| `INTERNAL_PUSH_TRIGGER_URL` | `""` | URL HTTP(S) de wake-up cross-cluster vers `pull-trigger.…/api/v1/pull-trigger`. Toute valeur non-URL (`""`, `deactivate`, `false`, …) désactive le trigger ; le file-puller continue à drainer la queue par polling |
+| `INTERNAL_PUSH_TRIGGER_TOKEN` | — | Bearer pour `/api/v1/pull-trigger` (côté file-mover et file-puller). Distinct de `INTERNAL_API_TOKEN`, rotable indépendamment |
+| `INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST` | `""` | CIDR list applicative redondante côté file-puller (vide = on s'appuie sur l'ACL nginx) |
+| `INTERNAL_PULL_QUEUE_INTERVAL_SECONDS` | `30` | Intervalle de drain périodique de la queue `internal_pull` côté file-puller |
+| `PULL_TRIGGER_HTTP_TIMEOUT_SECONDS` | `3` | Timeout du POST best-effort de file-mover vers le trigger HTTP |
+| `QUEUE_MAX_RETRIES` | `5` | Nombre max de retries (via header `x-retry-count`) avant qu'un message empoisonné soit droppé par les workers consommateurs |
 | `DEVICE_TOKEN_RETENTION_HOURS` | `168` | Durée de rétention d'un enrôlement device (zone interne) |
 | `DEVICE_REVALIDATE_INTERVAL_SECONDS` | `14400` | Intervalle de revalidation asynchrone des device tokens côté upload |
 | `DEVICE_REVALIDATE_MAX_FAILURE_SECONDS` | `14400` | Fenêtre max d'échec backend avant refus des requêtes device |
@@ -510,11 +524,11 @@ python deploy/scripts/measure_normalization_impact.py \
 
 ```mermaid
 flowchart TD
-  U["Upload mobile"] --> S3U["S3 upload-staging"] --> AV["Scan ClamAV"]
+  U["Upload mobile"] --> S3U["S3 audio-upload<br/>(brut)"] --> AV["Scan ClamAV"]
   AV -->|CLEAN| TR["FFmpeg transcode<br/>loudnorm dual-pass -> highpass 80Hz -> lowpass 7kHz -> alimiter<br/>16kHz mono WAV"]
   AV -->|INFECTED| Q["Quarantaine"]
-  TR --> QL["Score qualité 1-5"] --> S3P["S3 processed-staging"]
-  S3P --> N["NOTIFY (+ auto_transcribe)"] --> P["PULL"] --> S3I["S3 internal-storage"]
+  TR --> QL["Score qualité 1-5"] --> S3P["S3 audio-processed<br/>(guichet)"]
+  S3P --> N["NOTIFY queue internal_pull<br/>(+ auto_transcribe)"] --> P["PULL côté interne"] --> S3I["S3 audio-internal<br/>(zone protégée)"]
   P --> C{"auto_transcribe ?"}
   C -->|oui| STT["Transcription STT (stub)"]
   C -->|non| SKIP["Pas de transcription<br/>(audio optimisé voix conservé)"]

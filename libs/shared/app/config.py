@@ -127,6 +127,16 @@ ALLOWED_AUDIO_EXTENSIONS = _list("ALLOWED_AUDIO_EXTENSIONS", "mp3,wav,ogg,flac,m
 UPLOAD_PORTAL_BASE_URL = _str("UPLOAD_PORTAL_BASE_URL", "http://localhost:8081")
 MYDEVICES_PORTAL_URL = _str("MYDEVICES_PORTAL_URL", "")
 TOKEN_EXPIRY_WARNING_DAYS = _int("TOKEN_EXPIRY_WARNING_DAYS", 7)
+# Internal-pull cross-cluster channel.
+#   INTERNAL_PUSH_TRIGGER_URL : if it parses as an HTTP(S) URL with a non-empty
+#       host, file-mover will POST a wake-up to that URL after publishing the
+#       internal_pull AMQP message; otherwise the trigger is disabled and
+#       file-puller picks the message up at the next polling tick.
+#   INTERNAL_PULL_QUEUE_INTERVAL_SECONDS : how often file-puller drains the
+#       internal_pull queue. Acts as a safety net even when the HTTP trigger
+#       is enabled — anything missed by the trigger is caught next tick.
+INTERNAL_PUSH_TRIGGER_URL = _str("INTERNAL_PUSH_TRIGGER_URL", "")
+INTERNAL_PULL_QUEUE_INTERVAL_SECONDS = _int("INTERNAL_PULL_QUEUE_INTERVAL_SECONDS", 30)
 FFMPEG_AUDIO_FILTER = _str("FFMPEG_AUDIO_FILTER", "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11")
 TRANSCODE_SAMPLE_RATE = _int("TRANSCODE_SAMPLE_RATE", 16000)
 TRANSCODE_CHANNELS = _int("TRANSCODE_CHANNELS", 1)

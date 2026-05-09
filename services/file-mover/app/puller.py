@@ -1,16 +1,30 @@
 """
 File Puller Service (Zone Interne)
 ==================================
-API endpoint that receives notifications from the external zone.
-Upon notification, it PULLS the transcoded file from processed-staging S3
-and stores it in internal-storage S3.
+Entry point that integrates a transcoded file into the protected zone.
 
-SECURITY: Only entry point into the internal zone.
-- Only accepts authenticated API calls with bearer token
-- INITIATES file transfer (pull), never accepts pushed data
-- Notification only contains metadata, not file content
+Two ways to learn that a new file is ready:
+  1. Drain ``internal_pull`` queue periodically (every
+     ``INTERNAL_PULL_QUEUE_INTERVAL_SECONDS``). The AMQP socket is opened
+     **outbound** from inside the protected zone — no inbound connection
+     ever crosses the boundary. This is the source of truth.
+  2. ``/api/v1/pull-trigger`` HTTP endpoint exposed via Ingress: an
+     optional, bearer-protected wake-up that lets file-mover ask "drain now"
+     and reach near-zero latency. If anything blocks the trigger (ACL,
+     network, token rotated), the polling tick still catches up.
+
+Both paths converge on ``_perform_pull(payload)``, which does the actual
+S3 download/upload, DB insert, and transcription enqueue. The function is
+idempotent: calling it twice with the same ``(user_sub, simple_code,
+transcoded_filename)`` tuple results in a single internal record.
+
+The legacy ``/api/v1/pull`` route is preserved for backward compatibility
+with deployments where in-cluster DNS still works (local docker-compose,
+single-cluster integrations). It calls ``_perform_pull`` directly with the
+HTTP body — same logic, just a different trigger.
 """
 
+import ipaddress
 import logging
 import os
 import sys
@@ -29,11 +43,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
     load_int_db, load_s3_processed, load_s3_internal,
     INTERNAL_API_TOKEN, RabbitMQConfig,
+    INTERNAL_PULL_QUEUE_INTERVAL_SECONDS,
 )
 from libs.shared.app.models import InternalBase, UserAudioFile
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.s3_helper import download_fileobj, upload_fileobj, ensure_bucket, delete_object
-from libs.shared.app.queue_helper import publish_message, declare_queues, QUEUE_TRANSCRIPTION
+from libs.shared.app.queue_helper import (
+    publish_message,
+    declare_queues,
+    drain_queue_once,
+    QUEUE_TRANSCRIPTION,
+    QUEUE_INTERNAL_PULL,
+)
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -47,6 +68,7 @@ s3_internal_cfg = load_s3_internal()
 rabbit_cfg = RabbitMQConfig()
 SessionLocal = None
 _purge_thread_started = False
+_pull_loop_thread_started = False
 
 INTERNAL_PURGE_INTERVAL_SECONDS = max(60, int(os.getenv("INTERNAL_PURGE_INTERVAL_SECONDS", "86400")))
 INTERNAL_PURGE_MAX_AGE_DAYS = max(1, int(os.getenv("INTERNAL_PURGE_MAX_AGE_DAYS", "7")))
@@ -55,6 +77,37 @@ INTERNAL_PURGE_LOCK_ID = int(os.getenv("INTERNAL_PURGE_LOCK_ID", "910019001"))
 EXTERNAL_CALLBACK_URL = os.getenv(
     "EXTERNAL_CALLBACK_URL", "http://upload-portal:8081/api/notify-status"
 )
+
+INTERNAL_PUSH_TRIGGER_TOKEN = os.getenv("INTERNAL_PUSH_TRIGGER_TOKEN", "")
+_TRIGGER_IP_ALLOWLIST_RAW = os.getenv("INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST", "")
+
+
+def _parse_ip_allowlist(raw: str):
+    """Return a list of ip_network objects, ignoring blank entries."""
+    nets = []
+    for token in (raw or "").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(token, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid CIDR in trigger allowlist: %s", token)
+    return nets
+
+
+_TRIGGER_ALLOWED_NETS = _parse_ip_allowlist(_TRIGGER_IP_ALLOWLIST_RAW)
+
+
+def _client_ip_allowed(remote_addr: str) -> bool:
+    """Empty allowlist => allow (rely on nginx whitelist + bearer)."""
+    if not _TRIGGER_ALLOWED_NETS:
+        return True
+    try:
+        client = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return False
+    return any(client in net for net in _TRIGGER_ALLOWED_NETS)
 
 
 def notify_external_status(file_id: str, status: str, message: str, timeout: int = 5) -> None:
@@ -83,6 +136,12 @@ def verify_token():
     return verify_bearer_token(auth, INTERNAL_API_TOKEN)
 
 
+def verify_trigger_token():
+    """Bearer for the new /api/v1/pull-trigger route — distinct from INTERNAL_API_TOKEN."""
+    auth = request.headers.get("Authorization", "")
+    return bool(INTERNAL_PUSH_TRIGGER_TOKEN) and verify_bearer_token(auth, INTERNAL_PUSH_TRIGGER_TOKEN)
+
+
 def _guess_audio_mime(filename: str) -> str:
     ext = Path(filename or "").suffix.lower()
     if ext == ".mp4":
@@ -94,6 +153,122 @@ def _guess_audio_mime(filename: str) -> str:
     if ext == ".ogg":
         return "audio/ogg"
     return "application/octet-stream"
+
+
+def _perform_pull(payload: dict) -> dict:
+    """
+    Pull a transcoded file from processed-staging into the internal zone.
+
+    Idempotent: if a UserAudioFile already exists for this internal_key, the
+    function returns ``status=already_pulled`` without re-downloading.
+
+    Raises on infrastructure errors (S3 unreachable, DB down) so the caller
+    (queue drain or HTTP handler) can decide whether to retry. Returns a
+    dict on success suitable for JSON response.
+    """
+    required = ("file_id", "user_sub", "simple_code", "transcoded_filename")
+    missing = [f for f in required if f not in payload]
+    if missing:
+        raise ValueError(f"Missing fields: {missing}")
+
+    file_id = payload["file_id"]
+    user_sub = payload["user_sub"]
+    transcoded_filename = payload["transcoded_filename"]
+    simple_code = payload["simple_code"]
+    auto_transcribe = bool(payload.get("auto_transcribe", True))
+    internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
+
+    logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
+
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.stored_filename == internal_key)
+            .first()
+        )
+    finally:
+        db.close()
+    if existing:
+        logger.info("Idempotent replay detected for %s, key already present: %s", file_id, internal_key)
+        notify_external_status(
+            file_id,
+            "transferred",
+            "Fichier déjà intégré (idempotence). Transcription en cours... (100%)",
+        )
+        return {"status": "already_pulled", "file_id": file_id, "internal_key": internal_key}
+
+    notify_external_status(file_id, "transferring", "Transfert: téléchargement depuis la zone de transit (45%)")
+    logger.info("Pulling from processed-staging: %s", transcoded_filename)
+    file_data = download_fileobj(s3_processed_cfg, transcoded_filename)
+    file_size = file_data.getbuffer().nbytes
+
+    notify_external_status(file_id, "transferring", "Transfert: copie vers la zone interne (70%)")
+    upload_fileobj(s3_internal_cfg, internal_key, file_data, _guess_audio_mime(transcoded_filename))
+    logger.info("Stored internally: %s (%d bytes)", internal_key, file_size)
+
+    notify_external_status(file_id, "transferring", "Transfert: finalisation et indexation (90%)")
+    db = SessionLocal()
+    try:
+        audio_file = UserAudioFile(
+            id=uuid4(),
+            user_sub=user_sub,
+            user_email=payload.get("user_email"),
+            original_session_code=simple_code,
+            original_filename=payload.get("original_filename", transcoded_filename),
+            stored_filename=internal_key,
+            file_size_bytes=file_size,
+            audio_quality_score=payload.get("quality_score"),
+            audio_duration_seconds=payload.get("duration_seconds"),
+            transcription_status="pending" if auto_transcribe else "disabled",
+        )
+        db.add(audio_file)
+        db.commit()
+        audio_file_id = str(audio_file.id)
+
+        if auto_transcribe:
+            try:
+                publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
+                    "audio_file_id": audio_file_id,
+                    "user_sub": user_sub,
+                    "stored_filename": internal_key,
+                    "original_filename": payload.get("original_filename"),
+                    "simple_code": simple_code,
+                })
+                logger.info("Transcription enqueued for %s", audio_file_id)
+            except Exception as e:
+                logger.warning("Failed to enqueue transcription: %s", e)
+        else:
+            logger.info("Transcription disabled by token flag for %s", audio_file_id)
+
+    finally:
+        db.close()
+
+    if auto_transcribe:
+        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
+    else:
+        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription automatique désactivée pour ce code. (100%)")
+
+    return {"status": "pulled", "file_id": file_id, "internal_key": internal_key}
+
+
+def _drain_internal_pull_callback(message: dict) -> bool:
+    """Adapter for queue drain: True ⇒ ack, False/exception ⇒ retry counter."""
+    try:
+        _perform_pull(message)
+        return True
+    except ValueError:
+        # Bad payload — don't retry, just log and drop via the helper's drop path.
+        logger.exception("Invalid internal_pull payload, dropping: %s", message)
+        return True
+    except Exception:
+        logger.exception("internal_pull processing failed, will retry via queue counter")
+        return False
+
+
+def _drain_internal_pull_queue() -> int:
+    """Drain the internal_pull queue once. Safe to call from anywhere."""
+    return drain_queue_once(rabbit_cfg, QUEUE_INTERNAL_PULL, _drain_internal_pull_callback)
 
 
 def run_internal_purge_once():
@@ -166,6 +341,22 @@ def _purge_loop():
         time.sleep(INTERNAL_PURGE_INTERVAL_SECONDS)
 
 
+def _pull_queue_loop():
+    """Poll-drain internal_pull at the configured cadence."""
+    logger.info(
+        "Starting internal_pull drain loop: interval=%ss",
+        INTERNAL_PULL_QUEUE_INTERVAL_SECONDS,
+    )
+    while True:
+        try:
+            handled = _drain_internal_pull_queue()
+            if handled:
+                logger.info("Drained %d message(s) from internal_pull", handled)
+        except Exception:
+            logger.exception("Drain loop iteration failed; will retry next tick")
+        time.sleep(INTERNAL_PULL_QUEUE_INTERVAL_SECONDS)
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "zone": "internal"})
@@ -179,8 +370,10 @@ def healthz():
 @app.route("/api/v1/pull", methods=["POST"])
 def pull_file():
     """
-    Receive notification from external zone and PULL the file.
-    JSON body contains metadata only (not the file).
+    Legacy endpoint preserved for backward compatibility with single-cluster
+    deployments where in-cluster DNS resolves between zones (e.g.
+    docker-compose, integration). In prod-bêta this route is unreachable
+    from the DMZ; the trigger goes through /api/v1/pull-trigger instead.
     """
     if not verify_token():
         logger.warning("Unauthorized pull request from %s", request.remote_addr)
@@ -190,112 +383,41 @@ def pull_file():
     if not data:
         return jsonify({"error": "Missing JSON body"}), 400
 
-    required = ["file_id", "user_sub", "simple_code", "transcoded_filename"]
-    missing = [f for f in required if f not in data]
-    if missing:
-        return jsonify({"error": f"Missing fields: {missing}"}), 400
-
-    file_id = data["file_id"]
-    user_sub = data["user_sub"]
-    transcoded_filename = data["transcoded_filename"]
-    simple_code = data["simple_code"]
-    auto_transcribe = bool(data.get("auto_transcribe", True))
-    internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
-
-    logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
-
     try:
-        # Idempotency guard: if already imported, acknowledge success and stop.
-        db = SessionLocal()
-        try:
-            existing = (
-                db.query(UserAudioFile)
-                .filter(UserAudioFile.stored_filename == internal_key)
-                .first()
-            )
-        finally:
-            db.close()
-        if existing:
-            logger.info("Idempotent replay detected for %s, key already present: %s", file_id, internal_key)
-            notify_external_status(
-                file_id,
-                "transferred",
-                "Fichier déjà intégré (idempotence). Transcription en cours... (100%)",
-            )
-            return jsonify({
-                "status": "already_pulled",
-                "file_id": file_id,
-                "internal_key": internal_key,
-            })
-
-        # ── PULL the file from processed-staging S3 ──
-        notify_external_status(file_id, "transferring", "Transfert: téléchargement depuis la zone de transit (45%)")
-        logger.info("Pulling from processed-staging: %s", transcoded_filename)
-        file_data = download_fileobj(s3_processed_cfg, transcoded_filename)
-        file_size = file_data.getbuffer().nbytes
-
-        # ── Store in internal S3 under user directory ──
-        notify_external_status(file_id, "transferring", "Transfert: copie vers la zone interne (70%)")
-        upload_fileobj(s3_internal_cfg, internal_key, file_data, _guess_audio_mime(transcoded_filename))
-        logger.info("Stored internally: %s (%d bytes)", internal_key, file_size)
-
-        # ── Create internal DB record ──
-        notify_external_status(file_id, "transferring", "Transfert: finalisation et indexation (90%)")
-        db = SessionLocal()
-        try:
-            audio_file = UserAudioFile(
-                id=uuid4(),
-                user_sub=user_sub,
-                user_email=data.get("user_email"),
-                original_session_code=simple_code,
-                original_filename=data.get("original_filename", transcoded_filename),
-                stored_filename=internal_key,
-                file_size_bytes=file_size,
-                audio_quality_score=data.get("quality_score"),
-                audio_duration_seconds=data.get("duration_seconds"),
-                transcription_status="pending" if auto_transcribe else "disabled",
-            )
-            db.add(audio_file)
-            db.commit()
-
-            # ── Trigger transcription (optional by token flag) ──
-            if auto_transcribe:
-                try:
-                    publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
-                        "audio_file_id": str(audio_file.id),
-                        "user_sub": user_sub,
-                        "stored_filename": internal_key,
-                        "original_filename": data.get("original_filename"),
-                        "simple_code": simple_code,
-                    })
-                    logger.info("Transcription enqueued for %s", audio_file.id)
-                except Exception as e:
-                    logger.warning("Failed to enqueue transcription: %s", e)
-            else:
-                logger.info("Transcription disabled by token flag for %s", audio_file.id)
-
-        finally:
-            db.close()
-
-        # ── Notify external zone of successful transfer ──
-        if auto_transcribe:
-            notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
-        else:
-            notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription automatique désactivée pour ce code. (100%)")
-
-        return jsonify({
-            "status": "pulled",
-            "file_id": file_id,
-            "internal_key": internal_key,
-        })
-
+        result = _perform_pull(data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception:
-        logger.exception("Failed to pull file %s", file_id)
+        logger.exception("Failed to pull file %s", data.get("file_id"))
         return jsonify({"error": "Internal error during pull"}), 500
+    return jsonify(result)
+
+
+@app.route("/api/v1/pull-trigger", methods=["POST"])
+def pull_trigger():
+    """
+    Optional cross-cluster wake-up. Bearer-protected with
+    ``INTERNAL_PUSH_TRIGGER_TOKEN`` (distinct from INTERNAL_API_TOKEN so the
+    two can be rotated independently). The body is ignored — invocation is
+    a pure "drain now" signal. The actual messages live on the
+    ``internal_pull`` AMQP queue and are the source of truth.
+    """
+    if not verify_trigger_token():
+        logger.warning("Unauthorized trigger request from %s", request.remote_addr)
+        return jsonify({"error": "Unauthorized"}), 401
+    if not _client_ip_allowed(request.remote_addr or ""):
+        logger.warning("Trigger IP not in allowlist: %s", request.remote_addr)
+        return jsonify({"error": "Forbidden"}), 403
+    try:
+        handled = _drain_internal_pull_queue()
+    except Exception:
+        logger.exception("Trigger-driven drain failed")
+        return jsonify({"error": "drain_failed"}), 500
+    return jsonify({"status": "ok", "drained": handled})
 
 
 def create_app():
-    global SessionLocal, _purge_thread_started
+    global SessionLocal, _purge_thread_started, _pull_loop_thread_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
     init_tables(db_cfg, InternalBase)
     ensure_bucket(s3_internal_cfg)
@@ -308,11 +430,24 @@ def create_app():
         purge_thread = threading.Thread(target=_purge_loop, daemon=True, name="internal-purge-loop")
         purge_thread.start()
         _purge_thread_started = True
+    if not _pull_loop_thread_started:
+        pull_thread = threading.Thread(target=_pull_queue_loop, daemon=True, name="internal-pull-drain")
+        pull_thread.start()
+        _pull_loop_thread_started = True
+    if INTERNAL_PUSH_TRIGGER_TOKEN:
+        logger.info("Pull trigger HTTP endpoint enabled (allowlist=%s)",
+                    _TRIGGER_IP_ALLOWLIST_RAW or "<empty>")
+    else:
+        logger.info("Pull trigger HTTP endpoint disabled (no INTERNAL_PUSH_TRIGGER_TOKEN set)")
     return app
 
 
-# WSGI entrypoint for Gunicorn
-application = create_app()
+# WSGI entrypoint for Gunicorn. Skipped in tests via SKIP_CREATE_APP=1 so unit
+# tests can import this module without spinning up DB/S3/RabbitMQ connections.
+if os.getenv("SKIP_CREATE_APP", "0") != "1":
+    application = create_app()
+else:
+    application = app
 
 
 if __name__ == "__main__":
