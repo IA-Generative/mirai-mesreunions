@@ -151,27 +151,53 @@ INTERNAL_API_URL = _str("INTERNAL_API_URL", "http://file-puller:8090/api/v1/pull
 INTERNAL_API_TOKEN = _str("INTERNAL_API_TOKEN", "")
 TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://token-issuer:8091/api/v1/issue-token")
 
-# MCR push integration (replaces transcription-stub when enabled).
-#   MCR_PUSH_ENABLED            : when true, file-puller pushes the audio to MCR
-#                                 instead of publishing on the local transcription
-#                                 queue. Default false to keep dev / integration
-#                                 environments on the stub.
+# Transcription backend selection. Mutually exclusive — a file goes to
+# exactly one destination.
+#   TRANSCRIPTION_BACKEND  : "stub" (default, local transcription-stub via
+#                            the AMQP transcription queue), "mcr" (push to
+#                            the external MCR meeting platform), or
+#                            "kevent" (call the Mirai Kevent gateway for
+#                            transcription + optional diarization + optional
+#                            LLM-based meeting intelligence).
+TRANSCRIPTION_BACKEND = _str("TRANSCRIPTION_BACKEND", "stub")
+
+# MCR backend (when TRANSCRIPTION_BACKEND=mcr). The user-delegated push uses
+# a refresh token captured at OIDC login and exchanged on demand by file-puller.
 #   MCR_GATEWAY_URL             : base URL of the MCR API gateway (no trailing /).
-#   OIDC_OFFLINE_ACCESS         : when true, code-generator + admin-portal request
-#                                 the offline_access scope at OIDC login and
-#                                 persist the resulting refresh_token.
+#   OIDC_OFFLINE_ACCESS         : when true, code-generator + admin-portal
+#                                 request the offline_access scope at login
+#                                 and persist the resulting refresh_token.
 #   OIDC_TOKEN_ENDPOINT         : Keycloak's token endpoint, used by file-puller
-#                                 to exchange a refresh_token against an access_token
-#                                 at MCR push time. Typically the issuer URL +
-#                                 /protocol/openid-connect/token.
-# OIDC_REFRESH_TOKEN_FERNET_KEY  : Fernet key (URL-safe base64, 32 bytes decoded)
-#                                 used to encrypt persisted refresh tokens at rest.
-#                                 Required when OIDC_OFFLINE_ACCESS or MCR_PUSH_ENABLED
-#                                 is true. Same value MUST be deployed in both the
-#                                 services that capture (CG/admin) and the service
-#                                 that uses (file-puller).
-MCR_PUSH_ENABLED = _bool("MCR_PUSH_ENABLED", False)
+#                                 to exchange a refresh_token against an
+#                                 access_token at MCR push time.
+#   OIDC_REFRESH_TOKEN_FERNET_KEY : Fernet key (URL-safe base64) used to
+#                                 encrypt persisted refresh tokens at rest.
 MCR_GATEWAY_URL = _str("MCR_GATEWAY_URL", "")
 OIDC_OFFLINE_ACCESS = _bool("OIDC_OFFLINE_ACCESS", False)
 OIDC_TOKEN_ENDPOINT = _str("OIDC_TOKEN_ENDPOINT", "")
 OIDC_REFRESH_TOKEN_FERNET_KEY = _str("OIDC_REFRESH_TOKEN_FERNET_KEY", "")
+
+# Kevent backend (when TRANSCRIPTION_BACKEND=kevent). The Mirai inference
+# gateway exposes Whisper (transcription) and pyannote (diarization) over
+# multipart sync POSTs; auth is the non-standard "apikey: Bearer <token>"
+# header. Sub-toggles below let an operator activate the meeting-intelligence
+# steps progressively (each consumes the previous output).
+KEVENT_GATEWAY_URL = _str("KEVENT_GATEWAY_URL", "")
+KEVENT_API_KEY = _str("KEVENT_API_KEY", "")
+KEVENT_TRANSCRIPTION_MODEL = _str("KEVENT_TRANSCRIPTION_MODEL", "faster-whisper-large-v3-turbo")
+KEVENT_DIARIZATION_MODEL = _str("KEVENT_DIARIZATION_MODEL", "pyannote-diarization")
+KEVENT_DIARIZATION_ENABLED = _bool("KEVENT_DIARIZATION_ENABLED", False)
+KEVENT_SPEAKER_NAMING_ENABLED = _bool("KEVENT_SPEAKER_NAMING_ENABLED", False)
+KEVENT_OOB_CLEANING_ENABLED = _bool("KEVENT_OOB_CLEANING_ENABLED", False)
+KEVENT_REFORMULATION_ENABLED = _bool("KEVENT_REFORMULATION_ENABLED", False)
+KEVENT_MEETING_ANALYSIS_ENABLED = _bool("KEVENT_MEETING_ANALYSIS_ENABLED", False)
+KEVENT_HTTP_TIMEOUT_SECONDS = _int("KEVENT_HTTP_TIMEOUT_SECONDS", 600)
+
+# LiteLLM Mirai (chat backend used by the kevent meeting-intelligence steps).
+# OpenAI-compatible — standard "Authorization: Bearer <token>" header.
+LITELLM_BASE_URL = _str("LITELLM_BASE_URL", "")
+LITELLM_API_KEY = _str("LITELLM_API_KEY", "")
+LLM_MODEL_SMALL = _str("LLM_MODEL_SMALL", "chat-small")
+LLM_MODEL_MEDIUM = _str("LLM_MODEL_MEDIUM", "mistral-small-24b")
+LLM_MODEL_LARGE = _str("LLM_MODEL_LARGE", "gptoss-120b")
+LLM_HTTP_TIMEOUT_SECONDS = _int("LLM_HTTP_TIMEOUT_SECONDS", 180)

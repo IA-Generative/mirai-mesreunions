@@ -25,6 +25,7 @@ HTTP body — same logic, just a different trigger.
 """
 
 import ipaddress
+import json
 import logging
 import os
 import sys
@@ -45,7 +46,14 @@ from libs.shared.app.config import (
     load_int_db, load_s3_processed, load_s3_internal,
     INTERNAL_API_TOKEN, RabbitMQConfig,
     INTERNAL_PULL_QUEUE_INTERVAL_SECONDS,
-    MCR_PUSH_ENABLED, MCR_GATEWAY_URL, OIDC_TOKEN_ENDPOINT,
+    TRANSCRIPTION_BACKEND, MCR_GATEWAY_URL, OIDC_TOKEN_ENDPOINT,
+    KEVENT_GATEWAY_URL, KEVENT_API_KEY,
+    KEVENT_TRANSCRIPTION_MODEL, KEVENT_DIARIZATION_MODEL,
+    KEVENT_DIARIZATION_ENABLED, KEVENT_SPEAKER_NAMING_ENABLED,
+    KEVENT_OOB_CLEANING_ENABLED, KEVENT_REFORMULATION_ENABLED,
+    KEVENT_MEETING_ANALYSIS_ENABLED, KEVENT_HTTP_TIMEOUT_SECONDS,
+    LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
+    LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
 )
 from libs.shared.app.models import InternalBase, UserAudioFile
 from libs.shared.app.database import create_session_factory, init_tables
@@ -66,6 +74,15 @@ from app.mcr_client import (
     MCRTransientError,
     MCRApplicativeError,
 )
+from app.kevent_client import (
+    KeventClient,
+    KeventAuthError,
+    KeventTransientError,
+    KeventApplicativeError,
+)
+from app.llm_client import LLMClient
+from app.diarization_merger import merge_to_markdown
+from app import meeting_intelligence as mi
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -167,7 +184,7 @@ def _guess_audio_mime(filename: str) -> str:
 
 def _build_mcr_client() -> Optional[MCRClient]:
     """Construct the MCR client lazily, returning None if disabled or misconfigured."""
-    if not MCR_PUSH_ENABLED:
+    if TRANSCRIPTION_BACKEND != "mcr":
         return None
     try:
         return MCRClient(
@@ -178,13 +195,65 @@ def _build_mcr_client() -> Optional[MCRClient]:
         )
     except ValueError:
         logger.exception(
-            "MCR_PUSH_ENABLED but MCR client config is incomplete; falling back to local transcription queue"
+            "TRANSCRIPTION_BACKEND=mcr but client config is incomplete; falling back to local transcription queue"
         )
         return None
 
 
-def _set_user_audio_status(audio_file_id, status: str, mcr_meeting_id: Optional[str] = None) -> None:
-    """Update transcription_status (and optionally mcr_meeting_id) for an audio file."""
+def _build_kevent_client() -> Optional[KeventClient]:
+    """Construct the Kevent client lazily for the kevent backend."""
+    if TRANSCRIPTION_BACKEND != "kevent":
+        return None
+    try:
+        return KeventClient(
+            gateway_url=KEVENT_GATEWAY_URL,
+            api_key=KEVENT_API_KEY,
+            transcription_model=KEVENT_TRANSCRIPTION_MODEL,
+            diarization_model=KEVENT_DIARIZATION_MODEL,
+            timeout=KEVENT_HTTP_TIMEOUT_SECONDS,
+        )
+    except ValueError:
+        logger.exception(
+            "TRANSCRIPTION_BACKEND=kevent but Kevent config is incomplete; falling back to local transcription queue"
+        )
+        return None
+
+
+def _build_llm_client() -> Optional[LLMClient]:
+    """Construct the LiteLLM client used by the kevent meeting-intelligence steps."""
+    try:
+        return LLMClient(
+            base_url=LITELLM_BASE_URL,
+            api_key=LITELLM_API_KEY,
+            timeout=LLM_HTTP_TIMEOUT_SECONDS,
+        )
+    except ValueError:
+        logger.warning(
+            "LiteLLM config missing (LITELLM_BASE_URL or LITELLM_API_KEY); meeting-intelligence steps disabled"
+        )
+        return None
+
+
+def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
+    """
+    Update transcription_status and any other named columns on a UserAudioFile row.
+
+    Optional kwargs accepted: ``mcr_meeting_id``, ``transcription_engine``,
+    ``transcription_text``, ``transcription_language``, ``diarization_json``,
+    ``speaker_tagged_text``, ``cleaned_text``, ``reformulated_text``,
+    ``meeting_analysis_json``.
+    """
+    allowed = {
+        "mcr_meeting_id",
+        "transcription_engine",
+        "transcription_text",
+        "transcription_language",
+        "diarization_json",
+        "speaker_tagged_text",
+        "cleaned_text",
+        "reformulated_text",
+        "meeting_analysis_json",
+    }
     db = SessionLocal()
     try:
         rec = db.query(UserAudioFile).filter(UserAudioFile.id == audio_file_id).first()
@@ -192,11 +261,159 @@ def _set_user_audio_status(audio_file_id, status: str, mcr_meeting_id: Optional[
             logger.warning("UserAudioFile not found for status update: %s", audio_file_id)
             return
         rec.transcription_status = status
-        if mcr_meeting_id is not None:
-            rec.mcr_meeting_id = mcr_meeting_id
+        for key, val in fields.items():
+            if key in allowed:
+                setattr(rec, key, val)
         db.commit()
     finally:
         db.close()
+
+
+def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
+                            file_data, payload: dict) -> None:
+    """
+    Run the full Kevent pipeline:
+      1. transcribe via Kevent /v1/audio/transcriptions (always)
+      2. optionally diarize, merge into speaker_tagged_text
+      3. optionally LLM speaker naming, OOB cleaning, reformulation, analysis
+
+    All post-transcription steps are best-effort: a failure leaves the
+    corresponding column NULL but the raw transcription still ships.
+
+    Raises ``KeventTransientError`` when the *transcription* itself fails
+    transiently — caller (queue consumer) retries via the x-retry-count
+    counter. Auth/applicative errors are caught and mapped to terminal
+    statuses (kevent_failed) so the file isn't retried indefinitely.
+    """
+    client = _build_kevent_client()
+    if client is None:
+        _set_user_audio_status(audio_file_id, "kevent_failed",
+                               transcription_engine="kevent")
+        return
+
+    # Read the audio bytes once, reuse for both transcribe + diarize.
+    file_data.seek(0)
+    audio_bytes = file_data.read()
+    content_type = "audio/mp4"  # transcoded files are always .mp4
+
+    # ── Step 1 — transcription (always) ────────────────────────────────
+    try:
+        transcription = client.transcribe(
+            audio_bytes=audio_bytes,
+            filename=transcoded_filename,
+            content_type=content_type,
+        )
+    except KeventAuthError:
+        logger.exception("Kevent auth error on transcription for %s", audio_file_id)
+        _set_user_audio_status(audio_file_id, "kevent_failed",
+                               transcription_engine="kevent")
+        return
+    except KeventApplicativeError:
+        logger.exception("Kevent applicative error on transcription for %s", audio_file_id)
+        _set_user_audio_status(audio_file_id, "kevent_failed",
+                               transcription_engine="kevent")
+        return
+    # KeventTransientError propagates → queue retry handles it.
+
+    text = (transcription.get("text") or "").strip()
+    language = transcription.get("language") or None
+    logger.info(
+        "Kevent transcribe: %d chars, language=%s, audio_file_id=%s",
+        len(text), language, audio_file_id,
+    )
+
+    # We'll accumulate DB updates and apply them in one go at the end.
+    updates: dict = {
+        "transcription_engine": "kevent",
+        "transcription_text": text,
+        "transcription_language": language,
+    }
+    final_status = "kevent_completed"
+
+    # ── Step 2 — diarisation (optional) + merge to markdown ────────────
+    diarization: Optional[dict] = None
+    if KEVENT_DIARIZATION_ENABLED:
+        try:
+            diarization = client.diarize(audio_bytes=audio_bytes,
+                                         filename=transcoded_filename,
+                                         content_type=content_type)
+            logger.info(
+                "Kevent diarize: %d segments, num_speakers=%s",
+                len(diarization.get("segments") or []),
+                diarization.get("num_speakers"),
+            )
+            updates["diarization_json"] = json.dumps(diarization, ensure_ascii=False)
+        except (KeventAuthError, KeventApplicativeError):
+            logger.exception("Kevent diarisation failed (non-retryable), continuing")
+            final_status = "kevent_partially_completed"
+        except KeventTransientError:
+            logger.warning("Kevent diarisation transient failure, continuing without diarisation")
+            final_status = "kevent_partially_completed"
+
+    # ── Step 3 — LLM-based steps (all optional, best-effort) ───────────
+    llm = _build_llm_client()
+    speaker_tagged: Optional[str] = None
+
+    # 3a. Build the speaker-tagged markdown if we have diarization.
+    if diarization is not None:
+        try:
+            speaker_tagged = merge_to_markdown(transcription, diarization)
+        except Exception:
+            logger.exception("diarization merger failed, falling back to plain text")
+            speaker_tagged = None
+
+        # 3b. Speaker naming (small model) — replaces SPEAKER_NN with real names.
+        if speaker_tagged and KEVENT_SPEAKER_NAMING_ENABLED and llm is not None:
+            names = mi.extract_speaker_names(speaker_tagged, llm, LLM_MODEL_SMALL)
+            if names:
+                try:
+                    speaker_tagged = merge_to_markdown(transcription, diarization, speaker_names=names)
+                except Exception:
+                    logger.exception("merger re-render with names failed")
+            else:
+                final_status = "kevent_partially_completed" if final_status == "kevent_completed" else final_status
+
+        if speaker_tagged is not None:
+            updates["speaker_tagged_text"] = speaker_tagged
+
+    # The base text the LLM steps will operate on: the speaker-tagged text
+    # if available (richer context for the model), else the raw transcript.
+    base_for_llm = speaker_tagged or text
+
+    # 3c. Out-of-band cleaning (medium model).
+    if KEVENT_OOB_CLEANING_ENABLED and llm is not None:
+        cleaned = mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM)
+        if cleaned:
+            updates["cleaned_text"] = cleaned
+        else:
+            final_status = "kevent_partially_completed"
+
+    # 3d. Reformulation (medium model).
+    if KEVENT_REFORMULATION_ENABLED and llm is not None:
+        # Prefer the cleaned text when available — fewer parasites = better narrative.
+        source = updates.get("cleaned_text") or base_for_llm
+        reformulated = mi.reformulate(source, llm, LLM_MODEL_MEDIUM)
+        if reformulated:
+            updates["reformulated_text"] = reformulated
+        else:
+            final_status = "kevent_partially_completed"
+
+    # 3e. Meeting analysis (large model).
+    if KEVENT_MEETING_ANALYSIS_ENABLED and llm is not None:
+        # Same logic — analyse on the cleanest available text.
+        source = updates.get("cleaned_text") or base_for_llm
+        analysis = mi.analyse_meeting(source, llm, LLM_MODEL_LARGE)
+        serialized = mi.serialize_analysis(analysis)
+        if serialized is not None:
+            updates["meeting_analysis_json"] = serialized
+        else:
+            final_status = "kevent_partially_completed"
+
+    _set_user_audio_status(audio_file_id, final_status, **updates)
+    logger.info(
+        "Kevent pipeline finished for %s: status=%s, %d outputs",
+        audio_file_id, final_status, sum(1 for k in updates if k != "transcription_engine"),
+    )
 
 
 def _push_to_mcr(audio_file_id, user_sub: str, transcoded_filename: str,
@@ -343,11 +560,11 @@ def _perform_pull(payload: dict) -> dict:
         audio_file_id = str(audio_file.id)
 
         if auto_transcribe:
-            if MCR_PUSH_ENABLED:
-                # Push directly to the MCR platform instead of using the local
-                # transcription-stub queue. _push_to_mcr re-uses the file_data
-                # already loaded in RAM from the audio-internal upload step
-                # above, so we don't re-download from S3.
+            # Three mutually-exclusive backends, selected via env. file_data
+            # is already in RAM from the audio-internal upload step above —
+            # both mcr and kevent reuse it directly without re-downloading.
+            backend = (TRANSCRIPTION_BACKEND or "stub").strip().lower()
+            if backend == "mcr":
                 _push_to_mcr(
                     audio_file_id=audio_file.id,
                     user_sub=user_sub,
@@ -355,7 +572,26 @@ def _perform_pull(payload: dict) -> dict:
                     file_data=file_data,
                     payload=payload,
                 )
-            else:
+            elif backend == "kevent":
+                _set_user_audio_status(
+                    audio_file.id,
+                    "kevent_transcribing",
+                    transcription_engine="kevent",
+                )
+                try:
+                    _transcribe_via_kevent(
+                        audio_file_id=audio_file.id,
+                        transcoded_filename=transcoded_filename,
+                        file_data=file_data,
+                        payload=payload,
+                    )
+                except KeventTransientError:
+                    # Re-raise so the consume_queue retry counter gets to it;
+                    # the underlying message stays on internal_pull and will be
+                    # re-pushed up to QUEUE_MAX_RETRIES times.
+                    logger.exception("Kevent transient error, will retry via queue")
+                    raise
+            else:  # stub (default)
                 try:
                     publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
                         "audio_file_id": audio_file_id,
@@ -365,6 +601,7 @@ def _perform_pull(payload: dict) -> dict:
                         "simple_code": simple_code,
                     })
                     logger.info("Transcription enqueued for %s", audio_file_id)
+                    _set_user_audio_status(audio_file.id, "pending", transcription_engine="stub")
                 except Exception as e:
                     logger.warning("Failed to enqueue transcription: %s", e)
         else:

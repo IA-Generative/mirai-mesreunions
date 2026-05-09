@@ -157,7 +157,7 @@ sequenceDiagram
     FP->>MQ: publish transcription (audio_file_id, stored_filename)
     MQ-->>STT: deliver transcription
     STT->>S3I: GET audio (stored_filename)
-    Note over STT: aujourd'hui : stub avec délai simulé<br/>demain : Whisper / Azure STT
+    Note over STT: backend `stub` par défaut (délai simulé) ;<br/>backends `mcr` et `kevent` court-circuitent la queue<br/>(cf docs/integrate-with-{mcr,kevent}.md)
     STT->>PGI: UPDATE user_audio_files<br/>transcription_status=processing → completed
     STT->>PGI: stocke transcription_text
     STT->>PGI: INSERT transcription_events (audit)
@@ -209,9 +209,18 @@ flowchart TD
   QIP -->|"poll 30s + trigger HTTP\noptionnel"| FP["File Puller (int)"]
   FP --> S3I["S3 audio-internal\n(zone protégée)"]
   FP --> CHK{"auto_transcribe ?"}
-  CHK -->|"oui"| STT["queue transcription -> Stub"]
   CHK -->|"non"| SKIP["Pas de transcription"]
+  CHK -->|"oui"| BK{"TRANSCRIPTION_BACKEND ?"}
+  BK -->|"stub"| STUB["queue transcription -> stub local"]
+  BK -->|"mcr"| MCR["push MCR\n(OIDC refresh token)"]
+  BK -->|"kevent"| KEV["Kevent Mirai\n(Whisper + diarisation + LLM)"]
 ```
+
+> **3 backends mutuellement exclusifs** sélectionnés via `TRANSCRIPTION_BACKEND` :
+> `stub` (défaut, simulation), `mcr` (push vers la plateforme MCR cf
+> [docs/integrate-with-mcr.md](integrate-with-mcr.md)), `kevent` (transcription
+> Whisper + pyannote + intelligence de réunion LLM cf
+> [docs/integrate-with-kevent.md](integrate-with-kevent.md)).
 
 ## Reseau Et Politiques
 

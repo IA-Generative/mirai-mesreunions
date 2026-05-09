@@ -237,17 +237,40 @@ class UserAudioFile(InternalBase):
     audio_quality_score = Column(Float, nullable=True)
     audio_duration_seconds = Column(Float, nullable=True)
 
-    # Transcription
+    # Transcription — final text produced by whichever backend ran.
     transcription_status = Column(String(50), default="pending",
-                                  comment="pending|disabled|processing|completed|failed|"
-                                          "mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed")
+                                  comment=(
+                                      "stub: pending|disabled|processing|completed|failed | "
+                                      "mcr: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
+                                      "kevent: kevent_transcribing|kevent_completed|"
+                                      "kevent_partially_completed|kevent_failed"
+                                  ))
     transcription_text = Column(Text, nullable=True)
     transcription_started_at = Column(DateTime(timezone=True), nullable=True)
     transcription_completed_at = Column(DateTime(timezone=True), nullable=True)
+    transcription_engine = Column(String(50), nullable=True,
+                                  comment="stub | mcr | kevent — which backend produced this row")
+    transcription_language = Column(String(10), nullable=True,
+                                    comment="ISO-639-1 code detected by the engine (kevent/Whisper)")
 
-    # MCR push (when MCR_PUSH_ENABLED): the meeting_id returned by POST /meetings.
+    # MCR push (when TRANSCRIPTION_BACKEND=mcr): the meeting_id returned by POST /meetings.
     # Used for cross-reference with the MCR platform when investigating outcomes.
     mcr_meeting_id = Column(String(64), nullable=True, index=True)
+
+    # Kevent meeting-intelligence outputs (TRANSCRIPTION_BACKEND=kevent). Each
+    # column is NULL when the corresponding sub-toggle is off OR when the
+    # step failed (the row's status will be kevent_partially_completed in
+    # the latter case).
+    diarization_json = Column(Text, nullable=True,
+                              comment="raw pyannote segments: [{speaker, start, end}, …]")
+    speaker_tagged_text = Column(Text, nullable=True,
+                                 comment="markdown with SPEAKER_NN labels (real names if naming enabled)")
+    cleaned_text = Column(Text, nullable=True,
+                          comment="LLM-cleaned version with out-of-band content filtered out")
+    reformulated_text = Column(Text, nullable=True,
+                               comment="indirect-speech reformulation: 'X a dit que…, Y a répondu…'")
+    meeting_analysis_json = Column(Text, nullable=True,
+                                   comment="5-section structured analysis: actors/themes/decisions/gaps/recommendations")
 
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
