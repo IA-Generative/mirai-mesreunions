@@ -2634,7 +2634,7 @@ async function deleteDevicePermanently(deviceId, deviceName) {
         setTimeout(loadDevices, 250);
     } catch (e) {
         if (btn) btn.disabled = false;
-        alert('Echec suppression définitive de l\'appareil.');
+        alert('Echec suppression définitive de l\\'appareil.');
     }
 }
 
