@@ -25,6 +25,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
     load_ext_db, load_s3_upload, load_s3_processed, RabbitMQConfig,
     TRANSCODE_SAMPLE_RATE, TRANSCODE_CHANNELS, INTERNAL_API_TOKEN,
+    LOUDNORM_AUTO_DECISION, LOUDNORM_RMS_THRESHOLD_DBFS,
+    LOUDNORM_PROBE_OFFSETS_S, LOUDNORM_PROBE_DURATION_S,
 )
 from libs.shared.app.models import ExternalBase, UploadedFile, UploadSession, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
@@ -170,13 +172,63 @@ def analyze_audio_quality(input_path: str) -> dict:
     return result
 
 
-def transcode_audio(input_path: str, output_path: str) -> bool:
+def measure_rms_dbfs(input_path: str, offset_s: float, duration_s: float) -> float | None:
+    """Sample a small window with `ffmpeg astats`; return mean RMS in dBFS or None.
+
+    Bench `bench/reports/SYNTHESE.md` shows that loudnorm gives 0 WER gain on
+    audio that's already loud enough — so we probe before deciding.
+    """
+    cmd = [
+        "ffmpeg", "-v", "error", "-ss", str(offset_s), "-t", str(duration_s),
+        "-i", input_path, "-af", "astats=metadata=1:reset=1", "-f", "null", "-",
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    m = re.search(r"RMS level dB:\s*(-?\d+(?:\.\d+)?)", r.stderr)
+    return float(m.group(1)) if m else None
+
+
+def needs_loudnorm(input_path: str, file_duration_s: float) -> tuple[bool, dict]:
+    """Decide whether to run the 2-pass loudnorm. Returns (needed, debug_info)."""
+    try:
+        offsets = [float(o) for o in LOUDNORM_PROBE_OFFSETS_S.split(",") if o.strip()]
+    except ValueError:
+        offsets = [60.0, 300.0]
+    valid = [o for o in offsets if o + LOUDNORM_PROBE_DURATION_S <= file_duration_s]
+    if not valid:
+        valid = [0.0]  # very short file — sample from start
+    levels = []
+    for o in valid:
+        rms = measure_rms_dbfs(input_path, o, LOUDNORM_PROBE_DURATION_S)
+        if rms is not None:
+            levels.append((o, rms))
+    if not levels:
+        return True, {"reason": "probe failed (no valid samples), defaulting to normalize"}
+    max_rms = max(l[1] for l in levels)
+    needed = max_rms < LOUDNORM_RMS_THRESHOLD_DBFS
+    return needed, {
+        "levels_dbfs": levels,
+        "max_rms_dbfs": max_rms,
+        "threshold_dbfs": LOUDNORM_RMS_THRESHOLD_DBFS,
+        "decision": "loudnorm" if needed else "skip",
+    }
+
+
+def transcode_audio(input_path: str, output_path: str, file_duration_s: float = 0.0) -> tuple[bool, bool]:
     """
     Transcode audio with voice optimization:
     - Bandpass filter 80Hz-8kHz (voice frequencies)
-    - Loudness normalization (EBU R128)
+    - Loudness normalization (EBU R128) — only when probe says it's needed
+      (LOUDNORM_AUTO_DECISION=true) or unconditionally (ENABLE_LOUDNORM)
     - Mono, 16kHz sample rate
     - Output as MP4 (AAC)
+
+    Returns (success, was_normalized) — was_normalized is False when the audio
+    was loud enough and we skipped the 2-pass loudnorm.
     """
     def run_ffmpeg(cmd, timeout=300):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -202,9 +254,18 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
     def post_chain() -> str:
         return POST_LOUDNORM_FILTER_CHAIN or "highpass=f=80,lowpass=f=7000,alimiter=limit=0.95"
 
+    # Per-file decision: skip the 2-pass loudnorm if audio is already loud enough.
+    # Falls back to the global ENABLE_LOUDNORM env when auto-decision is off.
+    if LOUDNORM_AUTO_DECISION and file_duration_s > 0:
+        probe_needed, probe_info = needs_loudnorm(input_path, file_duration_s)
+        logger.info("Loudnorm auto-decision: needed=%s info=%s", probe_needed, probe_info)
+        local_loudnorm = probe_needed
+    else:
+        local_loudnorm = ENABLE_LOUDNORM
+
     try:
         # No loudnorm mode: keep voice filters + limiter only.
-        if not ENABLE_LOUDNORM:
+        if not local_loudnorm:
             cmd = [
                 *ffmpeg_base_input(),
                 "-af", post_chain(),
@@ -215,12 +276,12 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
                 "-movflags", "+faststart",
                 output_path,
             ]
-            logger.info("Transcode command (no loudnorm): %s", " ".join(cmd))
+            logger.info("Transcode command (no loudnorm)")
             result = run_ffmpeg(cmd)
             if result.returncode != 0:
                 logger.error("FFmpeg error: %s", result.stderr[-500:])
-                return False
-            return True
+                return False, False
+            return True, False
 
         # Pass 1: analyze full, raw signal (no bandpass, no limiter).
         measure_af = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json"
@@ -275,11 +336,11 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
         if apply.returncode != 0:
             logger.warning("Loudnorm pass2 failed, fallback to stable mode. err=%s", apply.stderr[-300:])
             raise RuntimeError("pass2 failed")
-        return True
+        return True, True
 
     except subprocess.TimeoutExpired:
         logger.error("FFmpeg timeout")
-        return False
+        return False, False
     except Exception:
         # Fallback: never run single-pass loudnorm. Apply only stable filters + limiter.
         stable_filter = post_chain()
@@ -297,8 +358,8 @@ def transcode_audio(input_path: str, output_path: str) -> bool:
         result = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             logger.error("FFmpeg fallback error: %s", result.stderr[-500:])
-            return False
-        return True
+            return False, False
+        return True, False
 
 
 def process_transcode(message: dict) -> bool:
@@ -342,7 +403,9 @@ def process_transcode(message: dict) -> bool:
             output_name = Path(stored_filename).stem + ".mp4"
             output_path = os.path.join(tmpdir, output_name)
 
-            success = transcode_audio(input_path, output_path)
+            success, was_normalized = transcode_audio(
+                input_path, output_path, file_duration_s=quality.get("duration", 0.0),
+            )
 
             if not success:
                 file_obj.status = UploadStatus.TRANSCODE_FAILED
@@ -361,9 +424,10 @@ def process_transcode(message: dict) -> bool:
             file_obj.audio_quality_score = quality["quality_score"]
             file_obj.audio_duration_seconds = quality["duration"]
             file_obj.audio_sample_rate = quality["sample_rate"]
+            normalize_label = "normalisé" if was_normalized else "déjà au niveau, normalisation omise"
             file_obj.status_message = (
                 f"Traitement terminé. Qualité audio : {quality['quality_score']}/5 "
-                f"({quality['duration']:.1f}s)"
+                f"({quality['duration']:.1f}s, {normalize_label})"
             )
             db.commit()
             notify_portal(session_obj, file_obj, file_obj.status_message)
@@ -374,12 +438,13 @@ def process_transcode(message: dict) -> bool:
                 "transcoded_filename": output_name,
                 "quality_score": quality["quality_score"],
                 "duration_seconds": quality["duration"],
+                "was_normalized": was_normalized,
             })
 
             logger.info(
-                "Transcoded %s → %s (quality=%.1f, duration=%.1fs)",
+                "Transcoded %s → %s (quality=%.1f, duration=%.1fs, was_normalized=%s)",
                 stored_filename, output_name,
-                quality["quality_score"], quality["duration"],
+                quality["quality_score"], quality["duration"], was_normalized,
             )
             return True
 

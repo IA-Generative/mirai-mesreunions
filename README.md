@@ -89,7 +89,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 | **code-generator** | Externe | 8080 | Interface OIDC, demande de token au token-issuer interne, affiche QR |
 | **upload-portal** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
 | **antivirus-worker** | Externe | — | Scan ClamAV, quarantaine si virus |
-| **transcode-worker** | Externe | — | FFmpeg : loudnorm dual-pass (linear), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
+| **transcode-worker** | Externe | — | FFmpeg : loudnorm dual-pass (linear) **conditionnel** (sondage RMS à +60s/+5min, skip si déjà ≥ -30 dBFS — cf bench [bench/reports/SYNTHESE.md](bench/reports/SYNTHESE.md)), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
 | **file-mover** | Externe | — | Publie une notification *fichier prêt* sur la queue durable `internal_pull` (AMQP) ; trigger HTTP optionnel pour ramener la latence quasi-zéro |
 | **token-issuer** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
 | **file-puller** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
@@ -500,8 +500,12 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `OIDC_ISSUER` | — | URL Keycloak |
 | `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/audio-upload` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
 | `FFMPEG_AUDIO_FILTER` | `highpass=f=80,lowpass=f=7000,loudnorm=...` | Filtre FFmpeg voix |
-| `ENABLE_LOUDNORM` | `true` | Active/desactive `loudnorm` dans le worker de transcodage (mode dual-pass `linear=true`) |
+| `ENABLE_LOUDNORM` | `true` | Active/desactive `loudnorm` dans le worker de transcodage (mode dual-pass `linear=true`). Ignoré si `LOUDNORM_AUTO_DECISION=true`. |
 | `POST_LOUDNORM_FILTER_CHAIN` | `highpass=f=80,lowpass=f=7000,alimiter=limit=0.95` | Filtres appliqués après loudnorm (ordre strict) |
+| `LOUDNORM_AUTO_DECISION` | `true` | Sondage RMS par-fichier : si l'audio est déjà au-dessus du seuil, skip la passe loudnorm (couteuse) et garde uniquement le post-chain |
+| `LOUDNORM_RMS_THRESHOLD_DBFS` | `-30.0` | Seuil de décision (dBFS). Si max RMS mesuré ≥ seuil → skip ; sinon → loudnorm dual-pass |
+| `LOUDNORM_PROBE_OFFSETS_S` | `60,300` | Offsets (CSV, secondes) où sont prélevées les fenêtres de mesure RMS |
+| `LOUDNORM_PROBE_DURATION_S` | `5.0` | Durée de chaque fenêtre de mesure (secondes) |
 
 ## Mesure de l'impact de normalisation
 

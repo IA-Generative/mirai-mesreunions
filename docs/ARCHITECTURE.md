@@ -102,9 +102,9 @@ sequenceDiagram
 
   MQ-->>TR: deliver transcode
   TR->>S3U: GET audio brut
-  Note over TR: ffmpeg : loudnorm dual-pass linear,<br/>highpass 80 Hz, lowpass 7 kHz, limiter,<br/>score qualité 1-5
+  Note over TR: probe RMS @ +60s & +5min →<br/>si max ≥ -30 dBFS : skip loudnorm (post-chain only)<br/>sinon : loudnorm dual-pass linear<br/>+ highpass 80 Hz, lowpass 7 kHz, limiter, score qualité 1-5
   TR->>S3P: PUT .mp4 transcodé
-  TR->>PGE: UPDATE status=transcoded + quality_score
+  TR->>PGE: UPDATE status=transcoded + quality_score + was_normalized
   TR->>MQ: publish file_ready
   TR-->>UP: notify-status WebSocket
 

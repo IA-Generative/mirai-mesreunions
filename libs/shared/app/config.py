@@ -147,6 +147,15 @@ INTERNAL_PULL_QUEUE_INTERVAL_SECONDS = _int("INTERNAL_PULL_QUEUE_INTERVAL_SECOND
 FFMPEG_AUDIO_FILTER = _str("FFMPEG_AUDIO_FILTER", "highpass=f=80,lowpass=f=8000,loudnorm=I=-16:TP=-1.5:LRA=11")
 TRANSCODE_SAMPLE_RATE = _int("TRANSCODE_SAMPLE_RATE", 16000)
 TRANSCODE_CHANNELS = _int("TRANSCODE_CHANNELS", 1)
+# Auto-skip loudnorm when the input is already loud enough.
+# Probes RMS (dBFS) on small windows; if max measured >= threshold, skip the
+# 2-pass loudnorm (still applies highpass/lowpass/limiter post-chain).
+# Bench `bench/reports/SYNTHESE.md` showed loudnorm gives 0 WER gain on
+# already-loud audio, so the work is wasted ~80% of the time in practice.
+LOUDNORM_AUTO_DECISION = _bool("LOUDNORM_AUTO_DECISION", True)
+LOUDNORM_RMS_THRESHOLD_DBFS = float(_str("LOUDNORM_RMS_THRESHOLD_DBFS", "-30.0"))
+LOUDNORM_PROBE_OFFSETS_S = _str("LOUDNORM_PROBE_OFFSETS_S", "60,300")
+LOUDNORM_PROBE_DURATION_S = float(_str("LOUDNORM_PROBE_DURATION_S", "5.0"))
 INTERNAL_API_URL = _str("INTERNAL_API_URL", "http://file-puller:8090/api/v1/pull")
 INTERNAL_API_TOKEN = _str("INTERNAL_API_TOKEN", "")
 TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://token-issuer:8091/api/v1/issue-token")
