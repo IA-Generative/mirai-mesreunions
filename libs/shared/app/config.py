@@ -13,6 +13,13 @@ def _str(key: str, default: str = "") -> str:
     return os.getenv(key, default)
 
 
+def _bool(key: str, default: bool = False) -> bool:
+    raw = os.getenv(key, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _list(key: str, default: str = "") -> List[str]:
     return [x.strip() for x in os.getenv(key, default).split(",") if x.strip()]
 
@@ -143,3 +150,28 @@ TRANSCODE_CHANNELS = _int("TRANSCODE_CHANNELS", 1)
 INTERNAL_API_URL = _str("INTERNAL_API_URL", "http://file-puller:8090/api/v1/pull")
 INTERNAL_API_TOKEN = _str("INTERNAL_API_TOKEN", "")
 TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://token-issuer:8091/api/v1/issue-token")
+
+# MCR push integration (replaces transcription-stub when enabled).
+#   MCR_PUSH_ENABLED            : when true, file-puller pushes the audio to MCR
+#                                 instead of publishing on the local transcription
+#                                 queue. Default false to keep dev / integration
+#                                 environments on the stub.
+#   MCR_GATEWAY_URL             : base URL of the MCR API gateway (no trailing /).
+#   OIDC_OFFLINE_ACCESS         : when true, code-generator + admin-portal request
+#                                 the offline_access scope at OIDC login and
+#                                 persist the resulting refresh_token.
+#   OIDC_TOKEN_ENDPOINT         : Keycloak's token endpoint, used by file-puller
+#                                 to exchange a refresh_token against an access_token
+#                                 at MCR push time. Typically the issuer URL +
+#                                 /protocol/openid-connect/token.
+# OIDC_REFRESH_TOKEN_FERNET_KEY  : Fernet key (URL-safe base64, 32 bytes decoded)
+#                                 used to encrypt persisted refresh tokens at rest.
+#                                 Required when OIDC_OFFLINE_ACCESS or MCR_PUSH_ENABLED
+#                                 is true. Same value MUST be deployed in both the
+#                                 services that capture (CG/admin) and the service
+#                                 that uses (file-puller).
+MCR_PUSH_ENABLED = _bool("MCR_PUSH_ENABLED", False)
+MCR_GATEWAY_URL = _str("MCR_GATEWAY_URL", "")
+OIDC_OFFLINE_ACCESS = _bool("OIDC_OFFLINE_ACCESS", False)
+OIDC_TOKEN_ENDPOINT = _str("OIDC_TOKEN_ENDPOINT", "")
+OIDC_REFRESH_TOKEN_FERNET_KEY = _str("OIDC_REFRESH_TOKEN_FERNET_KEY", "")

@@ -32,6 +32,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
+from typing import Optional
 from uuid import uuid4
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from libs.shared.app.config import (
     load_int_db, load_s3_processed, load_s3_internal,
     INTERNAL_API_TOKEN, RabbitMQConfig,
     INTERNAL_PULL_QUEUE_INTERVAL_SECONDS,
+    MCR_PUSH_ENABLED, MCR_GATEWAY_URL, OIDC_TOKEN_ENDPOINT,
 )
 from libs.shared.app.models import InternalBase, UserAudioFile
 from libs.shared.app.database import create_session_factory, init_tables
@@ -56,6 +58,14 @@ from libs.shared.app.queue_helper import (
     QUEUE_INTERNAL_PULL,
 )
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
+from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
+from libs.shared.app.oidc_refresh_store import fetch_ciphertext, delete_ciphertext
+from app.mcr_client import (
+    MCRClient,
+    MCRAuthError,
+    MCRTransientError,
+    MCRApplicativeError,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -155,6 +165,112 @@ def _guess_audio_mime(filename: str) -> str:
     return "application/octet-stream"
 
 
+def _build_mcr_client() -> Optional[MCRClient]:
+    """Construct the MCR client lazily, returning None if disabled or misconfigured."""
+    if not MCR_PUSH_ENABLED:
+        return None
+    try:
+        return MCRClient(
+            gateway_url=MCR_GATEWAY_URL,
+            oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+            oidc_client_id=os.getenv("OIDC_CLIENT_ID", ""),
+            oidc_client_secret=os.getenv("OIDC_CLIENT_SECRET", ""),
+        )
+    except ValueError:
+        logger.exception(
+            "MCR_PUSH_ENABLED but MCR client config is incomplete; falling back to local transcription queue"
+        )
+        return None
+
+
+def _set_user_audio_status(audio_file_id, status: str, mcr_meeting_id: Optional[str] = None) -> None:
+    """Update transcription_status (and optionally mcr_meeting_id) for an audio file."""
+    db = SessionLocal()
+    try:
+        rec = db.query(UserAudioFile).filter(UserAudioFile.id == audio_file_id).first()
+        if rec is None:
+            logger.warning("UserAudioFile not found for status update: %s", audio_file_id)
+            return
+        rec.transcription_status = status
+        if mcr_meeting_id is not None:
+            rec.mcr_meeting_id = mcr_meeting_id
+        db.commit()
+    finally:
+        db.close()
+
+
+def _push_to_mcr(audio_file_id, user_sub: str, transcoded_filename: str,
+                 file_data, payload: dict) -> None:
+    """
+    Asynchronously push a file to MCR for transcription. The 4-step sequence
+    (refresh exchange → create meeting → presigned URL → PUT binary) is
+    classified into 3 error families:
+
+      - MCRAuthError        : refresh expired/revoked. Wipe stored token,
+                              mark mcr_auth_failed, NO retry.
+      - MCRApplicativeError : 4xx applicative. Mark mcr_rejected, NO retry.
+      - MCRTransientError   : 5xx / network. Re-raised so the queue
+                              consumer's retry counter handles it.
+    """
+    client = _build_mcr_client()
+    if client is None:
+        # Misconfigured but enabled — preserve the file in mcr_push_failed so
+        # ops sees something concrete in the dashboard rather than a silent skip.
+        _set_user_audio_status(audio_file_id, "mcr_push_failed")
+        return
+
+    ciphertext = fetch_ciphertext(user_sub)
+    if not ciphertext:
+        logger.warning("MCR push: no refresh token stored for user_sub=%s; user must re-login", user_sub)
+        _set_user_audio_status(audio_file_id, "mcr_auth_failed")
+        return
+
+    try:
+        refresh_token = decrypt_secret(ciphertext)
+    except Exception:
+        logger.exception("MCR push: failed to decrypt refresh token for user_sub=%s", user_sub)
+        _set_user_audio_status(audio_file_id, "mcr_auth_failed")
+        return
+
+    # Step 1: refresh → access
+    try:
+        access_token = client.exchange_refresh(refresh_token)
+    except MCRAuthError:
+        logger.warning("MCR push: refresh rejected by KC for user_sub=%s; deleting stored token", user_sub)
+        delete_ciphertext(user_sub)
+        _set_user_audio_status(audio_file_id, "mcr_auth_failed")
+        return
+
+    # Steps 2-4: create meeting → presigned → PUT
+    meeting_payload = {
+        "name": payload.get("original_filename", transcoded_filename),
+        "name_platform": "IMPORT",
+    }
+    try:
+        meeting_id = client.create_meeting(access_token, meeting_payload)
+        presigned = client.generate_presigned(access_token, meeting_id, transcoded_filename)
+        # file_data is a BytesIO already loaded in RAM from the audio-internal upload step.
+        # Reset position and read raw bytes for the PUT.
+        file_data.seek(0)
+        body = file_data.read()
+        client.upload_binary(presigned, body, _guess_audio_mime(transcoded_filename))
+    except MCRAuthError:
+        # Token was accepted at exchange but rejected on /meetings — likely stale
+        # KC revocation between calls. Treat as auth failure.
+        logger.warning("MCR push: meeting/presigned/upload rejected with auth error for %s", audio_file_id)
+        delete_ciphertext(user_sub)
+        _set_user_audio_status(audio_file_id, "mcr_auth_failed")
+        return
+    except MCRApplicativeError:
+        logger.exception("MCR push: applicative error for %s, marking mcr_rejected", audio_file_id)
+        _set_user_audio_status(audio_file_id, "mcr_rejected")
+        return
+    # MCRTransientError propagates → consumer retries via x-retry-count
+
+    _set_user_audio_status(audio_file_id, "mcr_pushed", mcr_meeting_id=meeting_id)
+    logger.info("MCR push success: audio_file_id=%s meeting_id=%s", audio_file_id, meeting_id)
+
+
 def _perform_pull(payload: dict) -> dict:
     """
     Pull a transcoded file from processed-staging into the internal zone.
@@ -227,17 +343,30 @@ def _perform_pull(payload: dict) -> dict:
         audio_file_id = str(audio_file.id)
 
         if auto_transcribe:
-            try:
-                publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
-                    "audio_file_id": audio_file_id,
-                    "user_sub": user_sub,
-                    "stored_filename": internal_key,
-                    "original_filename": payload.get("original_filename"),
-                    "simple_code": simple_code,
-                })
-                logger.info("Transcription enqueued for %s", audio_file_id)
-            except Exception as e:
-                logger.warning("Failed to enqueue transcription: %s", e)
+            if MCR_PUSH_ENABLED:
+                # Push directly to the MCR platform instead of using the local
+                # transcription-stub queue. _push_to_mcr re-uses the file_data
+                # already loaded in RAM from the audio-internal upload step
+                # above, so we don't re-download from S3.
+                _push_to_mcr(
+                    audio_file_id=audio_file.id,
+                    user_sub=user_sub,
+                    transcoded_filename=transcoded_filename,
+                    file_data=file_data,
+                    payload=payload,
+                )
+            else:
+                try:
+                    publish_message(rabbit_cfg, QUEUE_TRANSCRIPTION, {
+                        "audio_file_id": audio_file_id,
+                        "user_sub": user_sub,
+                        "stored_filename": internal_key,
+                        "original_filename": payload.get("original_filename"),
+                        "simple_code": simple_code,
+                    })
+                    logger.info("Transcription enqueued for %s", audio_file_id)
+                except Exception as e:
+                    logger.warning("Failed to enqueue transcription: %s", e)
         else:
             logger.info("Transcription disabled by token flag for %s", audio_file_id)
 

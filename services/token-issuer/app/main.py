@@ -33,7 +33,7 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption
+from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -697,6 +697,115 @@ def revoke_all_devices():
         )
         db.commit()
         return jsonify({"ok": True, "revoked": int(updated)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/oidc-refresh-store", methods=["POST"])
+def oidc_refresh_store():
+    """
+    UPSERT a (Fernet-encrypted) OIDC refresh token, keyed by user_sub.
+
+    Called by code-generator and admin-portal after a successful OIDC login
+    when offline_access was requested. The plaintext token is never sent in
+    the body — the caller has already encrypted it with the shared Fernet
+    key via libs.shared.app.secrets_crypto.
+
+    Body: { user_sub, ciphertext, keycloak_iss?, user_email? }
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    ciphertext = (data.get("ciphertext") or "").strip()
+    keycloak_iss = (data.get("keycloak_iss") or "").strip()[:512] or None
+    user_email = (data.get("user_email") or "").strip()[:255] or None
+    if not user_sub or not ciphertext:
+        return jsonify({"error": "user_sub and ciphertext are required"}), 400
+
+    now = datetime.now(timezone.utc)
+    db = SessionLocal()
+    try:
+        rec = db.query(OidcRefreshToken).filter(OidcRefreshToken.user_sub == user_sub).first()
+        if rec:
+            rec.ciphertext = ciphertext
+            rec.keycloak_iss = keycloak_iss
+            rec.user_email = user_email
+            rec.last_login_at = now
+            rec.updated_at = now
+            action = "update"
+        else:
+            db.add(OidcRefreshToken(
+                user_sub=user_sub,
+                ciphertext=ciphertext,
+                keycloak_iss=keycloak_iss,
+                user_email=user_email,
+                last_login_at=now,
+            ))
+            action = "insert"
+        db.commit()
+        logger.info("oidc_refresh_store: %s for user_sub=%s (iss=%s)", action, user_sub, keycloak_iss or "-")
+        return jsonify({"ok": True, "action": action})
+    except Exception:
+        db.rollback()
+        logger.exception("oidc_refresh_store: UPSERT failed for user_sub=%s", user_sub)
+        return jsonify({"error": "internal_error"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/oidc-refresh-fetch/<user_sub>", methods=["GET"])
+def oidc_refresh_fetch(user_sub: str):
+    """
+    Return the stored ciphertext for a given user_sub (or 404).
+
+    Used by file-puller at MCR push time. The decryption happens
+    file-puller-side, so the Fernet key only needs to be present there
+    (and on CG/admin which encrypt). token-issuer is key-blind.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (user_sub or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub is required"}), 400
+    db = SessionLocal()
+    try:
+        rec = db.query(OidcRefreshToken).filter(OidcRefreshToken.user_sub == user_sub).first()
+        if not rec:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({
+            "user_sub": rec.user_sub,
+            "ciphertext": rec.ciphertext,
+            "keycloak_iss": rec.keycloak_iss,
+            "user_email": rec.user_email,
+            "last_login_at": rec.last_login_at.isoformat() if rec.last_login_at else None,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/oidc-refresh-delete/<user_sub>", methods=["DELETE"])
+def oidc_refresh_delete(user_sub: str):
+    """
+    Delete the stored refresh token for a user_sub. Called by file-puller
+    when Keycloak responds invalid_grant (refresh expired/revoked) so the
+    next MCR push attempt fails fast in mcr_auth_failed without trying to
+    use a known-bad token.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (user_sub or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub is required"}), 400
+    db = SessionLocal()
+    try:
+        deleted = (
+            db.query(OidcRefreshToken)
+            .filter(OidcRefreshToken.user_sub == user_sub)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        return jsonify({"ok": True, "deleted": int(deleted)})
     finally:
         db.close()
 

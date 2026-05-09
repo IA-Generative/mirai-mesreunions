@@ -37,7 +37,9 @@ from libs.shared.app.config import (
     load_s3_upload,
     load_s3_processed,
     load_s3_internal,
+    OIDC_OFFLINE_ACCESS,
 )
+from libs.shared.app.oidc_refresh_store import store_refresh_token
 from libs.shared.app.database import create_session_factory
 from libs.shared.app.models import (
     UploadSession, UploadedFile, UserAudioFile, TranscriptionEvent, UploadStatus, DeviceEnrollment,
@@ -547,11 +549,12 @@ def create_app() -> Flask:
         nonce = secrets.token_urlsafe(24)
         session["oidc_state"] = state
         session["oidc_nonce"] = nonce
+        scope = "openid email profile offline_access" if OIDC_OFFLINE_ACCESS else "openid email profile"
         params = {
             "response_type": "code",
             "client_id": oidc_cfg.client_id,
             "redirect_uri": oidc_cfg.redirect_uri,
-            "scope": "openid email profile",
+            "scope": scope,
             "state": state,
             "nonce": nonce,
         }
@@ -637,6 +640,20 @@ def create_app() -> Flask:
         session["id_token"] = token.get("id_token", "")
         session.pop("oidc_state", None)
         session.pop("oidc_nonce", None)
+
+        # Persist refresh_token (encrypted server-side) for the asynchronous
+        # MCR push later. Best-effort — must not break login if token-issuer is down.
+        if OIDC_OFFLINE_ACCESS:
+            try:
+                store_refresh_token(
+                    user_sub=userinfo.get("sub", ""),
+                    refresh_token=token.get("refresh_token"),
+                    keycloak_iss=oidc_cfg.issuer,
+                    user_email=userinfo.get("email", ""),
+                )
+            except Exception:
+                logger.exception("Failed to persist OIDC refresh token (login still succeeded)")
+
         return redirect(_with_base(url_for("index")))
 
     @app.route("/logout")

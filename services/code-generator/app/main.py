@@ -35,7 +35,9 @@ from libs.shared.app.config import (
     OIDCConfig, load_ext_db, CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES,
     MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed, load_s3_internal,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
+    OIDC_OFFLINE_ACCESS,
 )
+from libs.shared.app.oidc_refresh_store import store_refresh_token
 from libs.shared.app.models import (
     ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus, UploadTokenOption
 )
@@ -63,15 +65,22 @@ NORMALIZATION_ANALYSIS_MAX_SECONDS = max(30, int(os.getenv("NORMALIZATION_ANALYS
 
 # ─── OIDC Setup ─────────────────────────────────────────────
 
+_OIDC_SCOPE_BASE = "openid email profile"
+_OIDC_SCOPE = f"{_OIDC_SCOPE_BASE} offline_access" if OIDC_OFFLINE_ACCESS else _OIDC_SCOPE_BASE
+
 oauth = OAuth(app)
 oauth.register(
     name="keycloak",
     client_id=oidc_cfg.client_id,
     client_secret=oidc_cfg.client_secret,
     server_metadata_url=f"{oidc_cfg.issuer}/.well-known/openid-configuration",
-    client_kwargs={"scope": "openid email profile"},
+    client_kwargs={"scope": _OIDC_SCOPE},
 )
 oidc_internal_issuer = os.getenv("OIDC_INTERNAL_ISSUER", oidc_cfg.issuer).rstrip("/")
+if OIDC_OFFLINE_ACCESS:
+    logger.info("OIDC offline_access scope ENABLED — refresh tokens will be persisted")
+else:
+    logger.info("OIDC offline_access scope DISABLED — set OIDC_OFFLINE_ACCESS=true to enable MCR push prerequisite")
 
 
 # ─── Helpers ────────────────────────────────────────────────
@@ -333,7 +342,7 @@ def login():
         "response_type": "code",
         "client_id": oidc_cfg.client_id,
         "redirect_uri": oidc_cfg.redirect_uri,
-        "scope": "openid email profile",
+        "scope": _OIDC_SCOPE,
         "state": state,
         "nonce": nonce,
     }
@@ -427,6 +436,20 @@ def auth_callback():
     session["id_token"] = token.get("id_token", "")
     session.pop("oidc_state", None)
     session.pop("oidc_nonce", None)
+
+    # Persist the refresh token (encrypted, server-side) for the asynchronous
+    # MCR push later. Best-effort: failure here MUST NOT break the login flow.
+    if OIDC_OFFLINE_ACCESS:
+        try:
+            store_refresh_token(
+                user_sub=userinfo.get("sub", ""),
+                refresh_token=token.get("refresh_token"),
+                keycloak_iss=oidc_cfg.issuer,
+                user_email=userinfo.get("email", ""),
+            )
+        except Exception:
+            logger.exception("Failed to persist OIDC refresh token (login still succeeded)")
+
     return redirect(url_for("index"))
 
 

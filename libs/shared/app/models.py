@@ -238,10 +238,16 @@ class UserAudioFile(InternalBase):
     audio_duration_seconds = Column(Float, nullable=True)
 
     # Transcription
-    transcription_status = Column(String(50), default="pending")
+    transcription_status = Column(String(50), default="pending",
+                                  comment="pending|disabled|processing|completed|failed|"
+                                          "mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed")
     transcription_text = Column(Text, nullable=True)
     transcription_started_at = Column(DateTime(timezone=True), nullable=True)
     transcription_completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # MCR push (when MCR_PUSH_ENABLED): the meeting_id returned by POST /meetings.
+    # Used for cross-reference with the MCR platform when investigating outcomes.
+    mcr_meeting_id = Column(String(64), nullable=True, index=True)
 
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -249,6 +255,44 @@ class UserAudioFile(InternalBase):
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
+    )
+
+
+class OidcRefreshToken(InternalBase):
+    """
+    Server-side cache of an OIDC refresh token, keyed by user_sub.
+
+    Captured at login on mydevices (code-generator/admin-portal) when the
+    OIDC scope ``offline_access`` is requested. Used asynchronously by
+    file-puller at MCR push time to mint a fresh access token *on behalf
+    of* the original user — without that user being interactively
+    connected anymore.
+
+    Stored as Fernet ciphertext (cf libs.shared.app.secrets_crypto). The
+    plaintext refresh token never touches the disk in clear.
+
+    Lifecycle:
+      - INSERT/UPSERT at user login (latest token wins; Keycloak rotates
+        on use so older tokens become invalid anyway).
+      - SELECT-DECRYPT-EXCHANGE at file-puller MCR push.
+      - DELETE on KC ``invalid_grant`` (refresh expired or revoked) or on
+        explicit logout.
+    """
+    __tablename__ = "oidc_refresh_tokens"
+
+    user_sub = Column(String(255), primary_key=True)
+    ciphertext = Column(Text, nullable=False, comment="Fernet ciphertext of the refresh_token")
+    keycloak_iss = Column(String(512), nullable=True,
+                          comment="OIDC issuer at the time of capture, for multi-realm safety")
+    user_email = Column(String(255), nullable=True,
+                        comment="Convenience copy from id_token, for ops/debug only — ground truth is user_sub")
+    last_login_at = Column(DateTime(timezone=True), nullable=False,
+                           default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
     )
 
 
