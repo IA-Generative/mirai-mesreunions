@@ -2471,20 +2471,15 @@ function showEnrollmentForm() {
 }
 
 function applyEnrollmentFormVisibility(devices) {
+    // Form stays visible by default — the original "ne plus afficher le QR
+    // si un device est enrôlé" was about the QR result (which appears only
+    // after a generate click anyway), not the form. Hiding the form behind
+    // a toggle confused users who couldn't find the Generate button.
+    // Keep the function as a no-op to avoid breaking other call sites.
     const form = document.getElementById('generate-form');
     const collapsed = document.getElementById('enrollment-collapsed');
-    if (!form || !collapsed) return;
-    const hasActiveDevice = (devices || []).some((d) => {
-        const status = (d.status || '').toLowerCase();
-        return status !== 'revoked' && status !== 'expired';
-    });
-    if (hasActiveDevice && !userRequestedEnrollmentForm) {
-        form.style.display = 'none';
-        collapsed.style.display = '';
-    } else {
-        form.style.display = '';
-        collapsed.style.display = 'none';
-    }
+    if (form) form.style.display = '';
+    if (collapsed) collapsed.style.display = 'none';
 }
 
 async function loadDevices() {
