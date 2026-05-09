@@ -831,6 +831,27 @@ def api_revoke_device(device_id):
         return jsonify({"error": "device_revoke_failed"}), 500
 
 
+@app.route("/api/my-devices/<device_id>", methods=["DELETE"])
+@require_auth
+def api_delete_device(device_id):
+    """Permanently delete a device enrollment (no audit row left in DB).
+
+    Stronger than revoke — used by the user to clean up old / duplicate
+    enrollments. The UI requires a double-confirm before calling this.
+    """
+    user = get_current_user()
+    try:
+        request_internal_device_api(
+            "DELETE",
+            f"/api/v1/devices/{device_id}",
+            json_body={"user_sub": user.get("sub", "")},
+        )
+        return jsonify({"ok": True})
+    except Exception:
+        logger.exception("Failed to delete device %s for user %s", device_id, user.get("sub"))
+        return jsonify({"error": "device_delete_failed"}), 500
+
+
 @app.route("/api/my-devices/revoke-all", methods=["POST"])
 @require_auth
 def api_revoke_all_devices():
@@ -2535,6 +2556,10 @@ async function loadDevices() {
                                 data-device-revoke="${escapeHtml(d.device_id)}"
                                 onclick="revokeDevice('${escapeHtml(d.device_id)}')"
                                 ${d.status === 'revoked' ? 'disabled' : ''}>Révoquer</button>
+                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                data-device-delete="${escapeHtml(d.device_id)}"
+                                onclick="deleteDevicePermanently('${escapeHtml(d.device_id)}', '${escapeHtml(d.device_name || 'sans nom')}')"
+                                title="Suppression irréversible (audit perdu)">Supprimer</button>
                     </div>
                 </div>
                 <div style="display:flex;gap:0.4rem;margin-top:0.45rem;">
@@ -2589,6 +2614,31 @@ async function revokeDevice(deviceId) {
     } catch (e) {
         if (revokeBtn) revokeBtn.disabled = false;
         alert('Echec révocation appareil.');
+    }
+}
+
+async function deleteDevicePermanently(deviceId, deviceName) {
+    // Double-confirm — irreversible, no audit row left in DB.
+    const label = (deviceName || 'sans nom').slice(0, 60);
+    if (!confirm(`Supprimer DÉFINITIVEMENT l'appareil « ${label} » ?\n\n` +
+                 `Cette action est irréversible : la ligne sera retirée de la base de données ` +
+                 `(aucun audit conservé). Pour une suppression réversible, utilisez « Révoquer ».`)) {
+        return;
+    }
+    if (!confirm(`Confirmer la suppression définitive de « ${label} » ?`)) return;
+    const btn = document.querySelector(`[data-device-delete="${deviceId}"]`);
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/my-devices/${deviceId}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'delete_failed');
+        // Remove the row immediately from the DOM and refresh to confirm.
+        const row = document.querySelector(`[data-device-row="${deviceId}"]`);
+        if (row) row.remove();
+        setTimeout(loadDevices, 250);
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        alert('Echec suppression définitive de l\'appareil.');
     }
 }
 

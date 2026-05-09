@@ -669,6 +669,41 @@ def revoke_device(device_id: str):
         db.close()
 
 
+@app.route("/api/v1/devices/<device_id>", methods=["DELETE"])
+def delete_device(device_id: str):
+    """Permanently remove a device enrollment row.
+
+    Stronger than revoke (which keeps the row in DB for audit + hides it
+    after 24h). Use sparingly — once deleted, any historical reference
+    by device_id will return 404.
+
+    Auth: INTERNAL_API_TOKEN bearer (same as the other internal endpoints).
+    Body: ``{"user_sub": "..."}`` — ownership check; mismatched user_sub
+    returns 404 (no leak about whether the device exists for someone else).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub is required"}), 400
+
+    db = SessionLocal()
+    try:
+        rec = db.query(DeviceEnrollment).filter(DeviceEnrollment.id == device_id).first()
+        if not rec or rec.user_sub != user_sub:
+            return jsonify({"error": "not_found"}), 404
+        prior_status = rec.status
+        prior_qr = rec.qr_token
+        db.delete(rec)
+        db.commit()
+        logger.info("Device %s permanently deleted (user_sub=%s prior_status=%s qr_token=%s…)",
+                    device_id, user_sub, prior_status, (prior_qr or "")[:8])
+        return jsonify({"deleted": True})
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/devices/revoke-all", methods=["POST"])
 def revoke_all_devices():
     if not verify_token():
