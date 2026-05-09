@@ -200,6 +200,13 @@ KEVENT_SPEAKER_NAMING_ENABLED = _bool("KEVENT_SPEAKER_NAMING_ENABLED", False)
 KEVENT_OOB_CLEANING_ENABLED = _bool("KEVENT_OOB_CLEANING_ENABLED", False)
 KEVENT_REFORMULATION_ENABLED = _bool("KEVENT_REFORMULATION_ENABLED", False)
 KEVENT_MEETING_ANALYSIS_ENABLED = _bool("KEVENT_MEETING_ANALYSIS_ENABLED", False)
+# Glossary correction step (LLM rewrites detected acronyms / specialised terms
+# using a static general glossary loaded from `glossaire/*.md|txt|json` at
+# startup). Runs between speaker_naming and oob_cleaning so downstream steps
+# see the corrected sigles.
+KEVENT_GLOSSARY_CORRECTION_ENABLED = _bool("KEVENT_GLOSSARY_CORRECTION_ENABLED", False)
+KEVENT_GLOSSARY_DIR = _str("KEVENT_GLOSSARY_DIR", "/app/glossaire")
+KEVENT_GLOSSARY_MAX_TERMS_PER_CALL = _int("KEVENT_GLOSSARY_MAX_TERMS_PER_CALL", 200)
 KEVENT_HTTP_TIMEOUT_SECONDS = _int("KEVENT_HTTP_TIMEOUT_SECONDS", 600)
 
 # LiteLLM Mirai (chat backend used by the kevent meeting-intelligence steps).

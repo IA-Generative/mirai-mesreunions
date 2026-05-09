@@ -51,7 +51,10 @@ from libs.shared.app.config import (
     KEVENT_TRANSCRIPTION_MODEL, KEVENT_DIARIZATION_MODEL,
     KEVENT_DIARIZATION_ENABLED, KEVENT_SPEAKER_NAMING_ENABLED,
     KEVENT_OOB_CLEANING_ENABLED, KEVENT_REFORMULATION_ENABLED,
-    KEVENT_MEETING_ANALYSIS_ENABLED, KEVENT_HTTP_TIMEOUT_SECONDS,
+    KEVENT_MEETING_ANALYSIS_ENABLED,
+    KEVENT_GLOSSARY_CORRECTION_ENABLED, KEVENT_GLOSSARY_DIR,
+    KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+    KEVENT_HTTP_TIMEOUT_SECONDS,
     LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
     LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
 )
@@ -83,9 +86,19 @@ from app.kevent_client import (
 from app.llm_client import LLMClient
 from app.diarization_merger import merge_to_markdown
 from app import meeting_intelligence as mi
+from app.glossary_loader import load_glossary_dir
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+
+
+# Static general glossary loaded once per worker process. Reload requires a pod
+# restart — acceptable since the glossary lives in the image (cf
+# `docs/integrate-with-kevent.md` § Glossaire).
+_GLOSSARY_TERMS: list[str] = []
+if KEVENT_GLOSSARY_CORRECTION_ENABLED:
+    _GLOSSARY_TERMS = load_glossary_dir(KEVENT_GLOSSARY_DIR)
+    logger.info("Loaded %d glossary terms from %s", len(_GLOSSARY_TERMS), KEVENT_GLOSSARY_DIR)
 
 app = Flask(__name__)
 
@@ -240,8 +253,8 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
 
     Optional kwargs accepted: ``mcr_meeting_id``, ``transcription_engine``,
     ``transcription_text``, ``transcription_language``, ``diarization_json``,
-    ``speaker_tagged_text``, ``cleaned_text``, ``reformulated_text``,
-    ``meeting_analysis_json``.
+    ``speaker_tagged_text``, ``glossary_corrected_text``, ``cleaned_text``,
+    ``reformulated_text``, ``meeting_analysis_json``.
     """
     allowed = {
         "mcr_meeting_id",
@@ -250,6 +263,7 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "transcription_language",
         "diarization_json",
         "speaker_tagged_text",
+        "glossary_corrected_text",
         "cleaned_text",
         "reformulated_text",
         "meeting_analysis_json",
@@ -379,6 +393,22 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     # The base text the LLM steps will operate on: the speaker-tagged text
     # if available (richer context for the model), else the raw transcript.
     base_for_llm = speaker_tagged or text
+
+    # 3b-bis. Glossary correction (medium model) — fixes administrative acronyms
+    # phonetically mistranscribed by Whisper (cf docs/integrate-with-kevent.md
+    # § Glossaire). Runs BEFORE OOB cleaning so cleaning + reformulation +
+    # analysis all see the corrected sigles.
+    if KEVENT_GLOSSARY_CORRECTION_ENABLED and llm is not None and _GLOSSARY_TERMS:
+        corrected = mi.apply_glossary_correction(
+            base_for_llm, llm, LLM_MODEL_MEDIUM,
+            glossary_terms=_GLOSSARY_TERMS,
+            max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+        )
+        if corrected:
+            updates["glossary_corrected_text"] = corrected
+            base_for_llm = corrected  # downstream steps see the corrected text
+        # No status downgrade if no relevant terms (None) — glossary is
+        # opportunistic, not a required step.
 
     # 3c. Out-of-band cleaning (medium model).
     if KEVENT_OOB_CLEANING_ENABLED and llm is not None:

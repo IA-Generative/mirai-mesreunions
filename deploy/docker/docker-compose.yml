@@ -462,6 +462,10 @@ services:
     volumes:
       - ../../services/file-mover:/app/services/file-mover
       - ../../libs:/app/libs
+      # Mount the live glossary dir read-only so edits in `glossaire/` take
+      # effect on the next container restart, no rebuild. This masks the
+      # Dockerfile COPY at the same path.
+      - ../../glossaire:/app/glossaire:ro
     ports:
       - "8090:8090"
     environment:

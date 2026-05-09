@@ -87,6 +87,48 @@ def extract_speaker_names(transcript: str, llm: LLMClient, model: str) -> Dict[s
     return cleaned
 
 
+def apply_glossary_correction(
+    transcript: str,
+    llm: LLMClient,
+    model: str,
+    glossary_terms: list[str],
+    max_terms_per_call: int = 200,
+) -> Optional[str]:
+    """
+    Ask the LLM to fix acronyms / specialised terms in the transcript using a
+    static glossary. Whisper often spells out unknown sigles phonetically
+    ("deux M L F D I" instead of "2MLFDI") — this step rewrites those.
+
+    The glossary is filtered by relevance (see `glossary_loader.filter_relevant`)
+    before being embedded in the prompt so we don't burn context with
+    hundreds of unrelated entries.
+
+    Returns the corrected transcript, or None when the LLM call failed
+    or there was nothing to correct (caller keeps the original).
+    """
+    if not transcript.strip() or not glossary_terms:
+        return None
+    # Deferred import so unit tests can stub out the loader independently.
+    from app.glossary_loader import filter_relevant
+
+    relevant = filter_relevant(glossary_terms, transcript, max_terms_per_call)
+    if not relevant:
+        logger.info("glossary_correction: no relevant terms detected, skipping LLM call")
+        return None
+
+    prompt = (
+        _load_prompt("glossary_correction")
+        .replace("{TRANSCRIPT}", transcript)
+        .replace("{GLOSSARY_TERMS}", "\n".join(f"- {t}" for t in relevant))
+    )
+    logger.info("glossary_correction: %d relevant terms passed to LLM", len(relevant))
+    try:
+        return llm.chat(model, [{"role": "user", "content": prompt}])
+    except LLMError:
+        logger.warning("glossary_correction: LLM call failed", exc_info=True)
+        return None
+
+
 def clean_oob(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
     """
     Ask the LLM to remove out-of-band content. Returns the cleaned text

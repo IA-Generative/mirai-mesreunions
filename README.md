@@ -95,7 +95,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 | **file-puller** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
 | **transcription-stub** | Interne | — | Backend par défaut (`TRANSCRIPTION_BACKEND=stub`), simule la STT via la queue locale |
 | **MCR push** | Interne (file-puller) | — | Backend `mcr` : pousse le fichier transcodé vers la plateforme MCR via OIDC refresh token (cf [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md)) |
-| **Kevent / Mirai** | Interne (file-puller) | — | Backend `kevent` : Whisper + pyannote diarisation + intelligence de réunion LLM (speaker naming, OOB cleaning, reformulation, analyse 5 sections), cf [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md) |
+| **Kevent / Mirai** | Interne (file-puller) | — | Backend `kevent` : Whisper + pyannote diarisation + intelligence de réunion LLM (speaker naming, **glossary correction**, OOB cleaning, reformulation, analyse 5 sections). Glossaire administratif embarqué image (fallback) ou monté en ConfigMap K8s sans rebuild — cf [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md) |
 
 ## Principes de sécurité
 

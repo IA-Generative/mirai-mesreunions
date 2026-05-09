@@ -265,6 +265,8 @@ class UserAudioFile(InternalBase):
                               comment="raw pyannote segments: [{speaker, start, end}, …]")
     speaker_tagged_text = Column(Text, nullable=True,
                                  comment="markdown with SPEAKER_NN labels (real names if naming enabled)")
+    glossary_corrected_text = Column(Text, nullable=True,
+                                     comment="speaker_tagged_text with general glossary terms (sigles MI etc.) corrected by LLM; NULL if KEVENT_GLOSSARY_CORRECTION_ENABLED off or no relevant terms found")
     cleaned_text = Column(Text, nullable=True,
                           comment="LLM-cleaned version with out-of-band content filtered out")
     reformulated_text = Column(Text, nullable=True,

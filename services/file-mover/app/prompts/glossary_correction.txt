@@ -1,0 +1,28 @@
+Tu es un correcteur de transcription audio spécialisé dans le vocabulaire administratif français (Ministère de l'Intérieur, services publics).
+
+Voici la TRANSCRIPTION (avec marqueurs de speakers Markdown éventuels) :
+
+{TRANSCRIPT}
+
+Voici une LISTE DE SIGLES / TERMES officiels qui peuvent apparaître phonétiquement dans la transcription (Whisper a souvent du mal à reconstruire un sigle : il peut écrire « deux M L F D I » au lieu de « 2MLFDI », ou « ah anne ess » au lieu de « ANSC »).
+
+LISTE DE TERMES :
+{GLOSSARY_TERMS}
+
+INSTRUCTIONS — IMPÉRATIVES :
+
+1. Parcours la transcription et remplace UNIQUEMENT les passages qui correspondent phonétiquement à un terme de la liste ci-dessus. Exemples :
+   - « deux M L F D I » → « 2MLFDI »
+   - « ah anne ess cé » → « ANSC »
+   - « anne tay ah i » → « ANTAI »
+
+2. Si tu n'es pas SÛR à au moins 80 % qu'un passage correspond à un sigle de la liste, **ne le remplace pas**. Mieux vaut une transcription brute qu'une fausse correction.
+
+3. Préserve **strictement** :
+   - les marqueurs de speakers `**SPEAKER_NN**` ou `**Nom Prenom**`
+   - la ponctuation et les retours à la ligne
+   - les mots qui ne sont pas dans la liste — ne les modifie pas, même s'ils paraissent fautifs
+
+4. N'invente pas, ne résume pas, ne reformule pas.
+
+5. Réponds UNIQUEMENT avec la transcription corrigée, sans préambule ni commentaire.
