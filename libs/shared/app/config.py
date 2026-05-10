@@ -122,8 +122,14 @@ def load_s3_internal() -> S3Config:
 
 
 # Codes
-CODE_TTL_MINUTES = _int("CODE_TTL_MINUTES", 10080)
-CODE_TTL_MAX_MINUTES = _int("CODE_TTL_MAX_MINUTES", 10080)
+# CODE_TTL_MINUTES = enrollment grace window. NOT the upload window.
+# Once a device enrolls within this grace, its device_token has its own
+# retention (DEVICE_TOKEN_RETENTION_HOURS) which governs subsequent uploads.
+# Default 5 min : a user generating a code uses it immediately; beyond that
+# = forgotten / disposable. Max 60 min for edge cases (giving the QR to a
+# colleague to enroll later).
+CODE_TTL_MINUTES = _int("CODE_TTL_MINUTES", 5)
+CODE_TTL_MAX_MINUTES = _int("CODE_TTL_MAX_MINUTES", 60)
 MAX_UPLOADS_PER_SESSION = _int("MAX_UPLOADS_PER_SESSION", 299)
 CODE_LENGTH = _int("CODE_LENGTH", 6)
 UPLOAD_STATUS_VIEW_TTL_MINUTES = _int("UPLOAD_STATUS_VIEW_TTL_MINUTES", 60)

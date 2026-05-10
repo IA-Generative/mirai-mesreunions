@@ -669,6 +669,57 @@ def revoke_device(device_id: str):
         db.close()
 
 
+@app.route("/api/v1/sessions/<simple_code>", methods=["DELETE"])
+def delete_session(simple_code: str):
+    """Permanently remove an issued token + its options + any linked devices.
+
+    Used by code-generator when the user clicks "Supprimer cette session" on
+    a session card. Cascades:
+      - issued_token_options (FK on simple_code)
+      - device_enrollments  (FK on simple_code, may be 0 rows for never-enrolled codes)
+      - issued_tokens (the source row)
+
+    Auth: INTERNAL_API_TOKEN bearer. Body: ``{"user_sub": "..."}`` for the
+    ownership check; mismatch → 404 (no info leak).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub is required"}), 400
+
+    db = SessionLocal()
+    try:
+        token = (
+            db.query(IssuedToken)
+            .filter(IssuedToken.simple_code == simple_code)
+            .first()
+        )
+        if not token or token.user_sub != user_sub:
+            return jsonify({"error": "not_found"}), 404
+        # Cascade in this order so we never leave dangling FKs.
+        n_devices = (
+            db.query(DeviceEnrollment)
+            .filter(DeviceEnrollment.simple_code == simple_code)
+            .delete(synchronize_session=False)
+        )
+        n_options = (
+            db.query(IssuedTokenOption)
+            .filter(IssuedTokenOption.simple_code == simple_code)
+            .delete(synchronize_session=False)
+        )
+        db.delete(token)
+        db.commit()
+        logger.info(
+            "Session %s permanently deleted (user_sub=%s, devices=%d, options=%d)",
+            simple_code, user_sub, n_devices, n_options,
+        )
+        return jsonify({"deleted": True, "devices_removed": n_devices})
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/devices/<device_id>", methods=["DELETE"])
 def delete_device(device_id: str):
     """Permanently remove a device enrollment row.

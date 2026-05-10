@@ -770,11 +770,48 @@ def run_internal_purge_once():
             db.delete(audio_file)
             removed_db += 1
 
+        # Purge orphan issued_tokens (and their options + non-confirmed devices) :
+        #   - expired_unused : expires_at < NOW - 24h grace, never enrolled
+        #   - expired_consumed : expires_at < NOW - 90 days, even with history
+        # Note : `device_enrollments` survive even when the token is gone (the
+        # device_token is signed independently with retention_until). Only purge
+        # device rows whose `last_seen_at` is None (= enrollment never confirmed).
+        from libs.shared.app.models import IssuedToken, IssuedTokenOption, DeviceEnrollment
+        unused_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        consumed_cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        # Tokens jamais utilisés (aucun device confirmé) — purge à 24h après expiration
+        unused_tokens = (
+            db.query(IssuedToken)
+            .outerjoin(DeviceEnrollment, DeviceEnrollment.simple_code == IssuedToken.simple_code)
+            .filter(IssuedToken.expires_at < unused_cutoff)
+            .filter(DeviceEnrollment.id.is_(None))
+            .all()
+        )
+        # Tokens consumed (avec device) — purge à 90j après expiration. Plus
+        # rare ; le device_token signé reste valide jusqu'à sa retention_until.
+        consumed_tokens = (
+            db.query(IssuedToken)
+            .filter(IssuedToken.expires_at < consumed_cutoff)
+            .all()
+        )
+        purged_tokens = 0
+        for tok in {t.id: t for t in (unused_tokens + consumed_tokens)}.values():
+            db.query(IssuedTokenOption).filter(
+                IssuedTokenOption.simple_code == tok.simple_code
+            ).delete(synchronize_session=False)
+            db.query(DeviceEnrollment).filter(
+                DeviceEnrollment.simple_code == tok.simple_code,
+                DeviceEnrollment.last_seen_at.is_(None),  # only orphan/never-confirmed
+            ).delete(synchronize_session=False)
+            db.delete(tok)
+            purged_tokens += 1
+
         db.commit()
-        if removed_db:
+        if removed_db or purged_tokens:
             logger.info(
-                "Internal purge done: db=%d, s3_deleted=%d, s3_failed=%d, cutoff=%s",
-                removed_db, removed_s3, skipped_s3, cutoff.isoformat()
+                "Internal purge done: audio_files=%d (s3_deleted=%d, s3_failed=%d), "
+                "issued_tokens=%d, cutoff=%s",
+                removed_db, removed_s3, skipped_s3, purged_tokens, cutoff.isoformat()
             )
     except Exception:
         db.rollback()

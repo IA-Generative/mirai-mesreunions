@@ -302,6 +302,33 @@ def _resolve_transcoded_storage(file_obj: UploadedFile):
     return s3_processed_cfg, file_obj.transcoded_filename
 
 
+def _compute_lifecycle_state(session: UploadSession) -> str:
+    """Compute the user-facing lifecycle state of a session at read time.
+
+    No DB column needed — derived from existing fields. The 4 states map to
+    the 3 UI buckets (active vs obsolete vs archive).
+
+    Returns:
+      - ``pending_enrollment`` : within enrollment grace, no device enrolled
+      - ``enrolled``           : device(s) enrolled OR uploads happened
+      - ``expired_unused``     : grace passed, never used → safe to drop
+      - ``expired_consumed``   : grace passed but had uploads → keep for audit
+    """
+    now = datetime.now(timezone.utc)
+    expires_at = session.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    is_past = bool(expires_at and expires_at < now)
+    has_activity = (session.upload_count or 0) > 0
+    if is_past and not has_activity:
+        return "expired_unused"
+    if is_past and has_activity:
+        return "expired_consumed"
+    if has_activity:
+        return "enrolled"
+    return "pending_enrollment"
+
+
 def _resolve_transferred_storage(db, file_obj: UploadedFile):
     if not file_obj.transcoded_filename:
         return None, None
@@ -706,6 +733,7 @@ def api_my_sessions():
                 "max_uploads": s.max_uploads,
                 "expires_at": s.expires_at.isoformat(),
                 "created_at": s.created_at.isoformat(),
+                "lifecycle_state": _compute_lifecycle_state(s),
                 "uploads": uploads,
             })
         if reconciled:
@@ -1491,6 +1519,72 @@ def api_file_stream_transferred(file_id):
         db.close()
 
 
+@app.route("/api/my-sessions/<simple_code>", methods=["DELETE"])
+@require_auth
+def api_delete_session(simple_code):
+    """Permanently delete a single session (and everything attached to it).
+
+    Cascade order :
+      1. S3 audio-upload + audio-processed objects for the session's files
+      2. uploaded_files + upload_session rows in postgres-external
+      3. Internal cleanup via token-issuer DELETE /api/v1/sessions/<code>
+         (issued_token + options + device_enrollments)
+
+    Used by the "Supprimer cette session" button. Confirms ownership at every
+    layer (user_sub on the postgres-external query + bearer to token-issuer).
+    """
+    user = get_current_user()
+    db = SessionLocal()
+    deleted_objects = 0
+    deleted_files = 0
+    try:
+        s = (
+            db.query(UploadSession)
+            .filter(UploadSession.user_sub == user["sub"], UploadSession.simple_code == simple_code)
+            .first()
+        )
+        if not s:
+            return jsonify({"error": "session_not_found"}), 404
+        for f in s.uploads:
+            try:
+                if f.stored_filename:
+                    delete_object(s3_upload_cfg, f.stored_filename)
+                    deleted_objects += 1
+            except Exception:
+                logger.warning("Failed to delete upload object %s", f.stored_filename)
+            try:
+                if f.transcoded_filename:
+                    delete_object(s3_processed_cfg, f.transcoded_filename)
+                    deleted_objects += 1
+            except Exception:
+                logger.warning("Failed to delete processed object %s", f.transcoded_filename)
+            deleted_files += 1
+        db.delete(s)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to delete session %s for user %s", simple_code, user.get("sub"))
+        return jsonify({"error": "session_delete_failed"}), 500
+    finally:
+        db.close()
+
+    # Cleanup interne (best-effort — l'externe est déjà nettoyé, l'interne peut
+    # être rejoué si ça échoue maintenant via le purge background).
+    try:
+        request_internal_device_api(
+            "DELETE",
+            f"/api/v1/sessions/{simple_code}",
+            json_body={"user_sub": user.get("sub", "")},
+        )
+    except Exception:
+        logger.exception(
+            "External cleanup OK but internal token-issuer DELETE %s failed — "
+            "background purge will catch up.", simple_code,
+        )
+
+    return jsonify({"ok": True, "deleted_files": deleted_files, "deleted_objects": deleted_objects})
+
+
 @app.route("/api/purge-my-sessions", methods=["POST"])
 @require_auth
 def api_purge_my_sessions():
@@ -2112,18 +2206,20 @@ INDEX_TEMPLATE = """
 
         <div id="generate-form">
             <div class="form-group fr-select-group">
-                <label class="fr-label" for="ttl">Durée de validité</label>
+                <label class="fr-label" for="ttl">Fenêtre d'enrôlement</label>
+                <p style="margin:0.2rem 0 0.4rem 0;color:#64748b;font-size:0.78rem;">
+                    Délai pendant lequel le QR peut être scanné par un mobile pour s'enrôler.
+                    Une fois enrôlé, l'appareil est valide 15 jours pour uploader.
+                </p>
                 <select id="ttl" class="fr-select">
                     {% if short_ttl_enabled %}
                     <option value="15s">15 secondes (test)</option>
                     <option value="30s">30 secondes (test)</option>
                     {% endif %}
+                    <option value="5" selected>5 minutes (recommandé)</option>
                     <option value="15">15 minutes</option>
+                    <option value="30">30 minutes</option>
                     <option value="60">1 heure</option>
-                    <option value="240">4 heures</option>
-                    <option value="1440">24 heures</option>
-                    <option value="4320">3 jours</option>
-                    <option value="10080" selected>7 jours</option>
                 </select>
             </div>
             <!-- Le quota max-uploads/token n'est plus exposé à l'utilisateur (cf. mydevices UX
@@ -2703,6 +2799,30 @@ async function purgeSessions() {
     }
 }
 
+async function deleteSession(simpleCode, allowSilent) {
+    // For "expired_unused" / "pending_enrollment" with 0 upload, no confirm
+    // (rien à perdre). For "enrolled" / "expired_consumed" with files,
+    // double confirm warning that linked files will be removed too.
+    if (!allowSilent) {
+        if (!confirm(`Supprimer définitivement la session ${simpleCode} ?\n\n` +
+                     `Tous les fichiers uploadés via ce code seront aussi supprimés ` +
+                     `(S3 + base de données). Action irréversible.`)) return;
+    }
+    const btn = document.querySelector(`[data-session-delete="${simpleCode}"]`);
+    if (btn) btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/my-sessions/${simpleCode}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'delete_failed');
+        const row = document.querySelector(`[data-session-row="${simpleCode}"]`);
+        if (row) row.remove();
+        setTimeout(() => { loadSessions(); loadDevices(); }, 250);
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        alert('Echec suppression de la session.');
+    }
+}
+
 async function renewSession(sessionId) {
     if (!confirm('Renouveler cette session de 7 jours ?')) return;
     try {
@@ -2850,7 +2970,7 @@ async function loadSessions() {
             return;
         }
 
-        container.innerHTML = sessions.map(s => {
+        const renderedItems = sessions.map(s => {
             const isActive = s.status === 'active' && new Date(s.expires_at) > new Date();
             const statusClass = isActive ? 'status-active' : 'status-expired';
             const sessionStatusLabel = isActive ? 'Actif' : 'Expiré';
@@ -2944,15 +3064,58 @@ async function loadSessions() {
                 </div>`;
             }).join('');
 
-                return `<div class="session-item">
+                // Lifecycle bucket from server-computed state. UI labels +
+                // delete-button confirmation severity vary per bucket.
+                const lifecycle = s.lifecycle_state || (isActive ? 'pending_enrollment' : 'expired_unused');
+                const labels = {
+                    pending_enrollment: 'En attente d\\'enrôlement',
+                    enrolled:           'Enrôlé',
+                    expired_unused:     'Inutilisée (jetable)',
+                    expired_consumed:   'Expirée — fichiers conservés',
+                };
+                const stateLabel = labels[lifecycle] || sessionStatusLabel;
+                const stateBadgeClass = lifecycle === 'enrolled' ? 'status-active'
+                    : lifecycle === 'pending_enrollment' ? 'status-active'
+                    : 'status-expired';
+                const allowSilentDelete = (lifecycle === 'expired_unused' || lifecycle === 'pending_enrollment')
+                    && (s.upload_count || 0) === 0;
+
+                return `<div class="session-item" data-session-row="${s.simple_code}" data-lifecycle="${lifecycle}">
                 <span class="code">${s.simple_code}</span>
-                <span class="status-badge ${statusClass}">${sessionStatusLabel}</span>
+                <span class="status-badge ${stateBadgeClass}">${stateLabel}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
                         onclick="renewSession('${s.id}')">Renouveller</button>
+                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                        data-session-delete="${s.simple_code}"
+                        onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
+                        title="Suppression définitive (DB + S3)">Supprimer</button>
                 <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>
                 ${filesHtml}
             </div>`;
-        }).join('');
+            });
+
+        // Bucket sessions by lifecycle for visual grouping (active prominent,
+        // obsolete + archive collapsed).
+        const buckets = { active: [], obsolete: [], archive: [] };
+        sessions.forEach((s, i) => {
+            const lc = s.lifecycle_state;
+            const html = renderedItems[i];
+            if (lc === 'pending_enrollment' || lc === 'enrolled') buckets.active.push(html);
+            else if (lc === 'expired_unused') buckets.obsolete.push(html);
+            else buckets.archive.push(html);
+        });
+        const collapsibleSection = (title, items, id) => items.length === 0 ? '' : `
+            <details id="${id}" style="margin-top:0.5rem;">
+                <summary style="cursor:pointer;font-size:0.84rem;color:#475569;padding:0.3rem 0;">
+                    ${title} (${items.length})
+                </summary>
+                <div style="margin-top:0.4rem;">${items.join('')}</div>
+            </details>`;
+        container.innerHTML = `
+            ${buckets.active.join('')}
+            ${collapsibleSection('Sessions inutilisées (jetables)', buckets.obsolete, 'obsolete-sessions')}
+            ${collapsibleSection('Historique (sessions expirées avec fichiers)', buckets.archive, 'archive-sessions')}
+        `;
 
         const fileCount = sessions.reduce((acc, s) => acc + ((s.uploads || []).length), 0);
         const purgeBtn = document.getElementById('purge-btn');
