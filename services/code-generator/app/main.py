@@ -2307,7 +2307,7 @@ function transferProgressFromMessage(status, msg) {
     if (status === 'ready_for_transfer') return 10;
     if (status !== 'transferring') return 0;
     const text = (msg || '').toLowerCase();
-    const m = text.match(/(\d{1,3})\s*%/);
+    const m = text.match(/(\\d{1,3})\\s*%/);
     if (m) {
         const v = Math.max(0, Math.min(100, parseInt(m[1], 10)));
         return Number.isFinite(v) ? v : 50;
