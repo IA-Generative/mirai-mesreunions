@@ -1870,6 +1870,12 @@ INDEX_TEMPLATE = """
             cursor: not-allowed;
         }
         .transcript-section { margin-top: 0.55rem; padding-top: 0.45rem; border-top: 1px dashed #e2e8f0; }
+        .transcript-status-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #475569; margin-bottom: 0.35rem; }
+        .transcript-status-spinner { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex-shrink: 0; }
+        .transcript-status-spinner.on { background: conic-gradient(#3b7dd8 0%, #3b7dd8 25%, transparent 25%, transparent 100%); animation: transcriptSpin 1.1s linear infinite; }
+        .transcript-status-spinner.off { background: #94a3b8; }
+        @keyframes transcriptSpin { to { transform: rotate(360deg); } }
+        .transcript-status-label { font-weight: 500; }
         .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
         .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; margin-bottom: 0.15rem; }
         .transcript-meta-keypoints { margin: 0; font-family: inherit; white-space: pre-wrap; font-size: 0.76rem; color: #475569; }
@@ -3188,6 +3194,25 @@ function renderDownloadRow(label, fileId, kind, formats, isCR) {
     </div>`;
 }
 
+// Map des statuts transcription DB → label UI + indique si on doit re-poll.
+const TRANSCRIPT_STATUS_LABELS = {
+    'pending':                     { label: 'Transcription en attente', polling: true },
+    'processing':                  { label: 'Transcription en cours (stub)', polling: true },
+    'completed':                   { label: 'Transcription disponible', polling: false },
+    'failed':                      { label: 'Transcription échouée', polling: false },
+    'kevent_queued':               { label: 'Transcription Kevent — file d\\'attente Mirai', polling: true },
+    'kevent_transcribing':         { label: 'Transcription Kevent — Whisper en cours', polling: true },
+    'kevent_processing':           { label: 'Transcription Kevent — traitement', polling: true },
+    'kevent_completed':            { label: 'Pipeline Kevent terminé', polling: false },
+    'kevent_partially_completed':  { label: 'Pipeline Kevent partiel — certaines étapes ont échoué', polling: false },
+    'kevent_failed':               { label: 'Pipeline Kevent échoué', polling: false },
+    'mcr_pushed':                  { label: 'Poussé vers MCR', polling: false },
+    'mcr_auth_failed':             { label: 'MCR : échec auth', polling: false },
+    'mcr_rejected':                { label: 'MCR : rejeté', polling: false },
+    'mcr_push_failed':             { label: 'MCR : échec push', polling: false },
+    'disabled':                    { label: 'Transcription désactivée', polling: false },
+};
+
 async function loadTranscriptStatus(fileId, container) {
     try {
         const resp = await fetch(`/api/file/transcript-status/${fileId}`);
@@ -3198,8 +3223,15 @@ async function loadTranscriptStatus(fileId, container) {
         const data = await resp.json();
         if (!data.available) {
             container.innerHTML = '';
+            // re-test dans 30s : la row apparaîtra dès que file-puller a intégré
+            setTimeout(() => loadTranscriptStatus(fileId, container), 30000);
             return;
         }
+        const status = (data.transcription_status || '').toLowerCase();
+        const engine = data.transcription_engine || '';
+        const meta = TRANSCRIPT_STATUS_LABELS[status] || { label: status || 'Statut inconnu', polling: false };
+        const isInProgress = meta.polling;
+
         const outputs = data.outputs || {};
         const kp = data.key_points_summary || '';
         const title = data.suggested_filename || '';
@@ -3209,6 +3241,13 @@ async function loadTranscriptStatus(fileId, container) {
                 ${kp ? `<pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>` : ''}
               </div>`
             : '';
+
+        // Bandeau statut transcription — toujours visible quand la row interne existe.
+        const statusBadge = `<div class="transcript-status-line">
+            <span class="transcript-status-spinner ${isInProgress ? 'on' : 'off'}"></span>
+            <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
+        </div>`;
+
         const downloads = [];
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
             if (outputs[kind]) {
@@ -3223,15 +3262,17 @@ async function loadTranscriptStatus(fileId, container) {
                 'Compte-rendu structuré', fileId, 'meeting-cr', CR_FORMATS, true,
             ));
         }
-        if (!downloads.length && !subtitle) {
-            container.innerHTML = '';
-            return;
-        }
-        container.innerHTML = `${subtitle}${downloads.length ? `
+        container.innerHTML = `${statusBadge}${subtitle}${downloads.length ? `
             <div class="transcript-download-block">
                 <div class="transcript-download-title">Téléchargements</div>
                 ${downloads.join('')}
             </div>` : ''}`;
+
+        // Re-poll automatique tant qu'on est en cours, pour ne pas obliger
+        // l'utilisateur à recharger la page pour voir la transcription apparaître.
+        if (isInProgress) {
+            setTimeout(() => loadTranscriptStatus(fileId, container), 15000);
+        }
     } catch (e) {
         container.innerHTML = '';
     }
