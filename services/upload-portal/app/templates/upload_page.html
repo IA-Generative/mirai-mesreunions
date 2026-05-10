@@ -279,6 +279,21 @@
         .dot-transcoding { background: #3b82f6; animation: pulse 1s infinite; }
         .dot-transcoded, .dot-ready, .dot-transferred { background: #10b981; }
         .dot-error { background: #ef4444; }
+        /* Statuts post-transfert (transcription côté zone interne) */
+        .dot-processing,
+        .dot-kevent_queued,
+        .dot-kevent_transcribing,
+        .dot-kevent_processing { background: #3b7dd8; animation: pulse 1.1s infinite; }
+        .dot-completed,
+        .dot-kevent_completed { background: #10b981; }
+        .dot-kevent_partially_completed { background: #f59e0b; }
+        .dot-failed,
+        .dot-kevent_failed,
+        .dot-mcr_auth_failed,
+        .dot-mcr_rejected,
+        .dot-mcr_push_failed { background: #ef4444; }
+        .dot-mcr_pushed { background: #10b981; }
+        .dot-disabled { background: #94a3b8; }
         .status-text.alert-left {
             display: inline-block;
             margin-left: 0;

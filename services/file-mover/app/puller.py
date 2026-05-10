@@ -321,7 +321,11 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
 
     def _on_kevent_status(kevent_status: str):
         """Map kevent job statuses → our DB transcription_status so the
-        mydevices UI can show 'queued' / 'processing' while polling."""
+        mydevices UI can show 'queued' / 'processing' while polling.
+
+        Also pushes a callback to upload-portal so the mobile PWA can show
+        the progress in real time (same WebSocket channel as the upload
+        phase)."""
         mapped = {
             "pending": "kevent_queued",
             "processing": "kevent_processing",
@@ -332,6 +336,16 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                                        transcription_engine="kevent")
             except Exception:
                 logger.exception("Failed to push intermediate status %s", mapped)
+            # Best-effort callback vers upload-portal pour le PWA mobile.
+            external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
+            try:
+                notify_external_status(
+                    str(external_file_id),
+                    mapped,
+                    f"Transcription Kevent — {kevent_status}",
+                )
+            except Exception:
+                pass  # déjà loggé dans notify_external_status
 
     def _kevent_transcribe():
         if KEVENT_ASYNC_MODE:
@@ -511,6 +525,17 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         "Kevent pipeline finished for %s: status=%s, %d outputs",
         audio_file_id, final_status, sum(1 for k in updates if k != "transcription_engine"),
     )
+    # Final notification au PWA mobile (le badge bascule du spinner animé
+    # vers l'état terminal — completed / partially_completed).
+    external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
+    try:
+        notify_external_status(
+            str(external_file_id),
+            final_status,
+            f"Pipeline Kevent {final_status}",
+        )
+    except Exception:
+        pass
 
 
 def _push_to_mcr(audio_file_id, user_sub: str, transcoded_filename: str,
