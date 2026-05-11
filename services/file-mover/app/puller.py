@@ -714,6 +714,19 @@ def _perform_pull(payload: dict) -> dict:
         db.commit()
         audio_file_id = str(audio_file.id)
 
+        # On émet le "transferred 100%" AVANT la dispatch backend pour que
+        # les notifications kevent (kevent_queued / kevent_processing /
+        # kevent_failed) qui suivent puissent légitimement écraser ce
+        # status (le dernier write gagne côté upload-portal). Précédemment
+        # ce notify était fait après _transcribe_via_kevent et écrasait
+        # silencieusement les erreurs d'auth Kevent.
+        if auto_transcribe:
+            notify_external_status(
+                file_id,
+                "transferred",
+                "Fichier intégré à votre compte. Transcription en cours... (100%)",
+            )
+
         if auto_transcribe:
             # Three mutually-exclusive backends, selected via env. file_data
             # is already in RAM from the audio-internal upload step above —
@@ -765,10 +778,17 @@ def _perform_pull(payload: dict) -> dict:
     finally:
         db.close()
 
-    if auto_transcribe:
-        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription en cours... (100%)")
-    else:
-        notify_external_status(file_id, "transferred", "Fichier intégré à votre compte. Transcription automatique désactivée pour ce code. (100%)")
+    # NB: le notify "transferred 100%" cas auto_transcribe est désormais
+    # émis AVANT la dispatch backend (cf. plus haut), pour ne pas écraser
+    # les status kevent_failed / kevent_completed remontés par
+    # _transcribe_via_kevent. On garde ici uniquement la branche
+    # "transcription désactivée".
+    if not auto_transcribe:
+        notify_external_status(
+            file_id,
+            "transferred",
+            "Fichier intégré à votre compte. Transcription automatique désactivée pour ce code. (100%)",
+        )
 
     return {"status": "pulled", "file_id": file_id, "internal_key": internal_key}
 
