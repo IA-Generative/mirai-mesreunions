@@ -24,6 +24,9 @@ env/
 .idea/
 .vscode/
 
+# Claude Code internal scratch (worktrees / agent state — never commit)
+.claude/
+
 # Environment files
 .env
 .env.*

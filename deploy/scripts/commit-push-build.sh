@@ -55,7 +55,9 @@ if [ -n "$(git status --porcelain)" ]; then
   info "$CHANGED fichier(s) modifié(s) ou non suivi(s) :"
   git status --short | sed 's/^/      /'
   if [ -z "$COMMIT_MSG" ]; then
-    if [ -t 0 ] || [ -e /dev/tty ]; then
+    # Tentative d'ouverture /dev/tty pour le mode interactif ; si pas de
+    # TTY (background, CI, pipe), bascule sur l'erreur explicite.
+    if [ -t 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
       printf "  ${C_BOLD}message de commit ?${C_RST} "
       IFS= read -r COMMIT_MSG </dev/tty
       [ -n "$COMMIT_MSG" ] || fail "message vide, abandon"
