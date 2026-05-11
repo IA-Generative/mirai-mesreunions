@@ -2081,6 +2081,61 @@ INDEX_TEMPLATE = """
             white-space: nowrap;
         }
         .file-impact-row { margin-top: 0.35rem; }
+        /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
+        .file-row-compact {
+            display: grid;
+            grid-template-columns: minmax(0,1fr) auto auto auto auto;
+            align-items: center; gap: 0.55rem;
+            padding: 0.45rem 0.55rem;
+            border-bottom: 1px solid #f1f5f9;
+        }
+        .file-row-compact:hover { background: #f8fafc; }
+        .file-row-title {
+            font-weight: 600; color: #1d4ed8; text-decoration: none;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            min-width: 0;
+        }
+        .file-row-title:hover { text-decoration: underline; color: #1e40af; }
+        .file-row-status { white-space: nowrap; }
+        .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
+        .file-row-transcript { min-width: 0; }
+        .file-row-delete { white-space: nowrap; }
+        /* En mode compact (data-compact=1) on cache le dropdown et les
+           rails — visibles seulement en vue détail. Le bandeau de statut
+           transcription reste affiché (résumé / erreur). */
+        .transcript-section--inline .downloads-block,
+        .transcript-section--inline .pipeline-box { display: none; }
+        /* ── Vue DÉTAIL ───────────────────────────────────────────── */
+        .file-detail { padding: 0.6rem 0.2rem; }
+        .file-detail-header {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 0.5rem; margin-bottom: 0.6rem;
+        }
+        .file-detail-title {
+            margin: 0 0 0.4rem 0; font-size: 1.05rem;
+            word-break: break-word; line-height: 1.25;
+        }
+        .file-detail-meta {
+            display: flex; flex-wrap: wrap; align-items: center;
+            gap: 0.4rem; margin-bottom: 0.6rem;
+        }
+        /* ── Responsive mobile ─────────────────────────────────────── */
+        @media (max-width: 700px) {
+            .file-row-compact {
+                grid-template-columns: minmax(0,1fr) auto;
+                grid-template-rows: auto auto auto;
+                gap: 0.3rem;
+            }
+            .file-row-title { grid-column: 1 / 2; grid-row: 1; }
+            .file-row-delete { grid-column: 2 / 3; grid-row: 1; }
+            .file-row-status { grid-column: 1 / 3; grid-row: 2; }
+            .file-row-meta   { grid-column: 1 / 3; grid-row: 2; justify-self: end; }
+            .file-row-transcript { grid-column: 1 / 3; grid-row: 3; }
+            .tabs-nav { font-size: 0.85rem; }
+            .tab-btn { padding: 0.45rem 0.55rem; }
+            .downloads-block { flex-direction: column; align-items: stretch; }
+            .downloads-select { width: 100%; }
+        }
         @keyframes transcriptSpin { to { transform: rotate(360deg); } }
         .transcript-status-label { font-weight: 500; }
         .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
@@ -2565,6 +2620,35 @@ INDEX_TEMPLATE = """
 const impactCache = {};
 const impactLoading = new Set();
 let showAllDevices = false;
+// État vue transferts : null = liste compacte, fileId = vue détail pour
+// ce fichier. Switch via showFileDetail / showFilesList.
+let _detailFileId = null;
+function showFileDetail(fileId) {
+    _detailFileId = fileId;
+    activateTab('transfers');
+    loadSessions();
+    requestAnimationFrame(() => window.scrollTo(0, 0));
+}
+function showFilesList() {
+    _detailFileId = null;
+    loadSessions();
+}
+// Format helpers pour la vue liste compacte.
+function _formatDateCompact(iso) {
+    if (!iso) return '';
+    try {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '';
+        return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+            + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    } catch (e) { return ''; }
+}
+function _formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return '';
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return m > 0 ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`;
+}
 // Durée de rétention device en jours (lue depuis DEVICE_TOKEN_RETENTION_HOURS
 // côté serveur — 15j en prod-bêta, 7j par défaut). Sert aux messages de
 // confirmation pour refléter la vraie durée que Renouveler applique.
@@ -3320,11 +3404,17 @@ async function loadSessions() {
             const renewNeedsAttention = remainingDownloads < 2 || expiringSoon;
 
             const filesHtml = (s.uploads || []).map(f => {
+                // Si une vue détail est active et ce fichier n'est pas le
+                // détail demandé, on le saute (un seul fichier visible).
+                if (_detailFileId && _detailFileId !== f.id) return '';
+                const isDetailView = (_detailFileId === f.id);
                 const quality = (f.audio_quality_score !== null && f.audio_quality_score !== undefined)
                     ? ` <span class="quality-help" title="Indice de qualité audio (1 à 5). Calculé automatiquement par le worker de transcodage selon le niveau RMS, la proportion de silence, la durée et la fréquence d'échantillonnage.">i</span> ${f.audio_quality_score.toFixed(1)}/5`
                     : '';
                 const progress = pipelineProgress(f.status, f.status_message);
                 const fileStatusClass = `file-badge-${f.status || 'pending'}`;
+                const fileDateLabel = _formatDateCompact(f.created_at);
+                const fileDurLabel = _formatDuration(f.audio_duration_seconds);
                 const analyseClass = (progress.scan === 100 && !progress.blocked) ? 'done'
                     : (progress.active === 'analyse' ? (progress.blocked ? 'blocked' : 'active') : '');
                 const transcodeClass = (progress.transcode === 100) ? 'done'
@@ -3391,19 +3481,46 @@ async function loadSessions() {
                             <span data-transcribe-label="${f.id}">Transcription</span>
                         </div>
                     </div>`;
-                return `<div class="file-status">
-                    <span class="file-name" title="${escapeHtml(f.original_filename)}">${escapeHtml(f.original_filename)}</span>
-                    <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
-                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
-                            onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                            title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
-                        Supprimer
-                    </button>
+                if (!isDetailView) {
+                    // ── Vue LISTE COMPACTE ─────────────────────────────
+                    // Une ligne par fichier : titre cliquable (→ détail),
+                    // statut concis, date+durée, résumé dépliable, delete.
+                    return `<div class="file-row-compact">
+                        <a href="#" class="file-row-title" data-file-id="${f.id}"
+                           onclick="event.preventDefault();showFileDetail('${f.id}');"
+                           title="Voir les détails de ${escapeHtml(f.original_filename)}">
+                            ${escapeHtml(f.original_filename)}
+                        </a>
+                        <span class="file-row-status status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>
+                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
+                        <div class="file-row-transcript transcript-section transcript-section--inline"
+                             data-transcript-file-id="${f.id}"
+                             data-audio-downloads="${audioDownloadsAttr}"
+                             data-compact="1"></div>
+                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
+                                onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
+                                title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
+                            Supprimer
+                        </button>
+                    </div>`;
+                }
+                // ── Vue DÉTAIL ──────────────────────────────────────────
+                return `<div class="file-detail">
+                    <div class="file-detail-header">
+                        <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary file-detail-back"
+                                onclick="showFilesList()">← Retour à la liste</button>
+                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
+                                onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
+                                title="Supprime définitivement ce fichier (S3 + DB).">
+                            Supprimer
+                        </button>
+                    </div>
+                    <h2 class="file-detail-title">${escapeHtml(f.original_filename)}</h2>
+                    <div class="file-detail-meta">
+                        <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
+                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
+                    </div>
                     ${railroadBlock}
-                    <!-- Bloc transcript : porte un dropdown unifié (audios +
-                         transcripts) construit dynamiquement par
-                         loadTranscriptStatus à partir des audio passés en
-                         data-audio-downloads et des outputs Kevent. -->
                     <div class="transcript-section"
                          data-transcript-file-id="${f.id}"
                          data-audio-downloads="${audioDownloadsAttr}"></div>
@@ -3843,7 +3960,15 @@ function activateTab(tabName) {
 }
 function setupTabs() {
     document.querySelectorAll('.tab-btn').forEach((b) => {
-        b.addEventListener('click', () => activateTab(b.getAttribute('data-tab')));
+        b.addEventListener('click', () => {
+            const target = b.getAttribute('data-tab');
+            // Clic sur "Mes transferts..." = retour à la vue liste.
+            if (target === 'transfers' && _detailFileId) {
+                _detailFileId = null;
+                loadSessions();
+            }
+            activateTab(target);
+        });
     });
 }
 function pickDefaultTab(hasActiveDevice) {
