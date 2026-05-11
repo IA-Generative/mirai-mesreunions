@@ -355,6 +355,49 @@
         .mobile-share-reset-btn:hover {
             color: #78350f;
         }
+        .files-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .files-card-header h2 {
+            margin: 0;
+        }
+        .refresh-status-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            border: 1px solid #cbd5e1;
+            background: #f8fafc;
+            color: #1e293b;
+            font-size: 0.85rem;
+            padding: 0.3rem 0.7rem;
+            border-radius: 999px;
+            cursor: pointer;
+            line-height: 1;
+        }
+        .refresh-status-btn:hover:not(:disabled) {
+            background: #e2e8f0;
+            border-color: #94a3b8;
+        }
+        .refresh-status-btn:disabled {
+            cursor: default;
+            opacity: 0.75;
+        }
+        .refresh-status-btn .refresh-icon {
+            font-size: 1rem;
+            display: inline-block;
+            line-height: 1;
+        }
+        .refresh-status-btn.is-refreshing .refresh-icon {
+            animation: refresh-spin 0.8s linear infinite;
+        }
+        @keyframes refresh-spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
@@ -462,7 +505,13 @@
     </div>
 
     <div class="card" id="files-card" style="{% if not uploads %}display:none{% endif %}">
-        <h2>Fichiers</h2>
+        <div class="files-card-header">
+            <h2>Fichiers</h2>
+            <button type="button" id="refresh-status-btn" class="refresh-status-btn" aria-label="Rafraîchir l'état des fichiers" title="Rafraîchir">
+                <span class="refresh-icon" aria-hidden="true">⟳</span>
+                <span class="refresh-label">Rafraîchir</span>
+            </button>
+        </div>
         <div id="files-list">
             {% for f in uploads %}
             <div class="file-item" data-file-id="{{ f.id }}">
@@ -1080,8 +1129,8 @@ function setupPwaInstall() {
     });
 }
 
-// Auto-refresh status every 10s (fallback if WebSocket fails)
-setInterval(async () => {
+// Refresh status — also used by the manual refresh button.
+async function refreshStatus() {
     try {
         const resp = await deviceFetch(`/api/status/${qrToken}`);
         if (resp.ok) {
@@ -1095,12 +1144,36 @@ setInterval(async () => {
                 remaining = data.remaining;
                 updateRemainingText();
             }
+            return true;
         } else if (resp.status === 401) {
             clearDeviceToken();
             disableUpload("Token invalide, expiré ou révoqué. Veuillez renouveler votre token dans l'interface admin.");
+            return false;
         }
     } catch (e) {}
-}, 10000);
+    return false;
+}
+
+// Auto-refresh status every 10s (fallback if WebSocket fails)
+setInterval(refreshStatus, 10000);
+
+// Manual refresh button wiring (live transcription state via /api/status)
+function setupManualRefresh() {
+    const btn = document.getElementById('refresh-status-btn');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+        if (btn.classList.contains('is-refreshing')) return;
+        btn.classList.add('is-refreshing');
+        btn.disabled = true;
+        const ok = await refreshStatus();
+        // Keep the spinner visible for a moment so the user perceives the action.
+        setTimeout(() => {
+            btn.classList.remove('is-refreshing');
+            btn.disabled = false;
+        }, 400);
+    });
+}
+setupManualRefresh();
 
 function updateExpiryBanner() {
     const banner = document.getElementById('expiry-banner');
