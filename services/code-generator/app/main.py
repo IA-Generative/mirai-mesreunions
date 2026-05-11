@@ -2350,12 +2350,7 @@ INDEX_TEMPLATE = """
             color: #334155;
             border-bottom-color: #94a3b8;
         }
-        .recent-activities-panel {
-            display: none;
-        }
-        .recent-activities-panel.open {
-            display: block;
-        }
+        .recent-activities-panel { display: block; }
         .dsfr-inline-actions {
             display: flex;
             justify-content: space-between;
@@ -2420,18 +2415,20 @@ INDEX_TEMPLATE = """
 <main class="fr-container page-shell">
 <div class="container">
 
-    <!-- Navigation onglets — choisi par défaut selon présence d'appareil enrôlé.
-         JS (loadDevices) bascule sur "transfers" si au moins 1 device actif,
-         sinon reste sur "devices" pour guider l'enrôlement initial. -->
+    <!-- Navigation onglets — ordre : (1) Mes transferts (vue principale,
+         là où l'utilisateur passe le plus de temps), (2) Mes appareils,
+         (3) Enrôler un nouvel appareil. L'onglet par défaut est choisi
+         par loadDevices : si aucun device enrôlé → "Enrôler", sinon
+         "Mes transferts et analyses". -->
     <nav class="tabs-nav" role="tablist" aria-label="Sections principales">
-        <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
-            Mes appareils
-        </button>
         <button type="button" class="tab-btn" role="tab" data-tab="transfers" id="tab-btn-transfers">
             Mes transferts et analyses
         </button>
+        <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
+            Mes appareils
+        </button>
         <button type="button" class="tab-btn" role="tab" data-tab="generate" id="tab-btn-generate">
-            Nouveau code
+            Enrôler un nouvel appareil
         </button>
     </nav>
 
@@ -2539,13 +2536,13 @@ INDEX_TEMPLATE = """
                             <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
                             <span id="activity-mini-text" class="activity-mini-text">Activités: chargement...</span>
                         </div>
-                        <a href="#" id="toggle-activities-link" class="activity-toggle-link"
-                           onclick="toggleActivitiesPanel(); return false;">Voir activités</a>
                     </div>
                 </div>
             </div>
         </div>
-        <div id="recent-activities-panel" class="recent-activities-panel">
+        <!-- Panneau toujours déplié : on a un onglet dédié, plus besoin
+             du toggle "Voir activités / Masquer activités". -->
+        <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes transferts et analyses</h1>
                 <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
@@ -2566,7 +2563,6 @@ INDEX_TEMPLATE = """
 <script>
 const impactCache = {};
 const impactLoading = new Set();
-let activitiesPanelOpen = false;
 let showAllDevices = false;
 
 function escapeHtml(v) {
@@ -3030,13 +3026,8 @@ async function renewTokenByQr(qrToken) {
     }
 }
 
-function toggleActivitiesPanel() {
-    activitiesPanelOpen = !activitiesPanelOpen;
-    const panel = document.getElementById('recent-activities-panel');
-    const link = document.getElementById('toggle-activities-link');
-    if (panel) panel.classList.toggle('open', activitiesPanelOpen);
-    if (link) link.textContent = activitiesPanelOpen ? 'Masquer activités' : 'Voir activités';
-}
+// (le toggle Voir/Masquer activités a été retiré — la liste est toujours
+//  affichée dans l'onglet "Mes transferts et analyses".)
 
 async function purgeSessions() {
     const ok = confirm('Supprimer toutes vos sessions et les fichiers associés (S3 upload/processed) ?');
@@ -3700,7 +3691,9 @@ function pickDefaultTab(hasActiveDevice) {
     let target = null;
     try { target = sessionStorage.getItem('mydevices-active-tab'); } catch (e) {}
     if (!target) {
-        target = hasActiveDevice ? 'transfers' : 'devices';
+        // Sans device : on guide direct vers le formulaire d'enrôlement.
+        // Avec device : vue principale = transferts/analyses.
+        target = hasActiveDevice ? 'transfers' : 'generate';
     }
     activateTab(target);
 }

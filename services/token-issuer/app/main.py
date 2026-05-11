@@ -302,7 +302,32 @@ def extend_token_7d():
         token.status_view_expires_at = token.expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES)
         if add_uploads > 0:
             token.max_uploads = min(1000, int(token.max_uploads or 0) + add_uploads)
+
+        # Étend aussi la rétention des devices enrôlés sur ce QR. Sans
+        # ça, "Renouveler" ne déplaçait que la fenêtre d'enrôlement (QR)
+        # qui n'a plus d'importance une fois enrôlé — le device perdait
+        # son accès au bout de 15j même si l'utilisateur cliquait
+        # Renouveler 20× entre temps. On bump retention_expires_at à
+        # now + DEVICE_TOKEN_RETENTION_HOURS pour tous les devices
+        # actifs liés à ce token.
+        new_retention = now + timedelta(hours=DEVICE_TOKEN_RETENTION_HOURS)
+        devices_bumped = (
+            db.query(DeviceEnrollment)
+            .filter(
+                DeviceEnrollment.qr_token == qr_token,
+                DeviceEnrollment.status == "active",
+            )
+            .update(
+                {"retention_expires_at": new_retention},
+                synchronize_session=False,
+            )
+        )
         db.commit()
+        if devices_bumped:
+            logger.info(
+                "Token %s renewed: %d device(s) retention extended to %s",
+                qr_token, devices_bumped, new_retention.isoformat(),
+            )
 
         return jsonify({
             "ok": True,
