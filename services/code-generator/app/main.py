@@ -2067,6 +2067,20 @@ INDEX_TEMPLATE = """
         .transcript-status-spinner.err { background: #ef4444; }
         .transcript-status-spinner.ok { background: #10b981; }
         .transcript-status-icon { font-size: 0.95rem; line-height: 1; }
+        /* Dropdown unifié des téléchargements (audios + transcripts) */
+        .downloads-block {
+            display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+            margin-top: 0.4rem;
+        }
+        .downloads-select {
+            flex: 1; min-width: 180px; max-width: 100%;
+            padding: 0.3rem 0.5rem; font-size: 0.85rem;
+            border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+        }
+        .downloads-btn-dl, .downloads-btn-stream {
+            white-space: nowrap;
+        }
+        .file-impact-row { margin-top: 0.35rem; }
         @keyframes transcriptSpin { to { transform: rotate(360deg); } }
         .transcript-status-label { font-weight: 500; }
         .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
@@ -2228,11 +2242,17 @@ INDEX_TEMPLATE = """
             gap: 0.3rem;
         }
         .transfer-live-row {
-            display: flex;
-            gap: 0.4rem;
-            align-items: center;
-            color: #334155;
+            display: flex; flex-direction: column; gap: 0.2rem;
+            padding: 0.4rem 0.55rem; border: 1px solid #e2e8f0;
+            border-radius: 6px; background: #ffffff; color: #334155;
         }
+        .transfer-live-line1 {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+            font-size: 0.82rem;
+        }
+        .transfer-live-msg { color: #64748b; font-size: 0.78rem; }
+        .railroad-mini .rail-node { width: 14px; height: 14px; font-size: 8px; }
+        .railroad-mini .rail-line { height: 2px; }
         .transfer-live-code {
             color: #64748b;
             font-family: monospace;
@@ -3169,38 +3189,73 @@ async function loadSessions() {
             `;
         }
 
+        // Files "in progress" = tout ce qui n'est pas encore "transferred"
+        // (pré-transfert + transfer en cours). Pour chaque on affiche :
+        //   ligne 1 : nom + status_message (ex: "Transcription Kevent — file
+        //             d'attente Mirai")
+        //   ligne 2 : mini chemin de fer 4 étapes (analyse / transcodage /
+        //             transfert / transcription)
+        // Disparaît dès que le fichier passe en transferred (la suite est
+        // visible dans la liste sessions plus bas).
         const transfersInProgress = sessions.flatMap(s =>
             ((s.uploads || []).map(f => ({
+                fileId: f.id,
                 sessionCode: s.simple_code,
                 name: f.original_filename,
                 status: f.status,
                 message: f.status_message || '',
                 updatedAt: f.updated_at || f.created_at || null,
             })))
-        ).filter(f => f.status === 'ready_for_transfer' || f.status === 'transferring');
+        ).filter(f => f.status !== 'transferred'
+                   && f.status !== 'error'
+                   && f.status !== 'scan_infected'
+                   && f.status !== 'quarantined'
+                   && f.status !== 'transcode_failed');
 
         if (transferBox) {
             if (transfersInProgress.length === 0) {
-                transferBox.innerHTML = `
-                    <div class="transfer-live-title">Transferts en cours</div>
-                    <div class="transfer-live-empty">Aucun transfert en cours.</div>
-                `;
+                transferBox.style.display = 'none';
+                transferBox.innerHTML = '';
             } else {
+                transferBox.style.display = '';
                 const now = Date.now();
-                transferBox.innerHTML = `
-                    <div class="transfer-live-title">Transferts en cours (${transfersInProgress.length})</div>
-                    <div class="transfer-live-list">
-                        ${transfersInProgress.map(t => `
-                            <div class="transfer-live-row" title="${escapeHtml(t.name)}">
-                                <span class="status-badge file-badge-${escapeHtml(t.status)}">${escapeHtml(statusLabel(t.status))}</span>
+                const rows = transfersInProgress.map(t => {
+                    const progress = pipelineProgress(t.status, t.message);
+                    const analyseClass = (progress.scan === 100 && !progress.blocked) ? 'done'
+                        : (progress.active === 'analyse' ? (progress.blocked ? 'blocked' : 'active') : '');
+                    const transcodeClass = (progress.transcode === 100) ? 'done'
+                        : (progress.active === 'transcodage' ? (progress.error ? 'blocked' : 'active') : '');
+                    const transferClass = (progress.transfer === 100) ? 'done'
+                        : (progress.active === 'transfert' ? 'active' : '');
+                    const stale = t.updatedAt && (now - new Date(t.updatedAt).getTime()) > 180000;
+                    return `
+                        <div class="transfer-live-row" title="${escapeHtml(t.name)}">
+                            <div class="transfer-live-line1">
                                 <span class="transfer-live-code">${escapeHtml(t.sessionCode)}</span>
                                 <span class="transfer-live-name">${escapeHtml(t.name)}</span>
-                                <span style="color:${(t.updatedAt && (now - new Date(t.updatedAt).getTime()) > 180000) ? '#b91c1c' : '#64748b'};">
-                                  ${escapeHtml(t.message || 'Transfert en cours...')}
+                                <span class="transfer-live-msg" style="color:${stale ? '#b91c1c' : '#64748b'};">
+                                    ${escapeHtml(t.message || 'En cours...')}
                                 </span>
                             </div>
-                        `).join('')}
-                    </div>
+                            <div class="railroad railroad-mini">
+                                <div class="rail-segment ${analyseClass}">
+                                    <span class="rail-node">1</span><span class="rail-line"></span>
+                                </div>
+                                <div class="rail-segment ${transcodeClass}">
+                                    <span class="rail-node">2</span><span class="rail-line"></span>
+                                </div>
+                                <div class="rail-segment ${transferClass}">
+                                    <span class="rail-node">3</span><span class="rail-line"></span>
+                                </div>
+                                <div class="rail-segment" data-transcribe-segment="${t.fileId}">
+                                    <span class="rail-node">4</span><span class="rail-line rail-line-tail"></span>
+                                </div>
+                            </div>
+                        </div>`;
+                }).join('');
+                transferBox.innerHTML = `
+                    <div class="transfer-live-title">Transferts en cours (${transfersInProgress.length})</div>
+                    <div class="transfer-live-list">${rows}</div>
                 `;
             }
         }
@@ -3253,31 +3308,21 @@ async function loadSessions() {
                            title="${escapeHtml(impactTooltip)}"
                            ${loading ? 'disabled' : ''}>i</button>`
                     : '';
-                const sourceLinks = `<div class="file-links file-links-block file-links-row">
-                    <div class="file-links-actions">
-                        <span class="file-links-title">Source</span>
-                        ${f.source_available
-                            ? `<a href="${f.source_download_url}" target="_blank" rel="noopener">Télécharger</a>
-                               <a href="${f.source_stream_url}" target="_blank" rel="noopener">Écouter</a>`
-                            : `<span class="link-disabled" title="Fichier source purgé">Télécharger</span>
-                               <span class="link-disabled" title="Fichier source purgé">Écouter</span>`}
-                    </div>
-                    ${impactIcon}
-                </div>`;
-                const transcodedLinks = f.transcoded_available
-                    ? `<div class="file-links file-links-block">
-                        <span class="file-links-title">Transcodé</span>
-                        <a href="${f.transcoded_download_url}" target="_blank" rel="noopener">Télécharger</a>
-                        <a href="${f.transcoded_stream_url}" target="_blank" rel="noopener">Écouter</a>
-                    </div>`
-                    : '';
-                const transferredLinks = f.transferred_available
-                    ? `<div class="file-links file-links-block">
-                        <span class="file-links-title">Transféré (interne)</span>
-                        <a href="${f.transferred_download_url}" target="_blank" rel="noopener">Télécharger</a>
-                        <a href="${f.transferred_stream_url}" target="_blank" rel="noopener">Écouter</a>
-                    </div>`
-                    : '';
+                // Liste des audios téléchargeables pour ce fichier — sera
+                // mergée avec les transcripts par loadTranscriptStatus pour
+                // produire un seul dropdown au lieu de 3 blocs Source/
+                // Transcodé/Transféré qui prenaient toute la hauteur.
+                const audioDownloadsList = [];
+                if (f.source_available) audioDownloadsList.push({
+                    label: 'Audio source', dl: f.source_download_url, stream: f.source_stream_url,
+                });
+                if (f.transcoded_available) audioDownloadsList.push({
+                    label: 'Audio transcodé', dl: f.transcoded_download_url, stream: f.transcoded_stream_url,
+                });
+                if (f.transferred_available) audioDownloadsList.push({
+                    label: 'Audio transféré (interne)', dl: f.transferred_download_url, stream: f.transferred_stream_url,
+                });
+                const audioDownloadsAttr = encodeURIComponent(JSON.stringify(audioDownloadsList));
                 // Cache le chemin de fer une fois le pipeline pré-transcription
                 // abouti (fichier transféré côté interne). La 4e étape
                 // (transcription IA) est affichée séparément par le bandeau
@@ -3318,14 +3363,14 @@ async function loadSessions() {
                         Supprimer
                     </button>
                     ${railroadBlock}
-                    <!-- Bloc transcript (résumé + key_points + status badge + boutons
-                         de téléchargement transcript) AVANT les liens audio bruts,
-                         car c'est ce que l'utilisateur regarde en priorité une fois
-                         le fichier abouti. -->
-                    <div class="transcript-section" data-transcript-file-id="${f.id}"></div>
-                    ${sourceLinks}
-                    ${transcodedLinks}
-                    ${transferredLinks}
+                    <!-- Bloc transcript : porte un dropdown unifié (audios +
+                         transcripts) construit dynamiquement par
+                         loadTranscriptStatus à partir des audio passés en
+                         data-audio-downloads et des outputs Kevent. -->
+                    <div class="transcript-section"
+                         data-transcript-file-id="${f.id}"
+                         data-audio-downloads="${audioDownloadsAttr}"></div>
+                    ${impactIcon ? `<div class="file-impact-row">${impactIcon}</div>` : ''}
                 </div>`;
             }).join('');
 
@@ -3461,6 +3506,29 @@ const TRANSCRIPT_KIND_FORMATS = {
 
 const CR_FORMATS = ['md', 'docx', 'odt', 'json'];
 
+// Met à jour les boutons Télécharger/Écouter selon l'option sélectionnée
+// dans le dropdown unifié (audios + transcripts + meeting-cr).
+function updateDownloadButtons(select) {
+    const opt = select.options[select.selectedIndex];
+    if (!opt) return;
+    const dl = opt.getAttribute('data-dl') || '#';
+    const stream = opt.getAttribute('data-stream') || '';
+    const isAudio = !!opt.getAttribute('data-audio');
+    const block = select.closest('.downloads-block');
+    if (!block) return;
+    const dlBtn = block.querySelector('.downloads-btn-dl');
+    const streamBtn = block.querySelector('.downloads-btn-stream');
+    if (dlBtn) dlBtn.setAttribute('href', dl);
+    if (streamBtn) {
+        if (isAudio && stream) {
+            streamBtn.setAttribute('href', stream);
+            streamBtn.style.display = '';
+        } else {
+            streamBtn.style.display = 'none';
+        }
+    }
+}
+
 function renderDownloadRow(label, fileId, kind, formats, isCR) {
     const buttons = formats.map((ext) => {
         const url = isCR
@@ -3593,25 +3661,64 @@ async function loadTranscriptStatus(fileId, container) {
             <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
         </div>`;
 
-        const downloads = [];
+        // Construit le dropdown unifié : on agrège audios (passés en
+        // data-audio-downloads par la file row) + transcripts (kind ×
+        // formats) + meeting-cr. Une seule liste, un seul bouton
+        // Télécharger ; le bouton Écouter n'apparaît que pour les audios.
+        let audioOptions = [];
+        try {
+            const raw = container.getAttribute('data-audio-downloads') || '';
+            audioOptions = raw ? JSON.parse(decodeURIComponent(raw)) : [];
+        } catch (e) { audioOptions = []; }
+
+        const allOptions = [];
+        for (const a of audioOptions) {
+            allOptions.push({
+                label: a.label, dl: a.dl, stream: a.stream || '', audio: true,
+            });
+        }
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
-            if (outputs[kind]) {
-                downloads.push(renderDownloadRow(
-                    TRANSCRIPT_KIND_LABELS[kind], fileId, kind,
-                    TRANSCRIPT_KIND_FORMATS[kind], false,
-                ));
+            if (!outputs[kind]) continue;
+            const baseLabel = TRANSCRIPT_KIND_LABELS[kind];
+            for (const ext of (TRANSCRIPT_KIND_FORMATS[kind] || ['txt'])) {
+                allOptions.push({
+                    label: `${baseLabel} (.${ext})`,
+                    dl: `/api/file/transcript/${kind}/${ext}/${fileId}`,
+                    stream: '', audio: false,
+                });
             }
         }
         if (outputs['meeting-cr']) {
-            downloads.push(renderDownloadRow(
-                'Compte-rendu structuré', fileId, 'meeting-cr', CR_FORMATS, true,
-            ));
+            for (const ext of CR_FORMATS) {
+                allOptions.push({
+                    label: `Compte-rendu structuré (.${ext})`,
+                    dl: `/api/file/meeting-cr/${ext}/${fileId}`,
+                    stream: '', audio: false,
+                });
+            }
         }
-        container.innerHTML = `${statusBadge}${subtitle}${downloads.length ? `
-            <div class="transcript-download-block">
-                <div class="transcript-download-title">Téléchargements</div>
-                ${downloads.join('')}
-            </div>` : ''}`;
+
+        let dropdownBlock = '';
+        if (allOptions.length > 0) {
+            const optionsHtml = allOptions.map((o, i) =>
+                `<option value="${i}" data-dl="${escapeHtml(o.dl)}" data-stream="${escapeHtml(o.stream)}" data-audio="${o.audio ? '1' : ''}">${escapeHtml(o.label)}</option>`
+            ).join('');
+            dropdownBlock = `
+                <div class="downloads-block">
+                    <select class="downloads-select fr-select" onchange="updateDownloadButtons(this)">
+                        ${optionsHtml}
+                    </select>
+                    <a class="downloads-btn-dl fr-btn fr-btn--sm fr-btn--secondary"
+                       href="${escapeHtml(allOptions[0].dl)}" download
+                       target="_blank" rel="noopener">Télécharger</a>
+                    <a class="downloads-btn-stream fr-btn fr-btn--sm fr-btn--tertiary"
+                       href="${escapeHtml(allOptions[0].stream || '#')}"
+                       target="_blank" rel="noopener"
+                       style="${allOptions[0].audio ? '' : 'display:none;'}">Écouter</a>
+                </div>`;
+        }
+
+        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
 
         // Re-poll automatique tant qu'on est en cours, pour ne pas obliger
         // l'utilisateur à recharger la page pour voir la transcription apparaître.
