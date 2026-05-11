@@ -2520,39 +2520,16 @@ INDEX_TEMPLATE = """
     </div>
 
     <div class="card tab-pane" data-tab="transfers">
-        <div class="activity-inline">
-            <p class="activity-description">
-                Cet encadré donne une vue rapide des traitements en cours
-                (analyse, transcodage, transfert)
-            </p>
-            <div class="activity-main">
-                <div class="activity-mini">
-                    <div id="activity-rail" class="activity-rail">
-                        <span class="activity-dot">1</span><span class="activity-link"></span>
-                        <span class="activity-dot">2</span><span class="activity-link"></span>
-                        <span class="activity-dot">3</span>
-                    </div>
-                    <div class="activity-meta-row">
-                        <div class="activity-status-inline">
-                            <span id="activity-spinner" class="activity-spinner" title="Activité en cours"></span>
-                            <span id="activity-mini-text" class="activity-mini-text">Activités: chargement...</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <!-- Panneau toujours déplié : on a un onglet dédié, plus besoin
-             du toggle "Voir activités / Masquer activités". -->
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes transferts et analyses</h1>
                 <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
                         onclick="purgeSessions()">Purger liste + fichiers</button>
             </div>
-            <div class="transfer-live" id="transfer-live">
-                <div class="transfer-live-title">Transferts en cours</div>
-                <div class="transfer-live-empty">Chargement...</div>
-            </div>
+            <!-- "Transferts en cours" : un bloc par fichier in-flight avec
+                 son propre chemin de fer + statut transcription inline.
+                 Disparaît quand 0 transfert en cours. -->
+            <div class="transfer-live" id="transfer-live" style="display:none;"></div>
             <div class="sessions-list" id="sessions-list">
                 <p style="color:#999; font-size:0.85rem;">Chargement...</p>
             </div>
@@ -3108,6 +3085,10 @@ async function renewSession(sessionId) {
 }
 
 async function loadSessions() {
+    // Préserve la position de scroll pendant le refresh des sessions
+    // (sinon innerHTML reset le scroll en haut, particulièrement gênant
+    // sur les pages longues avec plusieurs sessions actives).
+    const savedScrollY = window.scrollY;
     try {
         const resp = await fetch('/api/my-sessions');
         const sessions = await resp.json();
@@ -3444,6 +3425,12 @@ async function loadSessions() {
         if (activitySpinner) {
             activitySpinner.classList.remove('active');
             activitySpinner.title = 'Activités indisponibles';
+        }
+    } finally {
+        // Restaure la position de scroll après l'innerHTML, sinon la
+        // page remonte en haut à chaque polling 15s.
+        if (Number.isFinite(savedScrollY)) {
+            requestAnimationFrame(() => window.scrollTo(0, savedScrollY));
         }
     }
 }
