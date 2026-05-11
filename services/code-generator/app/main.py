@@ -3250,15 +3250,24 @@ async function loadSessions() {
                 const allowSilentDelete = (lifecycle === 'expired_unused' || lifecycle === 'pending_enrollment')
                     && (s.upload_count || 0) === 0;
 
+                // Sessions actives (enrolled / pending_enrollment) : on ne
+                // montre plus le bouton "Supprimer cette session" pour ne pas
+                // exposer l'utilisateur à un destroy global accidentel. Pour
+                // retirer un fichier précis, le bouton "Supprimer" par
+                // fichier (au niveau de chaque ligne) suffit. Les sessions
+                // obsolètes/expirées gardent l'action.
+                const isActiveBucket = (lifecycle === 'pending_enrollment' || lifecycle === 'enrolled');
+                const sessionDeleteBtn = isActiveBucket ? '' : `
+                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                            data-session-delete="${s.simple_code}"
+                            onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
+                            title="Suppression définitive (DB + S3)">Supprimer</button>`;
                 return `<div class="session-item" data-session-row="${s.simple_code}" data-lifecycle="${lifecycle}">
                 <span class="code">${s.simple_code}</span>
                 <span class="status-badge ${stateBadgeClass}">${stateLabel}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
                         onclick="renewSession('${s.id}')">Renouveller</button>
-                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                        data-session-delete="${s.simple_code}"
-                        onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
-                        title="Suppression définitive (DB + S3)">Supprimer</button>
+                ${sessionDeleteBtn}
                 <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>
                 ${filesHtml}
             </div>`;
