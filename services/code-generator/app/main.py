@@ -2230,10 +2230,9 @@ INDEX_TEMPLATE = """
             </div>
             <!-- Le quota max-uploads/token n'est plus exposé à l'utilisateur (cf. mydevices UX
                  simplification). Reste en hidden input pour que le JS continue de lire la
-                 valeur sans casser le flow. Default 999 : on plafonne pas l'utilisateur côté
-                 UI ; le serveur applique son propre MAX_UPLOADS_PER_SESSION (299 par défaut)
-                 via min() à la création. -->
-            <input type="hidden" id="max-uploads" value="999">
+                 valeur sans casser le flow. Default 299 = MAX_UPLOADS_PER_SESSION côté
+                 serveur (le serveur clampe via min() de toute façon). -->
+            <input type="hidden" id="max-uploads" value="299">
             <div class="form-group fr-checkbox-group">
                 <input type="checkbox" id="auto-transcribe" checked>
                 <label class="fr-label" for="auto-transcribe">
