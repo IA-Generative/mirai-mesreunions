@@ -657,10 +657,19 @@ def _perform_pull(payload: dict) -> dict:
     logger.info("Pulling from processed-staging: %s", transcoded_filename)
     file_data = download_fileobj(s3_processed_cfg, transcoded_filename)
     file_size = file_data.getbuffer().nbytes
+    # Capture les bytes AVANT l'upload S3 : boto3.upload_fileobj peut
+    # fermer le BytesIO sous le capot (ValueError: I/O operation on closed
+    # file vu sur _transcribe_via_kevent.seek(0)). On reconstruit donc un
+    # BytesIO frais à partir des bytes en RAM pour le pipeline Kevent.
+    audio_bytes_for_transcription = file_data.getvalue()
 
     notify_external_status(file_id, "transferring", "Transfert: copie vers la zone interne (70%)")
     upload_fileobj(s3_internal_cfg, internal_key, file_data, _guess_audio_mime(transcoded_filename))
     logger.info("Stored internally: %s (%d bytes)", internal_key, file_size)
+    # Reconstruit un BytesIO en RAM pour les backends qui réutilisent les
+    # bytes (mcr / kevent). Sans ça, file_data peut être fermé après
+    # upload et tout le reste plante.
+    file_data = BytesIO(audio_bytes_for_transcription)
 
     notify_external_status(file_id, "transferring", "Transfert: finalisation et indexation (90%)")
     db = SessionLocal()
