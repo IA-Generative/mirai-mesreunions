@@ -761,6 +761,7 @@ def api_my_sessions():
                     "status": f.status.value,
                     "status_message": f.status_message,
                     "audio_quality_score": f.audio_quality_score,
+                    "audio_duration_seconds": f.audio_duration_seconds,
                     "created_at": f.created_at.isoformat(),
                     "updated_at": f.updated_at.isoformat() if f.updated_at else None,
                     "download_url": f"/api/file/download/{f.id}",
@@ -2082,14 +2083,14 @@ INDEX_TEMPLATE = """
         }
         .file-impact-row { margin-top: 0.35rem; }
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
+        .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
+        .file-row-compact-wrapper:hover { background: #f8fafc; }
         .file-row-compact {
             display: grid;
-            grid-template-columns: auto minmax(0,1fr) auto auto;
+            grid-template-columns: auto minmax(0,1fr) auto auto auto;
             align-items: center; gap: 0.55rem;
             padding: 0.4rem 0.55rem;
-            border-bottom: 1px solid #f1f5f9;
         }
-        .file-row-compact:hover { background: #f8fafc; }
         .file-row-status-mini { display: flex; align-items: center; }
         .file-row-title {
             font-weight: 600; color: #1d4ed8; text-decoration: none;
@@ -2098,7 +2099,24 @@ INDEX_TEMPLATE = """
         }
         .file-row-title:hover { text-decoration: underline; color: #1e40af; }
         .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
+        .file-row-expand {
+            border: 0; background: transparent; cursor: pointer;
+            color: #64748b; font-size: 0.85rem;
+            padding: 0.15rem 0.3rem; border-radius: 4px;
+            transition: transform 0.15s ease;
+        }
+        .file-row-expand:hover { background: #e2e8f0; color: #0f172a; }
+        .file-row-expand.is-open { transform: rotate(90deg); }
         .file-row-delete { white-space: nowrap; }
+        .file-row-expanded {
+            padding: 0.4rem 0.7rem 0.55rem 1.8rem;
+            background: #f8fafc; border-top: 1px dashed #e2e8f0;
+            font-size: 0.8rem;
+        }
+        .file-row-expanded-status {
+            font-weight: 500; color: #475569; margin-bottom: 0.3rem;
+        }
+        .file-row-expanded-empty { color: #94a3b8; font-style: italic; }
         /* En mode compact (data-compact=1) on réduit le bandeau statut
            à un simple point coloré avec tooltip (rollover), on cache le
            résumé (visible seulement en vue détail), le dropdown et les
@@ -2136,14 +2154,16 @@ INDEX_TEMPLATE = """
         /* ── Responsive mobile ─────────────────────────────────────── */
         @media (max-width: 700px) {
             .file-row-compact {
-                grid-template-columns: auto minmax(0,1fr) auto;
+                grid-template-columns: auto minmax(0,1fr) auto auto;
                 grid-template-rows: auto auto;
                 gap: 0.25rem 0.5rem;
             }
             .file-row-status-mini { grid-column: 1; grid-row: 1; }
             .file-row-title       { grid-column: 2; grid-row: 1; }
-            .file-row-delete      { grid-column: 3; grid-row: 1; }
-            .file-row-meta        { grid-column: 1 / 4; grid-row: 2; }
+            .file-row-expand      { grid-column: 3; grid-row: 1; }
+            .file-row-delete      { grid-column: 4; grid-row: 1; }
+            .file-row-meta        { grid-column: 1 / 5; grid-row: 2; }
+            .file-row-expanded    { padding-left: 0.7rem; }
             .tabs-nav { font-size: 0.85rem; }
             .tab-btn { padding: 0.45rem 0.55rem; }
             .downloads-block { flex-direction: column; align-items: stretch; }
@@ -2645,6 +2665,18 @@ function showFileDetail(fileId) {
 function showFilesList() {
     _detailFileId = null;
     loadSessions();
+}
+// Toggle l'affichage de la zone résumé sous une ligne compacte. Le
+// chevron tourne (CSS) selon la classe is-open.
+function toggleRowExpand(btn) {
+    const wrapper = btn.closest('.file-row-compact-wrapper');
+    if (!wrapper) return;
+    const exp = wrapper.querySelector('.file-row-expanded');
+    if (!exp) return;
+    const open = exp.style.display !== 'none';
+    exp.style.display = open ? 'none' : '';
+    btn.classList.toggle('is-open', !open);
+    btn.title = open ? 'Voir le résumé' : 'Masquer le résumé';
 }
 // Format helpers pour la vue liste compacte.
 function _formatDateCompact(iso) {
@@ -3496,31 +3528,43 @@ async function loadSessions() {
                     </div>`;
                 if (!isDetailView) {
                     // ── Vue LISTE COMPACTE ─────────────────────────────
-                    // Une seule ligne ultra-condensée :
+                    // Une seule ligne + chevron expandable pour le résumé :
                     //   • point statut transcription (rollover = label complet)
                     //   • titre cliquable (= suggested_filename si dispo, sinon
                     //     filename technique) — ouvre vue détail
                     //   • date+durée
+                    //   • chevron ▶ : déplie inline le résumé sans quitter la liste
                     //   • bouton Supprimer
-                    // Pas de bandeau status, pas de résumé, pas de rail :
-                    // ces infos sont visibles en cliquant sur le titre.
-                    return `<div class="file-row-compact">
-                        <div class="file-row-status-mini transcript-section transcript-section--inline"
-                             data-transcript-file-id="${f.id}"
-                             data-audio-downloads="${audioDownloadsAttr}"
-                             data-compact="1"
-                             aria-label="Statut transcription"></div>
-                        <a href="#" class="file-row-title" data-file-id="${f.id}"
-                           onclick="event.preventDefault();showFileDetail('${f.id}');"
-                           title="${escapeHtml(f.original_filename)}">
-                            ${escapeHtml(f.original_filename)}
-                        </a>
-                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
-                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
-                                onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
-                            Supprimer
-                        </button>
+                    return `<div class="file-row-compact-wrapper">
+                        <div class="file-row-compact">
+                            <div class="file-row-status-mini transcript-section transcript-section--inline"
+                                 data-transcript-file-id="${f.id}"
+                                 data-audio-downloads="${audioDownloadsAttr}"
+                                 data-compact="1"
+                                 aria-label="Statut transcription"></div>
+                            <a href="#" class="file-row-title" data-file-id="${f.id}"
+                               onclick="event.preventDefault();showFileDetail('${f.id}');"
+                               title="${escapeHtml(f.original_filename)}">
+                                ${escapeHtml(f.original_filename)}
+                            </a>
+                            <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
+                            <button class="file-row-expand" type="button"
+                                    onclick="toggleRowExpand(this)"
+                                    title="Voir le résumé">▶</button>
+                            <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
+                                    onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
+                                    title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
+                                Supprimer
+                            </button>
+                        </div>
+                        <!-- Zone résumé révélée par le chevron. Le contenu réel
+                             (transcript-meta-details + résumé) est injecté par
+                             loadTranscriptStatus mais cloné dans cette zone à
+                             chaque update via JS pour ne pas dupliquer fetchs. -->
+                        <div class="file-row-expanded" data-expanded-file-id="${f.id}" style="display:none;">
+                            <div class="file-row-expanded-summary"
+                                 data-expanded-summary-for="${f.id}"></div>
+                        </div>
                     </div>`;
                 }
                 // ── Vue DÉTAIL ──────────────────────────────────────────
@@ -3926,6 +3970,18 @@ async function loadTranscriptStatus(fileId, container) {
                 const dot = container.querySelector('.transcript-status-spinner');
                 if (dot) {
                     dot.title = meta.label + (engine ? ' (' + engine + ')' : '');
+                }
+                // Propage le résumé (key_points_summary) vers la zone
+                // expandable inline de la ligne — le chevron la révèle.
+                const expandedSummary = document.querySelector(
+                    `[data-expanded-summary-for="${fileId}"]`
+                );
+                if (expandedSummary) {
+                    const fullLabel = `<div class="file-row-expanded-status">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</div>`;
+                    const kpHtml = kp
+                        ? `<pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>`
+                        : `<div class="file-row-expanded-empty">Pas de résumé disponible.</div>`;
+                    expandedSummary.innerHTML = fullLabel + kpHtml;
                 }
             }
         } catch (e) {}
