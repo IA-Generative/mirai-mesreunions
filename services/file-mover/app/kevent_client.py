@@ -130,16 +130,19 @@ class KeventClient:
     # ── Helpers ─────────────────────────────────────────────
 
     def _auth_header(self) -> dict:
-        # Kevent uses a non-standard "apikey" header that ALSO contains
-        # the "Bearer " prefix in its value. /root/llm-credentials.txt on the VM
-        # is explicit: "(laisser le `Bearer`)".
+        # Le gateway Mirai a migré (validé empiriquement 2026-05-11) :
+        # l'ancien header non-standard ``apikey: Bearer <token>`` retourne
+        # désormais ``401 missing token`` sur tous les endpoints. La clé
+        # active depuis llm-credentials.txt s'utilise avec le header standard
+        # ``Authorization: Bearer <token>``. On garde le préfixe "Bearer "
+        # tel quel — c'est le format dans llm-credentials.txt et la doc gateway.
         prefix = "" if self.api_key.startswith("Bearer ") else "Bearer "
-        return {"apikey": f"{prefix}{self.api_key}"}
+        return {"Authorization": f"{prefix}{self.api_key}"}
 
     @staticmethod
     def _raise_for_status(resp, context: str) -> None:
         if resp.status_code in (401, 403):
-            raise KeventAuthError(f"{context} → {resp.status_code} (apikey rejected by Kevent)")
+            raise KeventAuthError(f"{context} → {resp.status_code} (Authorization header rejected by Kevent)")
         if resp.status_code >= 500:
             raise KeventTransientError(f"{context} → {resp.status_code}: {(resp.text or '')[:200]}")
         if resp.status_code == 422:
