@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Commit + push la branche courante vers GitHub, puis build container
-# multi-arch sur la VM cloud (bandwidth interne SCW).
+# sur la VM cloud (bandwidth interne SCW).
 #
 # Usage :
-#   deploy/scripts/commit-push-build.sh ["message de commit"]
+#   deploy/scripts/commit-push-build.sh [--multi-arch] ["message de commit"]
+#
+# Par défaut : build linux/amd64 uniquement (~2x plus rapide, c'est ce qui
+# tourne sur les nœuds Kapsule SCW). L'arm64 sert surtout pour Docker
+# Desktop local sur Mac M1/M2/M3.
+#
+#   --multi-arch / --arm   ajoute linux/arm64 en plus (build complet)
 #
 # Si des modifs sont uncommitées et qu'aucun message n'est passé en argv,
 # le script demande le message en interactif.
@@ -11,6 +17,8 @@
 # Variables d'env optionnelles :
 #   REMOTE_HOST   cible SSH (par défaut: root@198.51.100.10 = build-vm)
 #   REMOTE_REPO   chemin du clone sur la VM (par défaut: /root/mirai-mesreunions)
+#   PLATFORMS     override complet de la liste de plateformes buildx
+#                 (ex: PLATFORMS=linux/arm64 pour ne builder QUE arm64)
 #   SCW_SECRET_KEY  obligatoire en local, transmise au build via stdin (jamais argv)
 #
 # Le script partage son avancement étape par étape sur stdout/stderr.
@@ -19,6 +27,41 @@ set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-root@198.51.100.10}"
 REMOTE_REPO="${REMOTE_REPO:-/root/mirai-mesreunions}"
+
+# Plateformes par défaut : amd64 seulement.
+BUILD_PLATFORMS="${PLATFORMS:-linux/amd64}"
+
+# Parse flags + premier arg positionnel = message de commit.
+COMMIT_MSG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --multi-arch|--multi|--arm|--arm64)
+      BUILD_PLATFORMS="linux/amd64,linux/arm64"
+      shift
+      ;;
+    --platforms=*)
+      BUILD_PLATFORMS="${1#--platforms=}"
+      shift
+      ;;
+    --platforms)
+      BUILD_PLATFORMS="${2:?--platforms attend une valeur}"
+      shift 2
+      ;;
+    -h|--help)
+      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    --)
+      shift
+      [ $# -gt 0 ] && COMMIT_MSG="$1" && shift
+      ;;
+    *)
+      # premier arg restant = message de commit
+      [ -z "$COMMIT_MSG" ] && COMMIT_MSG="$1" || true
+      shift
+      ;;
+  esac
+done
 
 if [ -t 1 ]; then
   C_BOLD='\033[1m'; C_BLUE='\033[34m'; C_GREEN='\033[32m'
@@ -33,14 +76,13 @@ info() { printf "  ${C_DIM}•${C_RST} %s\n" "$*"; }
 warn() { printf "  ${C_YELLOW}!${C_RST} %s\n" "$*" >&2; }
 fail() { printf "  ${C_RED}✗${C_RST} %s\n" "$*" >&2; exit 1; }
 
-COMMIT_MSG="${1:-}"
-
 # 1. Préchecks
 step "Préchecks"
 git rev-parse --git-dir >/dev/null 2>&1 || fail "pas dans un git repo"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "HEAD" ] && fail "HEAD détaché — checkout une branche d'abord"
 ok "branche courante = ${C_BOLD}$BRANCH${C_RST}"
+ok "plateformes build = ${C_BOLD}$BUILD_PLATFORMS${C_RST}"
 
 [ -n "${SCW_SECRET_KEY:-}" ] || fail "SCW_SECRET_KEY non défini en local (export ou source la config)"
 ok "SCW_SECRET_KEY présent en environnement local"
@@ -79,11 +121,12 @@ ok "push terminé — HEAD = $(git rev-parse --short HEAD)"
 
 # 4. Build container sur la VM cloud
 step "Build container sur $REMOTE_HOST"
-info "synchro repo + buildx multi-arch + push registry (bandwidth interne SCW)"
+info "synchro repo + buildx ($BUILD_PLATFORMS) + push registry (bandwidth interne SCW)"
 info "clé SCW transmise via stdin (jamais en argv ni en log)"
 
 REMOTE_SCRIPT='set -e
 cd "'"$REMOTE_REPO"'"
+export PLATFORMS='"'$BUILD_PLATFORMS'"'
 
 echo "  ▸ fetch origin '"$BRANCH"' (avec mise à jour explicite du tracking ref)"
 git fetch --quiet origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
