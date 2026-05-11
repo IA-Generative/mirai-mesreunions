@@ -3106,15 +3106,17 @@ async function loadSessions() {
             </div>`;
             });
 
-        // Bucket sessions by lifecycle for visual grouping (active prominent,
-        // obsolete + archive collapsed).
-        const buckets = { active: [], obsolete: [], archive: [] };
+        // Bucket sessions by lifecycle for visual grouping. `expired_consumed`
+        // (QR grace passée mais fichiers uploadés + device enrôlé) reste dans
+        // le bucket actif : l'utilisateur veut écouter/voir ses fichiers
+        // tant que le device est valide (rétention 15j), pas devoir déplier
+        // une section repliée par défaut.
+        const buckets = { active: [], obsolete: [] };
         sessions.forEach((s, i) => {
             const lc = s.lifecycle_state;
             const html = renderedItems[i];
-            if (lc === 'pending_enrollment' || lc === 'enrolled') buckets.active.push(html);
-            else if (lc === 'expired_unused') buckets.obsolete.push(html);
-            else buckets.archive.push(html);
+            if (lc === 'expired_unused') buckets.obsolete.push(html);
+            else buckets.active.push(html);
         });
         const collapsibleSection = (title, items, id) => items.length === 0 ? '' : `
             <details id="${id}" style="margin-top:0.5rem;">
@@ -3126,7 +3128,6 @@ async function loadSessions() {
         container.innerHTML = `
             ${buckets.active.join('')}
             ${collapsibleSection('Sessions inutilisées (jetables)', buckets.obsolete, 'obsolete-sessions')}
-            ${collapsibleSection('Historique (sessions expirées avec fichiers)', buckets.archive, 'archive-sessions')}
         `;
 
         const fileCount = sessions.reduce((acc, s) => acc + ((s.uploads || []).length), 0);
