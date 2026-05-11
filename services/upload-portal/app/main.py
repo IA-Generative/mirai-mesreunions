@@ -868,7 +868,28 @@ def notify_status():
                     try:
                         file_obj.status = UploadStatus(status_raw)
                     except Exception:
-                        logger.warning("Invalid status in notify-status: %s", status_raw)
+                        # Pas un enum UploadStatus valide (ex: kevent_*,
+                        # mcr_*). On mappe vers UploadStatus.ERROR pour
+                        # les statuts d'erreur connus, sinon on laisse
+                        # l'enum tel quel (le status_message + l'emit
+                        # WebSocket suffisent à informer l'UI). Sans ce
+                        # mapping, /api/status retourne TRANSFERRED (vert)
+                        # alors que la transcription a échoué côté interne.
+                        failure_prefixes = (
+                            "kevent_failed",
+                            "kevent_auth_failed",
+                            "mcr_auth_failed",
+                            "mcr_rejected",
+                            "mcr_push_failed",
+                            "failed",
+                        )
+                        if status_raw in failure_prefixes:
+                            file_obj.status = UploadStatus.ERROR
+                        else:
+                            logger.debug(
+                                "Non-enum status forwarded as-is via WebSocket "
+                                "(file_obj.status unchanged): %s", status_raw,
+                            )
                 file_obj.status_message = status_msg
                 if quality is not None:
                     file_obj.audio_quality_score = quality

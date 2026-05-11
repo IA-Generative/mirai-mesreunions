@@ -993,12 +993,22 @@ def audio_lookup():
         return jsonify({"error": "db_not_ready"}), 503
     db = SessionLocal()
     try:
+        # ``filename`` côté code-generator c'est uploaded_files.transcoded_filename
+        # (basename, ex: YJENNB_xxx_foo.mp4). Côté user_audio_files,
+        # stored_filename est la clé S3 interne complète préfixée par
+        # ``<user_sub>/<simple_code>/`` (cf. _perform_pull). On matche
+        # donc en suffixe pour rester compatible avec les deux formats
+        # (lookup historique avec basename, et nouveaux uploads).
+        from sqlalchemy import or_
         row = (
             db.query(UserAudioFile)
             .filter(
                 UserAudioFile.user_sub == user_sub,
                 UserAudioFile.original_session_code == simple_code,
-                UserAudioFile.stored_filename == filename,
+                or_(
+                    UserAudioFile.stored_filename == filename,
+                    UserAudioFile.stored_filename.like(f"%/{filename}"),
+                ),
             )
             .first()
         )
