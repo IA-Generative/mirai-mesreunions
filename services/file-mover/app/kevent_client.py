@@ -129,6 +129,23 @@ class KeventClient:
 
     # ── Helpers ─────────────────────────────────────────────
 
+    @staticmethod
+    def _whisper_safe_filename(filename: str) -> str:
+        """Renomme l'extension pour matcher la whitelist du gateway Whisper.
+
+        Le gateway accepte ``.mp3 .wav .m4a .ogg .flac``. Le transcode-worker
+        produit du ``.mp4`` (container MP4 + AAC), qui est sémantiquement
+        identique à ``.m4a`` côté contenu. On renomme juste l'extension du
+        multipart sans toucher aux bytes, sinon le gateway répond
+        ``400: extension ".mp4" not accepted``.
+        """
+        if not filename:
+            return filename
+        lower = filename.lower()
+        if lower.endswith(".mp4"):
+            return filename[:-4] + ".m4a"
+        return filename
+
     def _auth_header(self) -> dict:
         # Le gateway Mirai a migré (validé empiriquement 2026-05-11) :
         # l'ancien header non-standard ``apikey: Bearer <token>`` retourne
@@ -171,7 +188,7 @@ class KeventClient:
         merger can align with diarisation timestamps.
         """
         url = f"{self.gateway_url}/v1/audio/transcriptions"
-        files = {"file": (filename, audio_bytes, content_type)}
+        files = {"file": (self._whisper_safe_filename(filename), audio_bytes, content_type)}
         data = {
             "model": self.transcription_model,
             "response_format": response_format,
@@ -224,7 +241,7 @@ class KeventClient:
         ``{"language": "fr"}``) without bloating the signature.
         """
         url = f"{self.gateway_url}/jobs/{service_type}"
-        files = {"file": (filename, audio_bytes, content_type)}
+        files = {"file": (self._whisper_safe_filename(filename), audio_bytes, content_type)}
         data = {"operation": operation}
         if model:
             data["model"] = model
@@ -382,7 +399,7 @@ class KeventClient:
         end}, …], num_speakers, duration, processing_time}``.
         """
         url = f"{self.gateway_url}/v1/audio/diarizations"
-        files = {"file": (filename, audio_bytes, content_type)}
+        files = {"file": (self._whisper_safe_filename(filename), audio_bytes, content_type)}
         data = {"model": self.diarization_model}
         try:
             resp = req.post(
