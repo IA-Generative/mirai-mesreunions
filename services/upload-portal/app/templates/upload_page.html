@@ -1175,14 +1175,17 @@ function setupManualRefresh() {
 }
 setupManualRefresh();
 
-// Décode le payload JSON d'un JWT (sans vérifier la signature — c'est juste
-// pour récupérer retention_until pour l'affichage). Renvoie null si invalide.
-function decodeJwtPayload(token) {
+// Décode le payload JSON du device token (format custom HMAC-SHA256 :
+// "<base64url(json_payload)>.<base64url(signature)>" — 2 parts, pas 3
+// comme un JWT standard). Pas de vérification de signature côté client,
+// c'est juste pour récupérer retention_until pour l'affichage.
+// Renvoie null si invalide.
+function decodeDeviceTokenPayload(token) {
     if (!token || typeof token !== 'string') return null;
     const parts = token.split('.');
     if (parts.length < 2) return null;
     try {
-        let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+        let b64 = parts[0].replace(/-/g, '+').replace(/_/g, '/');
         while (b64.length % 4) b64 += '=';
         return JSON.parse(atob(b64));
     } catch (e) {
@@ -1194,7 +1197,7 @@ function decodeJwtPayload(token) {
 // présente un claim retention_until, sinon null.
 function getDeviceRetentionMs() {
     const t = getDeviceToken();
-    const payload = decodeJwtPayload(t);
+    const payload = decodeDeviceTokenPayload(t);
     if (!payload) return null;
     const ts = Number(payload.retention_until || 0);
     return ts > 0 ? ts * 1000 : null;
