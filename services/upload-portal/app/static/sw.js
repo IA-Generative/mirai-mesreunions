@@ -1,4 +1,4 @@
-const CACHE_NAME = "mirai-upload-pwa-v7";
+const CACHE_NAME = "mirai-upload-pwa-v8";
 const CORE_ASSETS = [
   "/static/icons/pwa-icon-180.png",
   "/static/icons/pwa-icon-192.png",
@@ -38,6 +38,31 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // Pages HTML (navigate / document) : network-first pour récupérer les
+  // mises à jour de template immédiatement (sinon un déploiement reste
+  // invisible jusqu'à expiration du cache). On retombe sur le cache si
+  // offline.
+  const isHtml =
+    event.request.mode === "navigate" ||
+    event.request.destination === "document" ||
+    (event.request.headers.get("accept") || "").includes("text/html");
+
+  if (isHtml) {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          if (response && response.status === 200 && response.type === "basic") {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => undefined);
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request)),
+    );
+    return;
+  }
+
+  // Autres assets (icônes, CSS, JS) : cache-first (rapide, stable).
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
