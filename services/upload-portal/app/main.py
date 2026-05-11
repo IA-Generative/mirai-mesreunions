@@ -691,10 +691,16 @@ def api_device_enroll(qr_token):
 def api_upload(qr_token):
     """Handle file upload via API."""
     session_obj = get_session_by_token(qr_token)
-    valid, reason = is_session_valid(session_obj, for_upload=True)
+    if not session_obj:
+        return jsonify({"error": "Code invalide ou introuvable."}), 400
 
-    if not valid:
-        return jsonify({"error": reason}), 400
+    # On valide d'abord le device : c'est la source de vérité pour
+    # "ce mobile a-t-il encore le droit d'uploader ?" (rétention 15j).
+    # La grace QR (session.expires_at, 5 min) ne sert que de fenêtre
+    # d'enrôlement initial ; une fois le device enrôlé, elle n'a plus
+    # à gater les uploads. Sans ce réordonnement, on rejetait avec
+    # "Token expiré (fenêtre de grâce de 300s dépassée)" même quand le
+    # device avait encore 14 jours de validité.
     ok, details = _validate_device_fast_path(qr_token, _extract_device_token())
     if not ok:
         return jsonify(
@@ -703,6 +709,18 @@ def api_upload(qr_token):
                 "device_reason": details.get("reason"),
             }
         ), 401
+
+    # Device valide : on contrôle uniquement les limites de la session
+    # qui ont du sens long-terme (quota max_uploads, status révoqué).
+    # is_session_valid couvre les deux + l'expires_at qu'on ignore ici
+    # via la check upload_count.
+    if session_obj.status != SessionStatus.ACTIVE:
+        return jsonify({"error": "Token révoqué ou inactif."}), 400
+    if session_obj.upload_count >= session_obj.max_uploads:
+        return jsonify({
+            "error": f"Nombre maximal de téléchargements atteint ("
+                     f"{session_obj.max_uploads}/{session_obj.max_uploads})."
+        }), 400
 
     if "file" not in request.files:
         return jsonify({"error": "Aucun fichier sélectionné."}), 400
@@ -822,7 +840,14 @@ def api_status(qr_token):
                 "message": f.status_message or "",
                 "quality": f.audio_quality_score,
             } for f in uploads],
-            "can_upload": is_session_valid(session_obj, for_upload=True)[0],
+            # can_upload : device déjà validé plus haut (sinon on aurait
+            # retourné 401). On ignore session.expires_at (grace QR) qui
+            # n'est plus la source de vérité une fois enrôlé. Reste :
+            # status actif + quota non atteint.
+            "can_upload": (
+                session_obj.status == SessionStatus.ACTIVE
+                and session_obj.upload_count < session_obj.max_uploads
+            ),
             "remaining": max(0, session_obj.max_uploads - session_obj.upload_count),
         })
     finally:
