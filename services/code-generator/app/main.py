@@ -3297,15 +3297,16 @@ async function loadSessions() {
                         <a href="${f.transferred_stream_url}" target="_blank" rel="noopener">Écouter</a>
                     </div>`
                     : '';
-                return `<div class="file-status">
-                    <span class="file-name" title="${escapeHtml(f.original_filename)}">${escapeHtml(f.original_filename)}</span>
-                    <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
-                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
-                            onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                            title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
-                        Supprimer
-                    </button>
-                    <div class="pipeline-box" title="Progression du pipeline en chemin de fer: analyse, transcodage, transfert">
+                // Cache le chemin de fer une fois le pipeline pré-transcription
+                // abouti (fichier transféré côté interne). La 4e étape
+                // (transcription IA) est affichée séparément par le bandeau
+                // de loadTranscriptStatus, donc plus besoin du rail visuel
+                // qui prend de la place. On laisse le rail visible pendant
+                // l'analyse / transcodage / transfert pour montrer où on en
+                // est en temps réel.
+                const pipelineDone = (f.status === 'transferred');
+                const railroadBlock = pipelineDone ? '' : `
+                    <div class="pipeline-box" title="Progression du pipeline en chemin de fer: analyse, transcodage, transfert, transcription">
                         <div class="railroad">
                             <div class="rail-segment ${analyseClass}">
                                 <span class="rail-node">1</span><span class="rail-line"></span>
@@ -3326,11 +3327,24 @@ async function loadSessions() {
                             <span>Transfert ${progress.transfer}%</span>
                             <span data-transcribe-label="${f.id}">Transcription</span>
                         </div>
-                    </div>
+                    </div>`;
+                return `<div class="file-status">
+                    <span class="file-name" title="${escapeHtml(f.original_filename)}">${escapeHtml(f.original_filename)}</span>
+                    <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
+                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
+                            onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
+                            title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
+                        Supprimer
+                    </button>
+                    ${railroadBlock}
+                    <!-- Bloc transcript (résumé + key_points + status badge + boutons
+                         de téléchargement transcript) AVANT les liens audio bruts,
+                         car c'est ce que l'utilisateur regarde en priorité une fois
+                         le fichier abouti. -->
+                    <div class="transcript-section" data-transcript-file-id="${f.id}"></div>
                     ${sourceLinks}
                     ${transcodedLinks}
                     ${transferredLinks}
-                    <div class="transcript-section" data-transcript-file-id="${f.id}"></div>
                 </div>`;
             }).join('');
 
