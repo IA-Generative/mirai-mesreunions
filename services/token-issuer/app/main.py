@@ -33,7 +33,7 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken
+from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -716,6 +716,70 @@ def delete_session(simple_code: str):
             simple_code, user_sub, n_devices, n_options,
         )
         return jsonify({"deleted": True, "devices_removed": n_devices})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/files/by-session", methods=["DELETE"])
+def delete_file_by_session():
+    """Permanently remove a user_audio_files row + its transcription_events.
+
+    Called by code-generator quand l'utilisateur clique "Supprimer ce
+    fichier" depuis mydevices. La suppression côté externe (uploaded_files
+    + S3) est faite par code-generator avant cet appel ; cette route ne
+    s'occupe que de la zone interne.
+
+    Le lookup se fait sur ``(user_sub, simple_code, original_filename)`` :
+    user_audio_files.id n'est PAS lié à uploaded_files.id (ce sont deux
+    UUID indépendants). Le tuple ci-dessus est porté par
+    ``user_audio_files.original_session_code`` + ``original_filename``.
+
+    Auth: INTERNAL_API_TOKEN bearer.
+    Body: ``{"user_sub": "...", "simple_code": "...", "original_filename": "..."}``
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    simple_code = (data.get("simple_code") or "").strip()
+    original_filename = (data.get("original_filename") or "").strip()
+    if not user_sub or not simple_code or not original_filename:
+        return jsonify({
+            "error": "user_sub, simple_code and original_filename are required"
+        }), 400
+
+    db = SessionLocal()
+    try:
+        audio_files = (
+            db.query(UserAudioFile)
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.original_session_code == simple_code,
+                UserAudioFile.original_filename == original_filename,
+            )
+            .all()
+        )
+        if not audio_files:
+            return jsonify({"error": "not_found"}), 404
+        n_events_total = 0
+        for af in audio_files:
+            n_events_total += (
+                db.query(TranscriptionEvent)
+                .filter(TranscriptionEvent.audio_file_id == af.id)
+                .delete(synchronize_session=False)
+            )
+            db.delete(af)
+        db.commit()
+        logger.info(
+            "Internal audio file row(s) deleted (user_sub=%s, simple_code=%s, "
+            "filename=%s, rows=%d, events=%d)",
+            user_sub, simple_code, original_filename, len(audio_files), n_events_total,
+        )
+        return jsonify({
+            "deleted": True,
+            "rows_removed": len(audio_files),
+            "events_removed": n_events_total,
+        })
     finally:
         db.close()
 

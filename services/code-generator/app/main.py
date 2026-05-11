@@ -1572,6 +1572,91 @@ def api_file_stream_transferred(file_id):
         db.close()
 
 
+@app.route("/api/file/<file_id>", methods=["DELETE"])
+@require_auth
+def api_delete_file(file_id):
+    """Permanently delete a single uploaded file (S3 + DB), keep the session.
+
+    Cascade :
+      1. S3 audio-upload   (stored_filename)        — fichier source brut
+      2. S3 audio-processed (transcoded_filename)   — fichier transcodé MP4
+      3. S3 audio-internal (<user>/<code>/<file>)  — copie zone interne
+      4. external uploaded_files row                — DELETE
+      5. internal user_audio_files row              — best-effort via token-issuer
+         (si l'appel HTTP échoue, la row reste comme audit ; pas visible côté
+         mydevices puisque c'est uploaded_files qui drive l'UI).
+
+    Ownership vérifiée via _get_owned_file (join sur upload_sessions.user_sub).
+    """
+    user = get_current_user()
+    db = SessionLocal()
+    deleted_objects = 0
+    try:
+        file_obj = _get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            return jsonify({"error": "file_not_found"}), 404
+
+        try:
+            if file_obj.stored_filename:
+                delete_object(s3_upload_cfg, file_obj.stored_filename)
+                deleted_objects += 1
+        except Exception:
+            logger.warning("Failed to delete upload object %s", file_obj.stored_filename, exc_info=True)
+        try:
+            if file_obj.transcoded_filename:
+                delete_object(s3_processed_cfg, file_obj.transcoded_filename)
+                deleted_objects += 1
+        except Exception:
+            logger.warning("Failed to delete processed object %s", file_obj.transcoded_filename, exc_info=True)
+        try:
+            t_cfg, t_key = _resolve_transferred_storage(db, file_obj)
+            if t_cfg and t_key:
+                delete_object(t_cfg, t_key)
+                deleted_objects += 1
+        except Exception:
+            logger.warning("Failed to delete transferred object for file %s", file_id, exc_info=True)
+
+        original_filename = file_obj.original_filename
+        session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+        simple_code_for_internal = session_obj.simple_code if session_obj else None
+        db.delete(file_obj)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to delete file %s for user %s", file_id, user.get("sub"))
+        return jsonify({"error": "file_delete_failed"}), 500
+    finally:
+        db.close()
+
+    # Cleanup zone interne (user_audio_files + transcription_events).
+    # Best-effort : la suppression côté externe est déjà committée. Le
+    # lookup interne se fait par (user_sub, simple_code, original_filename)
+    # car les UUID externes et internes sont indépendants.
+    if simple_code_for_internal and original_filename:
+        try:
+            request_internal_device_api(
+                "DELETE",
+                "/api/v1/files/by-session",
+                json_body={
+                    "user_sub": user.get("sub", ""),
+                    "simple_code": simple_code_for_internal,
+                    "original_filename": original_filename,
+                },
+            )
+        except Exception:
+            logger.debug(
+                "External delete OK but internal cleanup failed for "
+                "file=%s session=%s — user_audio_files row reste comme audit.",
+                original_filename, simple_code_for_internal, exc_info=True,
+            )
+
+    return jsonify({
+        "ok": True,
+        "deleted_objects": deleted_objects,
+        "filename": original_filename,
+    })
+
+
 @app.route("/api/my-sessions/<simple_code>", methods=["DELETE"])
 @require_auth
 def api_delete_session(simple_code):
@@ -2864,6 +2949,21 @@ async function purgeSessions() {
     }
 }
 
+async function deleteFile(fileId, filenameRaw) {
+    const filename = (filenameRaw || '').replace(/&#39;/g, "'");
+    if (!confirm(`Supprimer définitivement le fichier « ${filename} » ?\n\n` +
+                 `Le fichier source, transcodé et la copie zone interne sont retirés (S3 + DB). ` +
+                 `La session reste utilisable pour d'autres uploads. Action irréversible.`)) return;
+    try {
+        const resp = await fetch(`/api/file/${fileId}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'delete_failed');
+        setTimeout(() => { loadSessions(); }, 250);
+    } catch (e) {
+        alert('Echec suppression du fichier.');
+    }
+}
+
 async function deleteSession(simpleCode, allowSilent) {
     // For "expired_unused" / "pending_enrollment" with 0 upload, no confirm
     // (rien à perdre). For "enrolled" / "expired_consumed" with files,
@@ -3104,6 +3204,11 @@ async function loadSessions() {
                 return `<div class="file-status">
                     <span class="file-name" title="${escapeHtml(f.original_filename)}">${escapeHtml(f.original_filename)}</span>
                     <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
+                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
+                            onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
+                            title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
+                        Supprimer
+                    </button>
                     <div class="pipeline-box" title="Progression du pipeline en chemin de fer: analyse, transcodage, transfert">
                         <div class="railroad">
                             <div class="rail-segment ${analyseClass}">
