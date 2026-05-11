@@ -813,6 +813,52 @@ def delete_file_by_session():
         db.close()
 
 
+@app.route("/api/v1/files/by-session/rename", methods=["POST"])
+def rename_file_by_session():
+    """Renomme le titre suggéré (suggested_filename) d'un user_audio_files.
+
+    Auth: INTERNAL_API_TOKEN bearer.
+    Body: ``{"user_sub","simple_code","original_filename","new_title"}``
+    Matching identique à delete_file_by_session.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    simple_code = (data.get("simple_code") or "").strip()
+    original_filename = (data.get("original_filename") or "").strip()
+    new_title = (data.get("new_title") or "").strip()
+    if not user_sub or not simple_code or not original_filename or not new_title:
+        return jsonify({
+            "error": "user_sub, simple_code, original_filename and new_title are required"
+        }), 400
+    new_title = new_title[:500]  # safety cap
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserAudioFile)
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.original_session_code == simple_code,
+                UserAudioFile.original_filename == original_filename,
+            )
+            .all()
+        )
+        if not rows:
+            return jsonify({"error": "not_found"}), 404
+        for af in rows:
+            af.suggested_filename = new_title
+        db.commit()
+        logger.info(
+            "User audio file renamed: user_sub=%s simple_code=%s file=%s → '%s' (%d rows)",
+            user_sub, simple_code, original_filename, new_title[:80], len(rows),
+        )
+        return jsonify({"ok": True, "rows_updated": len(rows), "new_title": new_title})
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/devices/<device_id>", methods=["DELETE"])
 def delete_device(device_id: str):
     """Permanently remove a device enrollment row.

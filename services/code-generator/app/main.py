@@ -1574,6 +1574,56 @@ def api_file_stream_transferred(file_id):
         db.close()
 
 
+@app.route("/api/file/<file_id>/rename", methods=["POST"])
+@require_auth
+def api_rename_file(file_id):
+    """Renomme le titre affiché (suggested_filename) d'un fichier.
+
+    Body: ``{"title": "..."}``. Persiste via token-issuer
+    ``POST /api/v1/files/by-session/rename`` (matche sur user_sub +
+    simple_code + original_filename puisque les UUID externes/internes
+    sont indépendants — cf. delete_file_by_session).
+    """
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    new_title = (payload.get("title") or "").strip()
+    if not new_title:
+        return jsonify({"error": "title is required"}), 400
+    if len(new_title) > 500:
+        return jsonify({"error": "title too long"}), 400
+
+    db = SessionLocal()
+    try:
+        file_obj = _get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            return jsonify({"error": "file_not_found"}), 404
+        session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+        if not session_obj:
+            return jsonify({"error": "session_not_found"}), 404
+        try:
+            data = request_internal_device_api(
+                "POST",
+                "/api/v1/files/by-session/rename",
+                json_body={
+                    "user_sub": user["sub"],
+                    "simple_code": session_obj.simple_code,
+                    "original_filename": file_obj.original_filename,
+                    "new_title": new_title,
+                },
+            )
+        except req.HTTPError as err:
+            if err.response is not None:
+                try:
+                    body = err.response.json()
+                except Exception:
+                    body = {"error": "internal_api_error"}
+                return jsonify({"error": body.get("error", "rename_failed")}), err.response.status_code
+            return jsonify({"error": "rename_failed"}), 502
+        return jsonify({"ok": True, "title": data.get("new_title", new_title)})
+    finally:
+        db.close()
+
+
 @app.route("/api/file/<file_id>", methods=["DELETE"])
 @require_auth
 def api_delete_file(file_id):
@@ -2087,26 +2137,32 @@ INDEX_TEMPLATE = """
         .file-row-compact-wrapper:hover { background: #f8fafc; }
         .file-row-compact {
             display: grid;
-            grid-template-columns: auto minmax(0,1fr) auto auto auto;
+            grid-template-columns: auto auto minmax(0,1fr) auto auto auto;
             align-items: center; gap: 0.55rem;
-            padding: 0.4rem 0.55rem;
+            padding: 0.45rem 0.55rem;
+            min-height: 32px;
         }
-        .file-row-status-mini { display: flex; align-items: center; }
+        .file-row-status-mini {
+            display: flex; align-items: center;
+            line-height: 1; min-height: 12px;
+        }
         .file-row-title {
             font-weight: 600; color: #1d4ed8; text-decoration: none;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            min-width: 0;
+            min-width: 0; line-height: 1.2;
         }
-        .file-row-title:hover { text-decoration: underline; color: #1e40af; }
+        .file-row-title:hover { color: #1e40af; }
         .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
         .file-row-expand {
-            border: 0; background: transparent; cursor: pointer;
-            color: #64748b; font-size: 0.85rem;
-            padding: 0.15rem 0.3rem; border-radius: 4px;
-            transition: transform 0.15s ease;
+            border: 1px solid transparent; background: transparent;
+            cursor: pointer; color: #475569; font-size: 0.78rem;
+            padding: 0.15rem 0.45rem; border-radius: 4px;
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            white-space: nowrap;
         }
-        .file-row-expand:hover { background: #e2e8f0; color: #0f172a; }
-        .file-row-expand.is-open { transform: rotate(90deg); }
+        .file-row-expand:hover { background: #e2e8f0; color: #0f172a; border-color: #cbd5e1; }
+        .file-row-expand-icon { display: inline-block; transition: transform 0.15s ease; }
+        .file-row-expand.is-open .file-row-expand-icon { transform: rotate(90deg); }
         .file-row-delete { white-space: nowrap; }
         .file-row-expanded {
             padding: 0.4rem 0.7rem 0.55rem 1.8rem;
@@ -2143,13 +2199,49 @@ INDEX_TEMPLATE = """
             display: flex; justify-content: space-between; align-items: center;
             gap: 0.5rem; margin-bottom: 0.6rem;
         }
-        .file-detail-title {
-            margin: 0 0 0.4rem 0; font-size: 1.05rem;
-            word-break: break-word; line-height: 1.25;
+        .file-detail-title-row {
+            display: flex; gap: 0.5rem; align-items: center;
+            margin: 0.3rem 0 0.15rem 0;
+        }
+        .file-detail-title-input {
+            flex: 1; min-width: 0; font-size: 1.05rem; font-weight: 600;
+            color: #0f172a; padding: 0.35rem 0.55rem;
+            border: 1px solid transparent; border-radius: 6px;
+            background: transparent; line-height: 1.25;
+        }
+        .file-detail-title-input:hover,
+        .file-detail-title-input:focus {
+            border-color: #cbd5e1; background: #fff; outline: none;
+        }
+        .file-detail-rename-btn { white-space: nowrap; }
+        .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
+        .file-detail-techname {
+            font-size: 0.72rem; color: #94a3b8; margin: 0 0 0.5rem 0.6rem;
+            word-break: break-all;
         }
         .file-detail-meta {
             display: flex; flex-wrap: wrap; align-items: center;
-            gap: 0.4rem; margin-bottom: 0.6rem;
+            gap: 0.45rem; margin-bottom: 0.6rem;
+        }
+        .file-detail-status-dot { display: flex; align-items: center; }
+        .file-detail-fullinfo { margin-top: 0.6rem; }
+        /* Mode "page détail" : on cache le titre de l'onglet + le bouton
+           purger + la liste des autres sessions. Seul le détail demandé
+           est visible, pour vraiment ressembler à une page dédiée. */
+        .tab-pane[data-tab="transfers"].detail-active .dsfr-inline-actions,
+        .tab-pane[data-tab="transfers"].detail-active #transfer-live { display: none !important; }
+        /* En vue détail : on n'affiche pas le bandeau session
+           (code + état "Enrôlé") — l'utilisateur a cliqué un fichier
+           précis, le contexte session n'apporte rien ici. */
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .code,
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .status-badge { display: none !important; }
+        .tab-pane[data-tab="transfers"].detail-active .session-item {
+            border: 0 !important; padding: 0 !important; background: transparent !important;
+        }
+        /* Résumé persistant en vue détail (non collapsible) */
+        .transcript-meta-persistent-title {
+            font-weight: 600; color: #0f172a; font-size: 0.78rem;
+            margin-bottom: 0.2rem;
         }
         /* ── Responsive mobile ─────────────────────────────────────── */
         @media (max-width: 700px) {
@@ -2659,15 +2751,59 @@ let _detailFileId = null;
 function showFileDetail(fileId) {
     _detailFileId = fileId;
     activateTab('transfers');
-    loadSessions();
+    // Active le mode "page détail" : masque le titre + bouton purge +
+    // bordure carte pour donner l'illusion d'une vraie page dédiée.
+    const pane = document.querySelector('.tab-pane[data-tab="transfers"]');
+    if (pane) pane.classList.add('detail-active');
+    loadSessions({ force: true });
     requestAnimationFrame(() => window.scrollTo(0, 0));
 }
 function showFilesList() {
     _detailFileId = null;
-    loadSessions();
+    const pane = document.querySelector('.tab-pane[data-tab="transfers"]');
+    if (pane) pane.classList.remove('detail-active');
+    loadSessions({ force: true });
 }
 // Toggle l'affichage de la zone résumé sous une ligne compacte. Le
 // chevron tourne (CSS) selon la classe is-open.
+// Renomme le titre suggéré (suggested_filename) du fichier en vue détail.
+// Persiste via POST /api/file/<id>/rename → token-issuer interne.
+async function renameDetailTitle(fileId, btn) {
+    const input = document.querySelector(`[data-detail-title-for="${fileId}"]`);
+    if (!input) return;
+    const newTitle = (input.value || '').trim();
+    if (!newTitle) {
+        showToast('Le titre ne peut pas être vide.', 'error');
+        return;
+    }
+    btn.disabled = true;
+    try {
+        const resp = await fetch(`/api/file/${fileId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: newTitle }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'rename_failed');
+        input.dataset.originalTitle = newTitle;
+        showToast('Titre renommé.', 'success');
+        // Force un refresh des sessions pour propager le nouveau titre.
+        loadSessions({ force: true });
+    } catch (e) {
+        btn.disabled = false;
+        showToast(`Renommage échoué : ${e.message}`, 'error');
+    }
+}
+// Active le bouton "Renommer" quand le titre est modifié (vs valeur initiale).
+document.addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (!t || !t.matches('.file-detail-title-input')) return;
+    const original = t.dataset.originalTitle || '';
+    const current = (t.value || '').trim();
+    const btn = t.parentElement && t.parentElement.querySelector('.file-detail-rename-btn');
+    if (btn) btn.disabled = !current || current === original;
+});
+
 function toggleRowExpand(btn) {
     const wrapper = btn.closest('.file-row-compact-wrapper');
     if (!wrapper) return;
@@ -2676,7 +2812,9 @@ function toggleRowExpand(btn) {
     const open = exp.style.display !== 'none';
     exp.style.display = open ? 'none' : '';
     btn.classList.toggle('is-open', !open);
-    btn.title = open ? 'Voir le résumé' : 'Masquer le résumé';
+    const lbl = btn.querySelector('.file-row-expand-label');
+    if (lbl) lbl.textContent = open ? 'déplier' : 'replier';
+    btn.setAttribute('aria-label', open ? 'Voir le résumé' : 'Masquer le résumé');
 }
 // Format helpers pour la vue liste compacte.
 function _formatDateCompact(iso) {
@@ -3257,11 +3395,17 @@ function _userIsInteracting() {
     return _userInteractingTs && (Date.now() - _userInteractingTs) < 2000;
 }
 
-async function loadSessions() {
+// Snapshot du dernier rendu (JSON sérialisé) — sert au diff-based refresh
+// pour ne pas re-render si rien n'a changé entre 2 polls (ce qui faisait
+// flicker l'UI toutes les 15s).
+let _lastSessionsSnapshot = '';
+
+async function loadSessions(opts) {
+    opts = opts || {};
     // Skip le refresh si l'utilisateur est en train de sélectionner un
     // download ou cliquer un bouton — sinon innerHTML remplace le DOM
     // et la sélection est perdue. Le polling 15s tentera de nouveau.
-    if (_userIsInteracting()) return;
+    if (_userIsInteracting() && !opts.force) return;
     // Préserve la position de scroll pendant le refresh des sessions
     // (sinon innerHTML reset le scroll en haut, particulièrement gênant
     // sur les pages longues avec plusieurs sessions actives).
@@ -3284,6 +3428,12 @@ async function loadSessions() {
         if (!Array.isArray(sessions)) {
             throw new Error('Format API invalide');
         }
+        // Diff : si la response est identique à la dernière (et qu'aucune
+        // vue détail/forced n'est demandée), on skip le re-render pour
+        // éviter le flicker visuel toutes les 15s sur une page stable.
+        const snap = JSON.stringify(sessions);
+        if (!opts.force && snap === _lastSessionsSnapshot) return;
+        _lastSessionsSnapshot = snap;
         const container = document.getElementById('sessions-list');
         const transferBox = document.getElementById('transfer-live');
         const activityMiniText = document.getElementById('activity-mini-text');
@@ -3433,7 +3583,14 @@ async function loadSessions() {
             return;
         }
 
-        const renderedItems = sessions.map(s => {
+        // En mode vue détail, on garde uniquement la session qui contient
+        // le fichier ciblé, et on filtre tout le reste (autres sessions,
+        // wrappers buckets) pour vraiment afficher une page focus fichier.
+        const sessionsToRender = _detailFileId
+            ? sessions.filter(s => (s.uploads || []).some(u => u.id === _detailFileId))
+            : sessions;
+
+        const renderedItems = sessionsToRender.map(s => {
             const isActive = s.status === 'active' && new Date(s.expires_at) > new Date();
             const statusClass = isActive ? 'status-active' : 'status-expired';
             const sessionStatusLabel = isActive ? 'Actif' : 'Expiré';
@@ -3547,20 +3704,22 @@ async function loadSessions() {
                                title="${escapeHtml(f.original_filename)}">
                                 ${escapeHtml(f.original_filename)}
                             </a>
-                            <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
                             <button class="file-row-expand" type="button"
                                     onclick="toggleRowExpand(this)"
-                                    title="Voir le résumé">▶</button>
+                                    aria-label="Voir le résumé">
+                                <span class="file-row-expand-icon">▶</span>
+                                <span class="file-row-expand-label">déplier</span>
+                            </button>
+                            <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
                             <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
                                     onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
                                     title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
                                 Supprimer
                             </button>
                         </div>
-                        <!-- Zone résumé révélée par le chevron. Le contenu réel
-                             (transcript-meta-details + résumé) est injecté par
-                             loadTranscriptStatus mais cloné dans cette zone à
-                             chaque update via JS pour ne pas dupliquer fetchs. -->
+                        <!-- Zone résumé révélée par le chevron, sans le statut
+                             technique (qui reste accessible via tooltip de la
+                             pastille). -->
                         <div class="file-row-expanded" data-expanded-file-id="${f.id}" style="display:none;">
                             <div class="file-row-expanded-summary"
                                  data-expanded-summary-for="${f.id}"></div>
@@ -3568,7 +3727,14 @@ async function loadSessions() {
                     </div>`;
                 }
                 // ── Vue DÉTAIL ──────────────────────────────────────────
-                return `<div class="file-detail">
+                // Mode "page" : on cache tout le reste (header de la session
+                // + autres fichiers) via la classe parent `.detail-active`
+                // pour ne montrer QUE le détail demandé.
+                // Titre éditable (suggested_filename, persisté via
+                // /api/file/<id>/rename) + nom technique en petit dessous.
+                // Statut technique uniquement via tooltip sur la pastille.
+                // Résumé déployé persistant (pas de <details>).
+                return `<div class="file-detail" data-detail-file-id="${f.id}">
                     <div class="file-detail-header">
                         <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary file-detail-back"
                                 onclick="showFilesList()">← Retour à la liste</button>
@@ -3578,15 +3744,38 @@ async function loadSessions() {
                             Supprimer
                         </button>
                     </div>
-                    <h2 class="file-detail-title">${escapeHtml(f.original_filename)}</h2>
+                    <div class="file-detail-title-row">
+                        <input class="file-detail-title-input" type="text"
+                               value="${escapeHtml(f.original_filename)}"
+                               data-original-title="${escapeHtml(f.original_filename)}"
+                               data-detail-title-for="${f.id}"
+                               placeholder="Titre de la réunion" />
+                        <button class="file-detail-rename-btn fr-btn fr-btn--sm fr-btn--secondary"
+                                onclick="renameDetailTitle('${f.id}', this)" disabled>
+                            Renommer
+                        </button>
+                    </div>
+                    <div class="file-detail-techname" title="Nom technique du fichier source">
+                        ${escapeHtml(f.original_filename)}
+                    </div>
                     <div class="file-detail-meta">
-                        <span class="status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>${quality}
+                        <div class="file-detail-status-dot transcript-section transcript-section--inline"
+                             data-transcript-file-id="${f.id}"
+                             data-audio-downloads="${audioDownloadsAttr}"
+                             data-compact="1"
+                             aria-label="Statut transcription"></div>
+                        ${quality}
                         <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
                     </div>
                     ${railroadBlock}
-                    <div class="transcript-section"
+                    <!-- Section résumé toujours visible (pas de <details>
+                         repliable en vue détail). Le contenu (key_points
+                         + dropdown downloads) est injecté par
+                         loadTranscriptStatus en mode non-compact. -->
+                    <div class="file-detail-fullinfo transcript-section"
                          data-transcript-file-id="${f.id}"
-                         data-audio-downloads="${audioDownloadsAttr}"></div>
+                         data-audio-downloads="${audioDownloadsAttr}"
+                         data-persistent-summary="1"></div>
                     ${impactIcon ? `<div class="file-impact-row">${impactIcon}</div>` : ''}
                 </div>`;
             }).join('');
@@ -3641,7 +3830,7 @@ async function loadSessions() {
         // tant que le device est valide (rétention 15j), pas devoir déplier
         // une section repliée par défaut.
         const buckets = { active: [], obsolete: [] };
-        sessions.forEach((s, i) => {
+        sessionsToRender.forEach((s, i) => {
             const lc = s.lifecycle_state;
             const html = renderedItems[i];
             if (lc === 'expired_unused') buckets.obsolete.push(html);
@@ -3843,11 +4032,17 @@ async function loadTranscriptStatus(fileId, container) {
         const title = data.suggested_filename || '';
         // Key points : collapse par défaut (résumé peut faire 1000+ chars).
         // On garde le titre toujours visible, key_points derrière un
-        // <details> repliable.
+        // <details> repliable — SAUF en vue détail (data-persistent-summary=1)
+        // où le résumé est toujours visible.
+        const persistent = container.getAttribute('data-persistent-summary') === '1';
         const subtitle = (title || kp)
             ? `<div class="transcript-meta">
-                ${title ? `<div class="transcript-meta-title">${escapeHtml(title)}</div>` : ''}
-                ${kp ? `<details class="transcript-meta-details"><summary>Résumé</summary><pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre></details>` : ''}
+                ${title && !persistent ? `<div class="transcript-meta-title">${escapeHtml(title)}</div>` : ''}
+                ${kp
+                    ? (persistent
+                        ? `<div class="transcript-meta-persistent-title">Résumé</div><pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>`
+                        : `<details class="transcript-meta-details"><summary>Résumé</summary><pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre></details>`)
+                    : ''}
               </div>`
             : '';
 
@@ -3965,23 +4160,36 @@ async function loadTranscriptStatus(fileId, container) {
                 if (link) {
                     link.textContent = title;
                 }
+                // En vue détail, pré-remplit l'input éditable du titre
+                // une seule fois (puis on n'overwrite plus, l'utilisateur
+                // peut être en train de saisir une nouvelle valeur).
+                const titleInput = document.querySelector(
+                    `[data-detail-title-for="${fileId}"]`
+                );
+                if (titleInput && !titleInput.dataset.prefilled) {
+                    titleInput.value = title;
+                    titleInput.dataset.prefilled = '1';
+                    titleInput.dataset.originalTitle = title;
+                }
             }
             if (container.getAttribute('data-compact') === '1') {
+                // Tooltip pastille = code statut technique brut + engine
+                // (ex: "kevent_partially_completed (kevent)").
+                // Le label humain reste accessible en vue détail.
                 const dot = container.querySelector('.transcript-status-spinner');
                 if (dot) {
-                    dot.title = meta.label + (engine ? ' (' + engine + ')' : '');
+                    dot.title = `${status}${engine ? ' (' + engine + ')' : ''}`;
                 }
-                // Propage le résumé (key_points_summary) vers la zone
-                // expandable inline de la ligne — le chevron la révèle.
+                // Zone résumé : on n'affiche que les key_points (pas le
+                // label statut "Pipeline Kevent partiel..." qui est déjà
+                // sur la pastille via tooltip).
                 const expandedSummary = document.querySelector(
                     `[data-expanded-summary-for="${fileId}"]`
                 );
                 if (expandedSummary) {
-                    const fullLabel = `<div class="file-row-expanded-status">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</div>`;
-                    const kpHtml = kp
+                    expandedSummary.innerHTML = kp
                         ? `<pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>`
                         : `<div class="file-row-expanded-empty">Pas de résumé disponible.</div>`;
-                    expandedSummary.innerHTML = fullLabel + kpHtml;
                 }
             }
         } catch (e) {}
