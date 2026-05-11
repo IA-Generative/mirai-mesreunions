@@ -3218,13 +3218,17 @@ async function loadSessions() {
                                 <span class="rail-node">2</span><span class="rail-line"></span>
                             </div>
                             <div class="rail-segment ${transferClass}">
-                                <span class="rail-node">3</span><span class="rail-line rail-line-tail"></span>
+                                <span class="rail-node">3</span><span class="rail-line"></span>
+                            </div>
+                            <div class="rail-segment" data-transcribe-segment="${f.id}">
+                                <span class="rail-node">4</span><span class="rail-line rail-line-tail"></span>
                             </div>
                         </div>
                         <div class="rail-labels">
                             <span>Analyse ${progress.scan}%</span>
                             <span>Transcodage ${progress.transcode}%</span>
                             <span>Transfert ${progress.transfer}%</span>
+                            <span data-transcribe-label="${f.id}">Transcription</span>
                         </div>
                     </div>
                     ${sourceLinks}
@@ -3250,25 +3254,30 @@ async function loadSessions() {
                 const allowSilentDelete = (lifecycle === 'expired_unused' || lifecycle === 'pending_enrollment')
                     && (s.upload_count || 0) === 0;
 
-                // Sessions actives (enrolled / pending_enrollment) : on ne
-                // montre plus le bouton "Supprimer cette session" pour ne pas
-                // exposer l'utilisateur à un destroy global accidentel. Pour
-                // retirer un fichier précis, le bouton "Supprimer" par
-                // fichier (au niveau de chaque ligne) suffit. Les sessions
-                // obsolètes/expirées gardent l'action.
+                // Sessions actives (enrolled / pending_enrollment) : UI
+                // épurée — on cache les actions globales (renouveler,
+                // supprimer-session) et le compteur de quota qui n'a pas de
+                // valeur pour l'utilisateur quotidien (la rétention device
+                // pilote, et le quota est haut). Tout reste accessible dans
+                // le bucket "Sessions inutilisées (jetables)" où la session
+                // est figée/morte.
                 const isActiveBucket = (lifecycle === 'pending_enrollment' || lifecycle === 'enrolled');
                 const sessionDeleteBtn = isActiveBucket ? '' : `
                     <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
                             data-session-delete="${s.simple_code}"
                             onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
                             title="Suppression définitive (DB + S3)">Supprimer</button>`;
+                const sessionRenewBtn = isActiveBucket ? '' : `
+                    <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
+                            onclick="renewSession('${s.id}')">Renouveller</button>`;
+                const quotaLine = isActiveBucket ? '' : `
+                    <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>`;
                 return `<div class="session-item" data-session-row="${s.simple_code}" data-lifecycle="${lifecycle}">
                 <span class="code">${s.simple_code}</span>
                 <span class="status-badge ${stateBadgeClass}">${stateLabel}</span>
-                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
-                        onclick="renewSession('${s.id}')">Renouveller</button>
+                ${sessionRenewBtn}
                 ${sessionDeleteBtn}
-                <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>
+                ${quotaLine}
                 ${filesHtml}
             </div>`;
             });
@@ -3369,6 +3378,45 @@ function renderDownloadRow(label, fileId, kind, formats, isCR) {
 }
 
 // Map des statuts transcription DB → label UI + indique si on doit re-poll.
+// Met à jour la 4e étape du chemin de fer (rail-segment + label associé)
+// selon le backend de transcription en cours. Appelé depuis
+// loadTranscriptStatus() pour rester cohérent avec ce que voit
+// l'utilisateur dans le bandeau statut.
+function updateTranscribeRail(fileId, engine, status) {
+    const segment = document.querySelector(`[data-transcribe-segment="${fileId}"]`);
+    const label = document.querySelector(`[data-transcribe-label="${fileId}"]`);
+    if (!segment || !label) return;
+    const e = (engine || '').toLowerCase();
+    const s = (status || '').toLowerCase();
+    // Nom utilisateur du backend
+    const engineNames = {
+        stub: 'Transcription (test)',
+        mcr:  'Transcription MCR',
+        kevent: 'Transcription IA',
+    };
+    const baseName = engineNames[e] || 'Transcription';
+    let cls = '';
+    let label_text = baseName;
+    if (s === 'completed' || s === 'kevent_completed' || s === 'mcr_pushed') {
+        cls = 'done';
+        label_text = `${baseName} terminée`;
+    } else if (s === 'kevent_partially_completed') {
+        cls = 'done';
+        label_text = `${baseName} (partielle)`;
+    } else if (s === 'failed' || s === 'kevent_failed' || s === 'mcr_auth_failed' || s === 'mcr_rejected' || s === 'mcr_push_failed') {
+        cls = 'blocked';
+        label_text = `${baseName} échouée`;
+    } else if (s === 'disabled') {
+        cls = '';
+        label_text = `${baseName} désactivée`;
+    } else if (s) {
+        cls = 'active';
+        label_text = `${baseName} en cours`;
+    }
+    segment.className = `rail-segment ${cls}`;
+    label.textContent = label_text;
+}
+
 const TRANSCRIPT_STATUS_LABELS = {
     'pending':                     { label: 'Transcription en attente', polling: true },
     'processing':                  { label: 'Transcription en cours (stub)', polling: true },
@@ -3405,6 +3453,8 @@ async function loadTranscriptStatus(fileId, container) {
         const engine = data.transcription_engine || '';
         const meta = TRANSCRIPT_STATUS_LABELS[status] || { label: status || 'Statut inconnu', polling: false };
         const isInProgress = meta.polling;
+        // Met aussi à jour la 4e étape du chemin de fer dans la session.
+        updateTranscribeRail(fileId, engine, status);
 
         const outputs = data.outputs || {};
         const kp = data.key_points_summary || '';
