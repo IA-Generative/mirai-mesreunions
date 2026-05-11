@@ -140,6 +140,11 @@ ALLOWED_AUDIO_EXTENSIONS = _list("ALLOWED_AUDIO_EXTENSIONS", "mp3,wav,ogg,flac,m
 UPLOAD_PORTAL_BASE_URL = _str("UPLOAD_PORTAL_BASE_URL", "http://localhost:8081")
 MYDEVICES_PORTAL_URL = _str("MYDEVICES_PORTAL_URL", "")
 TOKEN_EXPIRY_WARNING_DAYS = _int("TOKEN_EXPIRY_WARNING_DAYS", 7)
+# Rétention device après enrôlement. Source de vérité : token-issuer
+# (qui applique la valeur lors d'une enroll/renew). Exposé ici pour les
+# autres services (code-generator) qui ont besoin d'afficher la durée
+# réelle à l'utilisateur dans les messages de confirmation.
+DEVICE_TOKEN_RETENTION_HOURS = _int("DEVICE_TOKEN_RETENTION_HOURS", 168)
 # Internal-pull cross-cluster channel.
 #   INTERNAL_PUSH_TRIGGER_URL : if it parses as an HTTP(S) URL with a non-empty
 #       host, file-mover will POST a wake-up to that URL after publishing the

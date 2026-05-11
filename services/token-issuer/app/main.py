@@ -259,7 +259,11 @@ def extend_token_7d():
     add_uploads_raw = data.get("add_uploads", 0)
 
     ttl_seconds = None
-    ttl_minutes = TOKEN_RENEW_DAYS * 24 * 60
+    # Défaut : aligner sur DEVICE_TOKEN_RETENTION_HOURS (15j en prod-bêta).
+    # Précédemment on étendait de TOKEN_RENEW_DAYS (7j) ce qui désynchro­
+    # nisait QR (7j) vs device retention (15j) → validate_device finissait
+    # par retourner "qr_expired" alors que le device était encore valide.
+    ttl_minutes = DEVICE_TOKEN_RETENTION_HOURS * 60
     if ttl_seconds_raw is not None:
         try:
             ttl_seconds = int(ttl_seconds_raw)

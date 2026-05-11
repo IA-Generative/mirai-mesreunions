@@ -35,7 +35,7 @@ from libs.shared.app.config import (
     OIDCConfig, load_ext_db, CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES,
     MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed, load_s3_internal,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
-    OIDC_OFFLINE_ACCESS,
+    OIDC_OFFLINE_ACCESS, DEVICE_TOKEN_RETENTION_HOURS,
 )
 from libs.shared.app.oidc_refresh_store import store_refresh_token
 from libs.shared.app.models import (
@@ -425,6 +425,7 @@ def index():
         INDEX_TEMPLATE,
         user=user,
         short_ttl_enabled=ALLOW_SHORT_QR_TTL_SECONDS_TEST,
+        device_retention_days=max(1, DEVICE_TOKEN_RETENTION_HOURS // 24),
     )
 
 
@@ -2564,6 +2565,10 @@ INDEX_TEMPLATE = """
 const impactCache = {};
 const impactLoading = new Set();
 let showAllDevices = false;
+// Durée de rétention device en jours (lue depuis DEVICE_TOKEN_RETENTION_HOURS
+// côté serveur — 15j en prod-bêta, 7j par défaut). Sert aux messages de
+// confirmation pour refléter la vraie durée que Renouveler applique.
+const deviceRetentionDays = {{ device_retention_days }};
 
 function escapeHtml(v) {
     return (v || '').toString().replace(/[&<>"']/g, (s) => ({
@@ -3002,20 +3007,16 @@ async function renewTokenByQr(qrToken) {
         alert('Token introuvable pour cet appareil.');
         return;
     }
-    if (!confirm('Renouveler ce token de 7 jours ?')) return;
+    if (!confirm(`Renouveler ce token pour ${deviceRetentionDays} jours ?`)) return;
     try {
-        const ttlValue = document.getElementById('ttl') ? document.getElementById('ttl').value : '';
-        const addUploadsValue = document.getElementById('max-uploads')
-            ? parseInt(document.getElementById('max-uploads').value || '0', 10)
-            : 0;
+        // On n'envoie PAS ttl_minutes : le serveur applique DEVICE_TOKEN_RETENTION_HOURS
+        // par défaut (15j en prod-bêta) pour rester aligné avec la rétention device.
+        // Précédemment on envoyait la valeur du select #ttl du form d'enrôlement
+        // (5 min par défaut) → l'access expirait 5 min après le renew. Bug.
         const resp = await fetch('/api/my-token/renew-7d', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                qr_token: qrToken,
-                ttl_minutes: ttlValue,
-                add_uploads: addUploadsValue,
-            }),
+            body: JSON.stringify({ qr_token: qrToken }),
         });
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || 'renew_failed');
