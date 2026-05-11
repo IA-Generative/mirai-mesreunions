@@ -422,11 +422,24 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         return
     # KeventTransientError propagates → queue retry handles it.
 
-    text = (transcription.get("text") or "").strip()
+    # Le champ "text" de Whisper est un seul long string sans \n, peu
+    # lisible. On reconstruit à partir de "segments" (découpage naturel
+    # par pauses/phrases, granularité ~10-30s) en mettant un saut de
+    # ligne par segment. Fallback sur "text" si segments est vide ou
+    # absent (response_format=json simple sans verbose).
+    segments = transcription.get("segments") or []
+    if segments:
+        text = "\n".join(
+            (seg.get("text") or "").strip()
+            for seg in segments
+            if (seg.get("text") or "").strip()
+        ).strip()
+    else:
+        text = (transcription.get("text") or "").strip()
     language = transcription.get("language") or None
     logger.info(
-        "Kevent transcribe: %d chars, language=%s, audio_file_id=%s",
-        len(text), language, audio_file_id,
+        "Kevent transcribe: %d chars, %d segments, language=%s, audio_file_id=%s",
+        len(text), len(segments), language, audio_file_id,
     )
 
     # We'll accumulate DB updates and apply them in one go at the end.
