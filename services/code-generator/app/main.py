@@ -1868,7 +1868,7 @@ INDEX_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MIrAI - Téléversement audio facilité et sécurisé</title>
+    <title>MIrAI — Enregistrer, transcrire et analyser vos réunions et notes vocales en toute sécurité</title>
     <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/pwa-icon-192.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/pwa-icon-180.png">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
@@ -2165,6 +2165,27 @@ INDEX_TEMPLATE = """
             border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.35rem;
             background: #fff;
         }
+        /* Tabs navigation (3-4 onglets en haut de page) */
+        .tabs-nav {
+            display: flex; gap: 0.4rem; margin-bottom: 1rem;
+            border-bottom: 1px solid #cbd5e1; padding-bottom: 0;
+            overflow-x: auto;
+        }
+        .tab-btn {
+            border: 0; background: transparent; cursor: pointer;
+            padding: 0.55rem 0.9rem; font-size: 0.92rem; font-weight: 500;
+            color: #475569; border-bottom: 3px solid transparent;
+            margin-bottom: -1px; white-space: nowrap;
+        }
+        .tab-btn:hover { color: #0f172a; }
+        .tab-btn[aria-selected="true"] {
+            color: #0f172a; font-weight: 700;
+            border-bottom-color: #1d4ed8;
+        }
+        /* Par défaut on cache tous les panneaux ; JS active le bon onglet
+           dès que loadDevices a déterminé l'état. */
+        .tab-pane { display: none; }
+        .tab-pane.is-active { display: block; }
         /* Toasts feedback (bas-droite, disparaît après 4s) */
         .toast {
             position: fixed; right: 1rem; bottom: 1rem; z-index: 9999;
@@ -2381,10 +2402,10 @@ INDEX_TEMPLATE = """
             </div>
           </div>
           <div class="fr-header__service">
-            <a href="#" title="Accueil MIrAI Upload">
-              <p class="fr-header__service-title">MIrAI - Téléversement audio facilité et sécurisé <span class="beta-badge">Bêta</span></p>
+            <a href="#" title="Accueil MIrAI">
+              <p class="fr-header__service-title">MIrAI <span class="beta-badge">Bêta</span></p>
             </a>
-            <p class="fr-header__service-tagline">Enrôlement mobile et téléversement sécurisé</p>
+            <p class="fr-header__service-tagline">Enregistrez depuis votre mobile, laissez l'IA transcrire et synthétiser vos réunions et notes vocales</p>
           </div>
         </div>
         <div class="header-user">
@@ -2398,7 +2419,23 @@ INDEX_TEMPLATE = """
 
 <main class="fr-container page-shell">
 <div class="container">
-    <div class="card" id="enrollment-card">
+
+    <!-- Navigation onglets — choisi par défaut selon présence d'appareil enrôlé.
+         JS (loadDevices) bascule sur "transfers" si au moins 1 device actif,
+         sinon reste sur "devices" pour guider l'enrôlement initial. -->
+    <nav class="tabs-nav" role="tablist" aria-label="Sections principales">
+        <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
+            Mes appareils
+        </button>
+        <button type="button" class="tab-btn" role="tab" data-tab="transfers" id="tab-btn-transfers">
+            Mes transferts et analyses
+        </button>
+        <button type="button" class="tab-btn" role="tab" data-tab="generate" id="tab-btn-generate">
+            Nouveau code
+        </button>
+    </nav>
+
+    <div class="card tab-pane" data-tab="generate" id="enrollment-card">
         <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
         <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
 
@@ -2469,7 +2506,7 @@ INDEX_TEMPLATE = """
         </div>
     </div>
 
-    <div class="card">
+    <div class="card tab-pane" data-tab="devices">
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
             <div style="display:flex;align-items:center;gap:0.35rem;">
@@ -2484,7 +2521,7 @@ INDEX_TEMPLATE = """
         <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils...</div>
     </div>
 
-    <div class="card">
+    <div class="card tab-pane" data-tab="transfers">
         <div class="activity-inline">
             <p class="activity-description">
                 Cet encadré donne une vue rapide des traitements en cours
@@ -2510,7 +2547,7 @@ INDEX_TEMPLATE = """
         </div>
         <div id="recent-activities-panel" class="recent-activities-panel">
             <div class="dsfr-inline-actions">
-                <h1 style="font-size:1.1rem;">Mes sessions récentes</h1>
+                <h1 style="font-size:1.1rem;">Mes transferts et analyses</h1>
                 <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
                         onclick="purgeSessions()">Purger liste + fichiers</button>
             </div>
@@ -2801,6 +2838,8 @@ async function loadDevices() {
         const oneDayMs = 24 * 60 * 60 * 1000;
 
         const nonRevokedCount = devices.filter((d) => (d.status || '').toLowerCase() !== 'revoked').length;
+        // Sélection onglet par défaut au premier chargement (idempotent).
+        pickDefaultTab(nonRevokedCount > 0);
         const visibleDevices = devices.filter((d) => {
             const status = (d.status || '').toLowerCase();
             if (status !== 'revoked') {
@@ -3635,6 +3674,38 @@ async function loadNormalizationImpact(fileId) {
     }
 }
 
+// Tabs : navigation entre Mes appareils / Mes transferts / Nouveau code.
+// L'onglet par défaut est choisi par le 1er loadDevices selon la présence
+// d'un device actif. Persiste le choix dans sessionStorage pour ne pas
+// switcher au refresh.
+let _tabsInitialised = false;
+function activateTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+        const on = b.getAttribute('data-tab') === tabName;
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-pane').forEach((p) => {
+        p.classList.toggle('is-active', p.getAttribute('data-tab') === tabName);
+    });
+    try { sessionStorage.setItem('mydevices-active-tab', tabName); } catch (e) {}
+}
+function setupTabs() {
+    document.querySelectorAll('.tab-btn').forEach((b) => {
+        b.addEventListener('click', () => activateTab(b.getAttribute('data-tab')));
+    });
+}
+function pickDefaultTab(hasActiveDevice) {
+    if (_tabsInitialised) return;
+    _tabsInitialised = true;
+    let target = null;
+    try { target = sessionStorage.getItem('mydevices-active-tab'); } catch (e) {}
+    if (!target) {
+        target = hasActiveDevice ? 'transfers' : 'devices';
+    }
+    activateTab(target);
+}
+
+setupTabs();
 loadSessions();
 updateDeviceFilterButton();
 loadDevices();
