@@ -2084,8 +2084,11 @@ INDEX_TEMPLATE = """
         @keyframes transcriptSpin { to { transform: rotate(360deg); } }
         .transcript-status-label { font-weight: 500; }
         .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
-        .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; margin-bottom: 0.15rem; }
-        .transcript-meta-keypoints { margin: 0; font-family: inherit; white-space: pre-wrap; font-size: 0.76rem; color: #475569; }
+        .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; }
+        .transcript-meta-details { margin-top: 0.2rem; font-size: 0.76rem; }
+        .transcript-meta-details summary { cursor: pointer; color: #475569; user-select: none; }
+        .transcript-meta-details summary:hover { color: #0f172a; }
+        .transcript-meta-keypoints { margin: 0.3rem 0 0 0; font-family: inherit; white-space: pre-wrap; font-size: 0.76rem; color: #475569; }
         .transcript-download-block { font-size: 0.76rem; }
         .transcript-download-title { font-size: 0.74rem; color: #64748b; margin-bottom: 0.2rem; }
         .transcript-download-row { display: flex; justify-content: space-between; align-items: center; padding: 0.15rem 0; gap: 0.5rem; flex-wrap: wrap; }
@@ -3104,11 +3107,45 @@ async function renewSession(sessionId) {
     }
 }
 
+// Détection d'interaction utilisateur dans la liste sessions : si focus
+// sur un <select>/<input>/<button> dans #sessions-list ou #transfer-live,
+// on saute le refresh pour ne pas casser la sélection en cours. Reprise
+// au focusout + au prochain tick.
+let _userInteractingTs = 0;
+document.addEventListener('focusin', (ev) => {
+    const t = ev.target;
+    if (!t) return;
+    if (t.closest('#sessions-list') || t.closest('#transfer-live')) {
+        _userInteractingTs = Date.now();
+    }
+});
+document.addEventListener('focusout', () => {
+    // Délai pour absorber un clic qui bascule focus rapidement.
+    setTimeout(() => { _userInteractingTs = 0; }, 800);
+});
+function _userIsInteracting() {
+    // Considère l'utilisateur actif si focus posé < 2s
+    return _userInteractingTs && (Date.now() - _userInteractingTs) < 2000;
+}
+
 async function loadSessions() {
+    // Skip le refresh si l'utilisateur est en train de sélectionner un
+    // download ou cliquer un bouton — sinon innerHTML remplace le DOM
+    // et la sélection est perdue. Le polling 15s tentera de nouveau.
+    if (_userIsInteracting()) return;
     // Préserve la position de scroll pendant le refresh des sessions
     // (sinon innerHTML reset le scroll en haut, particulièrement gênant
     // sur les pages longues avec plusieurs sessions actives).
     const savedScrollY = window.scrollY;
+    // Sauvegarde aussi l'ID + value du select de download en focus, si y'en
+    // a un (l'utilisateur a peut-être hover/sélectionné mais pas encore
+    // cliqué un bouton — restaure pour pas perdre le fil).
+    window._savedDlSelections = new Map();
+    document.querySelectorAll('.downloads-select').forEach((sel) => {
+        const sec = sel.closest('.transcript-section');
+        const fid = sec && sec.getAttribute('data-transcript-file-id');
+        if (fid) window._savedDlSelections.set(fid, sel.selectedIndex);
+    });
     try {
         const resp = await fetch('/api/my-sessions');
         const sessions = await resp.json();
@@ -3624,10 +3661,13 @@ async function loadTranscriptStatus(fileId, container) {
         const outputs = data.outputs || {};
         const kp = data.key_points_summary || '';
         const title = data.suggested_filename || '';
+        // Key points : collapse par défaut (résumé peut faire 1000+ chars).
+        // On garde le titre toujours visible, key_points derrière un
+        // <details> repliable.
         const subtitle = (title || kp)
             ? `<div class="transcript-meta">
                 ${title ? `<div class="transcript-meta-title">${escapeHtml(title)}</div>` : ''}
-                ${kp ? `<pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre>` : ''}
+                ${kp ? `<details class="transcript-meta-details"><summary>Résumé</summary><pre class="transcript-meta-keypoints">${escapeHtml(kp)}</pre></details>` : ''}
               </div>`
             : '';
 
@@ -3719,6 +3759,18 @@ async function loadTranscriptStatus(fileId, container) {
         }
 
         container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        // Restaure la sélection du dropdown si l'utilisateur avait avancé
+        // (mémorisée par loadSessions dans window._savedDlSelections).
+        try {
+            const saved = window._savedDlSelections && window._savedDlSelections.get(fileId);
+            if (Number.isInteger(saved)) {
+                const sel = container.querySelector('.downloads-select');
+                if (sel && saved >= 0 && saved < sel.options.length) {
+                    sel.selectedIndex = saved;
+                    updateDownloadButtons(sel);
+                }
+            }
+        } catch (e) {}
 
         // Re-poll automatique tant qu'on est en cours, pour ne pas obliger
         // l'utilisateur à recharger la page pour voir la transcription apparaître.
