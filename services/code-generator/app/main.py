@@ -2399,7 +2399,7 @@ INDEX_TEMPLATE = """
           </div>
           <div class="fr-header__service">
             <a href="#" title="Accueil MIrAI">
-              <p class="fr-header__service-title">MIrAI <span class="beta-badge">Bêta</span></p>
+              <p class="fr-header__service-title">MIrAI - Mes réunions <span class="beta-badge">Bêta</span></p>
             </a>
             <p class="fr-header__service-tagline">Enregistrez depuis votre mobile, laissez l'IA transcrire et synthétiser vos réunions et notes vocales</p>
           </div>
