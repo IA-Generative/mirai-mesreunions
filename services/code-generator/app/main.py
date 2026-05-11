@@ -2052,10 +2052,20 @@ INDEX_TEMPLATE = """
             cursor: not-allowed;
         }
         .transcript-section { margin-top: 0.55rem; padding-top: 0.45rem; border-top: 1px dashed #e2e8f0; }
-        .transcript-status-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #475569; margin-bottom: 0.35rem; }
+        .transcript-status-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #475569; margin-bottom: 0.35rem; padding: 0.3rem 0.5rem; border-radius: 6px; border: 1px solid transparent; }
+        .transcript-status-line.transcript-status-error {
+            background: #fef2f2; border-color: #fecaca; color: #991b1b;
+            font-weight: 600;
+        }
+        .transcript-status-line.transcript-status-ok {
+            background: #f0fdf4; border-color: #bbf7d0; color: #166534;
+        }
         .transcript-status-spinner { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex-shrink: 0; }
         .transcript-status-spinner.on { background: conic-gradient(#3b7dd8 0%, #3b7dd8 25%, transparent 25%, transparent 100%); animation: transcriptSpin 1.1s linear infinite; }
         .transcript-status-spinner.off { background: #94a3b8; }
+        .transcript-status-spinner.err { background: #ef4444; }
+        .transcript-status-spinner.ok { background: #10b981; }
+        .transcript-status-icon { font-size: 0.95rem; line-height: 1; }
         @keyframes transcriptSpin { to { transform: rotate(360deg); } }
         .transcript-status-label { font-weight: 500; }
         .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
@@ -3521,9 +3531,33 @@ async function loadTranscriptStatus(fileId, container) {
               </div>`
             : '';
 
-        // Bandeau statut transcription — toujours visible quand la row interne existe.
-        const statusBadge = `<div class="transcript-status-line">
-            <span class="transcript-status-spinner ${isInProgress ? 'on' : 'off'}"></span>
+        // Classification visuelle du bandeau : erreur (rouge ⚠), succès
+        // (vert ✓), en cours (bleu pulse) ou neutre (gris).
+        const failedStatuses = new Set([
+            'failed', 'kevent_failed',
+            'mcr_auth_failed', 'mcr_rejected', 'mcr_push_failed',
+        ]);
+        const successStatuses = new Set([
+            'completed', 'kevent_completed', 'kevent_partially_completed',
+            'mcr_pushed',
+        ]);
+        let bannerClass = '';
+        let dotClass = 'off';
+        let leadIcon = '';
+        if (failedStatuses.has(status)) {
+            bannerClass = 'transcript-status-error';
+            dotClass = 'err';
+            leadIcon = '<span class="transcript-status-icon" aria-hidden="true">⚠</span>';
+        } else if (successStatuses.has(status)) {
+            bannerClass = 'transcript-status-ok';
+            dotClass = 'ok';
+            leadIcon = '<span class="transcript-status-icon" aria-hidden="true">✓</span>';
+        } else if (isInProgress) {
+            dotClass = 'on';
+        }
+        const statusBadge = `<div class="transcript-status-line ${bannerClass}">
+            ${leadIcon}
+            <span class="transcript-status-spinner ${dotClass}"></span>
             <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
         </div>`;
 
