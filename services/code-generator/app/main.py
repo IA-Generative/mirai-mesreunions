@@ -3211,7 +3211,7 @@ const TRANSCRIPT_STATUS_LABELS = {
     'kevent_processing':           { label: 'Transcription Kevent — traitement', polling: true },
     'kevent_completed':            { label: 'Pipeline Kevent terminé', polling: false },
     'kevent_partially_completed':  { label: 'Pipeline Kevent partiel — certaines étapes ont échoué', polling: false },
-    'kevent_failed':               { label: 'Pipeline Kevent échoué', polling: false },
+    'kevent_failed':               { label: 'Accès au backend IA refusé ou indisponible', polling: false },
     'mcr_pushed':                  { label: 'Poussé vers MCR', polling: false },
     'mcr_auth_failed':             { label: 'MCR : échec auth', polling: false },
     'mcr_rejected':                { label: 'MCR : rejeté', polling: false },

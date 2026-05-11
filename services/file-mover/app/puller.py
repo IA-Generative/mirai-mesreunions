@@ -384,17 +384,41 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         )
 
     # ── Step 1 — transcription (always) ────────────────────────────────
+    # On capture les erreurs Kevent et on les propage à la PWA via
+    # notify_external_status pour que l'utilisateur ait un message clair
+    # (sinon le fichier reste affiché "transferred" indéfiniment côté
+    # mobile alors que la transcription a silencieusement échoué).
+    external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
+
+    def _push_failure(status: str, message: str):
+        try:
+            _set_user_audio_status(audio_file_id, status,
+                                   transcription_engine="kevent")
+        except Exception:
+            logger.exception("Failed to persist %s status for %s",
+                             status, audio_file_id)
+        try:
+            notify_external_status(str(external_file_id), status, message)
+        except Exception:
+            pass  # déjà loggé dans notify_external_status
+
     try:
         transcription = _kevent_transcribe()
     except KeventAuthError:
         logger.exception("Kevent auth error on transcription for %s", audio_file_id)
-        _set_user_audio_status(audio_file_id, "kevent_failed",
-                               transcription_engine="kevent")
+        _push_failure(
+            "kevent_failed",
+            "Accès au backend IA refusé. La transcription automatique n'a "
+            "pas pu démarrer — contactez un administrateur.",
+        )
         return
-    except KeventApplicativeError:
+    except KeventApplicativeError as exc:
         logger.exception("Kevent applicative error on transcription for %s", audio_file_id)
-        _set_user_audio_status(audio_file_id, "kevent_failed",
-                               transcription_engine="kevent")
+        _push_failure(
+            "kevent_failed",
+            "Erreur du backend IA pendant la transcription. Réessayez "
+            "ultérieurement ou contactez un administrateur.",
+        )
         return
     # KeventTransientError propagates → queue retry handles it.
 
