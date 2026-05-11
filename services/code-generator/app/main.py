@@ -2230,9 +2230,10 @@ INDEX_TEMPLATE = """
             </div>
             <!-- Le quota max-uploads/token n'est plus exposé à l'utilisateur (cf. mydevices UX
                  simplification). Reste en hidden input pour que le JS continue de lire la
-                 valeur sans casser le flow. Default 15 = MAX_UPLOADS_PER_SESSION côté serveur,
-                 plafonné serveur de toute façon. -->
-            <input type="hidden" id="max-uploads" value="15">
+                 valeur sans casser le flow. Default 999 : on plafonne pas l'utilisateur côté
+                 UI ; le serveur applique son propre MAX_UPLOADS_PER_SESSION (299 par défaut)
+                 via min() à la création. -->
+            <input type="hidden" id="max-uploads" value="999">
             <div class="form-group fr-checkbox-group">
                 <input type="checkbox" id="auto-transcribe" checked>
                 <label class="fr-label" for="auto-transcribe">
@@ -2634,6 +2635,12 @@ async function loadDevices() {
             const stateLabel = deviceTokenStateLabel(d);
             const stateColor = deviceTokenStateColor(stateLabel);
             const tokenShort = (d.session_simple_code || '').trim() || tokenIdShort(d.qr_token);
+            // "restants" : seulement affiché quand on approche du quota
+            // (< 10), sinon c'est du bruit visuel. Pour un token tout neuf
+            // à 999 dispo, ça n'intéresse personne de voir 999/999.
+            const remainingFragment = (sessionMaxUploads > 0 && remainingUploads < 10)
+                ? ` | restants: ${remainingUploads}/${sessionMaxUploads}`
+                : '';
             return `
             <div data-device-row="${escapeHtml(d.device_id)}" class="${isRevoked ? 'device-row-revoked' : ''}" style="border:1px solid #e2e8f0;border-radius:8px;padding:0.55rem 0.6rem;margin-bottom:0.5rem;">
                 <div style="display:flex;justify-content:space-between;gap:0.5rem;align-items:center;">
@@ -2644,7 +2651,7 @@ async function loadDevices() {
                             <span data-device-status="${escapeHtml(d.device_id)}" style="font-weight:600;color:${escapeHtml(stateColor)};margin-left:0.35rem;">(${escapeHtml(stateLabel)})</span>
                         </div>
                         <div class="device-meta" style="font-size:0.74rem;color:#64748b;" data-device-meta="${escapeHtml(d.device_id)}">
-                            validité token: ${escapeHtml(tokenValidityDaysLabel(d.retention_expires_at))} | restants: ${remainingUploads}/${sessionMaxUploads} | récents 24h: ${recentUploads24h} | vu: ${escapeHtml(formatDateTimeShort(d.last_seen_at))}
+                            validité token: ${escapeHtml(tokenValidityDaysLabel(d.retention_expires_at))}${remainingFragment} | récents 24h: ${recentUploads24h} | vu: ${escapeHtml(formatDateTimeShort(d.last_seen_at))}
                         </div>
                     </div>
                     <div style="display:flex;gap:0.35rem;align-items:center;">
