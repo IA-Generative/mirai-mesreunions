@@ -2084,27 +2084,41 @@ INDEX_TEMPLATE = """
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact {
             display: grid;
-            grid-template-columns: minmax(0,1fr) auto auto auto auto;
+            grid-template-columns: auto minmax(0,1fr) auto auto;
             align-items: center; gap: 0.55rem;
-            padding: 0.45rem 0.55rem;
+            padding: 0.4rem 0.55rem;
             border-bottom: 1px solid #f1f5f9;
         }
         .file-row-compact:hover { background: #f8fafc; }
+        .file-row-status-mini { display: flex; align-items: center; }
         .file-row-title {
             font-weight: 600; color: #1d4ed8; text-decoration: none;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             min-width: 0;
         }
         .file-row-title:hover { text-decoration: underline; color: #1e40af; }
-        .file-row-status { white-space: nowrap; }
         .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
-        .file-row-transcript { min-width: 0; }
         .file-row-delete { white-space: nowrap; }
-        /* En mode compact (data-compact=1) on cache le dropdown et les
-           rails — visibles seulement en vue détail. Le bandeau de statut
-           transcription reste affiché (résumé / erreur). */
+        /* En mode compact (data-compact=1) on réduit le bandeau statut
+           à un simple point coloré avec tooltip (rollover), on cache le
+           résumé (visible seulement en vue détail), le dropdown et les
+           rails — visibles seulement en vue détail. */
         .transcript-section--inline .downloads-block,
-        .transcript-section--inline .pipeline-box { display: none; }
+        .transcript-section--inline .pipeline-box,
+        .transcript-section--inline .transcript-meta-details,
+        .transcript-section--inline .transcript-meta-title,
+        .transcript-section--inline .transcript-status-icon,
+        .transcript-section--inline .transcript-status-label { display: none; }
+        .transcript-section--inline .transcript-status-line {
+            background: transparent !important; border: 0 !important;
+            padding: 0 !important; margin: 0 !important;
+        }
+        .transcript-section--inline .transcript-status-spinner {
+            width: 12px; height: 12px;
+        }
+        .transcript-section--inline .transcript-meta {
+            background: transparent; border: 0; padding: 0; margin: 0;
+        }
         /* ── Vue DÉTAIL ───────────────────────────────────────────── */
         .file-detail { padding: 0.6rem 0.2rem; }
         .file-detail-header {
@@ -2122,15 +2136,14 @@ INDEX_TEMPLATE = """
         /* ── Responsive mobile ─────────────────────────────────────── */
         @media (max-width: 700px) {
             .file-row-compact {
-                grid-template-columns: minmax(0,1fr) auto;
-                grid-template-rows: auto auto auto;
-                gap: 0.3rem;
+                grid-template-columns: auto minmax(0,1fr) auto;
+                grid-template-rows: auto auto;
+                gap: 0.25rem 0.5rem;
             }
-            .file-row-title { grid-column: 1 / 2; grid-row: 1; }
-            .file-row-delete { grid-column: 2 / 3; grid-row: 1; }
-            .file-row-status { grid-column: 1 / 3; grid-row: 2; }
-            .file-row-meta   { grid-column: 1 / 3; grid-row: 2; justify-self: end; }
-            .file-row-transcript { grid-column: 1 / 3; grid-row: 3; }
+            .file-row-status-mini { grid-column: 1; grid-row: 1; }
+            .file-row-title       { grid-column: 2; grid-row: 1; }
+            .file-row-delete      { grid-column: 3; grid-row: 1; }
+            .file-row-meta        { grid-column: 1 / 4; grid-row: 2; }
             .tabs-nav { font-size: 0.85rem; }
             .tab-btn { padding: 0.45rem 0.55rem; }
             .downloads-block { flex-direction: column; align-items: stretch; }
@@ -3483,20 +3496,26 @@ async function loadSessions() {
                     </div>`;
                 if (!isDetailView) {
                     // ── Vue LISTE COMPACTE ─────────────────────────────
-                    // Une ligne par fichier : titre cliquable (→ détail),
-                    // statut concis, date+durée, résumé dépliable, delete.
+                    // Une seule ligne ultra-condensée :
+                    //   • point statut transcription (rollover = label complet)
+                    //   • titre cliquable (= suggested_filename si dispo, sinon
+                    //     filename technique) — ouvre vue détail
+                    //   • date+durée
+                    //   • bouton Supprimer
+                    // Pas de bandeau status, pas de résumé, pas de rail :
+                    // ces infos sont visibles en cliquant sur le titre.
                     return `<div class="file-row-compact">
-                        <a href="#" class="file-row-title" data-file-id="${f.id}"
-                           onclick="event.preventDefault();showFileDetail('${f.id}');"
-                           title="Voir les détails de ${escapeHtml(f.original_filename)}">
-                            ${escapeHtml(f.original_filename)}
-                        </a>
-                        <span class="file-row-status status-badge ${fileStatusClass}">${escapeHtml(statusLabel(f.status))}</span>
-                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
-                        <div class="file-row-transcript transcript-section transcript-section--inline"
+                        <div class="file-row-status-mini transcript-section transcript-section--inline"
                              data-transcript-file-id="${f.id}"
                              data-audio-downloads="${audioDownloadsAttr}"
-                             data-compact="1"></div>
+                             data-compact="1"
+                             aria-label="Statut transcription"></div>
+                        <a href="#" class="file-row-title" data-file-id="${f.id}"
+                           onclick="event.preventDefault();showFileDetail('${f.id}');"
+                           title="${escapeHtml(f.original_filename)}">
+                            ${escapeHtml(f.original_filename)}
+                        </a>
+                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
                         <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
                                 onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
                                 title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
@@ -3885,6 +3904,28 @@ async function loadTranscriptStatus(fileId, container) {
                 if (sel && saved >= 0 && saved < sel.options.length) {
                     sel.selectedIndex = saved;
                     updateDownloadButtons(sel);
+                }
+            }
+        } catch (e) {}
+        // Met à jour le titre cliquable de la ligne compacte avec le
+        // suggested_filename (généré par l'IA) si disponible — plus
+        // parlant que le filename technique poemes013_xxx.mp3. Le
+        // rollover affiche le filename d'origine pour traçabilité.
+        // Met aussi le tooltip de la pastille statut compacte avec le
+        // label complet (ex: "Pipeline Kevent partiel...").
+        try {
+            if (title) {
+                const link = document.querySelector(
+                    `.file-row-title[data-file-id="${fileId}"]`
+                );
+                if (link) {
+                    link.textContent = title;
+                }
+            }
+            if (container.getAttribute('data-compact') === '1') {
+                const dot = container.querySelector('.transcript-status-spinner');
+                if (dot) {
+                    dot.title = meta.label + (engine ? ' (' + engine + ')' : '');
                 }
             }
         } catch (e) {}
