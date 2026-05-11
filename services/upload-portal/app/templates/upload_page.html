@@ -1140,16 +1140,38 @@ async function refreshStatus() {
         });
         if (resp.ok) {
             const data = await resp.json();
-            data.files.forEach(f => updateFileStatus({
-                file_id: f.id, name: f.name,
-                status: f.status, message: f.message,
-                quality: f.quality,
-            }));
+            // Sync DOM avec la liste serveur : on update les présents et on
+            // supprime les items qui n'apparaissent plus (purge mydevices,
+            // delete admin, etc.). Sinon les items effacés côté serveur
+            // resteraient à l'écran indéfiniment.
+            const serverIds = new Set();
+            data.files.forEach(f => {
+                serverIds.add(String(f.id));
+                updateFileStatus({
+                    file_id: f.id, name: f.name,
+                    status: f.status, message: f.message,
+                    quality: f.quality,
+                });
+            });
+            document.querySelectorAll('#files-list [data-file-id]').forEach(el => {
+                const fid = el.getAttribute('data-file-id');
+                if (fid && !serverIds.has(String(fid))) el.remove();
+            });
+            const filesCard = document.getElementById('files-card');
+            if (filesCard && data.files.length === 0) {
+                filesCard.style.display = 'none';
+            }
             if (data.remaining !== undefined) {
                 remaining = data.remaining;
                 updateRemainingText();
             }
             return true;
+        } else if (resp.status === 404) {
+            // Session purgée ou expirée côté serveur : vider la liste locale.
+            document.querySelectorAll('#files-list [data-file-id]').forEach(el => el.remove());
+            const filesCard = document.getElementById('files-card');
+            if (filesCard) filesCard.style.display = 'none';
+            return false;
         } else if (resp.status === 401) {
             clearDeviceToken();
             disableUpload("Token invalide, expiré ou révoqué. Veuillez renouveler votre token dans l'interface admin.");
