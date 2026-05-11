@@ -72,6 +72,43 @@ def notify_portal(session_obj, file_obj, status_msg):
         logger.warning("Failed to notify portal: %s", e)
 
 
+def _measure_loudnorm_quiet(input_path: str) -> dict | None:
+    """Run a loudnorm pass-1 analysis and return {i, tp, lra} or None on error.
+
+    Best-effort : si ffmpeg échoue ou la sortie est inattendue, on renvoie
+    None et l'appelant laisse les colonnes DB à NULL. On limite l'analyse à
+    180s pour ne pas allonger inutilement le temps de transcode.
+    """
+    try:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-nostats",
+            "-fflags", "+discardcorrupt", "-err_detect", "ignore_err",
+            "-i", input_path,
+            "-t", "180",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+            "-f", "null", "-",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            logger.warning("loudnorm-measure: ffmpeg returncode=%s on %s",
+                           proc.returncode, input_path)
+            return None
+        blocks = re.findall(r"\{[\s\S]*?\}", proc.stderr or "")
+        if not blocks:
+            logger.warning("loudnorm-measure: no JSON block in stderr for %s",
+                           input_path)
+            return None
+        data = json.loads(blocks[-1])
+        return {
+            "i":   float(data.get("input_i")),
+            "tp":  float(data.get("input_tp")),
+            "lra": float(data.get("input_lra")),
+        }
+    except Exception:
+        logger.warning("loudnorm-measure failed for %s", input_path, exc_info=True)
+        return None
+
+
 def analyze_audio_quality(input_path: str) -> dict:
     """
     Analyze audio quality using FFmpeg's astats and silencedetect.
@@ -418,12 +455,28 @@ def process_transcode(message: dict) -> bool:
             with open(output_path, "rb") as f:
                 upload_fileobj(s3_processed_cfg, output_name, BytesIO(f.read()), "audio/mp4")
 
+            # Mesure loudnorm source + output AVANT de quitter le tmpdir.
+            # On persiste les valeurs en DB ; le bouton (i) côté mydevices
+            # lit la DB plutôt que de redownloader la source qui sera
+            # purgée plus tard. Best-effort : si une mesure échoue, on
+            # laisse la colonne NULL (le frontend sait gérer).
+            source_loud = _measure_loudnorm_quiet(input_path)
+            output_loud = _measure_loudnorm_quiet(output_path)
+
             # Update DB
             file_obj.status = UploadStatus.TRANSCODED
             file_obj.transcoded_filename = output_name
             file_obj.audio_quality_score = quality["quality_score"]
             file_obj.audio_duration_seconds = quality["duration"]
             file_obj.audio_sample_rate = quality["sample_rate"]
+            if source_loud:
+                file_obj.normalization_source_i = source_loud.get("i")
+                file_obj.normalization_source_tp = source_loud.get("tp")
+                file_obj.normalization_source_lra = source_loud.get("lra")
+            if output_loud:
+                file_obj.normalization_output_i = output_loud.get("i")
+                file_obj.normalization_output_tp = output_loud.get("tp")
+                file_obj.normalization_output_lra = output_loud.get("lra")
             normalize_label = "normalisé" if was_normalized else "déjà au niveau, normalisation omise"
             file_obj.status_message = (
                 f"Traitement terminé. Qualité audio : {quality['quality_score']}/5 "

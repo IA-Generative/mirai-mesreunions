@@ -100,6 +100,17 @@ class UploadedFile(ExternalBase):
     audio_duration_seconds = Column(Float, nullable=True)
     audio_sample_rate = Column(Integer, nullable=True)
 
+    # Normalization impact (mesuré par le transcode-worker en pass-1 et
+    # post-transcode). Persisté en DB pour qu'on n'ait plus besoin de
+    # redownloader la source S3 — qui est purgée après transcode — quand
+    # l'utilisateur clique l'icône info sur mydevices.
+    normalization_source_i = Column(Float, nullable=True)
+    normalization_source_tp = Column(Float, nullable=True)
+    normalization_source_lra = Column(Float, nullable=True)
+    normalization_output_i = Column(Float, nullable=True)
+    normalization_output_tp = Column(Float, nullable=True)
+    normalization_output_lra = Column(Float, nullable=True)
+
     # Transfer
     transferred_at = Column(DateTime(timezone=True), nullable=True)
 

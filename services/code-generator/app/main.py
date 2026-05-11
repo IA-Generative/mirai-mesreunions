@@ -1777,6 +1777,50 @@ def api_file_normalization_impact(file_id):
         if not file_obj.transcoded_filename:
             return jsonify({"error": "Fichier pas encore transcodé"}), 400
 
+        # Chemin rapide : si transcode-worker a déjà persisté les mesures
+        # (source + output), on les lit directement, plus de redownload S3.
+        if (file_obj.normalization_source_i is not None
+                and file_obj.normalization_output_i is not None):
+            source = {
+                "i":   file_obj.normalization_source_i,
+                "tp":  file_obj.normalization_source_tp,
+                "lra": file_obj.normalization_source_lra,
+            }
+            normalized = {
+                "i":   file_obj.normalization_output_i,
+                "tp":  file_obj.normalization_output_tp,
+                "lra": file_obj.normalization_output_lra,
+            }
+            target_i = -16.0
+            source_dist = abs(source["i"] - target_i)
+            normalized_dist = abs(normalized["i"] - target_i)
+            improvement = round(source_dist - normalized_dist, 2)
+            return jsonify({
+                "target": {"i": target_i, "tp": -1.5, "lra": 11.0},
+                "source": source,
+                "normalized": normalized,
+                "delta": {
+                    "i":   round(normalized["i"] - source["i"], 2),
+                    "tp":  round(normalized["tp"] - source["tp"], 2),
+                    "lra": round(normalized["lra"] - source["lra"], 2),
+                },
+                "improvement_to_target_lufs": improvement,
+                "from_cache": True,
+            })
+
+        # Fallback : pour les fichiers d'avant la migration (mesures non
+        # persistées), on tente le calcul live. Si la source S3 a déjà été
+        # purgée → 410 explicite.
+        try:
+            if not object_exists(s3_upload_cfg, file_obj.stored_filename or ""):
+                return jsonify({
+                    "error": "Source audio purgée (la mesure n'était pas "
+                             "persistée pour ce fichier ; les nouveaux uploads "
+                             "auront les valeurs disponibles directement)."
+                }), 410
+        except Exception:
+            pass
+
         with tempfile.TemporaryDirectory() as tmpdir:
             src_suffix = Path(file_obj.stored_filename or "").suffix or ".audio"
             out_suffix = Path(file_obj.transcoded_filename or "").suffix or ".wav"
@@ -2111,6 +2155,17 @@ INDEX_TEMPLATE = """
             border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.35rem;
             background: #fff;
         }
+        /* Toasts feedback (bas-droite, disparaît après 4s) */
+        .toast {
+            position: fixed; right: 1rem; bottom: 1rem; z-index: 9999;
+            max-width: 360px; padding: 0.6rem 0.8rem; border-radius: 8px;
+            font-size: 0.85rem; line-height: 1.3; color: #fff;
+            background: #1e293b; box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+            opacity: 0; transform: translateY(8px); transition: opacity .25s, transform .25s;
+        }
+        .toast.toast-show { opacity: 1; transform: translateY(0); }
+        .toast-error { background: #b91c1c; }
+        .toast-success { background: #047857; }
         .security-notice {
             margin: 0.75rem 0 1rem;
             padding: 0.7rem 0.8rem;
@@ -3502,6 +3557,19 @@ async function loadTranscriptStatus(fileId, container) {
     }
 }
 
+// Toast léger en bas-droite : disparaît après 4s.
+function showToast(message, kind) {
+    const t = document.createElement('div');
+    t.textContent = message;
+    t.className = `toast toast-${kind || 'info'}`;
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('toast-show'));
+    setTimeout(() => {
+        t.classList.remove('toast-show');
+        setTimeout(() => t.remove(), 250);
+    }, 4000);
+}
+
 async function loadNormalizationImpact(fileId) {
     if (impactLoading.has(fileId)) return;
     impactLoading.add(fileId);
@@ -3519,12 +3587,14 @@ async function loadNormalizationImpact(fileId) {
             text: msg,
             at: new Date().toLocaleString('fr-FR'),
         };
+        showToast('Impact de la normalisation calculé.', 'success');
     } catch (e) {
         const msg = `Erreur: ${e.message}`;
         impactCache[fileId] = {
             text: msg,
             at: new Date().toLocaleString('fr-FR'),
         };
+        showToast(`Impact normalisation : ${e.message}`, 'error');
     } finally {
         impactLoading.delete(fileId);
         loadSessions();
