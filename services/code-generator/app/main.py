@@ -302,31 +302,46 @@ def _resolve_transcoded_storage(file_obj: UploadedFile):
     return s3_processed_cfg, file_obj.transcoded_filename
 
 
-def _compute_lifecycle_state(session: UploadSession) -> str:
+def _compute_lifecycle_state(
+    session: UploadSession,
+    has_active_device: bool = False,
+) -> str:
     """Compute the user-facing lifecycle state of a session at read time.
 
-    No DB column needed — derived from existing fields. The 4 states map to
-    the 3 UI buckets (active vs obsolete vs archive).
+    Sémantique clarifiée :
+      - La "grace QR" (``session.expires_at``, 5 min par défaut) ne sert que
+        de fenêtre d'enrôlement. Une fois qu'un device a flashé le QR, c'est
+        la rétention device (15j par défaut) qui pilote la fin de vie.
+      - Donc tant qu'un ``device_enrollments`` du même qr_token est encore
+        ``active`` (retention > now), la session est ``enrolled`` quoi qu'il
+        arrive côté ``session.expires_at``.
 
-    Returns:
-      - ``pending_enrollment`` : within enrollment grace, no device enrolled
-      - ``enrolled``           : device(s) enrolled OR uploads happened
-      - ``expired_unused``     : grace passed, never used → safe to drop
-      - ``expired_consumed``   : grace passed but had uploads → keep for audit
+    États :
+      - ``pending_enrollment`` : grace QR encore valide, 0 device enrôlé
+                                 → user en train de scanner
+      - ``enrolled``           : ≥1 device actif (peut être post-grace, c'est OK)
+      - ``expired_unused``     : grace passée, 0 device actif, 0 upload
+                                 → safe to drop
+      - ``expired_consumed``   : 0 device actif mais des fichiers existent
+                                 → archive auditeur uniquement
     """
     now = datetime.now(timezone.utc)
     expires_at = session.expires_at
     if expires_at and expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-    is_past = bool(expires_at and expires_at < now)
+    qr_grace_past = bool(expires_at and expires_at < now)
     has_activity = (session.upload_count or 0) > 0
-    if is_past and not has_activity:
-        return "expired_unused"
-    if is_past and has_activity:
-        return "expired_consumed"
-    if has_activity:
+
+    # Source de vérité : le device. Si un device est encore actif, peu
+    # importe l'état de la grace QR — l'utilisateur est en usage normal.
+    if has_active_device:
         return "enrolled"
-    return "pending_enrollment"
+    # Plus de device actif : on retombe sur l'état "historique".
+    if not qr_grace_past and not has_activity:
+        return "pending_enrollment"
+    if has_activity:
+        return "expired_consumed"
+    return "expired_unused"
 
 
 def _resolve_transferred_storage(db, file_obj: UploadedFile):
@@ -663,6 +678,41 @@ def api_my_sessions():
             UploadSession.user_sub == user["sub"]
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
+        # On récupère la liste des devices encore actifs pour cet utilisateur
+        # (token-issuer GET /api/v1/devices). Permet à _compute_lifecycle_state
+        # de décider "enrolled" même quand session.expires_at est dans le passé,
+        # tant qu'un device est encore valide en rétention.
+        active_qr_tokens: set[str] = set()
+        try:
+            devices = request_internal_device_api(
+                "GET",
+                "/api/v1/devices",
+                params={"user_sub": user.get("sub", "")},
+            )
+            now = datetime.now(timezone.utc)
+            for d in (devices if isinstance(devices, list) else []):
+                if not isinstance(d, dict):
+                    continue
+                if (d.get("status") or "").lower() != "active":
+                    continue
+                retention_raw = d.get("retention_expires_at")
+                if retention_raw:
+                    try:
+                        retention = datetime.fromisoformat(retention_raw.replace("Z", "+00:00"))
+                        if retention.tzinfo is None:
+                            retention = retention.replace(tzinfo=timezone.utc)
+                        if retention <= now:
+                            continue
+                    except Exception:
+                        pass
+                qr = (d.get("qr_token") or "").strip()
+                if qr:
+                    active_qr_tokens.add(qr)
+        except Exception:
+            # Best-effort : si token-issuer ne répond pas, on retombe sur le
+            # calcul historique (basé uniquement sur session.expires_at).
+            logger.debug("Could not fetch devices for lifecycle enrichment", exc_info=True)
+
         reconciled = 0
         result = []
         for s in sessions:
@@ -733,7 +783,10 @@ def api_my_sessions():
                 "max_uploads": s.max_uploads,
                 "expires_at": s.expires_at.isoformat(),
                 "created_at": s.created_at.isoformat(),
-                "lifecycle_state": _compute_lifecycle_state(s),
+                "lifecycle_state": _compute_lifecycle_state(
+                    s,
+                    has_active_device=(s.qr_token or "") in active_qr_tokens,
+                ),
                 "uploads": uploads,
             })
         if reconciled:
