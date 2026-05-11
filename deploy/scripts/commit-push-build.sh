@@ -85,8 +85,8 @@ info "clé SCW transmise via stdin (jamais en argv ni en log)"
 REMOTE_SCRIPT='set -e
 cd "'"$REMOTE_REPO"'"
 
-echo "  ▸ fetch origin '"$BRANCH"'"
-git fetch --quiet origin "'"$BRANCH"'"
+echo "  ▸ fetch origin '"$BRANCH"' (avec mise à jour explicite du tracking ref)"
+git fetch --quiet origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
 
 if git show-ref --verify --quiet "refs/heads/'"$BRANCH"'"; then
   git checkout --quiet "'"$BRANCH"'"
@@ -101,7 +101,9 @@ IFS= read -r SCW_SECRET_KEY
 export SCW_SECRET_KEY
 
 echo "  ▸ prépare buildx (driver docker-container)"
-if ! docker buildx ls | grep -q "^scw-multi "; then
+# Le format réel de `buildx ls` met un astérisque sur le builder actif :
+# "scw-multi*  docker-container ...". On match donc le nom seul.
+if ! docker buildx inspect scw-multi >/dev/null 2>&1; then
   docker buildx create --name scw-multi --driver docker-container --bootstrap >/dev/null
 fi
 docker buildx use scw-multi
