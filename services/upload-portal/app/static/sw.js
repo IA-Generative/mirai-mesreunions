@@ -1,4 +1,4 @@
-const CACHE_NAME = "mirai-upload-pwa-v8";
+const CACHE_NAME = "mirai-upload-pwa-v9";
 const CORE_ASSETS = [
   "/static/icons/pwa-icon-180.png",
   "/static/icons/pwa-icon-192.png",
@@ -35,6 +35,18 @@ self.addEventListener("fetch", (event) => {
 
   if (reqUrl.pathname.startsWith("/__shared/")) {
     event.respondWith(serveSharedFile(event.request));
+    return;
+  }
+
+  // Endpoints applicatifs : network-only, jamais de cache. Sinon le
+  // bouton Rafraîchir et le polling /api/status servent une réponse
+  // figée (problème particulièrement visible sur iOS Safari où le SW
+  // est très agressif). Si offline, on laisse remonter l'erreur réseau.
+  if (
+    reqUrl.pathname.startsWith("/api/") ||
+    reqUrl.pathname.startsWith("/socket.io/")
+  ) {
+    event.respondWith(fetch(event.request));
     return;
   }
 

@@ -1132,7 +1132,12 @@ function setupPwaInstall() {
 // Refresh status — also used by the manual refresh button.
 async function refreshStatus() {
     try {
-        const resp = await deviceFetch(`/api/status/${qrToken}`);
+        // cache:'no-store' + query buster pour blinder iOS Safari (HTTP
+        // cache + service worker cache, qui sinon servent une réponse
+        // figée).
+        const resp = await deviceFetch(`/api/status/${qrToken}?t=${Date.now()}`, {
+            cache: 'no-store',
+        });
         if (resp.ok) {
             const data = await resp.json();
             data.files.forEach(f => updateFileStatus({
