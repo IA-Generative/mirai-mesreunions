@@ -2100,7 +2100,7 @@ INDEX_TEMPLATE = """
         .rail-labels {
             margin-top: 0.25rem;
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 0.3rem;
             font-size: 0.68rem;
             color: #64748b;
