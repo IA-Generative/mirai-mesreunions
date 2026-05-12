@@ -2132,7 +2132,46 @@ INDEX_TEMPLATE = """
         .downloads-btn-dl, .downloads-btn-stream {
             white-space: nowrap;
         }
-        .file-impact-row { margin-top: 0.35rem; }
+        .file-impact-row { margin-top: 0.35rem; display: flex; align-items: center; gap: 0.5rem; }
+        /* Diagnostic per-step de la transcription IA (dépliable) */
+        .status-details {
+            margin: 0.4rem 0 0.6rem 0; font-size: 0.78rem;
+            border: 1px solid #e2e8f0; border-radius: 6px;
+            background: #fbfcfd;
+        }
+        .status-details > summary {
+            cursor: pointer; padding: 0.45rem 0.6rem;
+            color: #1d4ed8; font-weight: 500;
+        }
+        .status-details > summary:hover { background: #f1f5f9; }
+        .status-step-list { padding: 0 0.6rem 0.6rem 0.6rem; }
+        .status-step {
+            display: grid; grid-template-columns: 1rem 1fr;
+            grid-template-rows: auto auto;
+            gap: 0.1rem 0.5rem; padding: 0.35rem 0;
+            border-bottom: 1px dashed #e2e8f0;
+        }
+        .status-step:last-child { border-bottom: 0; }
+        .status-step > :first-child { grid-row: 1 / 3; font-size: 1rem; line-height: 1; padding-top: 0.05rem; }
+        .status-step-label { font-weight: 600; color: #0f172a; }
+        .status-step-desc { color: #64748b; font-size: 0.74rem; }
+        /* Impact normalisation audio (dépliable, en vue détail) */
+        .impact-details {
+            margin: 0.6rem 0; font-size: 0.78rem;
+            border: 1px solid #e2e8f0; border-radius: 6px;
+            background: #fbfcfd;
+        }
+        .impact-details > summary {
+            cursor: pointer; padding: 0.45rem 0.6rem;
+            color: #1d4ed8; font-weight: 500;
+        }
+        .impact-details > summary:hover { background: #f1f5f9; }
+        .impact-explanation {
+            margin: 0; padding: 0 0.6rem 0.5rem 0.6rem;
+            color: #475569; font-size: 0.76rem; line-height: 1.4;
+        }
+        .impact-details .file-impact-row { padding: 0 0.6rem 0.6rem 0.6rem; margin: 0; }
+        .impact-hint { font-size: 0.72rem; color: #94a3b8; }
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
         .file-row-compact-wrapper:hover { background: #f8fafc; }
@@ -2143,17 +2182,24 @@ INDEX_TEMPLATE = """
             padding: 0.45rem 0.55rem;
             min-height: 32px;
         }
+        /* Pastille alignée comme un caractère inline avec le titre. La
+           technique du flex précédente ne marchait pas car la grille
+           centrait le wrapper mais la baseline du dot restait
+           différente de celle du texte. Inline-block + vertical-align
+           middle (technique éprouvée pour icones inline) résout. */
         .file-row-status-mini {
-            display: inline-flex; align-items: center; align-self: center;
-            line-height: 0;
+            display: inline-block; vertical-align: middle;
+            line-height: 0; align-self: center;
         }
         .file-row-status-mini .transcript-status-line {
-            display: inline-flex; align-items: center;
+            display: inline-block;
             padding: 0 !important; margin: 0 !important;
+            border: 0 !important; background: transparent !important;
             line-height: 0;
         }
         .file-row-status-mini .transcript-status-spinner {
             display: inline-block; vertical-align: middle;
+            width: 12px; height: 12px;
         }
         .file-row-title {
             font-weight: 600; color: #1d4ed8;
@@ -2644,7 +2690,7 @@ INDEX_TEMPLATE = """
          "Mes transferts et analyses". -->
     <nav class="tabs-nav" role="tablist" aria-label="Sections principales">
         <button type="button" class="tab-btn" role="tab" data-tab="transfers" id="tab-btn-transfers">
-            Mes transferts et analyses
+            Mes réunions (IA)
         </button>
         <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
             Mes appareils
@@ -2743,7 +2789,7 @@ INDEX_TEMPLATE = """
     <div class="card tab-pane" data-tab="transfers">
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
-                <h1 style="font-size:1.1rem;">Mes transferts et analyses</h1>
+                <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
                 <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
                         onclick="purgeSessions()">Purger liste + fichiers</button>
             </div>
@@ -3809,7 +3855,20 @@ async function loadSessions(opts) {
                          data-transcript-file-id="${f.id}"
                          data-audio-downloads="${audioDownloadsAttr}"
                          data-persistent-summary="1"></div>
-                    ${impactIcon ? `<div class="file-impact-row">${impactIcon}</div>` : ''}
+                    ${canComputeImpact ? `
+                        <details class="impact-details">
+                            <summary>Impact technique de la normalisation audio</summary>
+                            <p class="impact-explanation">
+                                La normalisation aligne le niveau sonore (volume) du fichier
+                                source sur une cible standard (−16 LUFS, compatible voix). Le
+                                calcul compare les LUFS (loudness), TP (true peak) et LRA (range)
+                                avant et après transcodage pour mesurer l'effet du traitement.
+                                Si le fichier source était déjà au bon niveau, l'amélioration sera
+                                proche de 0.
+                            </p>
+                            <div class="file-impact-row">${impactIcon}<span class="impact-hint">Cliquez le bouton ⓘ pour calculer.</span></div>
+                        </details>
+                    ` : ''}
                 </div>`;
             }).join('');
 
@@ -4113,11 +4172,49 @@ async function loadTranscriptStatus(fileId, container) {
         } else if (isInProgress) {
             dotClass = 'on';
         }
+        // Diagnostic per-step : on déduit les étapes manquantes des
+        // outputs absents (visible uniquement quand la transcription
+        // est terminée, partiellement ou non, ou échouée).
+        const STEP_INFO = {
+            'transcript':              { label: 'Transcription brute',          desc: 'Texte issu du Whisper (faster-whisper). Étape obligatoire pour toutes les autres.' },
+            'transcript-tagged':       { label: 'Identification des locuteurs', desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur les enregistrements très courts ou monolocuteurs.' },
+            'transcript-corrected':    { label: 'Correction des sigles',        desc: 'LLM relit le texte avec un glossaire pour corriger les acronymes mal entendus (ex: "EFS" → "EHS" repassé en "EFS").' },
+            'transcript-cleaned':      { label: 'Nettoyage hors-sujet',         desc: 'LLM retire les passages parasites (faux départs, bruits ambiants verbalisés).' },
+            'transcript-reformulated': { label: 'Discours indirect',            desc: 'LLM reformule au style indirect ("X a dit que...") pour une lecture rapide.' },
+            'meeting-cr':              { label: 'Compte-rendu structuré',      desc: 'LLM produit l\\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
+        };
+        let stepsDetails = '';
+        // On n'affiche le diagnostic que lorsque la transcription est terminée
+        // (en cours = pas encore d'outputs) — sinon ça ferait du bruit.
+        const showSteps = (status === 'kevent_completed'
+                          || status === 'kevent_partially_completed'
+                          || status === 'kevent_failed'
+                          || status === 'completed' || status === 'failed');
+        if (showSteps) {
+            const rows = Object.keys(STEP_INFO).map(k => {
+                const info = STEP_INFO[k];
+                const ok = !!outputs[k];
+                const icon = ok ? '✓' : '✗';
+                const color = ok ? '#10b981' : '#b91c1c';
+                const note = (!ok && k === 'transcript-tagged')
+                    ? ' <small style="color:#94a3b8">(pyannote a peut-être eu un problème avec ce signal — voir logs côté admin)</small>'
+                    : '';
+                return `<div class="status-step">
+                    <span style="color:${color};font-weight:700;">${icon}</span>
+                    <span class="status-step-label">${escapeHtml(info.label)}</span>
+                    <span class="status-step-desc">${escapeHtml(info.desc)}${note}</span>
+                </div>`;
+            }).join('');
+            stepsDetails = `<details class="status-details">
+                <summary>Voir le détail des étapes</summary>
+                <div class="status-step-list">${rows}</div>
+            </details>`;
+        }
         const statusBadge = `<div class="transcript-status-line ${bannerClass}">
             ${leadIcon}
             <span class="transcript-status-spinner ${dotClass}"></span>
             <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
-        </div>`;
+        </div>${stepsDetails}`;
 
         // Construit le dropdown unifié : on agrège audios (passés en
         // data-audio-downloads par la file row) + transcripts (kind ×
