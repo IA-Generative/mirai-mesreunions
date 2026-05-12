@@ -2155,6 +2155,66 @@ INDEX_TEMPLATE = """
         .status-step > :first-child { grid-row: 1 / 3; font-size: 1rem; line-height: 1; padding-top: 0.05rem; }
         .status-step-label { font-weight: 600; color: #0f172a; }
         .status-step-desc { color: #64748b; font-size: 0.74rem; }
+        /* Bouton ⓘ aligné à droite, prend couleur du status */
+        .file-detail-info-btn {
+            margin-left: auto; padding: 0.1rem 0.5rem;
+            border: 1px solid currentColor; background: transparent;
+            cursor: pointer; font-size: 0.95rem; line-height: 1;
+            border-radius: 999px; color: #94a3b8;
+        }
+        .file-detail-info-btn:hover { background: #f1f5f9; }
+        /* Modal détails techniques */
+        .file-info-modal {
+            border: 0; border-radius: 12px; padding: 0;
+            max-width: 560px; width: 92%;
+            box-shadow: 0 16px 48px rgba(0,0,0,0.18);
+        }
+        .file-info-modal::backdrop {
+            background: rgba(15,23,42,0.45);
+        }
+        .modal-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0.8rem 1rem; border-bottom: 1px solid #e2e8f0;
+        }
+        .modal-header h3 { margin: 0; font-size: 1rem; color: #0f172a; }
+        .modal-close {
+            border: 0; background: transparent; cursor: pointer;
+            font-size: 1rem; color: #64748b; padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+        .modal-close:hover { background: #e2e8f0; color: #0f172a; }
+        .modal-body { padding: 0.8rem 1rem 1rem 1rem; font-size: 0.84rem; }
+        .modal-section { margin-bottom: 1rem; }
+        .modal-section:last-child { margin-bottom: 0; }
+        .modal-section-title {
+            font-weight: 700; color: #0f172a; font-size: 0.82rem;
+            margin-bottom: 0.4rem; text-transform: uppercase;
+            letter-spacing: 0.04em; color: #64748b;
+        }
+        .modal-status { margin-bottom: 0.3rem; }
+        .modal-steps { display: flex; flex-direction: column; gap: 0.5rem; }
+        .modal-step {
+            display: grid; grid-template-columns: 1rem 1fr;
+            gap: 0.5rem; align-items: start;
+            padding: 0.3rem 0; border-bottom: 1px dashed #e2e8f0;
+        }
+        .modal-step:last-child { border-bottom: 0; }
+        .modal-step-label { font-weight: 600; color: #0f172a; }
+        .modal-step-desc { color: #64748b; font-size: 0.76rem; line-height: 1.35; }
+        .modal-explain {
+            margin: 0 0 0.5rem 0; color: #475569; font-size: 0.78rem; line-height: 1.4;
+        }
+        .modal-impact-result { margin-top: 0.5rem; font-size: 0.78rem; color: #475569; }
+        /* #3 Détail full-height : le panel détail prend toute la hauteur
+           dispo, le scroll est celui de la page entière, pas un scroll
+           interne secondaire. */
+        .tab-pane[data-tab="transfers"].detail-active .card {
+            border: 0; box-shadow: none; padding: 0.4rem 0.2rem;
+            background: transparent;
+        }
+        .tab-pane[data-tab="transfers"].detail-active #recent-activities-panel {
+            min-height: calc(100vh - 180px);
+        }
         /* Impact normalisation audio (dépliable, en vue détail) */
         .impact-details {
             margin: 0.6rem 0; font-size: 0.78rem;
@@ -2182,25 +2242,31 @@ INDEX_TEMPLATE = """
             padding: 0.45rem 0.55rem;
             min-height: 32px;
         }
-        /* Pastille alignée comme un caractère inline avec le titre. La
-           technique du flex précédente ne marchait pas car la grille
-           centrait le wrapper mais la baseline du dot restait
-           différente de celle du texte. Inline-block + vertical-align
-           middle (technique éprouvée pour icones inline) résout. */
-        .file-row-status-mini {
-            display: inline-block; vertical-align: middle;
-            line-height: 0; align-self: center;
+        /* Dot caractère unicode "●" : aligné naturellement sur la
+           baseline du texte (pas de div/flex contournant). Sa couleur
+           est ajustée par loadTranscriptStatus selon le statut.
+           Approche cleanup : on s'appuie sur la métrique font, pas
+           sur un cercle CSS qui retombait toujours plus bas que le
+           texte (les techniques flex/inline-flex ne fixent pas). */
+        .file-row-dot {
+            font-size: 0.7rem; line-height: 1; color: #cbd5e1;
+            user-select: none;
         }
-        .file-row-status-mini .transcript-status-line {
-            display: inline-block;
-            padding: 0 !important; margin: 0 !important;
-            border: 0 !important; background: transparent !important;
-            line-height: 0;
-        }
-        .file-row-status-mini .transcript-status-spinner {
-            display: inline-block; vertical-align: middle;
-            width: 12px; height: 12px;
-        }
+        .file-row-dot-completed,
+        .file-row-dot-kevent_completed,
+        .file-row-dot-mcr_pushed { color: #10b981; }
+        .file-row-dot-kevent_partially_completed { color: #f59e0b; }
+        .file-row-dot-failed,
+        .file-row-dot-kevent_failed,
+        .file-row-dot-mcr_auth_failed,
+        .file-row-dot-mcr_rejected,
+        .file-row-dot-mcr_push_failed { color: #b91c1c; }
+        .file-row-dot-pending,
+        .file-row-dot-processing,
+        .file-row-dot-kevent_queued,
+        .file-row-dot-kevent_transcribing,
+        .file-row-dot-kevent_processing { color: #3b82f6; }
+        .file-row-dot-disabled { color: #94a3b8; }
         .file-row-title {
             font-weight: 600; color: #1d4ed8;
             text-decoration: none !important;
@@ -2283,17 +2349,10 @@ INDEX_TEMPLATE = """
         .file-detail-rename-btn { white-space: nowrap; }
         .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
         .file-detail-techline {
-            display: flex; flex-wrap: wrap; align-items: center;
+            display: flex; align-items: center; justify-content: space-between;
             gap: 0.45rem; margin: 0 0 0.6rem 0.6rem;
             font-size: 0.78rem; color: #64748b;
         }
-        .file-detail-techname {
-            color: #94a3b8; font-size: 0.72rem;
-            word-break: break-all; min-width: 0;
-            overflow: hidden; text-overflow: ellipsis;
-        }
-        .file-detail-techline-sep { color: #cbd5e1; }
-        .file-detail-status-dot { display: inline-block; vertical-align: middle; }
         .file-detail-fullinfo { margin-top: 0.6rem; }
         /* Mode "page détail" : on cache le titre de l'onglet + le bouton
            purger + la liste des autres sessions. Seul le détail demandé
@@ -2845,6 +2904,83 @@ function showFilesList() {
 }
 // Toggle l'affichage de la zone résumé sous une ligne compacte. Le
 // chevron tourne (CSS) selon la classe is-open.
+// Affiche un modal avec toutes les infos techniques du fichier :
+// statut + engine + langue + étapes IA (✓/✗ avec description) + impact LUFS.
+async function openFileInfoModal(fileId) {
+    const cached = (window._fileInfoCache || {})[fileId];
+    if (!cached) {
+        showToast('Données techniques en cours de chargement.', 'error');
+        return;
+    }
+    const STEPS = {
+        'transcript':              { label: 'Transcription brute',          desc: 'Texte issu de Whisper (faster-whisper).' },
+        'transcript-tagged':       { label: 'Identification des locuteurs', desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur monolocuteur/audio très court.' },
+        'transcript-corrected':    { label: 'Correction des sigles',        desc: 'LLM relit avec un glossaire métier pour corriger les acronymes.' },
+        'transcript-cleaned':      { label: 'Nettoyage hors-sujet',         desc: 'LLM retire les passages parasites (faux départs, bruits verbalisés).' },
+        'transcript-reformulated': { label: 'Discours indirect',            desc: 'LLM reformule au style indirect pour lecture rapide.' },
+        'meeting-cr':              { label: 'Compte-rendu structuré',      desc: 'LLM produit l\\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
+    };
+    const stepsHtml = Object.keys(STEPS).map(k => {
+        const ok = !!(cached.outputs || {})[k];
+        const icon = ok ? '✓' : '✗';
+        const color = ok ? '#10b981' : '#b91c1c';
+        return `<div class="modal-step">
+            <span style="color:${color};font-weight:700;font-size:1rem;">${icon}</span>
+            <div>
+                <div class="modal-step-label">${escapeHtml(STEPS[k].label)}</div>
+                <div class="modal-step-desc">${escapeHtml(STEPS[k].desc)}</div>
+            </div>
+        </div>`;
+    }).join('');
+
+    // Récupère ou crée le modal
+    let modal = document.getElementById('file-info-modal');
+    if (!modal) {
+        modal = document.createElement('dialog');
+        modal.id = 'file-info-modal';
+        modal.className = 'file-info-modal';
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => {
+            // Click sur backdrop ferme le modal
+            if (e.target === modal) modal.close();
+        });
+    }
+    modal.innerHTML = `
+        <div class="modal-header">
+            <h3>Détails techniques</h3>
+            <button class="modal-close" onclick="document.getElementById('file-info-modal').close()" aria-label="Fermer">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="modal-section">
+                <div class="modal-section-title">Pipeline IA</div>
+                <div class="modal-status">
+                    <strong>Statut :</strong> ${escapeHtml(cached.label)}
+                    <small style="color:#94a3b8;">(${escapeHtml(cached.status)}${cached.engine ? ' · ' + escapeHtml(cached.engine) : ''})</small>
+                </div>
+                ${cached.language ? `<div><strong>Langue détectée :</strong> ${escapeHtml(cached.language)}</div>` : ''}
+            </div>
+            <div class="modal-section">
+                <div class="modal-section-title">Étapes</div>
+                <div class="modal-steps">${stepsHtml}</div>
+            </div>
+            <div class="modal-section">
+                <div class="modal-section-title">Normalisation audio (LUFS)</div>
+                <p class="modal-explain">La normalisation aligne le niveau sonore sur la cible −16 LUFS (compatible voix). Le calcul mesure les LUFS / TP / LRA avant et après transcodage.</p>
+                <button class="fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="loadNormalizationImpact('${fileId}')">Calculer l'impact</button>
+                <div class="modal-impact-result" id="modal-impact-${fileId}">
+                    ${(impactCache[fileId] && impactCache[fileId].text) ? escapeHtml(impactCache[fileId].text) : '<small style="color:#94a3b8;">Pas encore calculé.</small>'}
+                </div>
+            </div>
+        </div>
+    `;
+    if (typeof modal.showModal === 'function') {
+        modal.showModal();
+    } else {
+        modal.setAttribute('open', '');
+    }
+}
+
 // Renomme le titre suggéré (suggested_filename) du fichier en vue détail.
 // Persiste via POST /api/file/<id>/rename → token-issuer interne.
 async function renameDetailTitle(fileId, btn) {
@@ -3784,11 +3920,20 @@ async function loadSessions(opts) {
                     //   • bouton Supprimer
                     return `<div class="file-row-compact-wrapper">
                         <div class="file-row-compact">
-                            <div class="file-row-status-mini transcript-section transcript-section--inline"
+                            <!-- transcript-section caché : sert juste à
+                                 déclencher loadTranscriptStatus qui mettra
+                                 à jour la couleur du dot inline via JS. -->
+                            <div class="transcript-section transcript-section--inline"
                                  data-transcript-file-id="${f.id}"
                                  data-audio-downloads="${audioDownloadsAttr}"
                                  data-compact="1"
-                                 aria-label="Statut transcription"></div>
+                                 style="display:none;"></div>
+                            <!-- Dot inline (caractère unicode) : aligné comme
+                                 un caractère sur la baseline du titre. Sa
+                                 couleur est ajustée par loadTranscriptStatus
+                                 via la classe file-row-dot-<status>. -->
+                            <span class="file-row-dot" data-file-dot="${f.id}"
+                                  title="Statut transcription">●</span>
                             <a href="#" class="file-row-title" data-file-id="${f.id}"
                                onclick="event.preventDefault();showFileDetail('${f.id}');"
                                title="${escapeHtml(f.original_filename)}">
@@ -3845,21 +3990,28 @@ async function loadSessions(opts) {
                             Renommer
                         </button>
                     </div>
-                    <!-- Ligne combinée : nom technique + pastille statut +
-                         qualité + date/durée alignés sur la même ligne pour
-                         compacter le header de la vue détail. -->
+                    <!-- Ligne sous le titre : juste date+durée à gauche +
+                         bouton (i) coloré à droite. Les infos techniques
+                         (qualité, statut, étapes, normalisation) sont
+                         derrière le bouton (i) qui ouvre un modal. -->
                     <div class="file-detail-techline">
-                        <span class="file-detail-techname"
-                              title="Nom technique du fichier source">${escapeHtml(f.original_filename)}</span>
-                        <span class="file-detail-techline-sep">·</span>
-                        <div class="file-detail-status-dot transcript-section transcript-section--inline"
-                             data-transcript-file-id="${f.id}"
-                             data-audio-downloads="${audioDownloadsAttr}"
-                             data-compact="1"
-                             aria-label="Statut transcription"></div>
-                        ${quality}
                         <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
+                        <button class="file-detail-info-btn"
+                                type="button"
+                                data-file-info-btn="${f.id}"
+                                onclick="openFileInfoModal('${f.id}')"
+                                title="Détails techniques (statut, qualité, étapes IA, normalisation)"
+                                aria-label="Voir les détails techniques">ⓘ</button>
                     </div>
+                    <!-- transcript-section caché pour déclencher
+                         loadTranscriptStatus qui met à jour la couleur du
+                         bouton (i) selon le status. -->
+                    <div class="transcript-section transcript-section--inline"
+                         data-transcript-file-id="${f.id}"
+                         data-audio-downloads="${audioDownloadsAttr}"
+                         data-compact="1"
+                         data-info-btn-target="${f.id}"
+                         style="display:none;"></div>
                     ${railroadBlock}
                     <!-- Section résumé toujours visible (pas de <details>
                          repliable en vue détail). Le contenu (key_points
@@ -3869,20 +4021,6 @@ async function loadSessions(opts) {
                          data-transcript-file-id="${f.id}"
                          data-audio-downloads="${audioDownloadsAttr}"
                          data-persistent-summary="1"></div>
-                    ${canComputeImpact ? `
-                        <details class="impact-details">
-                            <summary>Impact technique de la normalisation audio</summary>
-                            <p class="impact-explanation">
-                                La normalisation aligne le niveau sonore (volume) du fichier
-                                source sur une cible standard (−16 LUFS, compatible voix). Le
-                                calcul compare les LUFS (loudness), TP (true peak) et LRA (range)
-                                avant et après transcodage pour mesurer l'effet du traitement.
-                                Si le fichier source était déjà au bon niveau, l'amélioration sera
-                                proche de 0.
-                            </p>
-                            <div class="file-impact-row">${impactIcon}<span class="impact-hint">Cliquez le bouton ⓘ pour calculer.</span></div>
-                        </details>
-                    ` : ''}
                 </div>`;
             }).join('');
 
@@ -4327,13 +4465,30 @@ async function loadTranscriptStatus(fileId, container) {
                 }
             }
             if (container.getAttribute('data-compact') === '1') {
-                // Tooltip pastille = code statut technique brut + engine
-                // (ex: "kevent_partially_completed (kevent)").
-                // Le label humain reste accessible en vue détail.
-                const dot = container.querySelector('.transcript-status-spinner');
+                // Met à jour le dot caractère unicode "●" inline dans la
+                // file-row (aligné naturellement avec le titre). La couleur
+                // dépend du statut via la classe file-row-dot-<status>.
+                const dot = document.querySelector(`[data-file-dot="${fileId}"]`);
                 if (dot) {
+                    dot.className = `file-row-dot file-row-dot-${status}`;
                     dot.title = `${status}${engine ? ' (' + engine + ')' : ''}`;
                 }
+                // Met aussi à jour le bouton (i) en vue détail (même mapping
+                // couleur que le dot inline, juste sur le bouton info).
+                const infoBtn = document.querySelector(`[data-file-info-btn="${fileId}"]`);
+                if (infoBtn) {
+                    infoBtn.className = `file-detail-info-btn file-row-dot-${status}`;
+                    infoBtn.title = `Détails techniques — statut: ${status}${engine ? ' (' + engine + ')' : ''}`;
+                }
+                // Mémorise les infos pour le modal (status raw, engine,
+                // outputs map). On ne re-fetch pas quand l'utilisateur
+                // clique sur (i), on lit ce cache.
+                window._fileInfoCache = window._fileInfoCache || {};
+                window._fileInfoCache[fileId] = {
+                    status, engine, label: meta.label,
+                    outputs: outputs, title, kp,
+                    language: data.transcription_language,
+                };
                 // Zone résumé : on n'affiche que les key_points (pas le
                 // label statut "Pipeline Kevent partiel..." qui est déjà
                 // sur la pastille via tooltip).
@@ -4389,6 +4544,9 @@ async function loadNormalizationImpact(fileId) {
             at: new Date().toLocaleString('fr-FR'),
         };
         showToast('Impact de la normalisation calculé.', 'success');
+        // Si le modal est ouvert, met aussi à jour son contenu impact
+        const modalImpact = document.getElementById(`modal-impact-${fileId}`);
+        if (modalImpact) modalImpact.textContent = msg;
     } catch (e) {
         const msg = `Erreur: ${e.message}`;
         impactCache[fileId] = {
@@ -4445,17 +4603,11 @@ function pickDefaultTab(hasActiveDevice) {
 
 setupTabs();
 updateDeviceFilterButton();
-// Charge d'abord les devices (peuple _devicesByQrToken pour enrichir le
-// header de session), puis les sessions. Force=true sur loadSessions
-// pour qu'il re-render quand l'utilisateur change d'onglet manuellement.
+// Charge initial : devices puis sessions. Pas d'auto-refresh setInterval —
+// le user peut Rafraîchir manuellement via le bouton dédié dans le header
+// de l'onglet, ou la transcription qui poll elle-même (loadTranscriptStatus
+// re-fire dans 15-30s tant qu'isInProgress).
 loadDevices().then(() => loadSessions({ force: true })).catch(() => loadSessions({ force: true }));
-setInterval(loadSessions, 15000);
-setInterval(() => {
-    // loadDevices + propager les nouveaux noms de device dans la liste
-    // sessions (force pour bypass le diff JSON, sinon les noms ajoutés
-    // ne s'afficheraient pas immédiatement).
-    loadDevices().then(() => loadSessions({ force: true })).catch(() => {});
-}, 30000);
 </script>
 <script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
 <script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
