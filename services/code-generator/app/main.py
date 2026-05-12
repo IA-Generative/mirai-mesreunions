@@ -2143,15 +2143,22 @@ INDEX_TEMPLATE = """
             min-height: 32px;
         }
         .file-row-status-mini {
-            display: flex; align-items: center;
-            line-height: 1; min-height: 12px;
+            display: flex; align-items: center; align-self: center;
+            line-height: 1; height: 100%;
+        }
+        .file-row-status-mini .transcript-status-line {
+            display: inline-flex; align-items: center; min-height: 18px;
         }
         .file-row-title {
-            font-weight: 600; color: #1d4ed8; text-decoration: none;
+            font-weight: 600; color: #1d4ed8;
+            text-decoration: none !important;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
             min-width: 0; line-height: 1.2;
+            background-image: none !important; /* DSFR ajoute parfois un underline via gradient */
         }
-        .file-row-title:hover { color: #1e40af; }
+        .file-row-title:hover {
+            color: #1e40af; text-decoration: none !important;
+        }
         .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
         .file-row-expand {
             border: 1px solid transparent; background: transparent;
