@@ -207,6 +207,19 @@ KEVENT_API_KEY = _str("KEVENT_API_KEY", "")
 KEVENT_TRANSCRIPTION_MODEL = _str("KEVENT_TRANSCRIPTION_MODEL", "faster-whisper-large-v3-turbo")
 KEVENT_DIARIZATION_MODEL = _str("KEVENT_DIARIZATION_MODEL", "pyannote-diarization")
 KEVENT_DIARIZATION_ENABLED = _bool("KEVENT_DIARIZATION_ENABLED", False)
+# Format envoyé au gateway pour la diarisation. Workaround pour le bug
+# "samples mismatch" côté pyannote-audio 3.1 (encoder delay AAC fait que la
+# durée décodée par leur preprocessing ne matche pas la durée du header MP4,
+# ~88 ms de drift sur du 16 kHz mono 64k).
+#   "flac" (défaut) : ré-encode en FLAC lossless 16 kHz mono — bit-exact
+#                     décodage côté pyannote, ~6× la taille du MP4 (acceptable
+#                     car upload intra-SCW Paris).
+#   "wav"           : ré-encode en PCM WAV 16 kHz mono — encore plus sûr,
+#                     ~25× la taille du MP4. À utiliser si FLAC pose
+#                     problème côté Kevent.
+#   "mp4"           : ancien comportement (envoi du transcodé MP4/AAC tel
+#                     quel). Kill-switch au cas où l'helper ffmpeg foire.
+KEVENT_DIARIZATION_FORMAT = _str("KEVENT_DIARIZATION_FORMAT", "flac")
 KEVENT_SPEAKER_NAMING_ENABLED = _bool("KEVENT_SPEAKER_NAMING_ENABLED", False)
 KEVENT_OOB_CLEANING_ENABLED = _bool("KEVENT_OOB_CLEANING_ENABLED", False)
 KEVENT_REFORMULATION_ENABLED = _bool("KEVENT_REFORMULATION_ENABLED", False)

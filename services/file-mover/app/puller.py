@@ -58,7 +58,8 @@ from libs.shared.app.config import (
     KEVENT_ASYNC_MODE, KEVENT_ASYNC_SERVICE_TYPE,
     KEVENT_ASYNC_TRANSCRIPTION_OPERATION, KEVENT_ASYNC_DIARIZATION_OPERATION,
     KEVENT_ASYNC_POLL_INTERVAL_SECONDS, KEVENT_ASYNC_TIMEOUT_SECONDS,
-    KEVENT_HTTP_TIMEOUT_SECONDS,
+    KEVENT_HTTP_TIMEOUT_SECONDS, KEVENT_DIARIZATION_FORMAT,
+    TRANSCODE_SAMPLE_RATE, TRANSCODE_CHANNELS,
     LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
     LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
 )
@@ -322,6 +323,9 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         db.close()
 
 
+from app.audio_format import to_diarization_format as _to_diarization_format
+
+
 def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                             file_data, payload: dict) -> None:
     """
@@ -398,11 +402,20 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         )
 
     def _kevent_diarize():
+        # Le format soumis à la diarisation est gouverné par
+        # KEVENT_DIARIZATION_FORMAT (flac/wav/mp4). FLAC par défaut pour
+        # éviter le bug "samples mismatch" de pyannote sur du MP4/AAC.
+        # En cas de target="mp4" ou de ré-encodage raté, on retombe sur
+        # les bytes originaux (kill-switch).
+        d_bytes, d_filename, d_ctype = _to_diarization_format(
+            audio_bytes, transcoded_filename, KEVENT_DIARIZATION_FORMAT,
+            sample_rate=TRANSCODE_SAMPLE_RATE, channels=TRANSCODE_CHANNELS,
+        )
         if KEVENT_ASYNC_MODE:
             return client.diarize_async(
-                audio_bytes=audio_bytes,
-                filename=transcoded_filename,
-                content_type=content_type,
+                audio_bytes=d_bytes,
+                filename=d_filename,
+                content_type=d_ctype,
                 service_type=KEVENT_ASYNC_SERVICE_TYPE,
                 operation=KEVENT_ASYNC_DIARIZATION_OPERATION,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
@@ -410,9 +423,9 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 on_status=_on_kevent_status,
             )
         return client.diarize(
-            audio_bytes=audio_bytes,
-            filename=transcoded_filename,
-            content_type=content_type,
+            audio_bytes=d_bytes,
+            filename=d_filename,
+            content_type=d_ctype,
         )
 
     # ── Step 1 — transcription (always) ────────────────────────────────
