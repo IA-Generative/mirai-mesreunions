@@ -780,6 +780,7 @@ def api_my_sessions():
             result.append({
                 "id": str(s.id),
                 "simple_code": s.simple_code,
+                "qr_token": s.qr_token,
                 "status": s.status.value,
                 "upload_count": s.upload_count,
                 "max_uploads": s.max_uploads,
@@ -2143,11 +2144,16 @@ INDEX_TEMPLATE = """
             min-height: 32px;
         }
         .file-row-status-mini {
-            display: flex; align-items: center; align-self: center;
-            line-height: 1; height: 100%;
+            display: inline-flex; align-items: center; align-self: center;
+            line-height: 0;
         }
         .file-row-status-mini .transcript-status-line {
-            display: inline-flex; align-items: center; min-height: 18px;
+            display: inline-flex; align-items: center;
+            padding: 0 !important; margin: 0 !important;
+            line-height: 0;
+        }
+        .file-row-status-mini .transcript-status-spinner {
+            display: inline-block; vertical-align: middle;
         }
         .file-row-title {
             font-weight: 600; color: #1d4ed8;
@@ -2240,6 +2246,11 @@ INDEX_TEMPLATE = """
         /* En vue détail : on n'affiche pas le bandeau session
            (code + état "Enrôlé") — l'utilisateur a cliqué un fichier
            précis, le contexte session n'apporte rien ici. */
+        .session-device-name {
+            font-weight: 600; color: #0f172a; font-size: 0.92rem;
+            margin-right: 0.35rem;
+        }
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .session-device-name,
         .tab-pane[data-tab="transfers"].detail-active .session-item > .code,
         .tab-pane[data-tab="transfers"].detail-active .session-item > .status-badge { display: none !important; }
         .tab-pane[data-tab="transfers"].detail-active .session-item {
@@ -2752,6 +2763,10 @@ INDEX_TEMPLATE = """
 const impactCache = {};
 const impactLoading = new Set();
 let showAllDevices = false;
+// Map qr_token → {device_name, status, retention_expires_at} populée par
+// loadDevices. Sert à enrichir l'en-tête de chaque session dans la liste
+// des transferts (montre "iPhone CODE (active)" au lieu de juste "CODE").
+const _devicesByQrToken = {};
 // État vue transferts : null = liste compacte, fileId = vue détail pour
 // ce fichier. Switch via showFileDetail / showFilesList.
 let _detailFileId = null;
@@ -3115,6 +3130,17 @@ async function loadDevices() {
         const nonRevokedCount = devices.filter((d) => (d.status || '').toLowerCase() !== 'revoked').length;
         // Sélection onglet par défaut au premier chargement (idempotent).
         pickDefaultTab(nonRevokedCount > 0);
+        // Populate qr_token map for session header enrichment.
+        Object.keys(_devicesByQrToken).forEach(k => delete _devicesByQrToken[k]);
+        devices.forEach(d => {
+            const qr = (d.qr_token || '').trim();
+            if (qr) {
+                _devicesByQrToken[qr] = {
+                    name: d.device_name || 'Appareil',
+                    status: (d.status || '').toLowerCase(),
+                };
+            }
+        });
         const visibleDevices = devices.filter((d) => {
             const status = (d.status || '').toLowerCase();
             if (status !== 'revoked') {
@@ -3821,9 +3847,19 @@ async function loadSessions(opts) {
                             onclick="renewSession('${s.id}')">Renouveller</button>`;
                 const quotaLine = isActiveBucket ? '' : `
                     <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>`;
+                // Header : on remplace "CODE + Enrôlé" par
+                // "DeviceName CODE (status)" inspiré de l'onglet
+                // "Mes appareils". Fallback sur l'ancien format si aucun
+                // device matching trouvé (cas pending_enrollment).
+                const dev = _devicesByQrToken[(s.qr_token || '')];
+                const headerInner = dev
+                    ? `<span class="session-device-name">${escapeHtml(dev.name)}</span>
+                       <span class="code">${escapeHtml(s.simple_code)}</span>
+                       <span class="status-badge ${stateBadgeClass}">(${escapeHtml(dev.status)})</span>`
+                    : `<span class="code">${escapeHtml(s.simple_code)}</span>
+                       <span class="status-badge ${stateBadgeClass}">${escapeHtml(stateLabel)}</span>`;
                 return `<div class="session-item" data-session-row="${s.simple_code}" data-lifecycle="${lifecycle}">
-                <span class="code">${s.simple_code}</span>
-                <span class="status-badge ${stateBadgeClass}">${stateLabel}</span>
+                ${headerInner}
                 ${sessionRenewBtn}
                 ${sessionDeleteBtn}
                 ${quotaLine}
@@ -4297,11 +4333,18 @@ function pickDefaultTab(hasActiveDevice) {
 }
 
 setupTabs();
-loadSessions();
 updateDeviceFilterButton();
-loadDevices();
+// Charge d'abord les devices (peuple _devicesByQrToken pour enrichir le
+// header de session), puis les sessions. Force=true sur loadSessions
+// pour qu'il re-render quand l'utilisateur change d'onglet manuellement.
+loadDevices().then(() => loadSessions({ force: true })).catch(() => loadSessions({ force: true }));
 setInterval(loadSessions, 15000);
-setInterval(loadDevices, 30000);
+setInterval(() => {
+    // loadDevices + propager les nouveaux noms de device dans la liste
+    // sessions (force pour bypass le diff JSON, sinon les noms ajoutés
+    // ne s'afficheraient pas immédiatement).
+    loadDevices().then(() => loadSessions({ force: true })).catch(() => {});
+}, 30000);
 </script>
 <script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
 <script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
