@@ -2234,14 +2234,22 @@ INDEX_TEMPLATE = """
         .file-row-expanded-empty { color: #94a3b8; font-style: italic; }
         /* En mode compact (data-compact=1) on réduit le bandeau statut
            à un simple point coloré avec tooltip (rollover), on cache le
-           résumé (visible seulement en vue détail), le dropdown et les
-           rails — visibles seulement en vue détail. */
+           résumé (visible seulement en vue détail), le dropdown, les
+           rails ET les détails per-step ("Voir le détail des étapes")
+           qui s'affichent mal sur une seule ligne. */
         .transcript-section--inline .downloads-block,
         .transcript-section--inline .pipeline-box,
         .transcript-section--inline .transcript-meta-details,
         .transcript-section--inline .transcript-meta-title,
         .transcript-section--inline .transcript-status-icon,
-        .transcript-section--inline .transcript-status-label { display: none; }
+        .transcript-section--inline .transcript-status-label,
+        .transcript-section--inline .status-details { display: none !important; }
+        /* En vue détail persistante (data-persistent-summary=1) on
+           cache le bandeau statut redondant (la pastille à côté du nom
+           technique le porte déjà via tooltip) ET le `<details>` per-step
+           dupliqué. La pastille mini reste seul source de vérité visuelle. */
+        .transcript-section[data-persistent-summary="1"] .transcript-status-line,
+        .transcript-section[data-persistent-summary="1"] .status-details { display: none !important; }
         .transcript-section--inline .transcript-status-line {
             background: transparent !important; border: 0 !important;
             padding: 0 !important; margin: 0 !important;
@@ -2274,15 +2282,18 @@ INDEX_TEMPLATE = """
         }
         .file-detail-rename-btn { white-space: nowrap; }
         .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
-        .file-detail-techname {
-            font-size: 0.72rem; color: #94a3b8; margin: 0 0 0.5rem 0.6rem;
-            word-break: break-all;
-        }
-        .file-detail-meta {
+        .file-detail-techline {
             display: flex; flex-wrap: wrap; align-items: center;
-            gap: 0.45rem; margin-bottom: 0.6rem;
+            gap: 0.45rem; margin: 0 0 0.6rem 0.6rem;
+            font-size: 0.78rem; color: #64748b;
         }
-        .file-detail-status-dot { display: flex; align-items: center; }
+        .file-detail-techname {
+            color: #94a3b8; font-size: 0.72rem;
+            word-break: break-all; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .file-detail-techline-sep { color: #cbd5e1; }
+        .file-detail-status-dot { display: inline-block; vertical-align: middle; }
         .file-detail-fullinfo { margin-top: 0.6rem; }
         /* Mode "page détail" : on cache le titre de l'onglet + le bouton
            purger + la liste des autres sessions. Seul le détail demandé
@@ -3834,10 +3845,13 @@ async function loadSessions(opts) {
                             Renommer
                         </button>
                     </div>
-                    <div class="file-detail-techname" title="Nom technique du fichier source">
-                        ${escapeHtml(f.original_filename)}
-                    </div>
-                    <div class="file-detail-meta">
+                    <!-- Ligne combinée : nom technique + pastille statut +
+                         qualité + date/durée alignés sur la même ligne pour
+                         compacter le header de la vue détail. -->
+                    <div class="file-detail-techline">
+                        <span class="file-detail-techname"
+                              title="Nom technique du fichier source">${escapeHtml(f.original_filename)}</span>
+                        <span class="file-detail-techline-sep">·</span>
                         <div class="file-detail-status-dot transcript-section transcript-section--inline"
                              data-transcript-file-id="${f.id}"
                              data-audio-downloads="${audioDownloadsAttr}"
