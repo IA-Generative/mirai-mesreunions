@@ -355,6 +355,8 @@
         .mobile-share-reset-btn:hover {
             color: #78350f;
         }
+        #queue-hint { color: #475569; }
+        #queue-hint.queue-hint-stale { color: #94a3b8; font-style: italic; }
         .files-card-header {
             display: flex;
             align-items: center;
@@ -441,6 +443,11 @@
         <div class="progress-bar" id="progress-bar">
             <div class="fill" id="progress-fill" style="width: 0%"></div>
         </div>
+        <!-- Info-bulle file d'attente Kevent (cf /api/queue-status). Sobre,
+             pas de spinner, pas d'emoji autre que ⏳. Polling 10s tant que
+             le fichier courant n'est pas dans un état terminal. -->
+        <p id="queue-hint" class="fr-text--sm fr-text-mention--grey"
+           style="margin-top:.5rem;min-height:1.1em;"></p>
 
         <div class="info-banner" style="margin-top:0.9rem;">
             <strong>Ne fermez pas cette page</strong> pendant l'upload et le traitement.
@@ -1129,6 +1136,81 @@ function setupPwaInstall() {
     });
 }
 
+// ── Info-bulle file d'attente Kevent ────────────────────────────────────
+// Affiche "⏳ Position X/Y dans la file — env. Zs d'attente" sous la zone
+// de progression. Poll 10s tant que le statut local n'est pas terminal.
+// Format texte conformément à la spec (DSFR sobre, pas de spinner).
+const QUEUE_TERMINAL_STATUSES = new Set([
+    'completed','transferred','quarantined','error',
+    'scan_infected','transcode_failed',
+]);
+let _queueHintTimer = null;
+let _queueHintFileId = null;  // qr_token de référence (le dernier job en cours)
+
+function _formatEta(seconds) {
+    if (seconds == null) return '';
+    if (seconds < 15) return 'quasi immédiat';
+    if (seconds < 60) return `${seconds} s`;
+    const m = Math.floor(seconds / 60);
+    const s = Math.round((seconds % 60) / 10) * 10;
+    return s === 0 ? `${m} min` : `${m} min ${String(s).padStart(2,'0')} s`;
+}
+
+function _renderQueueHint(summary, ownStatus) {
+    const el = document.getElementById('queue-hint');
+    if (!el) return;
+    if (!summary || summary.pending_total == null) {
+        el.textContent = '';
+        return;
+    }
+    let txt = '';
+    const pos = summary.your_position;
+    const total = summary.pending_total;
+    const eta = summary.eta_seconds;
+    if (ownStatus === 'processing') {
+        txt = '⏳ Transcription en cours';
+    } else if (pos === 1) {
+        txt = '⏳ En tête de file';
+    } else if (pos && total > 0) {
+        const etaPart = eta != null && eta < 15
+            ? ' — quasi immédiat'
+            : (eta != null ? ` — env. ${_formatEta(eta)} d'attente` : '');
+        txt = `⏳ Position ${pos}/${total} dans la file${etaPart}`;
+    } else if (total > 0) {
+        txt = `⏳ ${total} jobs en attente`;
+    }
+    if (txt && summary.stale) txt += ' (estimation)';
+    el.textContent = txt;
+    el.classList.toggle('queue-hint-stale', !!summary.stale);
+}
+
+async function _pollQueueHint() {
+    try {
+        const qs = _queueHintFileId
+            ? `?job_id=${encodeURIComponent(_queueHintFileId)}`
+            : '';
+        const r = await fetch(`/api/queue-status${qs}`, { cache: 'no-store' });
+        const data = await r.json();
+        _renderQueueHint(data, null);
+    } catch (e) {
+        // silencieux : la hint disparaît si erreur
+    }
+}
+
+function startQueueHint(jobId) {
+    _queueHintFileId = jobId || null;  // null = compteur global
+    if (_queueHintTimer) clearInterval(_queueHintTimer);
+    _pollQueueHint();   // premier appel immédiat
+    _queueHintTimer = setInterval(_pollQueueHint, 10000);
+}
+
+function stopQueueHint() {
+    if (_queueHintTimer) clearInterval(_queueHintTimer);
+    _queueHintTimer = null;
+    _queueHintFileId = null;
+    _renderQueueHint(null, null);
+}
+
 // Refresh status — also used by the manual refresh button.
 async function refreshStatus() {
     try {
@@ -1160,6 +1242,18 @@ async function refreshStatus() {
             const filesCard = document.getElementById('files-card');
             if (filesCard && data.files.length === 0) {
                 filesCard.style.display = 'none';
+            }
+            // Démarre/stoppe l'info-bulle file Kevent selon qu'il reste
+            // des fichiers non-terminaux. job_id Kevent n'est pas connu
+            // côté PWA (interne file-puller) → on poll sans job_id pour
+            // surfacer le compteur global "N jobs en attente".
+            const hasNonTerminal = (data.files || []).some(
+                f => !QUEUE_TERMINAL_STATUSES.has(f.status)
+            );
+            if (hasNonTerminal && !_queueHintTimer) {
+                startQueueHint('');  // pas de job_id → compteur global
+            } else if (!hasNonTerminal && _queueHintTimer) {
+                stopQueueHint();
             }
             if (data.remaining !== undefined) {
                 remaining = data.remaining;

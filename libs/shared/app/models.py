@@ -67,6 +67,11 @@ class UploadSession(ExternalBase):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
 
+    # Corbeille (soft-delete). NULL = visible. NOT NULL = mis à la corbeille
+    # le YYYY-MM-DD ; sera définitivement supprimé (DB + S3) après 30 jours
+    # par le balayage opportuniste de code-generator (api_my_sessions).
+    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
     uploads = relationship("UploadedFile", back_populates="session", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -117,6 +122,9 @@ class UploadedFile(ExternalBase):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
                         onupdate=lambda: datetime.now(timezone.utc))
+
+    # Corbeille (soft-delete). NULL = visible. Cf. UploadSession.trashed_at.
+    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     session = relationship("UploadSession", back_populates="uploads")
 

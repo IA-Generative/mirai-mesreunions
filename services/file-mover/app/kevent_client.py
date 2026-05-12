@@ -266,6 +266,36 @@ class KeventClient:
                     job_id, service_type, operation)
         return job_id
 
+    def list_jobs(
+        self,
+        service_type: str = "audio",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """GET /jobs?service_type=...&limit=...&offset=... — listing live
+        de la file d'attente (scopé sur la clé API = consumer).
+
+        Confirmé opérationnel 2026-05-12. La réponse contient :
+          { consumer, total, limit, offset, jobs: [{job_id, service_type,
+            model, status, queue_position?, created_at, updated_at, error?}] }
+
+        À noter : les jobs ``completed`` sont supprimés après pickup côté
+        gateway → invisibles ici (ne pas tenter d'en déduire un throughput).
+        ``queue_position`` (1-based) n'est présent que sur les ``pending``.
+        """
+        url = f"{self.gateway_url}/jobs"
+        params = {"service_type": service_type, "limit": limit, "offset": offset}
+        try:
+            resp = req.get(url, headers=self._auth_header(),
+                           params=params, timeout=self.timeout)
+        except req.RequestException as exc:
+            raise KeventTransientError(f"Kevent list_jobs unreachable: {exc}") from exc
+        self._raise_for_status(resp, "GET /jobs")
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise KeventApplicativeError(f"Kevent list_jobs non-JSON: {exc}") from exc
+
     def get_job(self, service_type: str, job_id: str) -> dict:
         """GET /jobs/{service_type}/{id}. Returns the parsed JSON.
 

@@ -84,7 +84,16 @@ def handle_request_entity_too_large(_err):
 def get_session_by_token(qr_token: str):
     db = SessionLocal()
     try:
-        return db.query(UploadSession).filter(UploadSession.qr_token == qr_token).first()
+        # Une session mise à la corbeille depuis mydevices ne doit plus
+        # accepter d'upload (sinon le fichier serait invisible côté user).
+        return (
+            db.query(UploadSession)
+            .filter(
+                UploadSession.qr_token == qr_token,
+                UploadSession.trashed_at.is_(None),
+            )
+            .first()
+        )
     finally:
         db.close()
 
@@ -93,7 +102,14 @@ def get_session_by_code(simple_code: str):
     db = SessionLocal()
     try:
         code = simple_code.upper().strip()
-        return db.query(UploadSession).filter(UploadSession.simple_code == code).first()
+        return (
+            db.query(UploadSession)
+            .filter(
+                UploadSession.simple_code == code,
+                UploadSession.trashed_at.is_(None),
+            )
+            .first()
+        )
     finally:
         db.close()
 
@@ -809,6 +825,41 @@ def api_upload(qr_token):
         "status": "pending",
         "remaining": max(0, session_obj.max_uploads - session_obj.upload_count),
     })
+
+
+@app.route("/api/queue-status")
+def api_queue_status():
+    """Proxy léger vers code-generator /api/queue-status (qui proxy
+    file-puller, qui lui interroge la gateway Kevent).
+
+    Query: ``job_id`` (optionnel). Sert la même réponse QueueSummary —
+    surface pour la PWA d'info "Position dans la file" sans exposer
+    de clé ni de token sensible.
+    Pas d'auth requise sur l'endpoint PWA : on ne révèle que des
+    compteurs et une position relative au job_id transmis.
+    """
+    job_id = (request.args.get("job_id") or "").strip()
+    service_type = (request.args.get("service_type") or "audio").strip()
+    params = {"service_type": service_type}
+    if job_id:
+        params["job_id"] = job_id
+    try:
+        resp = req.get(
+            f"{DEVICE_API_PROXY_BASE_URL}/api/queue-status",
+            params=params,
+            headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+            timeout=6,
+        )
+        return resp.json(), resp.status_code
+    except Exception:
+        logger.warning("queue-status proxy to code-generator failed", exc_info=True)
+        from datetime import datetime as _dt, timezone as _tz
+        return jsonify({
+            "pending_total": None, "processing_total": None,
+            "your_position": None, "eta_seconds": None,
+            "throughput_per_min": None, "stale": True,
+            "fetched_at": _dt.now(_tz.utc).isoformat(),
+        }), 503
 
 
 @app.route("/api/status/<qr_token>")

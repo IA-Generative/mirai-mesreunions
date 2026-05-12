@@ -53,6 +53,102 @@ def _render(template: str, transcript: str) -> str:
     return template.replace("{TRANSCRIPT}", transcript)
 
 
+# Seuil au-delà duquel on chunke le transcript pour les LLM rewriters
+# (glossary / oob_cleaning / reformulation). Calibré pour rester en-dessous
+# du timeout HTTP par chunk même sur les modèles medium (mistral-small-24b
+# ~ 20s sur 25k chars). Override possible via env :
+#   LLM_REWRITE_CHUNK_THRESHOLD : seuil au-dessus duquel on découpe (chars)
+#   LLM_REWRITE_CHUNK_SIZE       : taille cible d'un chunk (chars)
+#   LLM_REWRITE_CHUNK_OVERLAP    : overlap entre 2 chunks consécutifs (chars)
+_CHUNK_THRESHOLD = int(os.getenv("LLM_REWRITE_CHUNK_THRESHOLD", "50000"))
+_CHUNK_SIZE      = int(os.getenv("LLM_REWRITE_CHUNK_SIZE",      "25000"))
+_CHUNK_OVERLAP   = int(os.getenv("LLM_REWRITE_CHUNK_OVERLAP",   "500"))
+
+
+def _chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
+    """Découpe le texte en chunks de ~size chars avec overlap.
+
+    Cherche un séparateur naturel (paragraphe, fin de phrase) près de la
+    borne pour éviter de couper en plein milieu d'un mot/phrase. Fallback
+    sur hard-split si rien trouvé dans une fenêtre de 2000 chars.
+    """
+    if len(text) <= size:
+        return [text]
+    chunks: list[str] = []
+    pos = 0
+    while pos < len(text):
+        end = min(pos + size, len(text))
+        if end < len(text):
+            window_start = max(pos + size - 2000, pos + 1)
+            best = -1
+            for sep in ("\n\n", ". ", "? ", "! ", "\n"):
+                idx = text.rfind(sep, window_start, end)
+                if idx > best:
+                    best = idx + len(sep)
+            if best > pos:
+                end = best
+        chunks.append(text[pos:end])
+        if end >= len(text):
+            break
+        pos = max(end - overlap, pos + 1)  # garantit la progression
+    return chunks
+
+
+def _run_llm_rewrite(
+    transcript: str,
+    llm: LLMClient,
+    model: str,
+    prompt_template: str,
+    *,
+    step_name: str,
+    extra_subs: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Exécute un LLM-rewrite (glossary / oob_cleaning / reformulation)
+    avec chunking automatique si le transcript dépasse le seuil.
+
+    Pour chaque chunk : appelle llm.chat ; en cas d'échec, garde le texte
+    brut du chunk plutôt que de tout perdre. Renvoie la concaténation des
+    sorties ; None si le transcript est vide.
+    """
+    if not transcript.strip():
+        return None
+    extra_subs = extra_subs or {}
+    if len(transcript) <= _CHUNK_THRESHOLD:
+        prompt = prompt_template.replace("{TRANSCRIPT}", transcript)
+        for k, v in extra_subs.items():
+            prompt = prompt.replace(k, v)
+        try:
+            return llm.chat(model, [{"role": "user", "content": prompt}])
+        except LLMError:
+            logger.warning("%s: LLM call failed", step_name, exc_info=True)
+            return None
+
+    chunks = _chunk_text(transcript)
+    logger.info(
+        "%s: transcript %d chars → %d chunks (size~%d, overlap %d)",
+        step_name, len(transcript), len(chunks), _CHUNK_SIZE, _CHUNK_OVERLAP,
+    )
+    out_parts: list[str] = []
+    any_success = False
+    for i, ch in enumerate(chunks, 1):
+        prompt = prompt_template.replace("{TRANSCRIPT}", ch)
+        for k, v in extra_subs.items():
+            prompt = prompt.replace(k, v)
+        try:
+            out = llm.chat(model, [{"role": "user", "content": prompt}])
+            out_parts.append(out or ch)
+            any_success = True
+        except LLMError:
+            logger.warning(
+                "%s: chunk %d/%d failed, keeping raw text for this section",
+                step_name, i, len(chunks), exc_info=True,
+            )
+            out_parts.append(ch)
+    if not any_success:
+        return None
+    return "\n\n".join(out_parts)
+
+
 def extract_speaker_names(transcript: str, llm: LLMClient, model: str) -> Dict[str, str]:
     """
     Ask the LLM to map ``SPEAKER_NN`` labels to real names found in the
@@ -116,49 +212,30 @@ def apply_glossary_correction(
         logger.info("glossary_correction: no relevant terms detected, skipping LLM call")
         return None
 
-    prompt = (
-        _load_prompt("glossary_correction")
-        .replace("{TRANSCRIPT}", transcript)
-        .replace("{GLOSSARY_TERMS}", "\n".join(f"- {t}" for t in relevant))
-    )
     logger.info("glossary_correction: %d relevant terms passed to LLM", len(relevant))
-    try:
-        return llm.chat(model, [{"role": "user", "content": prompt}])
-    except LLMError:
-        logger.warning("glossary_correction: LLM call failed", exc_info=True)
-        return None
+    return _run_llm_rewrite(
+        transcript, llm, model, _load_prompt("glossary_correction"),
+        step_name="glossary_correction",
+        extra_subs={"{GLOSSARY_TERMS}": "\n".join(f"- {t}" for t in relevant)},
+    )
 
 
 def clean_oob(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
-    """
-    Ask the LLM to remove out-of-band content. Returns the cleaned text
-    or None if the call failed (caller falls back to original transcript).
-    """
-    if not transcript.strip():
-        return None
-    prompt = _render(_load_prompt("oob_cleaning"), transcript)
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        return llm.chat(model, messages)
-    except LLMError:
-        logger.warning("oob_cleaning: LLM call failed", exc_info=True)
-        return None
+    """Retire les contenus hors-bande. Chunké automatiquement sur les
+    transcriptions longues (cf _run_llm_rewrite)."""
+    return _run_llm_rewrite(
+        transcript, llm, model, _load_prompt("oob_cleaning"),
+        step_name="oob_cleaning",
+    )
 
 
 def reformulate(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
-    """
-    Ask the LLM to turn verbatim into indirect-speech narrative.
-    Returns the reformulated text or None on failure.
-    """
-    if not transcript.strip():
-        return None
-    prompt = _render(_load_prompt("reformulation"), transcript)
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        return llm.chat(model, messages)
-    except LLMError:
-        logger.warning("reformulation: LLM call failed", exc_info=True)
-        return None
+    """Reformule en discours indirect. Chunké automatiquement sur les
+    transcriptions longues (cf _run_llm_rewrite)."""
+    return _run_llm_rewrite(
+        transcript, llm, model, _load_prompt("reformulation"),
+        step_name="reformulation",
+    )
 
 
 def analyse_meeting(transcript: str, llm: LLMClient, model: str) -> Optional[dict]:

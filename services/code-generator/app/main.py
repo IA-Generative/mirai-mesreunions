@@ -263,12 +263,110 @@ def request_internal_device_api(method: str, path: str, *, json_body=None, timeo
 
 
 def _get_owned_file(db, user_sub: str, file_id: str):
+    """Return owned file row, ignoring trashed files and trashed sessions.
+
+    Une fois `trashed_at` positionné, le fichier est invisible pour les
+    endpoints download/stream/transcript — l'utilisateur ne peut plus
+    l'utiliser, mais la row + S3 restent jusqu'à la purge 30j.
+    """
     return (
         db.query(UploadedFile)
         .join(UploadSession, UploadSession.id == UploadedFile.session_id)
-        .filter(UploadedFile.id == file_id, UploadSession.user_sub == user_sub)
+        .filter(
+            UploadedFile.id == file_id,
+            UploadSession.user_sub == user_sub,
+            UploadedFile.trashed_at.is_(None),
+            UploadSession.trashed_at.is_(None),
+        )
         .first()
     )
+
+
+# Durée de rétention de la corbeille avant purge définitive (DB + S3).
+TRASH_RETENTION_DAYS = int(os.getenv("TRASH_RETENTION_DAYS", "30"))
+
+
+def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
+    """Hard-delete des entries en corbeille depuis > TRASH_RETENTION_DAYS.
+
+    Appelé en début de chaque GET /api/my-sessions pour assurer le
+    "vidage automatique" promis dans l'UI sans dépendre d'un cron externe.
+    Retourne (sessions_purged, files_purged, s3_objects_deleted).
+    """
+    threshold = datetime.now(timezone.utc) - timedelta(days=TRASH_RETENTION_DAYS)
+    sessions_purged = 0
+    files_purged = 0
+    objects_deleted = 0
+
+    # 1) Fichiers individuels en corbeille — leur session peut être active.
+    trashed_files = (
+        db.query(UploadedFile)
+        .join(UploadSession, UploadSession.id == UploadedFile.session_id)
+        .filter(
+            UploadSession.user_sub == user_sub,
+            UploadedFile.trashed_at.isnot(None),
+            UploadedFile.trashed_at < threshold,
+        )
+        .all()
+    )
+    for f in trashed_files:
+        for cfg, key in (
+            (s3_upload_cfg, f.stored_filename),
+            (s3_processed_cfg, f.transcoded_filename),
+        ):
+            if not key:
+                continue
+            try:
+                delete_object(cfg, key)
+                objects_deleted += 1
+            except Exception:
+                logger.debug("trash purge: S3 delete failed for %s", key, exc_info=True)
+        try:
+            t_cfg, t_key = _resolve_transferred_storage(db, f)
+            if t_cfg and t_key:
+                delete_object(t_cfg, t_key)
+                objects_deleted += 1
+        except Exception:
+            logger.debug("trash purge: transferred S3 delete failed for %s", f.id, exc_info=True)
+        db.delete(f)
+        files_purged += 1
+
+    # 2) Sessions en corbeille (cascade delete-orphan supprime aussi
+    # les uploaded_files qui leur sont attachés — qu'elles soient
+    # trashed ou non, la session porte la décision).
+    trashed_sessions = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.user_sub == user_sub,
+            UploadSession.trashed_at.isnot(None),
+            UploadSession.trashed_at < threshold,
+        )
+        .all()
+    )
+    for s in trashed_sessions:
+        for f in s.uploads:
+            for cfg, key in (
+                (s3_upload_cfg, f.stored_filename),
+                (s3_processed_cfg, f.transcoded_filename),
+            ):
+                if not key:
+                    continue
+                try:
+                    delete_object(cfg, key)
+                    objects_deleted += 1
+                except Exception:
+                    logger.debug("trash purge (session): S3 delete failed for %s", key, exc_info=True)
+            files_purged += 1
+        db.delete(s)
+        sessions_purged += 1
+
+    if sessions_purged or files_purged:
+        db.commit()
+        logger.info(
+            "trash purge: user=%s sessions=%s files=%s s3_objects=%s",
+            user_sub, sessions_purged, files_purged, objects_deleted,
+        )
+    return sessions_purged, files_purged, objects_deleted
 
 
 def _resolve_file_storage(file_obj: UploadedFile):
@@ -675,8 +773,18 @@ def api_my_sessions():
     user = get_current_user()
     db = SessionLocal()
     try:
+        # Avant de servir la liste : purge définitive opportuniste des items
+        # restés en corbeille > 30 jours. Idempotent ; coût borné (filtre
+        # indexé sur trashed_at + scope user_sub).
+        try:
+            _purge_expired_trash(db, user["sub"])
+        except Exception:
+            db.rollback()
+            logger.debug("trash purge skipped (non-fatal)", exc_info=True)
+
         sessions = db.query(UploadSession).filter(
-            UploadSession.user_sub == user["sub"]
+            UploadSession.user_sub == user["sub"],
+            UploadSession.trashed_at.is_(None),
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
         # On récupère la liste des devices encore actifs pour cet utilisateur
@@ -719,6 +827,10 @@ def api_my_sessions():
         for s in sessions:
             uploads = []
             for f in s.uploads:
+                # Skip soft-deleted files (en corbeille) — invisibles tant
+                # que pas purgés définitivement (>30j) par _purge_expired_trash.
+                if f.trashed_at is not None:
+                    continue
                 # Self-heal: if transfer callback was missed but object exists internally,
                 # promote the status to TRANSFERRED so the UI can resume correctly.
                 if f.status in {UploadStatus.READY_FOR_TRANSFER, UploadStatus.TRANSFERRING} and f.transcoded_filename:
@@ -1575,6 +1687,52 @@ def api_file_stream_transferred(file_id):
         db.close()
 
 
+@app.route("/api/queue-status", methods=["GET"])
+def api_queue_status():
+    """Proxy live vers file-puller /api/v1/queue-status (qui parle au gateway).
+
+    Accepte 2 modes d'auth :
+      - session OIDC (utilisateur connecté à mydevices)
+      - bearer INTERNAL_API_TOKEN (cross-cluster depuis upload-portal)
+
+    Query: ``job_id`` (optionnel) pour position+ETA spécifique.
+    Réponse: ``QueueSummary`` JSON (cf libs/shared/app/queue_eta.py).
+    En cas d'erreur upstream → 200 + payload neutre (stale=true) plutôt
+    que de propager l'erreur, pour que la UI puisse afficher
+    "indisponible" sans casser.
+    """
+    # Auth dual : soit OIDC session, soit bearer INTERNAL_API_TOKEN.
+    has_session = bool(session.get("user"))
+    has_internal = verify_bearer_token(
+        request.headers.get("Authorization", ""), INTERNAL_API_TOKEN
+    )
+    if not (has_session or has_internal):
+        return jsonify({"error": "Unauthorized"}), 401
+    job_id = (request.args.get("job_id") or "").strip()
+    service_type = (request.args.get("service_type") or "audio").strip()
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://file-puller:8090").rstrip("/")
+    params = {"service_type": service_type}
+    if job_id:
+        params["job_id"] = job_id
+    try:
+        resp = req.get(
+            f"{base}/api/v1/queue-status",
+            headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+            params=params,
+            timeout=6,
+        )
+        return jsonify(resp.json()), resp.status_code
+    except Exception:
+        logger.warning("queue-status proxy to file-puller failed", exc_info=True)
+        from datetime import datetime, timezone as _tz
+        return jsonify({
+            "pending_total": None, "processing_total": None,
+            "your_position": None, "eta_seconds": None,
+            "throughput_per_min": None, "stale": True,
+            "fetched_at": datetime.now(_tz.utc).isoformat(),
+        }), 503
+
+
 @app.route("/api/file/<file_id>/rename", methods=["POST"])
 @require_auth
 def api_rename_file(file_id):
@@ -1628,84 +1786,35 @@ def api_rename_file(file_id):
 @app.route("/api/file/<file_id>", methods=["DELETE"])
 @require_auth
 def api_delete_file(file_id):
-    """Permanently delete a single uploaded file (S3 + DB), keep the session.
+    """Soft-delete (corbeille) : positionne trashed_at sur le fichier.
 
-    Cascade :
-      1. S3 audio-upload   (stored_filename)        — fichier source brut
-      2. S3 audio-processed (transcoded_filename)   — fichier transcodé MP4
-      3. S3 audio-internal (<user>/<code>/<file>)  — copie zone interne
-      4. external uploaded_files row                — DELETE
-      5. internal user_audio_files row              — best-effort via token-issuer
-         (si l'appel HTTP échoue, la row reste comme audit ; pas visible côté
-         mydevices puisque c'est uploaded_files qui drive l'UI).
+    Le fichier disparaît de la liste mydevices immédiatement, mais reste
+    en DB + S3 pendant TRASH_RETENTION_DAYS (30j par défaut). À l'expiration,
+    `_purge_expired_trash` (déclenché par le prochain GET /api/my-sessions
+    de l'utilisateur) fait le hard-delete S3 + DB + zone interne.
 
-    Ownership vérifiée via _get_owned_file (join sur upload_sessions.user_sub).
+    Ownership vérifiée via _get_owned_file (qui filtre déjà les trashed).
     """
     user = get_current_user()
     db = SessionLocal()
-    deleted_objects = 0
     try:
         file_obj = _get_owned_file(db, user["sub"], file_id)
         if not file_obj:
             return jsonify({"error": "file_not_found"}), 404
-
-        try:
-            if file_obj.stored_filename:
-                delete_object(s3_upload_cfg, file_obj.stored_filename)
-                deleted_objects += 1
-        except Exception:
-            logger.warning("Failed to delete upload object %s", file_obj.stored_filename, exc_info=True)
-        try:
-            if file_obj.transcoded_filename:
-                delete_object(s3_processed_cfg, file_obj.transcoded_filename)
-                deleted_objects += 1
-        except Exception:
-            logger.warning("Failed to delete processed object %s", file_obj.transcoded_filename, exc_info=True)
-        try:
-            t_cfg, t_key = _resolve_transferred_storage(db, file_obj)
-            if t_cfg and t_key:
-                delete_object(t_cfg, t_key)
-                deleted_objects += 1
-        except Exception:
-            logger.warning("Failed to delete transferred object for file %s", file_id, exc_info=True)
-
+        file_obj.trashed_at = datetime.now(timezone.utc)
         original_filename = file_obj.original_filename
-        session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
-        simple_code_for_internal = session_obj.simple_code if session_obj else None
-        db.delete(file_obj)
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception("Failed to delete file %s for user %s", file_id, user.get("sub"))
+        logger.exception("Failed to trash file %s for user %s", file_id, user.get("sub"))
         return jsonify({"error": "file_delete_failed"}), 500
     finally:
         db.close()
 
-    # Cleanup zone interne (user_audio_files + transcription_events).
-    # Best-effort : la suppression côté externe est déjà committée. Le
-    # lookup interne se fait par (user_sub, simple_code, original_filename)
-    # car les UUID externes et internes sont indépendants.
-    if simple_code_for_internal and original_filename:
-        try:
-            request_internal_device_api(
-                "DELETE",
-                "/api/v1/files/by-session",
-                json_body={
-                    "user_sub": user.get("sub", ""),
-                    "simple_code": simple_code_for_internal,
-                    "original_filename": original_filename,
-                },
-            )
-        except Exception:
-            logger.debug(
-                "External delete OK but internal cleanup failed for "
-                "file=%s session=%s — user_audio_files row reste comme audit.",
-                original_filename, simple_code_for_internal, exc_info=True,
-            )
-
     return jsonify({
         "ok": True,
-        "deleted_objects": deleted_objects,
+        "trashed": True,
+        "retention_days": TRASH_RETENTION_DAYS,
         "filename": original_filename,
     })
 
@@ -1713,106 +1822,83 @@ def api_delete_file(file_id):
 @app.route("/api/my-sessions/<simple_code>", methods=["DELETE"])
 @require_auth
 def api_delete_session(simple_code):
-    """Permanently delete a single session (and everything attached to it).
+    """Soft-delete (corbeille) d'une session entière.
 
-    Cascade order :
-      1. S3 audio-upload + audio-processed objects for the session's files
-      2. uploaded_files + upload_session rows in postgres-external
-      3. Internal cleanup via token-issuer DELETE /api/v1/sessions/<code>
-         (issued_token + options + device_enrollments)
-
-    Used by the "Supprimer cette session" button. Confirms ownership at every
-    layer (user_sub on the postgres-external query + bearer to token-issuer).
+    Positionne `trashed_at` sur la session : elle disparaît de la liste
+    et ses fichiers ne sont plus accessibles (download/transcript). La
+    purge définitive (DB + S3 + cleanup interne via token-issuer) est faite
+    par `_purge_expired_trash` après TRASH_RETENTION_DAYS.
     """
     user = get_current_user()
     db = SessionLocal()
-    deleted_objects = 0
-    deleted_files = 0
     try:
         s = (
             db.query(UploadSession)
-            .filter(UploadSession.user_sub == user["sub"], UploadSession.simple_code == simple_code)
+            .filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.simple_code == simple_code,
+                UploadSession.trashed_at.is_(None),
+            )
             .first()
         )
         if not s:
             return jsonify({"error": "session_not_found"}), 404
-        for f in s.uploads:
-            try:
-                if f.stored_filename:
-                    delete_object(s3_upload_cfg, f.stored_filename)
-                    deleted_objects += 1
-            except Exception:
-                logger.warning("Failed to delete upload object %s", f.stored_filename)
-            try:
-                if f.transcoded_filename:
-                    delete_object(s3_processed_cfg, f.transcoded_filename)
-                    deleted_objects += 1
-            except Exception:
-                logger.warning("Failed to delete processed object %s", f.transcoded_filename)
-            deleted_files += 1
-        db.delete(s)
+        s.trashed_at = datetime.now(timezone.utc)
+        deleted_files = sum(1 for _ in s.uploads)
         db.commit()
     except Exception:
         db.rollback()
-        logger.exception("Failed to delete session %s for user %s", simple_code, user.get("sub"))
+        logger.exception("Failed to trash session %s for user %s", simple_code, user.get("sub"))
         return jsonify({"error": "session_delete_failed"}), 500
     finally:
         db.close()
 
-    # Cleanup interne (best-effort — l'externe est déjà nettoyé, l'interne peut
-    # être rejoué si ça échoue maintenant via le purge background).
-    try:
-        request_internal_device_api(
-            "DELETE",
-            f"/api/v1/sessions/{simple_code}",
-            json_body={"user_sub": user.get("sub", "")},
-        )
-    except Exception:
-        logger.exception(
-            "External cleanup OK but internal token-issuer DELETE %s failed — "
-            "background purge will catch up.", simple_code,
-        )
-
-    return jsonify({"ok": True, "deleted_files": deleted_files, "deleted_objects": deleted_objects})
+    return jsonify({
+        "ok": True,
+        "trashed": True,
+        "retention_days": TRASH_RETENTION_DAYS,
+        "deleted_files": deleted_files,
+    })
 
 
 @app.route("/api/purge-my-sessions", methods=["POST"])
 @require_auth
 def api_purge_my_sessions():
+    """Soft-delete (corbeille) de TOUTES les sessions de l'utilisateur.
+
+    Le hard-delete (DB + S3) sera fait par `_purge_expired_trash` après
+    TRASH_RETENTION_DAYS. Idempotent : seules les sessions actuellement
+    visibles (non déjà en corbeille) sont marquées.
+    """
     user = get_current_user()
     db = SessionLocal()
     deleted_sessions = 0
     deleted_files = 0
-    deleted_objects = 0
     try:
-        sessions = db.query(UploadSession).filter(UploadSession.user_sub == user["sub"]).all()
+        now = datetime.now(timezone.utc)
+        sessions = (
+            db.query(UploadSession)
+            .filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.trashed_at.is_(None),
+            )
+            .all()
+        )
         for s in sessions:
-            for f in s.uploads:
-                try:
-                    if f.stored_filename:
-                        delete_object(s3_upload_cfg, f.stored_filename)
-                        deleted_objects += 1
-                except Exception:
-                    logger.warning("Failed to delete upload object %s", f.stored_filename)
-                try:
-                    if f.transcoded_filename:
-                        delete_object(s3_processed_cfg, f.transcoded_filename)
-                        deleted_objects += 1
-                except Exception:
-                    logger.warning("Failed to delete processed object %s", f.transcoded_filename)
-                deleted_files += 1
-            db.delete(s)
+            s.trashed_at = now
+            deleted_files += sum(1 for _ in s.uploads)
             deleted_sessions += 1
         db.commit()
         return jsonify({
             "ok": True,
+            "trashed": True,
+            "retention_days": TRASH_RETENTION_DAYS,
             "deleted_sessions": deleted_sessions,
             "deleted_files": deleted_files,
-            "deleted_objects": deleted_objects,
         })
     except Exception:
         db.rollback()
-        logger.exception("Failed to purge user sessions for %s", user["sub"])
+        logger.exception("Failed to trash user sessions for %s", user["sub"])
         return jsonify({"error": "Failed to purge sessions"}), 500
     finally:
         db.close()
@@ -2120,17 +2206,44 @@ INDEX_TEMPLATE = """
         .transcript-status-spinner.ok { background: #10b981; }
         .transcript-status-icon { font-size: 0.95rem; line-height: 1; }
         /* Dropdown unifié des téléchargements (audios + transcripts) */
+        /* Bloc téléchargements : liste verticale de "types de document", chaque
+           ligne montrant à droite des boutons-icône (un par format). Objectif :
+           pas de jargon dans la liste (que des types) + icônes facilement
+           identifiables pour un néophyte. */
         .downloads-block {
-            display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+            display: flex; flex-direction: column; gap: 0.15rem;
             margin-top: 0.4rem;
+            border: 1px solid #e2e8f0; border-radius: 8px;
+            background: #fbfcfd; padding: 0.35rem 0.5rem;
         }
-        .downloads-select {
-            flex: 1; min-width: 180px; max-width: 100%;
-            padding: 0.3rem 0.5rem; font-size: 0.85rem;
-            border: 1px solid #cbd5e1; border-radius: 6px; background: #fff;
+        .downloads-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 0.5rem; padding: 0.3rem 0.2rem;
+            border-bottom: 1px solid #f1f5f9;
         }
-        .downloads-btn-dl, .downloads-btn-stream {
-            white-space: nowrap;
+        .downloads-row:last-child { border-bottom: 0; }
+        .downloads-row-label {
+            font-size: 0.82rem; color: #1e293b; flex: 1; min-width: 0;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .downloads-row-icons {
+            display: flex; gap: 0.2rem; flex-shrink: 0;
+        }
+        .downloads-icon-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.85rem; height: 1.85rem;
+            border: 1px solid #cbd5e1; border-radius: 6px;
+            background: #fff; color: #475569;
+            text-decoration: none; cursor: pointer;
+            transition: all 0.12s ease;
+        }
+        .downloads-icon-btn svg { width: 1.1rem; height: 1.1rem; }
+        .downloads-icon-btn:hover {
+            background: #eff6ff; border-color: #3b82f6; color: #1d4ed8;
+            transform: translateY(-1px);
+        }
+        .downloads-icon-btn-play:hover {
+            background: #dcfce7; border-color: #16a34a; color: #166534;
         }
         .file-impact-row { margin-top: 0.35rem; display: flex; align-items: center; gap: 0.5rem; }
         /* Diagnostic per-step de la transcription IA (dépliable) */
@@ -2232,6 +2345,9 @@ INDEX_TEMPLATE = """
         }
         .impact-details .file-impact-row { padding: 0 0.6rem 0.6rem 0.6rem; margin: 0; }
         .impact-hint { font-size: 0.72rem; color: #94a3b8; }
+        /* Hint file d'attente Kevent — sobre, atténuée si stale */
+        .queue-hint { color: #475569; }
+        .queue-hint.queue-hint-stale { color: #94a3b8; font-style: italic; }
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
         .file-row-compact-wrapper:hover { background: #f8fafc; }
@@ -2277,7 +2393,37 @@ INDEX_TEMPLATE = """
         .file-row-title:hover {
             color: #1e40af; text-decoration: none !important;
         }
-        .file-row-meta { font-size: 0.75rem; color: #64748b; white-space: nowrap; }
+        .file-row-meta {
+            font-size: 0.75rem; color: #64748b; white-space: nowrap;
+            display: inline-flex; flex-direction: column; align-items: flex-end;
+            line-height: 1.15; gap: 0.05rem;
+        }
+        .file-row-meta .file-row-meta-date { font-weight: 500; color: #475569; }
+        .file-row-meta .file-row-meta-dur { color: #94a3b8; font-variant-numeric: tabular-nums; }
+        /* Nom du fichier audio d'origine sous le titre (vue détail), légèrement bleuté */
+        .file-detail-source-filename {
+            font-size: 0.74rem; color: #3b82f6; font-style: italic;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            flex: 1; min-width: 0; text-align: left;
+            margin-left: 0.4rem;
+        }
+        /* Bouton icône (poubelle, camion poubelle) : remplace les boutons texte
+           Supprimer/Purger. Fond transparent, hover discret, tooltip natif. */
+        .icon-btn {
+            background: transparent; border: 1px solid transparent;
+            cursor: pointer; padding: 0.18rem 0.32rem; border-radius: 6px;
+            line-height: 1; color: #64748b;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .icon-btn svg { width: 1.05rem; height: 1.05rem; }
+        .icon-btn:hover { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+        .icon-btn:focus { outline: 2px solid #fca5a5; outline-offset: 1px; }
+        .icon-btn[disabled] { opacity: 0.35; cursor: not-allowed; }
+        .icon-btn[disabled]:hover { background: transparent; color: #64748b; border-color: transparent; }
+        /* Variante "purge" plus marquée — camion poubelle, action lourde */
+        .icon-btn-purge { color: #b91c1c; }
+        .icon-btn-purge svg { width: 1.2rem; height: 1.2rem; }
+        .icon-btn-purge:hover { background: #b91c1c; color: #fff; border-color: #991b1b; }
         .file-row-expand {
             border: 1px solid transparent; background: transparent;
             cursor: pointer; color: #475569; font-size: 0.78rem;
@@ -2860,8 +3006,14 @@ INDEX_TEMPLATE = """
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
-                <button id="purge-btn" class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline" disabled
-                        onclick="purgeSessions()">Purger liste + fichiers</button>
+                <button type="button" id="purge-btn" class="icon-btn icon-btn-purge" disabled
+                        onclick="purgeSessions()"
+                        title="Mettre toute la liste à la corbeille (purgée définitivement après 30 jours)"
+                        aria-label="Tout mettre à la corbeille">
+                    <!-- Camion poubelle — action lourde qui touche TOUTES les
+                         sessions. Icône inline (peuplée aussi par JS si écrasée). -->
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:1.2rem;height:1.2rem;"><path d="M2 17h2V7a1 1 0 0 1 1-1h9v11h2"/><path d="M14 10h4l3 4v3h-2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 10v3M9 10v3M11 10v3"/></svg>
+                </button>
             </div>
             <!-- "Transferts en cours" : un bloc par fichier in-flight avec
                  son propre chemin de fer + statut transcription inline.
@@ -2904,6 +3056,59 @@ function showFilesList() {
 }
 // Toggle l'affichage de la zone résumé sous une ligne compacte. Le
 // chevron tourne (CSS) selon la classe is-open.
+// ── Info-bulle file d'attente Kevent (vue détail) ───────────────────────
+// Poll 10s vers /api/queue-status. Format texte conformément à la spec.
+const _TERMINAL_TS = new Set([
+    'completed','kevent_completed','failed','kevent_failed',
+    'kevent_partially_completed','mcr_pushed','mcr_auth_failed',
+    'mcr_rejected','mcr_push_failed','disabled',
+]);
+let _queueHintTimer = null;
+function _fmtEta(s) {
+    if (s == null) return '';
+    if (s < 15) return 'quasi immédiat';
+    if (s < 60) return `${s} s`;
+    const m = Math.floor(s / 60);
+    const sec = Math.round((s % 60) / 10) * 10;
+    return sec === 0 ? `${m} min` : `${m} min ${String(sec).padStart(2,'0')} s`;
+}
+async function _pollQueueHintDetail(fileId) {
+    const el = document.querySelector(`[data-queue-hint-for="${fileId}"]`);
+    if (!el) return;
+    try {
+        const r = await fetch('/api/queue-status', { cache: 'no-store' });
+        const d = await r.json();
+        if (d.pending_total == null) { el.textContent = ''; return; }
+        let txt = '';
+        if (d.your_position === 1) {
+            txt = '⏳ En tête de file';
+        } else if (d.your_position && d.pending_total > 0) {
+            const eta = d.eta_seconds;
+            const part = eta != null && eta < 15
+                ? ' — quasi immédiat'
+                : (eta != null ? ` — env. ${_fmtEta(eta)} d'attente` : '');
+            txt = `⏳ Position ${d.your_position}/${d.pending_total} dans la file${part}`;
+        } else if (d.pending_total > 0) {
+            txt = `⏳ ${d.pending_total} jobs en attente`;
+        } else if (d.processing_total > 0) {
+            txt = '⏳ Transcription en cours';
+        }
+        if (txt && d.stale) txt += ' (estimation)';
+        el.textContent = txt;
+        el.classList.toggle('queue-hint-stale', !!d.stale);
+    } catch (e) { /* silencieux */ }
+}
+function startQueueHintDetail(fileId) {
+    if (_queueHintTimer) clearInterval(_queueHintTimer);
+    if (!fileId) return;
+    _pollQueueHintDetail(fileId);  // 1er appel immédiat
+    _queueHintTimer = setInterval(() => _pollQueueHintDetail(fileId), 10000);
+}
+function stopQueueHintDetail() {
+    if (_queueHintTimer) clearInterval(_queueHintTimer);
+    _queueHintTimer = null;
+}
+
 // Affiche un modal avec toutes les infos techniques du fichier :
 // statut + engine + langue + étapes IA (✓/✗ avec description) + impact LUFS.
 async function openFileInfoModal(fileId) {
@@ -3028,7 +3233,7 @@ function toggleRowExpand(btn) {
     exp.style.display = open ? 'none' : '';
     btn.classList.toggle('is-open', !open);
     const lbl = btn.querySelector('.file-row-expand-label');
-    if (lbl) lbl.textContent = open ? 'déplier' : 'replier';
+    if (lbl) lbl.textContent = open ? 'détails' : 'replier';
     btn.setAttribute('aria-label', open ? 'Voir le résumé' : 'Masquer le résumé');
 }
 // Format helpers pour la vue liste compacte.
@@ -3052,6 +3257,23 @@ function _formatDuration(seconds) {
 // confirmation pour refléter la vraie durée que Renouveler applique.
 const deviceRetentionDays = {{ device_retention_days }};
 
+// Icônes SVG inline (Heroicons-like, simplifiés). Centralisées ici pour
+// que tous les boutons-icône partagent le même rendu et qu'on puisse les
+// faire évoluer en un seul endroit.
+const ICONS = {
+    // Poubelle simple — suppression d'un élément
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>',
+    // Camion poubelle — purge massive (suppression de toute la liste)
+    truck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 17h2V7a1 1 0 0 1 1-1h9v11h2"/><path d="M14 10h4l3 4v3h-2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 10v3M9 10v3M11 10v3"/></svg>',
+    // Icônes formats document
+    fmt_audio:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+    fmt_play:   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+    fmt_txt:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8M8 9h2"/></svg>',
+    fmt_md:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15V9l2.5 3L12 9v6"/><path d="M16 9v6m0 0l-1.5-1.5M16 15l1.5-1.5"/></svg>',
+    fmt_docx:   '<svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#dbeafe"/><path d="M14 2v6h6" fill="#bfdbfe"/><text x="12" y="18" font-size="6" font-weight="700" fill="#1e40af" text-anchor="middle" font-family="Arial,sans-serif">W</text></svg>',
+    fmt_odt:    '<svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#dcfce7"/><path d="M14 2v6h6" fill="#bbf7d0"/><text x="12" y="18" font-size="5" font-weight="700" fill="#166534" text-anchor="middle" font-family="Arial,sans-serif">ODT</text></svg>',
+    fmt_json:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v3c0 2-2 2-2 2s2 0 2 2v3c0 2 1 3 3 3"/><path d="M16 4c2 0 3 1 3 3v3c0 2 2 2 2 2s-2 0-2 2v3c0 2-1 3-3 3"/></svg>',
+};
 function escapeHtml(v) {
     return (v || '').toString().replace(/[&<>"']/g, (s) => ({
         '&': '&amp;',
@@ -3524,13 +3746,15 @@ async function renewTokenByQr(qrToken) {
 //  affichée dans l'onglet "Mes transferts et analyses".)
 
 async function purgeSessions() {
-    const ok = confirm('Supprimer toutes vos sessions et les fichiers associés (S3 upload/processed) ?');
+    const ok = confirm('Mettre TOUTES vos sessions et leurs fichiers à la corbeille ?\\n\\n' +
+                       'Les éléments seront définitivement supprimés au bout de 30 jours.');
     if (!ok) return;
     try {
         const resp = await fetch('/api/purge-my-sessions', { method: 'POST' });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || 'Erreur purge');
-        alert(`Purge terminée: ${data.deleted_sessions} sessions, ${data.deleted_files} fichiers.`);
+        alert(`Mis à la corbeille: ${data.deleted_sessions || 0} session(s), ${data.deleted_files || 0} fichier(s).\\n` +
+              `Purge définitive automatique au bout de 30 jours.`);
         loadSessions();
         loadDevices();
     } catch (e) {
@@ -3540,9 +3764,9 @@ async function purgeSessions() {
 
 async function deleteFile(fileId, filenameRaw) {
     const filename = (filenameRaw || '').replace(/&#39;/g, "'");
-    if (!confirm(`Supprimer définitivement le fichier « ${filename} » ?\n\n` +
-                 `Le fichier source, transcodé et la copie zone interne sont retirés (S3 + DB). ` +
-                 `La session reste utilisable pour d'autres uploads. Action irréversible.`)) return;
+    if (!confirm(`Mettre le fichier « ${filename} » à la corbeille ?\n\n` +
+                 `Le fichier (audio + transcription + CR) est masqué de la liste ` +
+                 `et sera définitivement supprimé au bout de 30 jours.`)) return;
     try {
         const resp = await fetch(`/api/file/${fileId}`, { method: 'DELETE' });
         const data = await resp.json();
@@ -3558,9 +3782,9 @@ async function deleteSession(simpleCode, allowSilent) {
     // (rien à perdre). For "enrolled" / "expired_consumed" with files,
     // double confirm warning that linked files will be removed too.
     if (!allowSilent) {
-        if (!confirm(`Supprimer définitivement la session ${simpleCode} ?\n\n` +
-                     `Tous les fichiers uploadés via ce code seront aussi supprimés ` +
-                     `(S3 + base de données). Action irréversible.`)) return;
+        if (!confirm(`Mettre la session ${simpleCode} à la corbeille ?\n\n` +
+                     `Les fichiers uploadés via ce code seront aussi masqués ` +
+                     `et définitivement supprimés au bout de 30 jours.`)) return;
     }
     const btn = document.querySelector(`[data-session-delete="${simpleCode}"]`);
     if (btn) btn.disabled = true;
@@ -3943,13 +4167,17 @@ async function loadSessions(opts) {
                                     onclick="toggleRowExpand(this)"
                                     aria-label="Voir le résumé">
                                 <span class="file-row-expand-icon">▶</span>
-                                <span class="file-row-expand-label">déplier</span>
+                                <span class="file-row-expand-label">détails</span>
                             </button>
-                            <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
-                            <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn file-row-delete"
+                            <span class="file-row-meta">
+                                <span class="file-row-meta-date">${escapeHtml(fileDateLabel)}</span>
+                                ${fileDurLabel ? `<span class="file-row-meta-dur">${escapeHtml(fileDurLabel)}</span>` : ''}
+                            </span>
+                            <button type="button" class="icon-btn file-row-delete"
                                     onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                    title="Supprime définitivement ce fichier (S3 + DB) sans toucher au reste de la session.">
-                                Supprimer
+                                    title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                    aria-label="Mettre à la corbeille">
+                                ${ICONS.trash}
                             </button>
                         </div>
                         <!-- Zone résumé révélée par le chevron, sans le statut
@@ -3973,10 +4201,11 @@ async function loadSessions(opts) {
                     <div class="file-detail-header">
                         <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary file-detail-back"
                                 onclick="showFilesList()">← Retour à la liste</button>
-                        <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline file-delete-btn"
+                        <button type="button" class="icon-btn"
                                 onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                title="Supprime définitivement ce fichier (S3 + DB).">
-                            Supprimer
+                                title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                aria-label="Mettre à la corbeille">
+                            ${ICONS.trash}
                         </button>
                     </div>
                     <div class="file-detail-title-row">
@@ -3995,7 +4224,14 @@ async function loadSessions(opts) {
                          (qualité, statut, étapes, normalisation) sont
                          derrière le bouton (i) qui ouvre un modal. -->
                     <div class="file-detail-techline">
-                        <span class="file-row-meta">${escapeHtml(fileDateLabel)}${fileDurLabel ? ' • ' + escapeHtml(fileDurLabel) : ''}</span>
+                        <span class="file-row-meta">
+                            <span class="file-row-meta-date">${escapeHtml(fileDateLabel)}</span>
+                            ${fileDurLabel ? `<span class="file-row-meta-dur">${escapeHtml(fileDurLabel)}</span>` : ''}
+                        </span>
+                        <span class="file-detail-source-filename"
+                              title="Nom d'origine du fichier audio">
+                            ${escapeHtml(f.original_filename)}
+                        </span>
                         <button class="file-detail-info-btn"
                                 type="button"
                                 data-file-info-btn="${f.id}"
@@ -4012,6 +4248,11 @@ async function loadSessions(opts) {
                          data-compact="1"
                          data-info-btn-target="${f.id}"
                          style="display:none;"></div>
+                    <!-- Hint file d'attente Kevent (idem PWA) — poll 10s tant
+                         que la transcription n'est pas terminée. -->
+                    <p class="fr-text--sm fr-text-mention--grey queue-hint"
+                       data-queue-hint-for="${f.id}"
+                       style="margin:.4rem 0 0 0;min-height:1.1em;"></p>
                     ${railroadBlock}
                     <!-- Section résumé toujours visible (pas de <details>
                          repliable en vue détail). Le contenu (key_points
@@ -4049,10 +4290,11 @@ async function loadSessions(opts) {
                 // est figée/morte.
                 const isActiveBucket = (lifecycle === 'pending_enrollment' || lifecycle === 'enrolled');
                 const sessionDeleteBtn = isActiveBucket ? '' : `
-                    <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                    <button type="button" class="icon-btn"
                             data-session-delete="${s.simple_code}"
                             onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
-                            title="Suppression définitive (DB + S3)">Supprimer</button>`;
+                            title="Mettre cette session à la corbeille (purgée définitivement après 30 jours)"
+                            aria-label="Mettre la session à la corbeille">${ICONS.trash}</button>`;
                 const sessionRenewBtn = isActiveBucket ? '' : `
                     <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
                             onclick="renewSession('${s.id}')">Renouveller</button>`;
@@ -4368,61 +4610,79 @@ async function loadTranscriptStatus(fileId, container) {
             <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
         </div>${stepsDetails}`;
 
-        // Construit le dropdown unifié : on agrège audios (passés en
-        // data-audio-downloads par la file row) + transcripts (kind ×
-        // formats) + meeting-cr. Une seule liste, un seul bouton
-        // Télécharger ; le bouton Écouter n'apparaît que pour les audios.
+        // Nouvelle UX downloads : on liste les TYPES de document (pas les
+        // formats × types), avec à droite une rangée de boutons-icône, un
+        // par format disponible. Pour un néophyte : "Ah je veux le
+        // compte-rendu — je clique l'icône Word." Plus de jargon dans le
+        // libellé, plus de dropdown 12 lignes.
         let audioOptions = [];
         try {
             const raw = container.getAttribute('data-audio-downloads') || '';
             audioOptions = raw ? JSON.parse(decodeURIComponent(raw)) : [];
         } catch (e) { audioOptions = []; }
 
-        const allOptions = [];
+        const FMT_ICON = {
+            txt:  { svg: ICONS.fmt_txt,  title: 'Texte simple (.txt)' },
+            md:   { svg: ICONS.fmt_md,   title: 'Markdown (.md)' },
+            docx: { svg: ICONS.fmt_docx, title: 'Word (.docx)' },
+            odt:  { svg: ICONS.fmt_odt,  title: 'LibreOffice (.odt)' },
+            json: { svg: ICONS.fmt_json, title: 'JSON (.json) — données brutes' },
+        };
+        const fmtIconHtml = (ext, url) => {
+            const fi = FMT_ICON[ext] || { svg: ICONS.fmt_txt, title: `.${ext}` };
+            return `<a class="downloads-icon-btn" href="${escapeHtml(url)}"
+                       download target="_blank" rel="noopener"
+                       title="${escapeHtml(fi.title)}"
+                       aria-label="${escapeHtml(fi.title)}">${fi.svg}</a>`;
+        };
+
+        // Construit la liste de lignes { label, icons[] }
+        const rows = [];
+
+        // Audios : une ligne par variante (source / transcodé / transféré),
+        // chaque ligne avec deux boutons-icône : ⬇ télécharger et ▶ écouter.
         for (const a of audioOptions) {
-            allOptions.push({
-                label: a.label, dl: a.dl, stream: a.stream || '', audio: true,
-            });
+            const icons = [];
+            icons.push(`<a class="downloads-icon-btn" href="${escapeHtml(a.dl)}"
+                          download target="_blank" rel="noopener"
+                          title="Télécharger l'audio"
+                          aria-label="Télécharger l'audio">${ICONS.fmt_audio}</a>`);
+            if (a.stream) {
+                icons.push(`<a class="downloads-icon-btn downloads-icon-btn-play"
+                              href="${escapeHtml(a.stream)}"
+                              target="_blank" rel="noopener"
+                              title="Écouter dans le navigateur"
+                              aria-label="Écouter">${ICONS.fmt_play}</a>`);
+            }
+            rows.push({ label: a.label, iconsHtml: icons.join('') });
         }
+
+        // Transcriptions : une ligne par type, icônes selon les formats dispo.
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
             if (!outputs[kind]) continue;
-            const baseLabel = TRANSCRIPT_KIND_LABELS[kind];
-            for (const ext of (TRANSCRIPT_KIND_FORMATS[kind] || ['txt'])) {
-                allOptions.push({
-                    label: `${baseLabel} (.${ext})`,
-                    dl: `/api/file/transcript/${kind}/${ext}/${fileId}`,
-                    stream: '', audio: false,
-                });
-            }
+            const formats = TRANSCRIPT_KIND_FORMATS[kind] || ['txt'];
+            const icons = formats.map((ext) =>
+                fmtIconHtml(ext, `/api/file/transcript/${kind}/${ext}/${fileId}`)
+            ).join('');
+            rows.push({ label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons });
         }
+
+        // Compte-rendu : une ligne unique.
         if (outputs['meeting-cr']) {
-            for (const ext of CR_FORMATS) {
-                allOptions.push({
-                    label: `Compte-rendu structuré (.${ext})`,
-                    dl: `/api/file/meeting-cr/${ext}/${fileId}`,
-                    stream: '', audio: false,
-                });
-            }
+            const icons = CR_FORMATS.map((ext) =>
+                fmtIconHtml(ext, `/api/file/meeting-cr/${ext}/${fileId}`)
+            ).join('');
+            rows.push({ label: 'Compte-rendu structuré', iconsHtml: icons });
         }
 
         let dropdownBlock = '';
-        if (allOptions.length > 0) {
-            const optionsHtml = allOptions.map((o, i) =>
-                `<option value="${i}" data-dl="${escapeHtml(o.dl)}" data-stream="${escapeHtml(o.stream)}" data-audio="${o.audio ? '1' : ''}">${escapeHtml(o.label)}</option>`
-            ).join('');
-            dropdownBlock = `
-                <div class="downloads-block">
-                    <select class="downloads-select fr-select" onchange="updateDownloadButtons(this)">
-                        ${optionsHtml}
-                    </select>
-                    <a class="downloads-btn-dl fr-btn fr-btn--sm fr-btn--secondary"
-                       href="${escapeHtml(allOptions[0].dl)}" download
-                       target="_blank" rel="noopener">Télécharger</a>
-                    <a class="downloads-btn-stream fr-btn fr-btn--sm fr-btn--tertiary"
-                       href="${escapeHtml(allOptions[0].stream || '#')}"
-                       target="_blank" rel="noopener"
-                       style="${allOptions[0].audio ? '' : 'display:none;'}">Écouter</a>
-                </div>`;
+        if (rows.length > 0) {
+            const rowsHtml = rows.map(r => `
+                <div class="downloads-row">
+                    <span class="downloads-row-label">${escapeHtml(r.label)}</span>
+                    <span class="downloads-row-icons">${r.iconsHtml}</span>
+                </div>`).join('');
+            dropdownBlock = `<div class="downloads-block">${rowsHtml}</div>`;
         }
 
         container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
@@ -4489,6 +4749,15 @@ async function loadTranscriptStatus(fileId, container) {
                     outputs: outputs, title, kp,
                     language: data.transcription_language,
                 };
+                // Hint file d'attente : poll uniquement quand on est en
+                // vue détail ET que le statut n'est pas terminal.
+                if (_detailFileId === fileId) {
+                    if (!_TERMINAL_TS.has(status)) {
+                        startQueueHintDetail(fileId);
+                    } else {
+                        stopQueueHintDetail();
+                    }
+                }
                 // Zone résumé : on n'affiche que les key_points (pas le
                 // label statut "Pipeline Kevent partiel..." qui est déjà
                 // sur la pastille via tooltip).
@@ -4579,10 +4848,10 @@ function setupTabs() {
     document.querySelectorAll('.tab-btn').forEach((b) => {
         b.addEventListener('click', () => {
             const target = b.getAttribute('data-tab');
-            // Clic sur "Mes transferts..." = retour à la vue liste.
-            if (target === 'transfers' && _detailFileId) {
-                _detailFileId = null;
-                loadSessions();
+            // Clic sur "Mes réunions IA" = retour à la vue liste (même si
+            // on est déjà sur l'onglet transfers en vue détail).
+            if (target === 'transfers') {
+                showFilesList();
             }
             activateTab(target);
         });

@@ -154,6 +154,38 @@ def _client_ip_allowed(remote_addr: str) -> bool:
     return any(client in net for net in _TRIGGER_ALLOWED_NETS)
 
 
+# Cache mémoire (TTL 5s) pour /api/v1/queue-status — évite de marteler la
+# gateway si plusieurs onglets PWA/mydevices polll en parallèle.
+import threading as _qs_threading
+import time as _qs_time
+_QS_CACHE_TTL = 5.0
+_qs_cache: dict = {}  # {service_type: (monotonic_ts, payload_or_none)}
+_qs_lock = _qs_threading.Lock()
+
+
+def _queue_status_cache_get_or_fetch(service_type: str):
+    """Renvoie le dict ``payload`` (réponse gateway /jobs) ou None si la
+    gateway est injoignable. Cache TTL 5s par service_type."""
+    now = _qs_time.monotonic()
+    with _qs_lock:
+        entry = _qs_cache.get(service_type)
+        if entry and (now - entry[0]) < _QS_CACHE_TTL:
+            return entry[1]
+    client = _build_kevent_client()
+    if client is None:
+        return None
+    try:
+        payload = client.list_jobs(service_type=service_type, limit=50)
+    except Exception:
+        logger.warning("queue-status: gateway list_jobs failed", exc_info=True)
+        with _qs_lock:
+            _qs_cache[service_type] = (now, None)
+        return None
+    with _qs_lock:
+        _qs_cache[service_type] = (now, payload)
+    return payload
+
+
 def notify_external_status(file_id: str, status: str, message: str, timeout: int = 5) -> None:
     """Push transfer progression/status back to external portal."""
     try:
@@ -982,6 +1014,44 @@ def pull_file():
         logger.exception("Failed to pull file %s", data.get("file_id"))
         return jsonify({"error": "Internal error during pull"}), 500
     return jsonify(result)
+
+
+@app.route("/api/v1/queue-status", methods=["GET"])
+def queue_status():
+    """File d'attente Kevent — proxy lite vers gateway list_jobs.
+
+    Permet à upload-portal / code-generator de surfacer une info brève
+    "Position X/Y dans la file" sans exposer la clé API.
+
+    Query: ``service_type`` (défaut audio), ``job_id`` (optional → calcule
+    position+ETA pour ce job spécifique).
+    Auth: INTERNAL_API_TOKEN bearer (cf autres endpoints internes).
+
+    Cache mémoire TTL 5s par (service_type) car notre clé API = unique
+    consumer → la response est la même pour tous les callers.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    service_type = (request.args.get("service_type") or "audio").strip()
+    job_id = (request.args.get("job_id") or "").strip() or None
+
+    payload = _queue_status_cache_get_or_fetch(service_type)
+    if payload is None:
+        # Gateway indisponible → réponse neutre (la UI gérera "indisponible").
+        from datetime import datetime, timezone as _tz
+        return jsonify({
+            "pending_total": None,
+            "processing_total": None,
+            "your_position": None,
+            "eta_seconds": None,
+            "throughput_per_min": None,
+            "stale": True,
+            "fetched_at": datetime.now(_tz.utc).isoformat(),
+        }), 503
+    from libs.shared.app.queue_eta import compute_queue_summary
+    import dataclasses
+    summary = compute_queue_summary(payload, own_job_id=job_id)
+    return jsonify(dataclasses.asdict(summary))
 
 
 @app.route("/api/v1/audio/lookup", methods=["POST"])
