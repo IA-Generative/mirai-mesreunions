@@ -2246,6 +2246,30 @@ INDEX_TEMPLATE = """
             font-size: 0.8rem;
             line-height: 1.2;
         }
+        /* Toggle "Mode avancé" sous le bouton Déconnexion. Pill compacte
+           qui change d'état visuel quand actif. Astuce power-user :
+           maintenir Alt fait peek temporairement vers le mode avancé
+           sans changer le toggle (état restauré au relâchement). */
+        .header-user .advanced-toggle {
+            margin-top: 0.15rem;
+            font-size: 0.7rem; line-height: 1;
+            padding: 0.18rem 0.5rem;
+            background: transparent; color: #64748b;
+            border: 1px solid #cbd5e1; border-radius: 999px;
+            cursor: pointer; user-select: none;
+            transition: all 0.12s ease;
+        }
+        .header-user .advanced-toggle:hover {
+            background: #f1f5f9; color: #0f172a; border-color: #94a3b8;
+        }
+        .header-user .advanced-toggle.is-on {
+            background: #1e293b; color: #fff; border-color: #1e293b;
+        }
+        /* Pendant le peek Alt : on souligne le toggle pour indiquer que
+           c'est temporaire (n'a pas changé l'état persistant). */
+        .header-user .advanced-toggle.is-peek {
+            box-shadow: 0 0 0 2px #fde68a;
+        }
         .form-group { margin-bottom: 1rem; }
         label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #444; }
         select, input[type=number] {
@@ -2423,8 +2447,9 @@ INDEX_TEMPLATE = """
         }
         .downloads-row {
             display: flex; align-items: center; justify-content: space-between;
-            gap: 0.5rem; padding: 0.3rem 0.2rem;
+            gap: 0.5rem; padding: 0.08rem 0.2rem;
             border-bottom: 1px solid #f1f5f9;
+            min-height: 1.8rem;
         }
         .downloads-row:last-child { border-bottom: 0; }
         .downloads-row-label {
@@ -2440,13 +2465,13 @@ INDEX_TEMPLATE = """
            pour un feedback haptique-like. */
         .downloads-icon-btn {
             display: inline-flex; align-items: center; justify-content: center;
-            width: 2.4rem; height: 2.4rem;
-            border: 0; border-radius: 8px;
+            width: 1.75rem; height: 1.75rem;
+            border: 0; border-radius: 6px;
             background: transparent; color: #64748b;
             text-decoration: none; cursor: pointer;
             transition: transform 0.12s ease, color 0.12s ease, background 0.12s ease;
         }
-        .downloads-icon-btn svg { width: 1.7rem; height: 1.7rem; }
+        .downloads-icon-btn svg { width: 1.4rem; height: 1.4rem; }
         /* DSFR injecte une flèche "lien externe" sur les <a target="_blank">
            via ::after. On la retire pour nos boutons-icône — l'icône SVG
            porte déjà tout le sens visuel. */
@@ -2543,6 +2568,16 @@ INDEX_TEMPLATE = """
         }
         .file-detail-info-btn:hover {
             background: #f1f5f9; border-color: #475569; color: #0f172a;
+        }
+        /* Pulse "il se passe un truc" sur le bouton (i) tant que le pipeline
+           (upload + transcription) n'est pas terminal. Sync avec le dot. */
+        @keyframes infoBtnPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.55); }
+            50%      { box-shadow: 0 0 0 6px rgba(59,130,246,0);  }
+        }
+        .file-detail-info-btn.is-in-progress {
+            border-color: #3b82f6; color: #1d4ed8;
+            animation: infoBtnPulse 1.4s ease-in-out infinite;
         }
         /* Modal détails techniques : fenêtre flottante positionnée vers le
            haut (haut de page reste visible). Backdrop très léger. */
@@ -2667,8 +2702,24 @@ INDEX_TEMPLATE = """
         .file-row-dot-processing,
         .file-row-dot-kevent_queued,
         .file-row-dot-kevent_transcribing,
-        .file-row-dot-kevent_processing { color: #3b82f6; }
+        .file-row-dot-kevent_processing,
+        .file-row-dot-upload-in-progress { color: #3b82f6; }
         .file-row-dot-disabled { color: #94a3b8; }
+        /* Animation "il se passe un truc" : pulse opacity+scale tant que
+           le pipeline (upload + transcription) n'est pas terminal. */
+        @keyframes filerowDotPulse {
+            0%, 100% { opacity: 1;   transform: scale(1);    }
+            50%      { opacity: 0.4; transform: scale(1.35); }
+        }
+        .file-row-dot-pending,
+        .file-row-dot-processing,
+        .file-row-dot-kevent_queued,
+        .file-row-dot-kevent_transcribing,
+        .file-row-dot-kevent_processing,
+        .file-row-dot-upload-in-progress {
+            animation: filerowDotPulse 1.4s ease-in-out infinite;
+            display: inline-block; /* nécessaire pour que transform: scale prenne effet */
+        }
         .file-row-title {
             font-weight: 600; color: #1d4ed8;
             text-decoration: none !important;
@@ -2802,10 +2853,10 @@ INDEX_TEMPLATE = """
         .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
         .file-detail-techline {
             display: flex; align-items: center; justify-content: space-between;
-            gap: 0.45rem; margin: 0 0 0.6rem 0.6rem;
+            gap: 0.45rem; margin: 0 0 0.15rem 0.6rem;
             font-size: 0.78rem; color: #64748b;
         }
-        .file-detail-fullinfo { margin-top: 0.6rem; }
+        .file-detail-fullinfo { margin-top: 0.2rem; }
         /* Mode "page détail" : on cache le titre de l'onglet + le bouton
            purger + la liste des autres sessions. Seul le détail demandé
            est visible, pour vraiment ressembler à une page dédiée. */
@@ -2849,7 +2900,14 @@ INDEX_TEMPLATE = """
         }
         @keyframes transcriptSpin { to { transform: rotate(360deg); } }
         .transcript-status-label { font-weight: 500; }
-        .transcript-meta { background: #f8fafc; border-left: 3px solid #3b7dd8; padding: 0.35rem 0.55rem; margin-bottom: 0.4rem; border-radius: 4px; }
+        .transcript-meta {
+            background: #f8fafc; border-left: 3px solid #3b7dd8;
+            padding: 0.35rem 0.55rem;
+            margin-bottom: 0.3rem;
+            border-radius: 4px;
+            border-bottom: 1px dashed #cbd5e1;
+            padding-bottom: 0.5rem;
+        }
         .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; }
         .transcript-meta-details { margin-top: 0.2rem; font-size: 0.76rem; }
         .transcript-meta-details summary { cursor: pointer; color: #475569; user-select: none; }
@@ -3196,6 +3254,10 @@ INDEX_TEMPLATE = """
         <div class="header-user">
           <span class="header-user-name">{{ user.name or user.email }}</span>
           <a class="fr-link" href="/logout">Déconnexion</a>
+          <button type="button" id="advanced-toggle" class="advanced-toggle"
+                  onclick="toggleAdvancedDl(this)"
+                  title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
+                  aria-pressed="false">Mode avancé</button>
         </div>
       </div>
     </div>
@@ -3446,14 +3508,36 @@ async function openFileInfoModal(fileId) {
         'transcript-reformulated': { label: 'Discours indirect',            desc: 'LLM reformule au style indirect pour lecture rapide.' },
         'meeting-cr':              { label: 'Compte-rendu structuré',      desc: 'LLM produit l\\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
     };
+    // État par étape :
+    //   ok    → output présent (vert ✓)
+    //   fail  → output absent ET statut global = failed (rouge ✗ + cause)
+    //   run   → output absent ET pipeline en cours, première étape pending
+    //   wait  → output absent, pas encore tentée
+    const status = cached.status || '';
+    const isFail = (window._FAILED_TS && window._FAILED_TS.has(status))
+        || ['failed','kevent_failed','mcr_auth_failed','mcr_rejected','mcr_push_failed'].includes(status);
+    const isRunning = ['pending','processing','kevent_queued','kevent_transcribing','kevent_processing'].includes(status);
+    let runMarked = false;
     const stepsHtml = Object.keys(STEPS).map(k => {
         const ok = !!(cached.outputs || {})[k];
-        const icon = ok ? '✓' : '✗';
-        const color = ok ? '#10b981' : '#b91c1c';
+        let icon, color, suffix = '';
+        if (ok) { icon = '✓'; color = '#10b981'; }
+        else if (isFail) {
+            icon = '✗'; color = '#b91c1c';
+            suffix = ` <small style="color:#94a3b8">(échec du pipeline — étape non aboutie)</small>`;
+        } else if (isRunning && !runMarked) {
+            icon = '⏳'; color = '#2563eb'; runMarked = true;
+            suffix = ` <small style="color:#94a3b8">(en cours)</small>`;
+        } else if (isRunning) {
+            icon = '☐'; color = '#94a3b8';
+            suffix = ` <small style="color:#94a3b8">(en attente)</small>`;
+        } else {
+            icon = '☐'; color = '#94a3b8';
+        }
         return `<div class="modal-step">
             <span style="color:${color};font-weight:700;font-size:1rem;">${icon}</span>
             <div>
-                <div class="modal-step-label">${escapeHtml(STEPS[k].label)}</div>
+                <div class="modal-step-label">${escapeHtml(STEPS[k].label)}${suffix}</div>
                 <div class="modal-step-desc">${escapeHtml(STEPS[k].desc)}</div>
             </div>
         </div>`;
@@ -3578,6 +3662,64 @@ function _formatDuration(seconds) {
 // confirmation pour refléter la vraie durée que Renouveler applique.
 const deviceRetentionDays = {{ device_retention_days }};
 
+// Mode "Mode avancé" pour les téléchargements : OFF (défaut) montre
+// le CR + audio interne + Transcription nettoyée + Discours indirect, le
+// reste va dans le menu "Autres". ON affiche tout à plat (pas de menu).
+// Persistant en sessionStorage. Astuce power-user non documentée : Alt
+// active un peek temporaire (sans changer l'état persistant) — pratique
+// pour jeter un œil sans toggler.
+let _dlAdvancedMode = false;
+try { _dlAdvancedMode = sessionStorage.getItem('mydevices-dl-mode') === 'advanced'; } catch(e){}
+let _altPeek = false;
+
+function effectiveAdvancedDl() { return _dlAdvancedMode || _altPeek; }
+
+function updateAdvancedToggleUi() {
+    const btn = document.getElementById('advanced-toggle');
+    if (!btn) return;
+    btn.classList.toggle('is-on', _dlAdvancedMode);
+    btn.classList.toggle('is-peek', _altPeek);
+    btn.setAttribute('aria-pressed', _dlAdvancedMode ? 'true' : 'false');
+}
+
+function toggleAdvancedDl() {
+    _dlAdvancedMode = !_dlAdvancedMode;
+    try { sessionStorage.setItem('mydevices-dl-mode', _dlAdvancedMode ? 'advanced' : 'simple'); } catch(e){}
+    updateAdvancedToggleUi();
+    refreshDownloadsBlocks();
+}
+
+function refreshDownloadsBlocks() {
+    document.querySelectorAll('.transcript-section[data-persistent-summary="1"]').forEach((container) => {
+        const fileId = container.getAttribute('data-transcript-file-id');
+        if (fileId) loadTranscriptStatus(fileId, container);
+    });
+}
+
+// Peek temporaire via Alt enfoncé. Modifier-only keydown ne se répète
+// pas (autorepeat ignore Alt sur la plupart des navigateurs), donc on
+// fire bien une seule fois à l'appui.
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Alt' && !_altPeek) {
+        _altPeek = true;
+        updateAdvancedToggleUi();
+        refreshDownloadsBlocks();
+        e.preventDefault();
+    }
+});
+document.addEventListener('keyup', (e) => {
+    if (e.key === 'Alt' && _altPeek) {
+        _altPeek = false;
+        updateAdvancedToggleUi();
+        refreshDownloadsBlocks();
+    }
+});
+// Si la fenêtre perd le focus pendant un peek (Cmd+Tab…), on annule
+// pour ne pas rester coincé en mode peek.
+window.addEventListener('blur', () => {
+    if (_altPeek) { _altPeek = false; updateAdvancedToggleUi(); refreshDownloadsBlocks(); }
+});
+
 // Icônes SVG inline (Heroicons-like, simplifiés). Centralisées ici pour
 // que tous les boutons-icône partagent le même rendu et qu'on puisse les
 // faire évoluer en un seul endroit.
@@ -3623,6 +3765,20 @@ function statusLabel(status) {
         error: 'Erreur',
     };
     return labels[status] || status;
+}
+
+// Phases d'upload où le pipeline tourne encore (avant que la transcription
+// ne prenne le relais). Utilisé pour animer le dot dès le départ.
+const UPLOAD_IN_PROGRESS_STATES = new Set([
+    'pending', 'scanning', 'scan_clean',
+    'transcoding', 'ready_for_transfer', 'transferring',
+]);
+function _uploadStateLabel(status) {
+    if (status === 'transferred') return 'Fichier reçu. Transcription en attente.';
+    if (UPLOAD_IN_PROGRESS_STATES.has(status)) {
+        return `Étape en cours : ${statusLabel(status)}`;
+    }
+    return statusLabel(status);
 }
 
 function tokenValidityDaysLabel(retentionExpiresAt) {
@@ -4477,10 +4633,16 @@ async function loadSessions(opts) {
                                  style="display:none;"></div>
                             <!-- Dot inline (caractère unicode) : aligné comme
                                  un caractère sur la baseline du titre. Sa
-                                 couleur est ajustée par loadTranscriptStatus
-                                 via la classe file-row-dot-<status>. -->
-                            <span class="file-row-dot" data-file-dot="${f.id}"
-                                  title="Statut transcription">●</span>
+                                 couleur+animation est ajustée par
+                                 loadTranscriptStatus via la classe
+                                 file-row-dot-<status>. À l'init, on pose
+                                 file-row-dot-upload-in-progress tant que
+                                 l'upload n'est pas TRANSFERRED — ça suffit à
+                                 animer "il se passe un truc" avant même que
+                                 la transcription démarre. -->
+                            <span class="file-row-dot ${UPLOAD_IN_PROGRESS_STATES.has(f.status) ? 'file-row-dot-upload-in-progress' : ''}"
+                                  data-file-dot="${f.id}"
+                                  title="${escapeHtml(_uploadStateLabel(f.status))}">●</span>
                             <a href="#" class="file-row-title" data-file-id="${f.id}"
                                onclick="event.preventDefault();showFileDetail('${f.id}');"
                                title="${escapeHtml(f.original_filename)}">
@@ -4845,6 +5007,66 @@ const TRANSCRIPT_STATUS_LABELS = {
     'disabled':                    { label: 'Transcription désactivée', polling: false },
 };
 
+// Étapes du pipeline IA — ordre d'exécution. Réutilisé pour construire la
+// checklist de progression dans le tooltip du (i) et le modal Détails.
+const PIPELINE_STEPS = [
+    { key: 'transcript',              label: 'Transcription brute' },
+    { key: 'transcript-tagged',       label: 'Identification des locuteurs' },
+    { key: 'transcript-corrected',    label: 'Correction des sigles' },
+    { key: 'transcript-cleaned',      label: 'Nettoyage hors-sujet' },
+    { key: 'transcript-reformulated', label: 'Discours indirect' },
+    { key: 'meeting-cr',              label: 'Compte-rendu structuré' },
+];
+
+const _FAILED_TRANSCRIPT_STATUSES = new Set([
+    'failed', 'kevent_failed',
+    'mcr_auth_failed', 'mcr_rejected', 'mcr_push_failed',
+]);
+
+// Construit le tooltip multi-ligne du bouton (i). Chaque étape porte un
+// glyphe :
+//   ✓  étape réussie (output présent)
+//   ✗  étape échouée explicitement (statut failed + output absent)
+//   ⏳  étape en cours (pipeline qui tourne + output absent)
+//   ☐  étape en attente (pas encore tentée)
+// Les sauts de ligne \\n sont rendus par les tooltips natifs (vu sur
+// Firefox/Chrome desktop).
+function _buildInfoTooltip(status, engine, outputs, meta) {
+    const head = (meta && meta.label) || status || 'Statut inconnu';
+    const isFail = _FAILED_TRANSCRIPT_STATUSES.has(status);
+    const isRunning = !!(meta && meta.polling);
+    const lines = [
+        `Pipeline IA — ${head}${engine ? ' (' + engine + ')' : ''}`,
+        '─────────────',
+    ];
+    // Première étape "en cours" qu'on rencontre = la prochaine attendue.
+    let firstPendingMarked = false;
+    for (const step of PIPELINE_STEPS) {
+        const done = !!(outputs || {})[step.key];
+        let glyph;
+        let suffix = '';
+        if (done) {
+            glyph = '✓';
+        } else if (isFail) {
+            glyph = '✗';
+            suffix = ' (échec)';
+        } else if (isRunning && !firstPendingMarked) {
+            glyph = '⏳';
+            suffix = ' (en cours)';
+            firstPendingMarked = true;
+        } else if (isRunning) {
+            glyph = '☐';
+            suffix = ' (en attente)';
+        } else {
+            glyph = '☐';
+        }
+        lines.push(`${glyph} ${step.label}${suffix}`);
+    }
+    lines.push('─────────────');
+    lines.push('Cliquer pour voir le détail complet.');
+    return lines.join('\\n');
+}
+
 async function loadTranscriptStatus(fileId, container) {
     try {
         const resp = await fetch(`/api/file/transcript-status/${fileId}`);
@@ -4995,22 +5217,27 @@ async function loadTranscriptStatus(fileId, container) {
                href="${escapeHtml(url)}" target="_blank" rel="noopener"
                title="Écouter dans le navigateur" aria-label="Écouter">${ICONS.fmt_play}</a>`;
 
-        // Transcription nettoyée EN PREMIER (output le plus utile : lisible,
-        // sans hors-sujet, sigles corrigés). Audio interne ensuite. Les
-        // autres types passent dans le menu déroulant en bas.
+        // Direct (haut de section) = uniquement CR + audio (interne).
+        // Le reste passe dans la dropdown "Autres" :
+        //   - simple mode (default) : nettoyée + discours indirect seulement
+        //   - avancé (toggle ou Alt) : toutes les transcriptions + audios non-interne
+        const SIMPLE_OTHER_KINDS = new Set([
+            'transcript-cleaned',
+            'transcript-reformulated',
+        ]);
+        const advanced = effectiveAdvancedDl();
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
             if (!outputs[kind]) continue;
+            if (!advanced && !SIMPLE_OTHER_KINDS.has(kind)) continue;
             const formats = TRANSCRIPT_KIND_FORMATS[kind] || ['txt'];
             const icons = formats.map((ext) =>
                 fmtIconHtml(ext, `/api/file/transcript/${kind}/${ext}/${fileId}`)
             ).join('');
-            const row = { label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons };
-            if (kind === 'transcript-cleaned') defaultRows.push(row);
-            else otherRows.push(row);
+            otherRows.push({ label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons });
         }
 
-        // Audios : interne → "Écouter + Télécharger" en accès direct ;
-        // les variantes source/transcodé vont dans "Autres téléchargements".
+        // Audios : interne → accès direct (toujours visible) ; les variantes
+        // source/transcodé ne sont accessibles QU'EN MODE AVANCÉ (dropdown).
         for (const a of audioOptions) {
             const isInternal = (a.label || '').toLowerCase().includes('interne');
             if (isInternal && (a.stream || a.dl)) {
@@ -5021,7 +5248,7 @@ async function loadTranscriptStatus(fileId, container) {
                     label: "Écouter / Télécharger l'audio (interne)",
                     iconsHtml: icons.join(''),
                 });
-            } else {
+            } else if (advanced) {
                 const icons = [];
                 if (a.dl) icons.push(audioDlIcon(a.dl));
                 if (a.stream) icons.push(audioPlayIcon(a.stream));
@@ -5029,13 +5256,12 @@ async function loadTranscriptStatus(fileId, container) {
             }
         }
 
-        // Compte-rendu structuré : dans "Autres" (pas l'usage le plus fréquent
-        // côté grand public ; reste à 1 clic via le menu).
+        // Compte-rendu structuré : accès direct (en TÊTE des défauts).
         if (outputs['meeting-cr']) {
             const icons = CR_FORMATS.map((ext) =>
                 fmtIconHtml(ext, `/api/file/meeting-cr/${ext}/${fileId}`)
             ).join('');
-            otherRows.push({ label: 'Compte-rendu structuré', iconsHtml: icons });
+            defaultRows.unshift({ label: 'Compte-rendu structuré', iconsHtml: icons });
         }
 
         let dropdownBlock = '';
@@ -5121,17 +5347,21 @@ async function loadTranscriptStatus(fileId, container) {
             if (container.getAttribute('data-compact') === '1') {
                 // Met à jour le dot caractère unicode "●" inline dans la
                 // file-row (aligné naturellement avec le titre). La couleur
-                // dépend du statut via la classe file-row-dot-<status>.
+                // dépend du statut via la classe file-row-dot-<status>,
+                // l'animation pulse aussi (les classes in-progress portent
+                // l'animation CSS — cf. @keyframes filerowDotPulse).
                 const dot = document.querySelector(`[data-file-dot="${fileId}"]`);
                 if (dot) {
                     dot.className = `file-row-dot file-row-dot-${status}`;
-                    dot.title = `${status}${engine ? ' (' + engine + ')' : ''}`;
+                    const friendly = (TRANSCRIPT_STATUS_LABELS[status] || {}).label || status;
+                    dot.title = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
                 }
-                // Bouton (i) : on garde neutre (juste rond + i). On met
-                // seulement à jour le tooltip pour porter l'info statut.
+                // Bouton (i) : tooltip multi-ligne avec checklist par étape
+                // (☐/✓/✗). Pulse + bordure bleue si le pipeline tourne.
                 const infoBtn = document.querySelector(`[data-file-info-btn="${fileId}"]`);
                 if (infoBtn) {
-                    infoBtn.title = `Détails techniques — statut: ${status}${engine ? ' (' + engine + ')' : ''}`;
+                    infoBtn.title = _buildInfoTooltip(status, engine, outputs, meta);
+                    infoBtn.classList.toggle('is-in-progress', isInProgress);
                 }
                 // Mémorise les infos pour le modal (status raw, engine,
                 // outputs map). On ne re-fetch pas quand l'utilisateur
@@ -5344,6 +5574,7 @@ function pickDefaultTab(hasActiveDevice) {
 
 setupTabs();
 updateDeviceFilterButton();
+updateAdvancedToggleUi();
 // Feedback visuel sur clic d'une icône de téléchargement : flash + scale.
 // Délégation globale — fonctionne pour les boutons re-rendus par
 // loadTranscriptStatus sans re-bind à chaque refresh.

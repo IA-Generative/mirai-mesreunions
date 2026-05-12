@@ -177,6 +177,9 @@ MOCK_TRANSCRIPTS = {
     },
     FILE_2_ID: {
         "available": True,
+        # État réel exporté de prod-bêta. Pour exercer l'animation pulse
+        # "en cours", flipper temporairement vers 'kevent_transcribing'
+        # (+ tous les outputs à False sauf 'transcript').
         "transcription_status": "kevent_partially_completed",
         "transcription_engine": "kevent",
         "transcription_language": "fr",
@@ -186,7 +189,7 @@ MOCK_TRANSCRIPTS = {
             "transcript-corrected": True,
             "transcript-cleaned": True,
             "transcript-reformulated": True,
-            "meeting-cr": False,  # étape CR a timeout sur 1h45 d'audio
+            "meeting-cr": True,
         },
         "suggested_filename": "Échange IA — Architecture multi-agents et orchestration",
         "key_points_summary": (
