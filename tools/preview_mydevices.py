@@ -20,7 +20,7 @@ edge cases (many files, failed transcription, partial outputs, etc.).
 
 from __future__ import annotations
 
-import re
+import ast
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,15 +32,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = REPO_ROOT / "services" / "code-generator" / "app" / "main.py"
 
 # ─── Template extraction (re-read on every request for hot reload) ─────────
-
-_TEMPLATE_RE = re.compile(r'INDEX_TEMPLATE\s*=\s*"""(.*?)"""', re.DOTALL)
+#
+# On parse main.py via AST plutôt qu'un regex sur le source brut : il faut
+# que les escape sequences (\', \n, \\) soient processed comme Python le
+# ferait à l'import. Sinon `'l\\'analyse'` reste avec deux backslashes dans
+# le HTML rendu et casse le parser JS (Unexpected identifier 'analyse').
 
 def load_template() -> str:
     src = MAIN_PY.read_text(encoding="utf-8")
-    m = _TEMPLATE_RE.search(src)
-    if not m:
-        raise RuntimeError("INDEX_TEMPLATE not found in main.py")
-    return m.group(1)
+    tree = ast.parse(src)
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "INDEX_TEMPLATE"
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            return node.value.value
+    raise RuntimeError("INDEX_TEMPLATE = '...' not found at module top-level in main.py")
 
 
 # ─── Mock data ─────────────────────────────────────────────────────────────
@@ -191,7 +202,11 @@ MOCK_TRANSCRIPTS = {
 
 # ─── Flask app ─────────────────────────────────────────────────────────────
 
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder=str(REPO_ROOT / "services" / "code-generator" / "app" / "static"),
+    static_url_path="/static",
+)
 
 
 @app.route("/")

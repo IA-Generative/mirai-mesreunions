@@ -1783,6 +1783,205 @@ def api_rename_file(file_id):
         db.close()
 
 
+@app.route("/api/my-trash", methods=["GET"])
+@require_auth
+def api_my_trash():
+    """Liste les fichiers + sessions en corbeille de l'utilisateur.
+
+    Inclut les items individuellement trashed et les sessions trashées
+    (avec leurs fichiers). Au passage, déclenche le balayage opportuniste
+    qui hard-delete les items > TRASH_RETENTION_DAYS.
+
+    Réponse: { files: [{id, original_filename, simple_code, trashed_at,
+    days_left}], sessions: [{simple_code, trashed_at, files: [...]}],
+    retention_days: 30 }
+    """
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        try:
+            _purge_expired_trash(db, user["sub"])
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        now = datetime.now(timezone.utc)
+        # Fichiers individuels en corbeille (session active)
+        files_q = (
+            db.query(UploadedFile)
+            .join(UploadSession, UploadSession.id == UploadedFile.session_id)
+            .filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.trashed_at.is_(None),
+                UploadedFile.trashed_at.isnot(None),
+            )
+            .order_by(UploadedFile.trashed_at.desc())
+            .all()
+        )
+        files_list = [{
+            "id": str(f.id),
+            "original_filename": f.original_filename,
+            "simple_code": f.session.simple_code if f.session else None,
+            "trashed_at": f.trashed_at.isoformat() if f.trashed_at else None,
+            "days_left": max(0, TRASH_RETENTION_DAYS - (now - f.trashed_at.replace(tzinfo=timezone.utc)).days)
+                if f.trashed_at else None,
+        } for f in files_q]
+
+        # Sessions complètes en corbeille
+        sessions_q = (
+            db.query(UploadSession)
+            .filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.trashed_at.isnot(None),
+            )
+            .order_by(UploadSession.trashed_at.desc())
+            .all()
+        )
+        sessions_list = [{
+            "simple_code": s.simple_code,
+            "id": str(s.id),
+            "trashed_at": s.trashed_at.isoformat() if s.trashed_at else None,
+            "days_left": max(0, TRASH_RETENTION_DAYS - (now - s.trashed_at.replace(tzinfo=timezone.utc)).days)
+                if s.trashed_at else None,
+            "files_count": len(s.uploads),
+        } for s in sessions_q]
+
+        return jsonify({
+            "files": files_list,
+            "sessions": sessions_list,
+            "retention_days": TRASH_RETENTION_DAYS,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/file/<file_id>/restore", methods=["POST"])
+@require_auth
+def api_restore_file(file_id):
+    """Restaure un fichier de la corbeille — clear `trashed_at`."""
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        f = (
+            db.query(UploadedFile)
+            .join(UploadSession, UploadSession.id == UploadedFile.session_id)
+            .filter(
+                UploadedFile.id == file_id,
+                UploadSession.user_sub == user["sub"],
+                UploadedFile.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not f:
+            return jsonify({"error": "file_not_in_trash"}), 404
+        f.trashed_at = None
+        db.commit()
+        return jsonify({"ok": True, "restored": True, "filename": f.original_filename})
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to restore file %s", file_id)
+        return jsonify({"error": "restore_failed"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/my-sessions/<simple_code>/restore", methods=["POST"])
+@require_auth
+def api_restore_session(simple_code):
+    """Restaure une session de la corbeille."""
+    user = get_current_user()
+    db = SessionLocal()
+    try:
+        s = (
+            db.query(UploadSession)
+            .filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.simple_code == simple_code,
+                UploadSession.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not s:
+            return jsonify({"error": "session_not_in_trash"}), 404
+        s.trashed_at = None
+        db.commit()
+        return jsonify({"ok": True, "restored": True, "simple_code": simple_code})
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to restore session %s", simple_code)
+        return jsonify({"error": "restore_failed"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/file/<file_id>/permanently", methods=["DELETE"])
+@require_auth
+def api_delete_file_permanently(file_id):
+    """Hard-delete d'un fichier déjà en corbeille (depuis "Vider la corbeille"
+    ou bouton "Supprimer définitivement"). Supprime DB + S3 + cleanup interne.
+    """
+    user = get_current_user()
+    db = SessionLocal()
+    deleted_objects = 0
+    try:
+        f = (
+            db.query(UploadedFile)
+            .join(UploadSession, UploadSession.id == UploadedFile.session_id)
+            .filter(
+                UploadedFile.id == file_id,
+                UploadSession.user_sub == user["sub"],
+                UploadedFile.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not f:
+            return jsonify({"error": "file_not_in_trash"}), 404
+        session_obj = db.query(UploadSession).filter(UploadSession.id == f.session_id).first()
+        simple_code = session_obj.simple_code if session_obj else None
+        original_filename = f.original_filename
+        for cfg, key in (
+            (s3_upload_cfg, f.stored_filename),
+            (s3_processed_cfg, f.transcoded_filename),
+        ):
+            try:
+                if key:
+                    delete_object(cfg, key)
+                    deleted_objects += 1
+            except Exception:
+                logger.warning("Permanent delete: S3 fail %s", key, exc_info=True)
+        try:
+            t_cfg, t_key = _resolve_transferred_storage(db, f)
+            if t_cfg and t_key:
+                delete_object(t_cfg, t_key)
+                deleted_objects += 1
+        except Exception:
+            logger.warning("Permanent delete: transferred fail", exc_info=True)
+        db.delete(f)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Permanent delete file %s failed", file_id)
+        return jsonify({"error": "delete_failed"}), 500
+    finally:
+        db.close()
+
+    # Cleanup interne (best-effort)
+    if simple_code and original_filename:
+        try:
+            request_internal_device_api(
+                "DELETE", "/api/v1/files/by-session",
+                json_body={
+                    "user_sub": user.get("sub", ""),
+                    "simple_code": simple_code,
+                    "original_filename": original_filename,
+                },
+            )
+        except Exception:
+            logger.debug("Internal cleanup post-purge failed for %s", file_id, exc_info=True)
+
+    return jsonify({"ok": True, "deleted_objects": deleted_objects})
+
+
 @app.route("/api/file/<file_id>", methods=["DELETE"])
 @require_auth
 def api_delete_file(file_id):
@@ -2145,6 +2344,12 @@ INDEX_TEMPLATE = """
             overflow-y: auto;
             padding-right: 0.25rem;
         }
+        /* En vue détail (page-mode), on supprime le scroll interne : la
+           fiche occupe toute la hauteur naturelle, le scroll vit au niveau
+           de la page (plus naturel sur mobile et desktop). */
+        .tab-pane[data-tab="transfers"].detail-active .sessions-list {
+            max-height: none; overflow: visible; padding-right: 0;
+        }
         .session-item {
             padding: 0.75rem; background: #f8f9fa; border-radius: 8px;
             margin-bottom: 0.5rem; font-size: 0.85rem;
@@ -2190,7 +2395,7 @@ INDEX_TEMPLATE = """
             text-decoration: line-through;
             cursor: not-allowed;
         }
-        .transcript-section { margin-top: 0.55rem; padding-top: 0.45rem; border-top: 1px dashed #e2e8f0; }
+        .transcript-section { margin-top: 0.15rem; padding-top: 0.2rem; border-top: 1px dashed #e2e8f0; }
         .transcript-status-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #475569; margin-bottom: 0.35rem; padding: 0.3rem 0.5rem; border-radius: 6px; border: 1px solid transparent; }
         .transcript-status-line.transcript-status-error {
             background: #fef2f2; border-color: #fecaca; color: #991b1b;
@@ -2229,21 +2434,76 @@ INDEX_TEMPLATE = """
         .downloads-row-icons {
             display: flex; gap: 0.2rem; flex-shrink: 0;
         }
+        /* Icônes de téléchargement : bouton minimaliste — juste l'icône,
+           plus grosse, pas de chrome (border/bg) au repos. Hover = scale
+           up + couleur ; active (clic) = scale down + flash background
+           pour un feedback haptique-like. */
         .downloads-icon-btn {
             display: inline-flex; align-items: center; justify-content: center;
-            width: 1.85rem; height: 1.85rem;
-            border: 1px solid #cbd5e1; border-radius: 6px;
-            background: #fff; color: #475569;
+            width: 2.4rem; height: 2.4rem;
+            border: 0; border-radius: 8px;
+            background: transparent; color: #64748b;
             text-decoration: none; cursor: pointer;
-            transition: all 0.12s ease;
+            transition: transform 0.12s ease, color 0.12s ease, background 0.12s ease;
         }
-        .downloads-icon-btn svg { width: 1.1rem; height: 1.1rem; }
+        .downloads-icon-btn svg { width: 1.7rem; height: 1.7rem; }
+        /* DSFR injecte une flèche "lien externe" sur les <a target="_blank">
+           via ::after. On la retire pour nos boutons-icône — l'icône SVG
+           porte déjà tout le sens visuel. */
+        .downloads-icon-btn::after,
+        .downloads-icon-btn::before { content: none !important; display: none !important; }
+        .downloads-icon-btn { background-image: none !important; }
         .downloads-icon-btn:hover {
-            background: #eff6ff; border-color: #3b82f6; color: #1d4ed8;
-            transform: translateY(-1px);
+            color: #1d4ed8;
+            transform: scale(1.18);
         }
-        .downloads-icon-btn-play:hover {
-            background: #dcfce7; border-color: #16a34a; color: #166534;
+        .downloads-icon-btn:active,
+        .downloads-icon-btn.is-clicked {
+            transform: scale(0.92);
+            background: #dbeafe;
+            color: #1e3a8a;
+        }
+        .downloads-icon-btn-play:hover { color: #166534; }
+        .downloads-icon-btn-play:active,
+        .downloads-icon-btn-play.is-clicked {
+            background: #dcfce7; color: #14532d;
+        }
+        /* Feedback flash : ajouté en JS sur tout clic, retiré après 350ms. */
+        @keyframes dlClickFlash {
+            0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45); }
+            100% { box-shadow: 0 0 0 12px rgba(59, 130, 246, 0);  }
+        }
+        .downloads-icon-btn.is-clicked { animation: dlClickFlash 0.45s ease-out; }
+        /* Section "Autres téléchargements" : visuellement DISTINCTE des
+           lignes par défaut — fond légèrement plus foncé, label "Autres :"
+           à gauche, select étroit, icônes à droite. Séparée du bloc
+           principal par un trait fin. */
+        .downloads-other-row {
+            display: flex; align-items: center;
+            gap: 0.45rem; padding: 0.35rem 0.5rem;
+            margin: 0.4rem -0.5rem -0.35rem -0.5rem;  /* étend au bord du bloc */
+            border-top: 1px solid #e2e8f0;
+            background: #f1f5f9;
+            border-radius: 0 0 8px 8px;  /* coins arrondis bas comme le block */
+        }
+        .downloads-other-label {
+            font-size: 0.72rem; color: #475569; font-weight: 600;
+            white-space: nowrap;
+            text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .downloads-other-select {
+            flex: 0 1 45%; max-width: 45%; min-width: 0;
+            padding: 0.12rem 0.4rem; font-size: 0.72rem;
+            height: 1.65rem; line-height: 1.2;
+            border: 1px solid #94a3b8; border-radius: 5px; background: #fff;
+            color: #1e293b;
+            background-position: right 0.35rem center;
+        }
+        .downloads-other-icons {
+            margin-left: auto;       /* pousse les icônes contre le bord droit */
+            min-width: 2.4rem;       /* réserve la place même quand vide */
+            min-height: 1.85rem;
+            display: inline-flex; gap: 0.2rem;
         }
         .file-impact-row { margin-top: 0.35rem; display: flex; align-items: center; gap: 0.5rem; }
         /* Diagnostic per-step de la transcription IA (dépliable) */
@@ -2269,21 +2529,36 @@ INDEX_TEMPLATE = """
         .status-step-label { font-weight: 600; color: #0f172a; }
         .status-step-desc { color: #64748b; font-size: 0.74rem; }
         /* Bouton ⓘ aligné à droite, prend couleur du status */
+        /* Bouton (i) : juste un petit rond neutre avec un i dedans.
+           La couleur ne reflète plus le statut (la pastille colorée porte
+           déjà cette info dans la liste compact). */
         .file-detail-info-btn {
-            margin-left: auto; padding: 0.1rem 0.5rem;
-            border: 1px solid currentColor; background: transparent;
-            cursor: pointer; font-size: 0.95rem; line-height: 1;
-            border-radius: 999px; color: #94a3b8;
+            margin-left: auto;
+            width: 1.4rem; height: 1.4rem; padding: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            border: 1.5px solid #94a3b8; background: #fff;
+            cursor: pointer; font-size: 0.78rem; font-weight: 700;
+            font-style: italic; font-family: Georgia, serif;
+            line-height: 1; border-radius: 50%; color: #475569;
         }
-        .file-detail-info-btn:hover { background: #f1f5f9; }
-        /* Modal détails techniques */
+        .file-detail-info-btn:hover {
+            background: #f1f5f9; border-color: #475569; color: #0f172a;
+        }
+        /* Modal détails techniques : fenêtre flottante positionnée vers le
+           haut (haut de page reste visible). Backdrop très léger. */
         .file-info-modal {
-            border: 0; border-radius: 12px; padding: 0;
+            position: fixed; top: 3.5rem; left: 50%;
+            transform: translateX(-50%);
+            margin: 0;
+            border: 1px solid #cbd5e1; border-radius: 12px; padding: 0;
             max-width: 560px; width: 92%;
-            box-shadow: 0 16px 48px rgba(0,0,0,0.18);
+            max-height: calc(100vh - 5rem); overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.22),
+                        0 0 0 1px rgba(15,23,42,0.05);
+            background: #fff;
         }
         .file-info-modal::backdrop {
-            background: rgba(15,23,42,0.45);
+            background: rgba(15,23,42,0.18);
         }
         .modal-header {
             display: flex; justify-content: space-between; align-items: center;
@@ -2348,6 +2623,17 @@ INDEX_TEMPLATE = """
         /* Hint file d'attente Kevent — sobre, atténuée si stale */
         .queue-hint { color: #475569; }
         .queue-hint.queue-hint-stale { color: #94a3b8; font-style: italic; }
+        /* Corbeille */
+        .trash-item {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem;
+            padding: 0.5rem 0.6rem; border-bottom: 1px solid #f1f5f9;
+        }
+        .trash-item-type {
+            font-size: 0.7rem; color: #64748b; text-transform: uppercase;
+            background: #f1f5f9; padding: 0.1rem 0.4rem; border-radius: 4px;
+        }
+        .trash-item-name { flex: 1; min-width: 0; font-size: 0.85rem; }
+        .trash-item-meta { font-size: 0.72rem; color: #94a3b8; }
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
         .file-row-compact-wrapper:hover { background: #f8fafc; }
@@ -2400,12 +2686,23 @@ INDEX_TEMPLATE = """
         }
         .file-row-meta .file-row-meta-date { font-weight: 500; color: #475569; }
         .file-row-meta .file-row-meta-dur { color: #94a3b8; font-variant-numeric: tabular-nums; }
-        /* Nom du fichier audio d'origine sous le titre (vue détail), légèrement bleuté */
+        /* Nom du fichier audio d'origine à droite de date+durée (vue détail),
+           légèrement bleuté. Aligné horizontalement avec date/durée. */
         .file-detail-source-filename {
             font-size: 0.74rem; color: #3b82f6; font-style: italic;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
             flex: 1; min-width: 0; text-align: left;
             margin-left: 0.4rem;
+        }
+        /* En vue détail (techline), la date+durée s'affiche EN LIGNE
+           (pas en colonne empilée comme dans la liste). On surcharge
+           .file-row-meta pour ce contexte uniquement. */
+        .file-detail-techline .file-row-meta {
+            flex-direction: row; align-items: baseline; gap: 0.4rem;
+        }
+        .file-detail-techline .file-row-meta-dur::before,
+        .file-detail-techline .file-detail-source-filename::before {
+            content: "•"; color: #cbd5e1; margin-right: 0.4rem;
         }
         /* Bouton icône (poubelle, camion poubelle) : remplace les boutons texte
            Supprimer/Purger. Fond transparent, hover discret, tooltip natif. */
@@ -2478,6 +2775,15 @@ INDEX_TEMPLATE = """
             display: flex; justify-content: space-between; align-items: center;
             gap: 0.5rem; margin-bottom: 0.6rem;
         }
+        /* Bouton "← Liste" : discret, en lien-texte, pas un gros bouton.
+           Hover = soulignement subtil. */
+        .file-detail-back {
+            background: transparent; border: 0; cursor: pointer;
+            color: #64748b; font-size: 0.72rem; line-height: 1;
+            padding: 0.15rem 0.25rem; border-radius: 4px;
+        }
+        .file-detail-back:hover { color: #1d4ed8; text-decoration: underline; }
+        .file-detail-back:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
         .file-detail-title-row {
             display: flex; gap: 0.5rem; align-items: center;
             margin: 0.3rem 0 0.15rem 0;
@@ -2914,7 +3220,22 @@ INDEX_TEMPLATE = """
         <button type="button" class="tab-btn" role="tab" data-tab="generate" id="tab-btn-generate">
             Enrôler un nouvel appareil
         </button>
+        <button type="button" class="tab-btn" role="tab" data-tab="trash" id="tab-btn-trash">
+            Corbeille
+        </button>
     </nav>
+
+    <div class="card tab-pane" data-tab="trash">
+        <div class="dsfr-inline-actions">
+            <h1 style="font-size:1.1rem;">Corbeille</h1>
+            <span style="color:#64748b;font-size:0.78rem;">
+                Les éléments sont automatiquement supprimés après <strong>30 jours</strong>.
+            </span>
+        </div>
+        <div id="trash-list" style="margin-top:0.6rem;">
+            <p style="color:#999;font-size:0.85rem;">Chargement de la corbeille...</p>
+        </div>
+    </div>
 
     <div class="card tab-pane" data-tab="generate" id="enrollment-card">
         <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
@@ -3265,9 +3586,11 @@ const ICONS = {
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>',
     // Camion poubelle — purge massive (suppression de toute la liste)
     truck: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 17h2V7a1 1 0 0 1 1-1h9v11h2"/><path d="M14 10h4l3 4v3h-2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 10v3M9 10v3M11 10v3"/></svg>',
-    // Icônes formats document
-    fmt_audio:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
-    fmt_play:   '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+    // Télécharger un audio : icône "fichier audio" type Finder — document
+    // avec coin replié + note de musique à l'intérieur.
+    fmt_audio:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#eff6ff"/><path d="M14 2v6h6" fill="#dbeafe"/><path d="M11 12v5.5" stroke="#1d4ed8"/><path d="M11 12l4-1v5.5" stroke="#1d4ed8"/><ellipse cx="10" cy="17.5" rx="1.4" ry="1.1" fill="#1d4ed8" stroke="#1d4ed8"/><ellipse cx="14" cy="16.5" rx="1.4" ry="1.1" fill="#1d4ed8" stroke="#1d4ed8"/></svg>',
+    // Écouter : triangle play dans un cercle (style bouton lecteur).
+    fmt_play:   '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.12"/><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M10 8.5v7l6-3.5z" fill="currentColor"/></svg>',
     fmt_txt:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8M8 9h2"/></svg>',
     fmt_md:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15V9l2.5 3L12 9v6"/><path d="M16 9v6m0 0l-1.5-1.5M16 15l1.5-1.5"/></svg>',
     fmt_docx:   '<svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#dbeafe"/><path d="M14 2v6h6" fill="#bfdbfe"/><text x="12" y="18" font-size="6" font-weight="700" fill="#1e40af" text-anchor="middle" font-family="Arial,sans-serif">W</text></svg>',
@@ -4199,8 +4522,10 @@ async function loadSessions(opts) {
                 // Résumé déployé persistant (pas de <details>).
                 return `<div class="file-detail" data-detail-file-id="${f.id}">
                     <div class="file-detail-header">
-                        <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary file-detail-back"
-                                onclick="showFilesList()">← Retour à la liste</button>
+                        <button type="button" class="file-detail-back"
+                                onclick="showFilesList()"
+                                title="Retour à la liste des réunions"
+                                aria-label="Retour à la liste">← Liste</button>
                         <button type="button" class="icon-btn"
                                 onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
                                 title="Mettre à la corbeille (purgée définitivement après 30 jours)"
@@ -4237,7 +4562,7 @@ async function loadSessions(opts) {
                                 data-file-info-btn="${f.id}"
                                 onclick="openFileInfoModal('${f.id}')"
                                 title="Détails techniques (statut, qualité, étapes IA, normalisation)"
-                                aria-label="Voir les détails techniques">ⓘ</button>
+                                aria-label="Voir les détails techniques">i</button>
                     </div>
                     <!-- transcript-section caché pour déclencher
                          loadTranscriptStatus qui met à jour la couleur du
@@ -4407,6 +4732,24 @@ const TRANSCRIPT_KIND_FORMATS = {
 };
 
 const CR_FORMATS = ['md', 'docx', 'odt', 'json'];
+
+// Map globale { selectId → [iconsHtml par index d'option] } pour éviter
+// les pièges d'escape HTML quand on stocke du HTML dans un attribut.
+const _otherDlIcons = new Map();
+
+// Met à jour la rangée d'icônes à droite du select "Autres téléchargements".
+// On résout le target via le DOM voisin (sel.closest(.downloads-other-row))
+// et non via document.querySelector — plusieurs containers transcript-section
+// peuvent partager le même selectId (vue compacte + vue détail) et un
+// querySelector global retourne le PREMIER (souvent l'élément caché).
+function updateOtherDownload(sel) {
+    const row = sel.closest('.downloads-other-row');
+    const target = row && row.querySelector('.downloads-other-icons');
+    if (!target) return;
+    const list = _otherDlIcons.get(sel.id) || [];
+    const idx = sel.selectedIndex;
+    target.innerHTML = (idx >= 0 && list[idx]) || '';
+}
 
 // Met à jour les boutons Télécharger/Écouter selon l'option sélectionnée
 // dans le dropdown unifié (audios + transcripts + meeting-cr).
@@ -4636,56 +4979,107 @@ async function loadTranscriptStatus(fileId, container) {
                        aria-label="${escapeHtml(fi.title)}">${fi.svg}</a>`;
         };
 
-        // Construit la liste de lignes { label, icons[] }
-        const rows = [];
+        // Layout : on met en HAUT les 2 actions courantes (transcription
+        // nettoyée + écouter audio interne), puis une section "Autres
+        // téléchargements" avec un menu déroulant qui révèle les icônes
+        // de format pour le type sélectionné. Plus de bruit visuel.
+        const defaultRows = [];
+        const otherRows = [];
 
-        // Audios : une ligne par variante (source / transcodé / transféré),
-        // chaque ligne avec deux boutons-icône : ⬇ télécharger et ▶ écouter.
-        for (const a of audioOptions) {
-            const icons = [];
-            icons.push(`<a class="downloads-icon-btn" href="${escapeHtml(a.dl)}"
-                          download target="_blank" rel="noopener"
-                          title="Télécharger l'audio"
-                          aria-label="Télécharger l'audio">${ICONS.fmt_audio}</a>`);
-            if (a.stream) {
-                icons.push(`<a class="downloads-icon-btn downloads-icon-btn-play"
-                              href="${escapeHtml(a.stream)}"
-                              target="_blank" rel="noopener"
-                              title="Écouter dans le navigateur"
-                              aria-label="Écouter">${ICONS.fmt_play}</a>`);
-            }
-            rows.push({ label: a.label, iconsHtml: icons.join('') });
-        }
+        const audioDlIcon = (url) =>
+            `<a class="downloads-icon-btn" href="${escapeHtml(url)}"
+               download target="_blank" rel="noopener"
+               title="Télécharger l'audio" aria-label="Télécharger l'audio">${ICONS.fmt_audio}</a>`;
+        const audioPlayIcon = (url) =>
+            `<a class="downloads-icon-btn downloads-icon-btn-play"
+               href="${escapeHtml(url)}" target="_blank" rel="noopener"
+               title="Écouter dans le navigateur" aria-label="Écouter">${ICONS.fmt_play}</a>`;
 
-        // Transcriptions : une ligne par type, icônes selon les formats dispo.
+        // Transcription nettoyée EN PREMIER (output le plus utile : lisible,
+        // sans hors-sujet, sigles corrigés). Audio interne ensuite. Les
+        // autres types passent dans le menu déroulant en bas.
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
             if (!outputs[kind]) continue;
             const formats = TRANSCRIPT_KIND_FORMATS[kind] || ['txt'];
             const icons = formats.map((ext) =>
                 fmtIconHtml(ext, `/api/file/transcript/${kind}/${ext}/${fileId}`)
             ).join('');
-            rows.push({ label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons });
+            const row = { label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons };
+            if (kind === 'transcript-cleaned') defaultRows.push(row);
+            else otherRows.push(row);
         }
 
-        // Compte-rendu : une ligne unique.
+        // Audios : interne → "Écouter + Télécharger" en accès direct ;
+        // les variantes source/transcodé vont dans "Autres téléchargements".
+        for (const a of audioOptions) {
+            const isInternal = (a.label || '').toLowerCase().includes('interne');
+            if (isInternal && (a.stream || a.dl)) {
+                const icons = [];
+                if (a.stream) icons.push(audioPlayIcon(a.stream));
+                if (a.dl)     icons.push(audioDlIcon(a.dl));
+                defaultRows.push({
+                    label: "Écouter / Télécharger l'audio (interne)",
+                    iconsHtml: icons.join(''),
+                });
+            } else {
+                const icons = [];
+                if (a.dl) icons.push(audioDlIcon(a.dl));
+                if (a.stream) icons.push(audioPlayIcon(a.stream));
+                otherRows.push({ label: a.label, iconsHtml: icons.join('') });
+            }
+        }
+
+        // Compte-rendu structuré : dans "Autres" (pas l'usage le plus fréquent
+        // côté grand public ; reste à 1 clic via le menu).
         if (outputs['meeting-cr']) {
             const icons = CR_FORMATS.map((ext) =>
                 fmtIconHtml(ext, `/api/file/meeting-cr/${ext}/${fileId}`)
             ).join('');
-            rows.push({ label: 'Compte-rendu structuré', iconsHtml: icons });
+            otherRows.push({ label: 'Compte-rendu structuré', iconsHtml: icons });
         }
 
         let dropdownBlock = '';
-        if (rows.length > 0) {
-            const rowsHtml = rows.map(r => `
+        if (defaultRows.length > 0 || otherRows.length > 0) {
+            const defaultHtml = defaultRows.map(r => `
                 <div class="downloads-row">
                     <span class="downloads-row-label">${escapeHtml(r.label)}</span>
                     <span class="downloads-row-icons">${r.iconsHtml}</span>
                 </div>`).join('');
-            dropdownBlock = `<div class="downloads-block">${rowsHtml}</div>`;
+
+            let otherSection = '';
+            let pendingOtherSelectId = '';
+            if (otherRows.length > 0) {
+                // Pas de placeholder : on pré-sélectionne la première entrée.
+                // Le HTML des icônes est stocké dans _otherDlIcons (Map JS)
+                // pour ne pas dépendre de l'escape HTML d'attribut.
+                const optsHtml = otherRows.map((r, i) =>
+                    `<option value="${i}"${i === 0 ? ' selected' : ''}>${escapeHtml(r.label)}</option>`
+                ).join('');
+                const selectId = `other-dl-${fileId}`;
+                pendingOtherSelectId = selectId;
+                _otherDlIcons.set(selectId, otherRows.map(r => r.iconsHtml));
+                otherSection = `
+                    <div class="downloads-other-row">
+                        <span class="downloads-other-label">Autres :</span>
+                        <select class="downloads-other-select fr-select"
+                                id="${selectId}"
+                                onchange="updateOtherDownload(this)">
+                            ${optsHtml}
+                        </select>
+                        <span class="downloads-row-icons downloads-other-icons"
+                              data-other-icons-for="${selectId}"></span>
+                    </div>`;
+            }
+            dropdownBlock = `<div class="downloads-block">${defaultHtml}${otherSection}</div>`;
         }
 
         container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        // Peuple immédiatement les icônes du select "Autres téléchargements"
+        // pour la première entrée sélectionnée (sinon la zone reste vide
+        // jusqu'au premier change).
+        container.querySelectorAll('.downloads-other-select').forEach((sel) => {
+            updateOtherDownload(sel);
+        });
         // Restaure la sélection du dropdown si l'utilisateur avait avancé
         // (mémorisée par loadSessions dans window._savedDlSelections).
         try {
@@ -4733,11 +5127,10 @@ async function loadTranscriptStatus(fileId, container) {
                     dot.className = `file-row-dot file-row-dot-${status}`;
                     dot.title = `${status}${engine ? ' (' + engine + ')' : ''}`;
                 }
-                // Met aussi à jour le bouton (i) en vue détail (même mapping
-                // couleur que le dot inline, juste sur le bouton info).
+                // Bouton (i) : on garde neutre (juste rond + i). On met
+                // seulement à jour le tooltip pour porter l'info statut.
                 const infoBtn = document.querySelector(`[data-file-info-btn="${fileId}"]`);
                 if (infoBtn) {
-                    infoBtn.className = `file-detail-info-btn file-row-dot-${status}`;
                     infoBtn.title = `Détails techniques — statut: ${status}${engine ? ' (' + engine + ')' : ''}`;
                 }
                 // Mémorise les infos pour le modal (status raw, engine,
@@ -4853,9 +5246,88 @@ function setupTabs() {
             if (target === 'transfers') {
                 showFilesList();
             }
+            if (target === 'trash') {
+                loadTrash();
+            }
             activateTab(target);
         });
     });
+}
+
+async function loadTrash() {
+    const container = document.getElementById('trash-list');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/my-trash');
+        const data = await resp.json();
+        const files = data.files || [];
+        const sessions = data.sessions || [];
+        if (files.length === 0 && sessions.length === 0) {
+            container.innerHTML = `<p style="color:#64748b;font-size:0.85rem;">
+                La corbeille est vide. Les éléments supprimés y restent ${data.retention_days || 30} jours avant suppression définitive.
+            </p>`;
+            return;
+        }
+        const sessionsHtml = sessions.map(s => `
+            <div class="trash-item">
+                <span class="trash-item-type">Session</span>
+                <span class="trash-item-name"><strong>${escapeHtml(s.simple_code)}</strong> · ${s.files_count} fichier(s)</span>
+                <span class="trash-item-meta">reste ${s.days_left} j avant purge</span>
+                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="restoreSession('${s.simple_code}')">Restaurer</button>
+            </div>
+        `).join('');
+        const filesHtml = files.map(f => `
+            <div class="trash-item">
+                <span class="trash-item-type">Fichier</span>
+                <span class="trash-item-name">${escapeHtml(f.original_filename)} <small style="color:#94a3b8;">(${escapeHtml(f.simple_code || '?')})</small></span>
+                <span class="trash-item-meta">reste ${f.days_left} j avant purge</span>
+                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="restoreFile('${f.id}')">Restaurer</button>
+                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                        onclick="deleteFilePermanently('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')">
+                    Supprimer définitivement
+                </button>
+            </div>
+        `).join('');
+        container.innerHTML = sessionsHtml + filesHtml;
+    } catch (e) {
+        container.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur chargement corbeille.</p>`;
+    }
+}
+
+async function restoreFile(fileId) {
+    try {
+        const r = await fetch(`/api/file/${fileId}/restore`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'restore_failed');
+        showToast('Fichier restauré.', 'success');
+        loadTrash();
+        loadSessions({ force: true });
+    } catch (e) { showToast('Restauration échouée.', 'error'); }
+}
+
+async function restoreSession(simpleCode) {
+    try {
+        const r = await fetch(`/api/my-sessions/${simpleCode}/restore`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'restore_failed');
+        showToast('Session restaurée.', 'success');
+        loadTrash();
+        loadSessions({ force: true });
+    } catch (e) { showToast('Restauration échouée.', 'error'); }
+}
+
+async function deleteFilePermanently(fileId, filenameRaw) {
+    const filename = (filenameRaw || '').replace(/&#39;/g, "'");
+    if (!confirm(`Supprimer définitivement « ${filename} » ?\\n\\nLe fichier sera retiré de S3 et de la base. Cette action est irréversible.`)) return;
+    try {
+        const r = await fetch(`/api/file/${fileId}/permanently`, { method: 'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'delete_failed');
+        showToast('Fichier supprimé définitivement.', 'success');
+        loadTrash();
+    } catch (e) { showToast('Suppression définitive échouée.', 'error'); }
 }
 function pickDefaultTab(hasActiveDevice) {
     if (_tabsInitialised) return;
@@ -4872,6 +5344,15 @@ function pickDefaultTab(hasActiveDevice) {
 
 setupTabs();
 updateDeviceFilterButton();
+// Feedback visuel sur clic d'une icône de téléchargement : flash + scale.
+// Délégation globale — fonctionne pour les boutons re-rendus par
+// loadTranscriptStatus sans re-bind à chaque refresh.
+document.addEventListener('click', (ev) => {
+    const btn = ev.target.closest && ev.target.closest('.downloads-icon-btn');
+    if (!btn) return;
+    btn.classList.add('is-clicked');
+    setTimeout(() => btn.classList.remove('is-clicked'), 450);
+});
 // Charge initial : devices puis sessions. Pas d'auto-refresh setInterval —
 // le user peut Rafraîchir manuellement via le bouton dédié dans le header
 // de l'onglet, ou la transcription qui poll elle-même (loadTranscriptStatus
