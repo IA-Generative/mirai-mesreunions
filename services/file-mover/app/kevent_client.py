@@ -382,8 +382,15 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> dict:
-        """Async equivalent of ``transcribe`` — same return shape, polled."""
+        """Async equivalent of ``transcribe`` — same return shape, polled.
+
+        ``on_submitted(job_id)`` is invoked exactly once, juste après que le
+        gateway ait accepté le job (avant le premier poll). Permet au caller
+        de persister le job_id en DB pour reprise au boot — cf.
+        Phase 2bis dans puller.py.
+        """
         extra: dict = {"response_format": response_format}
         if language:
             extra["language"] = language
@@ -392,6 +399,11 @@ class KeventClient:
             service_type=service_type, operation=operation,
             model=self.transcription_model, extra_form=extra,
         )
+        if on_submitted is not None:
+            try:
+                on_submitted(job_id)
+            except Exception:
+                logger.exception("on_submitted callback failed for job %s", job_id)
         return self.wait_for_job(
             service_type, job_id,
             poll_interval=poll_interval, timeout=timeout,
@@ -408,13 +420,40 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_submitted: Optional[Callable[[str], None]] = None,
     ) -> dict:
-        """Async equivalent of ``diarize``."""
+        """Async equivalent of ``diarize``.
+
+        Voir ``transcribe_async`` pour la sémantique de ``on_submitted``.
+        """
         job_id = self.submit_job(
             audio_bytes, filename, content_type,
             service_type=service_type, operation=operation,
             model=self.diarization_model,
         )
+        if on_submitted is not None:
+            try:
+                on_submitted(job_id)
+            except Exception:
+                logger.exception("on_submitted callback failed for job %s", job_id)
+        return self.wait_for_job(
+            service_type, job_id,
+            poll_interval=poll_interval, timeout=timeout,
+            on_status=on_status,
+        )
+
+    # Helper pour la reprise post-restart : on a déjà un job_id en DB, on
+    # rejoint juste le poll sans re-submit. Renvoie le résultat final
+    # (transcription/diarization) ou raise comme wait_for_job.
+    def resume_job(
+        self,
+        service_type: str,
+        job_id: str,
+        poll_interval: float = 3.0,
+        timeout: float = 600.0,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        """Poll un job déjà soumis (utile au boot pour récupérer un orphan)."""
         return self.wait_for_job(
             service_type, job_id,
             poll_interval=poll_interval, timeout=timeout,

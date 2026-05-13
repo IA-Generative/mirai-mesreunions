@@ -272,6 +272,12 @@ class UserAudioFile(InternalBase):
                                   comment="stub | mcr | kevent — which backend produced this row")
     transcription_language = Column(String(10), nullable=True,
                                     comment="ISO-639-1 code detected by the engine (kevent/Whisper)")
+    # Kevent job_id du WHISPER en cours / dernier soumis. Persisté pour :
+    # 1) demander la position d'attente au gateway via /api/queue-status?job_id=…
+    # 2) reprendre automatiquement un poll orphelin au boot d'un pod
+    #    file-puller (OOM, scale-down, rollout) sans re-uploader.
+    kevent_job_id = Column(String(64), nullable=True, index=True,
+                            comment="Kevent gateway job_id (Whisper) — track + resume on pod restart")
 
     # MCR push (when TRANSCRIPTION_BACKEND=mcr): the meeting_id returned by POST /meetings.
     # Used for cross-reference with the MCR platform when investigating outcomes.

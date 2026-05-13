@@ -1634,6 +1634,10 @@ def api_file_transcript_status(file_id):
             "outputs": flags,
             "suggested_filename": audio.get("suggested_filename"),
             "key_points_summary": audio.get("key_points_summary"),
+            # Permet à l'UI de demander la position d'attente précise via
+            # /api/queue-status?job_id=… plutôt que le générique
+            # "N jobs en attente" (Phase 2 du sprint queue hint).
+            "kevent_job_id": audio.get("kevent_job_id"),
         })
     finally:
         db.close()
@@ -3568,22 +3572,37 @@ function _formatQueueHint(d) {
 }
 
 // Poll global : scanne tous les widgets [data-queue-hint-for] présents dans
-// le DOM (liste compacte ET vue détail), récupère /api/queue-status une seule
-// fois, et applique le même texte à chacun. Quand chaque widget aura son
-// `data-queue-job-id` (Phase 2), on pourra faire 1 fetch par job pour le
-// rendre précis par fichier — pour l'instant on partage le payload générique.
+// le DOM (liste compacte ET vue détail). Si un widget porte un
+// `data-queue-job-id` (posé par loadTranscriptStatus quand le payload
+// transcript-status expose un kevent_job_id), on fait UN fetch par job
+// pour avoir position+ETA précis ; sinon un seul fetch générique partagé.
 async function _pollQueueHintAll() {
     const widgets = document.querySelectorAll('[data-queue-hint-for]');
     if (widgets.length === 0) return;
-    try {
-        const r = await fetch('/api/queue-status?service_type=audio', { cache: 'no-store' });
-        const d = await r.json();
-        const txt = _formatQueueHint(d);
-        widgets.forEach((el) => {
-            el.textContent = txt;
-            el.classList.toggle('queue-hint-stale', !!(d && d.stale));
-        });
-    } catch (e) { /* silencieux — on retentera dans 10s */ }
+
+    // Regroupe les widgets par job_id (string ou null pour "générique").
+    const byJobId = new Map();
+    widgets.forEach((el) => {
+        const jid = (el.getAttribute('data-queue-job-id') || '').trim() || null;
+        if (!byJobId.has(jid)) byJobId.set(jid, []);
+        byJobId.get(jid).push(el);
+    });
+
+    // Fetch 1 payload par groupe (générique + un par job_id distinct).
+    await Promise.all(Array.from(byJobId.entries()).map(async ([jid, els]) => {
+        const url = jid
+            ? `/api/queue-status?service_type=audio&job_id=${encodeURIComponent(jid)}`
+            : '/api/queue-status?service_type=audio';
+        try {
+            const r = await fetch(url, { cache: 'no-store' });
+            const d = await r.json();
+            const txt = _formatQueueHint(d);
+            els.forEach((el) => {
+                el.textContent = txt;
+                el.classList.toggle('queue-hint-stale', !!(d && d.stale));
+            });
+        } catch (e) { /* silencieux — on retentera dans 10s */ }
+    }));
 }
 
 // Activé tant qu'au moins un widget queue-hint est dans le DOM. Démarré
@@ -5547,6 +5566,16 @@ async function loadTranscriptStatus(fileId, container) {
                 // ou détail). Le poll global ensureQueueHintPolling est
                 // idempotent + auto-stop quand plus aucun widget dispo.
                 if (!_TERMINAL_TS.has(status)) {
+                    // Propage le kevent_job_id sur tous les widgets queue-hint
+                    // de ce fichier — _pollQueueHintAll s'en sert pour faire un
+                    // fetch précis (position + ETA) au lieu du générique.
+                    if (data.kevent_job_id) {
+                        document.querySelectorAll(
+                            `[data-queue-hint-for="${fileId}"]`
+                        ).forEach((el) => {
+                            el.setAttribute('data-queue-job-id', data.kevent_job_id);
+                        });
+                    }
                     ensureQueueHintPolling();
                 }
                 // Zone résumé : on n'affiche que les key_points (pas le

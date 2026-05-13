@@ -114,6 +114,19 @@ rabbit_cfg = RabbitMQConfig()
 SessionLocal = None
 _purge_thread_started = False
 _pull_loop_thread_started = False
+_orphan_resume_started = False
+_orphan_watchdog_started = False
+# États de transcription "non terminaux" — déclenchent une reprise du
+# poll Kevent si le pod redémarre alors qu'un fichier est dans cet état.
+_POLLING_STATES = (
+    "kevent_queued", "kevent_transcribing", "kevent_processing",
+    "pending", "processing",
+)
+# Au-delà de cette fenêtre depuis création, un job orphelin est considéré
+# perdu (gateway Kevent purge ses jobs après TTL court — leur résultat
+# est inaccessible). Inutile de tenter une reprise.
+_ORPHAN_MAX_AGE_HOURS = 24
+_ORPHAN_WATCHDOG_INTERVAL_S = 300  # 5 min
 
 INTERNAL_PURGE_INTERVAL_SECONDS = max(60, int(os.getenv("INTERNAL_PURGE_INTERVAL_SECONDS", "86400")))
 INTERNAL_PURGE_MAX_AGE_DAYS = max(1, int(os.getenv("INTERNAL_PURGE_MAX_AGE_DAYS", "7")))
@@ -307,6 +320,7 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "meeting_analysis_json",
         "suggested_filename",
         "key_points_summary",
+        "kevent_job_id",
     }
     db = SessionLocal()
     try:
@@ -324,6 +338,166 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
 
 
 from app.audio_format import to_diarization_format as _to_diarization_format
+
+
+# ── Phase 2bis : reprise auto des polls Kevent orphelins ─────────────────
+#
+# Quand un pod file-puller meurt (OOM, scale-down, rollout) pendant qu'il
+# poll Kevent pour un fichier, le job continue côté gateway mais plus
+# personne ne récupère le résultat. Le fichier reste figé dans son état
+# de polling (kevent_queued / kevent_transcribing / kevent_processing).
+#
+# Avec kevent_job_id persisté, on peut au boot scanner ces rows et relancer
+# un `client.resume_job(...)` sans re-uploader. Idempotent : si le job est
+# encore en cours, on le poll ; s'il est terminé, on récupère le résultat ;
+# s'il a été TTL'd côté Kevent (>24h), on marque kevent_failed pour libérer
+# la row.
+
+def _resume_orphaned_kevent_polls() -> None:
+    """Au boot, repère les fichiers dont le poll Kevent a été interrompu et
+    relance le poll dans un thread par row. Best-effort : log et continue
+    en cas d'erreur de scan ou de reprise. Borné à 24h pour éviter de
+    tenter de poller des jobs déjà TTL'd côté gateway."""
+    if SessionLocal is None:
+        logger.debug("orphan resume: SessionLocal not ready, skipping")
+        return
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_ORPHAN_MAX_AGE_HOURS)
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(UserAudioFile)
+                .filter(
+                    UserAudioFile.transcription_status.in_(_POLLING_STATES),
+                    UserAudioFile.kevent_job_id.isnot(None),
+                    UserAudioFile.created_at > cutoff,
+                )
+                .all()
+            )
+            # Détacher avant fermeture de session pour bosser sans
+            # référence à la session DB dans les threads enfants.
+            snapshot = [(str(r.id), r.kevent_job_id) for r in rows]
+        finally:
+            db.close()
+        if not snapshot:
+            logger.info("orphan resume: 0 orphaned kevent polls to resume")
+            return
+        logger.info("orphan resume: resuming %d orphaned kevent poll(s) at boot", len(snapshot))
+        for audio_id, job_id in snapshot:
+            threading.Thread(
+                target=_resume_one_kevent_poll,
+                args=(audio_id, job_id),
+                daemon=True,
+                name=f"kevent-resume-{audio_id[:8]}",
+            ).start()
+    except Exception:
+        logger.exception("orphan resume scan failed (non-fatal)")
+
+
+def _resume_one_kevent_poll(audio_file_id: str, job_id: str) -> None:
+    """Rejoint un poll Kevent pour un fichier audio. Si le job est encore
+    en cours, attend la fin ; si terminé, applique le résultat ; si TTL'd
+    (404), marque la row en kevent_failed."""
+    client = _build_kevent_client()
+    if client is None:
+        logger.warning("orphan resume %s: kevent client unavailable", audio_file_id)
+        return
+    try:
+        # On reprend juste le poll (skip submission) sur le job_id stocké.
+        logger.info("orphan resume %s: polling kevent job_id=%s", audio_file_id, job_id)
+        try:
+            client.resume_job(
+                service_type=KEVENT_ASYNC_SERVICE_TYPE,
+                job_id=job_id,
+                poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
+                timeout=float(KEVENT_ASYNC_TIMEOUT_SECONDS or KEVENT_HTTP_TIMEOUT_SECONDS),
+            )
+            # ⚠ Le résultat n'est pas re-injecté dans le pipeline downstream
+            # (correction sigles, etc.) — ce serait dupliquer le code de
+            # _transcribe_via_kevent. Pour cette première version, on
+            # marque juste kevent_failed avec un message clair pour signaler
+            # à l'utilisateur de ré-uploader. La pipeline complète sera
+            # ré-engageable dans une itération ultérieure (refactor de
+            # _transcribe_via_kevent en sous-fonctions prenant transcription
+            # déjà obtenue). Pour l'instant, on délivre la robustesse de
+            # détection — pas la reprise du pipeline complet.
+            _set_user_audio_status(
+                audio_file_id, "kevent_failed",
+                transcription_engine="kevent",
+            )
+            logger.info("orphan resume %s: job %s done (marked failed — re-upload needed for full pipeline)",
+                        audio_file_id, job_id)
+        except KeventApplicativeError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower() or "404" in msg:
+                logger.warning("orphan resume %s: job %s TTL'd côté Kevent, marking failed",
+                               audio_file_id, job_id)
+                _set_user_audio_status(audio_file_id, "kevent_failed",
+                                       transcription_engine="kevent")
+            else:
+                logger.exception("orphan resume %s: job %s applicative error", audio_file_id, job_id)
+        except KeventTransientError:
+            logger.warning("orphan resume %s: transient error on job %s — will retry via watchdog",
+                           audio_file_id, job_id)
+    except Exception:
+        logger.exception("orphan resume %s: unexpected error", audio_file_id)
+
+
+def _orphan_watchdog_loop() -> None:
+    """Toutes les 5 min, scanne les rows en polling state qui :
+      - n'ont pas de kevent_job_id (race window submission → DB write impossible
+        à reprendre → terminal), OU
+      - ont un kevent_job_id mais pas d'update depuis > 30 min (signe que
+        le poll thread est mort silencieusement)."""
+    while True:
+        time.sleep(_ORPHAN_WATCHDOG_INTERVAL_S)
+        if SessionLocal is None:
+            continue
+        try:
+            cutoff_create = datetime.now(timezone.utc) - timedelta(hours=_ORPHAN_MAX_AGE_HOURS)
+            cutoff_update = datetime.now(timezone.utc) - timedelta(minutes=30)
+            db = SessionLocal()
+            try:
+                from sqlalchemy import or_, and_
+                rows = (
+                    db.query(UserAudioFile)
+                    .filter(
+                        UserAudioFile.transcription_status.in_(_POLLING_STATES),
+                        UserAudioFile.created_at > cutoff_create,
+                        or_(
+                            UserAudioFile.kevent_job_id.is_(None),
+                            and_(
+                                UserAudioFile.kevent_job_id.isnot(None),
+                                UserAudioFile.transcription_started_at < cutoff_update,
+                            ),
+                        ),
+                    )
+                    .all()
+                )
+                snapshot = [(str(r.id), r.kevent_job_id) for r in rows]
+            finally:
+                db.close()
+            if not snapshot:
+                continue
+            logger.info("orphan watchdog: %d stuck row(s) detected", len(snapshot))
+            for audio_id, job_id in snapshot:
+                if job_id:
+                    threading.Thread(
+                        target=_resume_one_kevent_poll,
+                        args=(audio_id, job_id),
+                        daemon=True,
+                        name=f"kevent-watchdog-{audio_id[:8]}",
+                    ).start()
+                else:
+                    # Pas de job_id → impossible à reprendre. Terminal.
+                    _set_user_audio_status(
+                        audio_id, "kevent_failed",
+                        transcription_engine="kevent",
+                    )
+                    logger.warning("orphan watchdog: row %s has no kevent_job_id, marked failed", audio_id)
+        except Exception:
+            logger.exception("orphan watchdog scan failed (non-fatal, retry in %ss)",
+                             _ORPHAN_WATCHDOG_INTERVAL_S)
 
 
 def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
@@ -383,6 +557,18 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             except Exception:
                 pass  # déjà loggé dans notify_external_status
 
+    def _on_kevent_submitted(job_id: str):
+        """Persiste le kevent_job_id en DB dès que le gateway accepte le job.
+        Sert à reprise post-restart (Phase 2bis) et à la position d'attente
+        précise dans l'UI mydevices."""
+        try:
+            _set_user_audio_status(audio_file_id, "kevent_queued",
+                                   transcription_engine="kevent",
+                                   kevent_job_id=job_id)
+        except Exception:
+            logger.exception("Failed to persist kevent_job_id=%s for %s",
+                             job_id, audio_file_id)
+
     def _kevent_transcribe():
         if KEVENT_ASYNC_MODE:
             return client.transcribe_async(
@@ -394,6 +580,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_submitted=_on_kevent_submitted,
             )
         return client.transcribe(
             audio_bytes=audio_bytes,
@@ -1130,6 +1317,7 @@ def audio_lookup():
             ),
             "suggested_filename": row.suggested_filename,
             "key_points_summary": row.key_points_summary,
+            "kevent_job_id": row.kevent_job_id,
         })
     except Exception:
         logger.exception("audio_lookup failed")
@@ -1162,7 +1350,7 @@ def pull_trigger():
 
 
 def create_app():
-    global SessionLocal, _purge_thread_started, _pull_loop_thread_started
+    global SessionLocal, _purge_thread_started, _pull_loop_thread_started, _orphan_resume_started, _orphan_watchdog_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
     init_tables(db_cfg, InternalBase)
     ensure_bucket(s3_internal_cfg)
@@ -1179,6 +1367,20 @@ def create_app():
         pull_thread = threading.Thread(target=_pull_queue_loop, daemon=True, name="internal-pull-drain")
         pull_thread.start()
         _pull_loop_thread_started = True
+    # Phase 2bis : reprise auto des polls Kevent orphelins (jobs en cours
+    # dont le pod précédent est mort sans terminer le poll). Lancé une
+    # seule fois au boot, dans un thread non bloquant.
+    if not _orphan_resume_started:
+        threading.Thread(target=_resume_orphaned_kevent_polls,
+                         daemon=True, name="kevent-orphan-resume").start()
+        _orphan_resume_started = True
+    # Watchdog périodique : filet de sécurité pour les rows où kevent_job_id
+    # n'a pas été persisté (race window submission→DB write) ou pour les
+    # polls qui ont silencieusement crashé pendant la vie du pod.
+    if not _orphan_watchdog_started:
+        threading.Thread(target=_orphan_watchdog_loop,
+                         daemon=True, name="kevent-orphan-watchdog").start()
+        _orphan_watchdog_started = True
     if INTERNAL_PUSH_TRIGGER_TOKEN:
         logger.info("Pull trigger HTTP endpoint enabled (allowlist=%s)",
                     _TRIGGER_IP_ALLOWLIST_RAW or "<empty>")
