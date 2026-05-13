@@ -2746,6 +2746,31 @@ INDEX_TEMPLATE = """
         }
         .file-row-queue-hint:empty { display: none; }
         .file-row-queue-hint.queue-hint-stale { color: #94a3b8; }
+        /* Bandeau d'alerte virus inline (B1) — affiché en tête de la file-row
+           ou de la vue détail quand f.status ∈ {scan_infected, quarantined}.
+           Couleur rouge appuyée, icône ⚠, message explicite. */
+        .file-row-virus-banner {
+            display: flex; align-items: center; gap: 0.55rem;
+            padding: 0.5rem 0.75rem; margin: 0.2rem 0.3rem 0.3rem 0.3rem;
+            background: #fee2e2; border: 1px solid #fca5a5;
+            border-left: 4px solid #b91c1c; border-radius: 6px;
+            color: #7f1d1d; font-size: 0.82rem; line-height: 1.35;
+        }
+        .file-row-virus-icon {
+            font-size: 1.1rem; color: #b91c1c; flex-shrink: 0;
+        }
+        .file-row-virus-msg strong { color: #b91c1c; }
+        /* Quand virus bloqué : la row entière prend un fond rose pâle pour
+           bien marquer la mise en quarantaine. */
+        .file-row-virus { background: #fef2f2; }
+        .file-row-virus .file-row-title {
+            color: #7f1d1d !important;
+            text-decoration: line-through !important;
+        }
+        .file-detail-virus { background: #fef2f2; padding: 0.4rem; border-radius: 8px; }
+        /* Dot couleur virus (rouge fixe, pas d'animation pulse). */
+        .file-row-dot-scan_infected,
+        .file-row-dot-quarantined { color: #b91c1c !important; animation: none !important; }
         /* En vue détail (queue-hint au-dessus du rail), le widget partage
            la classe queue-hint. On garde son style existant intact. */
         .queue-hint:empty { display: none; }
@@ -4732,6 +4757,23 @@ async function loadSessions(opts) {
                             <span data-transcribe-label="${f.id}">Transcription</span>
                         </div>
                     </div>`;
+                // Bandeau d'alerte rouge inline si l'antivirus a bloqué le fichier
+                // (scan_infected / quarantined). On l'insère AVANT le contenu
+                // normal de la row pour que ce soit la première chose lue par
+                // l'utilisateur. Le dot rouge fixe + tooltip clair complètent.
+                const VIRUS_STATES = new Set(['scan_infected', 'quarantined']);
+                const isVirusBlocked = VIRUS_STATES.has(f.status);
+                const virusBanner = isVirusBlocked
+                    ? `<div class="file-row-virus-banner" role="alert">
+                         <span class="file-row-virus-icon" aria-hidden="true">⚠</span>
+                         <span class="file-row-virus-msg">
+                           <strong>Virus détecté</strong> — fichier
+                           ${f.status === 'quarantined' ? 'mis en quarantaine' : 'bloqué par l\\'antivirus'}.
+                           Aucun téléchargement possible. Si vous pensez à un
+                           faux positif, contactez un administrateur.
+                         </span>
+                       </div>`
+                    : '';
                 if (!isDetailView) {
                     // ── Vue LISTE COMPACTE ─────────────────────────────
                     // Une seule ligne + chevron expandable pour le résumé :
@@ -4741,7 +4783,8 @@ async function loadSessions(opts) {
                     //   • date+durée
                     //   • chevron ▶ : déplie inline le résumé sans quitter la liste
                     //   • bouton Supprimer
-                    return `<div class="file-row-compact-wrapper" data-file-row="${f.id}">
+                    return `<div class="file-row-compact-wrapper${isVirusBlocked ? ' file-row-virus' : ''}" data-file-row="${f.id}">
+                        ${virusBanner}
                         <div class="file-row-compact">
                             <!-- transcript-section caché : sert juste à
                                  déclencher loadTranscriptStatus qui mettra
@@ -4760,9 +4803,9 @@ async function loadSessions(opts) {
                                  l'upload n'est pas TRANSFERRED — ça suffit à
                                  animer "il se passe un truc" avant même que
                                  la transcription démarre. -->
-                            <span class="file-row-dot ${UPLOAD_IN_PROGRESS_STATES.has(f.status) ? 'file-row-dot-upload-in-progress' : ''}"
+                            <span class="file-row-dot ${UPLOAD_IN_PROGRESS_STATES.has(f.status) ? 'file-row-dot-upload-in-progress' : ''} ${isVirusBlocked ? `file-row-dot-${f.status}` : ''}"
                                   data-file-dot="${f.id}"
-                                  title="${escapeHtml(_uploadStateLabel(f.status))}">●</span>
+                                  title="${escapeHtml(isVirusBlocked ? `Virus détecté — ${statusLabel(f.status)}` : _uploadStateLabel(f.status))}">●</span>
                             <a href="#" class="file-row-title" data-file-id="${f.id}"
                                onclick="event.preventDefault();showFileDetail('${f.id}');"
                                title="${escapeHtml(f.original_filename)}">
@@ -4808,7 +4851,8 @@ async function loadSessions(opts) {
                 // /api/file/<id>/rename) + nom technique en petit dessous.
                 // Statut technique uniquement via tooltip sur la pastille.
                 // Résumé déployé persistant (pas de <details>).
-                return `<div class="file-detail" data-detail-file-id="${f.id}">
+                return `<div class="file-detail${isVirusBlocked ? ' file-detail-virus' : ''}" data-detail-file-id="${f.id}">
+                    ${virusBanner}
                     <div class="file-detail-header">
                         <button type="button" class="file-detail-back"
                                 onclick="showFilesList()"
