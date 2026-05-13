@@ -608,6 +608,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_submitted=_on_kevent_submitted,
             )
         return client.diarize(
             audio_bytes=d_bytes,
