@@ -2737,6 +2737,18 @@ INDEX_TEMPLATE = """
         }
         .file-row-meta .file-row-meta-date { font-weight: 500; color: #475569; }
         .file-row-meta .file-row-meta-dur { color: #94a3b8; font-variant-numeric: tabular-nums; }
+        /* Hint file d'attente Kevent (liste compacte). Invisible quand vide
+           (CSS :empty), discret quand peuplé. */
+        .file-row-queue-hint {
+            font-size: 0.72rem; color: #2563eb; font-style: italic;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            min-width: 0;
+        }
+        .file-row-queue-hint:empty { display: none; }
+        .file-row-queue-hint.queue-hint-stale { color: #94a3b8; }
+        /* En vue détail (queue-hint au-dessus du rail), le widget partage
+           la classe queue-hint. On garde son style existant intact. */
+        .queue-hint:empty { display: none; }
         /* Nom du fichier audio d'origine à droite de date+durée (vue détail),
            légèrement bleuté. Aligné horizontalement avec date/durée. */
         .file-detail-source-filename {
@@ -3455,38 +3467,67 @@ function _fmtEta(s) {
     const sec = Math.round((s % 60) / 10) * 10;
     return sec === 0 ? `${m} min` : `${m} min ${String(sec).padStart(2,'0')} s`;
 }
-async function _pollQueueHintDetail(fileId) {
-    const el = document.querySelector(`[data-queue-hint-for="${fileId}"]`);
-    if (!el) return;
+// Calcule le texte du hint à partir du payload /api/queue-status.
+// Renvoie '' si pas d'info exploitable.
+function _formatQueueHint(d) {
+    if (!d || d.pending_total == null) return '';
+    let txt = '';
+    if (d.your_position === 1) {
+        txt = '⏳ En tête de file';
+    } else if (d.your_position && d.pending_total > 0) {
+        const eta = d.eta_seconds;
+        const part = eta != null && eta < 15
+            ? ' — quasi immédiat'
+            : (eta != null ? ` — env. ${_fmtEta(eta)} d'attente` : '');
+        txt = `⏳ Position ${d.your_position}/${d.pending_total} dans la file${part}`;
+    } else if (d.pending_total > 0) {
+        txt = `⏳ ${d.pending_total} job${d.pending_total > 1 ? 's' : ''} en attente`;
+    } else if (d.processing_total > 0) {
+        txt = '⏳ Tour suivant';   // file vide mais quelqu'un est en train de tourner devant
+    } else {
+        txt = '⏳ Réservation de la file…';  // file complètement vide, transitoire (entre 2 jobs)
+    }
+    if (txt && d.stale) txt += ' (estimation)';
+    return txt;
+}
+
+// Poll global : scanne tous les widgets [data-queue-hint-for] présents dans
+// le DOM (liste compacte ET vue détail), récupère /api/queue-status une seule
+// fois, et applique le même texte à chacun. Quand chaque widget aura son
+// `data-queue-job-id` (Phase 2), on pourra faire 1 fetch par job pour le
+// rendre précis par fichier — pour l'instant on partage le payload générique.
+async function _pollQueueHintAll() {
+    const widgets = document.querySelectorAll('[data-queue-hint-for]');
+    if (widgets.length === 0) return;
     try {
-        const r = await fetch('/api/queue-status', { cache: 'no-store' });
+        const r = await fetch('/api/queue-status?service_type=audio', { cache: 'no-store' });
         const d = await r.json();
-        if (d.pending_total == null) { el.textContent = ''; return; }
-        let txt = '';
-        if (d.your_position === 1) {
-            txt = '⏳ En tête de file';
-        } else if (d.your_position && d.pending_total > 0) {
-            const eta = d.eta_seconds;
-            const part = eta != null && eta < 15
-                ? ' — quasi immédiat'
-                : (eta != null ? ` — env. ${_fmtEta(eta)} d'attente` : '');
-            txt = `⏳ Position ${d.your_position}/${d.pending_total} dans la file${part}`;
-        } else if (d.pending_total > 0) {
-            txt = `⏳ ${d.pending_total} jobs en attente`;
-        } else if (d.processing_total > 0) {
-            txt = '⏳ Transcription en cours';
+        const txt = _formatQueueHint(d);
+        widgets.forEach((el) => {
+            el.textContent = txt;
+            el.classList.toggle('queue-hint-stale', !!(d && d.stale));
+        });
+    } catch (e) { /* silencieux — on retentera dans 10s */ }
+}
+
+// Activé tant qu'au moins un widget queue-hint est dans le DOM. Démarré
+// idempotemment à chaque render (loadSessions) ; auto-stop dans le poll quand
+// il n'y a plus de widget (sortie de liste vers vue Mes appareils, etc.).
+function ensureQueueHintPolling() {
+    if (_queueHintTimer) return;          // déjà actif
+    _pollQueueHintAll();                  // 1er appel immédiat
+    _queueHintTimer = setInterval(() => {
+        if (document.querySelectorAll('[data-queue-hint-for]').length === 0) {
+            clearInterval(_queueHintTimer);
+            _queueHintTimer = null;
+            return;
         }
-        if (txt && d.stale) txt += ' (estimation)';
-        el.textContent = txt;
-        el.classList.toggle('queue-hint-stale', !!d.stale);
-    } catch (e) { /* silencieux */ }
+        _pollQueueHintAll();
+    }, 10000);
 }
-function startQueueHintDetail(fileId) {
-    if (_queueHintTimer) clearInterval(_queueHintTimer);
-    if (!fileId) return;
-    _pollQueueHintDetail(fileId);  // 1er appel immédiat
-    _queueHintTimer = setInterval(() => _pollQueueHintDetail(fileId), 10000);
-}
+
+// Aliases pour compat ascendante (anciens call-sites avant la généralisation).
+function startQueueHintDetail(fileId) { ensureQueueHintPolling(); }
 function stopQueueHintDetail() {
     if (_queueHintTimer) clearInterval(_queueHintTimer);
     _queueHintTimer = null;
@@ -4673,6 +4714,12 @@ async function loadSessions(opts) {
                                title="${escapeHtml(f.original_filename)}">
                                 ${escapeHtml(f.original_filename)}
                             </a>
+                            <!-- Hint file d'attente Kevent (visible uniquement
+                                 quand le pipeline est en cours — peuplé par
+                                 _pollQueueHintAll via /api/queue-status,
+                                 vide sinon). -->
+                            <span class="file-row-queue-hint"
+                                  data-queue-hint-for="${f.id}"></span>
                             <button class="file-row-expand" type="button"
                                     onclick="toggleRowExpand(this)"
                                     aria-label="Voir le résumé">
@@ -5397,14 +5444,12 @@ async function loadTranscriptStatus(fileId, container) {
                     outputs: outputs, title, kp,
                     language: data.transcription_language,
                 };
-                // Hint file d'attente : poll uniquement quand on est en
-                // vue détail ET que le statut n'est pas terminal.
-                if (_detailFileId === fileId) {
-                    if (!_TERMINAL_TS.has(status)) {
-                        startQueueHintDetail(fileId);
-                    } else {
-                        stopQueueHintDetail();
-                    }
+                // Hint file d'attente : assure que le poll global tourne
+                // tant qu'il existe au moins un fichier non-terminal (liste
+                // ou détail). Le poll global ensureQueueHintPolling est
+                // idempotent + auto-stop quand plus aucun widget dispo.
+                if (!_TERMINAL_TS.has(status)) {
+                    ensureQueueHintPolling();
                 }
                 // Zone résumé : on n'affiche que les key_points (pas le
                 // label statut "Pipeline Kevent partiel..." qui est déjà
