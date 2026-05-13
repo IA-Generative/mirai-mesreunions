@@ -1324,6 +1324,26 @@ function getDeviceRetentionMs() {
     return ts > 0 ? ts * 1000 : null;
 }
 
+// Formate un nombre de millisecondes en libellé humain "X j Y h" / "Y h Z min".
+// Math.floor pour la sémantique "il reste au moins X" (un user qui voit "15 j"
+// s'attend à 15 jours pleins ; "Math.ceil" arrondissait à 15 même quand il
+// restait 14 j 23 h 30 min → impression de tromperie quand ça tombe à 14
+// quelques minutes plus tard).
+function _formatRemaining(remainingMs) {
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) return null;
+    const totalMin = Math.floor(remainingMs / 60000);
+    const days = Math.floor(totalMin / (60 * 24));
+    const hours = Math.floor((totalMin % (60 * 24)) / 60);
+    const min = totalMin % 60;
+    if (days >= 1) {
+        return hours > 0 ? `${days} j ${hours} h` : `${days} j`;
+    }
+    if (hours >= 1) {
+        return min > 0 ? `${hours} h ${min} min` : `${hours} h`;
+    }
+    return `${Math.max(1, min)} min`;
+}
+
 function updateExpiryBanner() {
     const banner = document.getElementById('expiry-banner');
     if (!banner) return;
@@ -1334,18 +1354,30 @@ function updateExpiryBanner() {
     const deviceRetentionMs = getDeviceRetentionMs();
     const sessionMs = sessionExpiresAtRaw ? Date.parse(sessionExpiresAtRaw) : NaN;
     const expiresMs = Number.isFinite(deviceRetentionMs) ? deviceRetentionMs : sessionMs;
+    // Diagnostic console : permet de comparer la valeur réelle de
+    // retention_until côté token à ce qu'affiche l'UI, sans demander
+    // d'investigation manuelle.
+    try {
+        if (Number.isFinite(deviceRetentionMs)) {
+            const remainingMs = deviceRetentionMs - Date.now();
+            console.debug('[expiry] retention_until=%s remaining=%s',
+                new Date(deviceRetentionMs).toISOString(),
+                _formatRemaining(remainingMs));
+        }
+    } catch (e) {}
     if (!Number.isFinite(expiresMs)) { banner.style.display = 'none'; return; }
     const remainingMs = expiresMs - Date.now();
     const oneDayMs = 24 * 60 * 60 * 1000;
-    const days = Math.ceil(remainingMs / oneDayMs);
-    if (remainingMs <= 0 || days > tokenExpiryWarningDays) {
+    // Math.floor pour la sémantique "jours pleins restants".
+    const daysFloor = Math.floor(remainingMs / oneDayMs);
+    if (remainingMs <= 0 || daysFloor >= tokenExpiryWarningDays) {
         banner.style.display = 'none';
         return;
     }
-    const dayLabel = days <= 1 ? 'moins de 24 heures' : `${days} jours`;
-    const isUrgent = days <= 2;
+    const label = _formatRemaining(remainingMs) || 'moins d\'une minute';
+    const isUrgent = daysFloor <= 2;
     banner.classList.toggle('expiry-urgent', isUrgent);
-    let html = `<strong>Accès bientôt expiré :</strong> votre token est encore valide pendant ${dayLabel}.`;
+    let html = `<strong>Accès bientôt expiré :</strong> votre token est encore valide pendant ${label}.`;
     if (myDevicesPortalUrl) {
         html += ` Au-delà, retournez sur le <a href="${myDevicesPortalUrl}" target="_blank" rel="noopener">portail mydevices</a> pour le revalider.`;
     } else {
