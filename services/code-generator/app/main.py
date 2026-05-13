@@ -4243,16 +4243,41 @@ async function purgeSessions() {
 
 async function deleteFile(fileId, filenameRaw) {
     const filename = (filenameRaw || '').replace(/&#39;/g, "'");
-    if (!confirm(`Mettre le fichier « ${filename} » à la corbeille ?\n\n` +
+    if (!confirm(`Mettre le fichier « ${filename} » à la corbeille ?\n\n` +
                  `Le fichier (audio + transcription + CR) est masqué de la liste ` +
                  `et sera définitivement supprimé au bout de 30 jours.`)) return;
+    // Optimistic UI : on retire la row immédiatement du DOM pour que le user
+    // ait un feedback instantané. Si l'API DELETE échoue, on ré-insert la row
+    // à sa position d'origine et on alert.
+    const row = document.querySelector(`[data-file-row="${fileId}"]`);
+    let revertSnapshot = null;
+    if (row) {
+        revertSnapshot = { el: row, parent: row.parentNode, next: row.nextSibling };
+        row.remove();
+    }
+    // Si on était en vue détail de ce fichier, revenir à la liste.
+    if (_detailFileId === fileId) {
+        try { showFilesList(); } catch (e) {}
+    }
     try {
         const resp = await fetch(`/api/file/${fileId}`, { method: 'DELETE' });
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || 'delete_failed');
-        setTimeout(() => { loadSessions(); }, 250);
+        // OK : force un loadSessions en arrière-plan pour resync compteurs / autres rows.
+        loadSessions({ force: true });
     } catch (e) {
+        // Échec API : restaurer la row à sa position d'origine et alerter.
+        if (revertSnapshot && revertSnapshot.parent) {
+            try {
+                if (revertSnapshot.next && revertSnapshot.next.parentNode === revertSnapshot.parent) {
+                    revertSnapshot.parent.insertBefore(revertSnapshot.el, revertSnapshot.next);
+                } else {
+                    revertSnapshot.parent.appendChild(revertSnapshot.el);
+                }
+            } catch (_) { /* dernière sécurité : loadSessions re-render tout */ }
+        }
         alert('Echec suppression du fichier.');
+        loadSessions({ force: true });
     }
 }
 
@@ -4621,7 +4646,7 @@ async function loadSessions(opts) {
                     //   • date+durée
                     //   • chevron ▶ : déplie inline le résumé sans quitter la liste
                     //   • bouton Supprimer
-                    return `<div class="file-row-compact-wrapper">
+                    return `<div class="file-row-compact-wrapper" data-file-row="${f.id}">
                         <div class="file-row-compact">
                             <!-- transcript-section caché : sert juste à
                                  déclencher loadTranscriptStatus qui mettra
