@@ -606,6 +606,55 @@ def share_target_fallback(qr_token):
     return redirect(url_for("upload_page", qr_token=qr_token, shared_manual=1))
 
 
+@app.route("/api/device/heartbeat", methods=["POST"])
+def api_device_heartbeat():
+    """Léger ping pour rafraîchir le device_token côté PWA.
+
+    Permet à la PWA mobile (qui ne fait pas autrement de call direct vers
+    token-issuer) de récupérer un device_token mis à jour quand
+    `retention_expires_at` a été bumpé en DB suite à un clic « Renouveler »
+    côté mydevices. La PWA appelle ce endpoint depuis updateExpiryBanner
+    (toutes les heures) ; si la réponse contient `refreshed_device_token`,
+    elle remplace le token dans localStorage.
+
+    Pas d'auth user requise — l'identité est portée par le device_token
+    lui-même (signature HMAC vérifiée côté token-issuer).
+    """
+    device_token = _extract_device_token()
+    if not device_token:
+        return jsonify({"error": "missing_device_token"}), 400
+    try:
+        payload = verify_device_token(device_token, INTERNAL_API_TOKEN)
+    except Exception:
+        return jsonify({"error": "invalid_signature"}), 401
+    qr_token = (payload.get("qr_token") or "").strip()
+    if not qr_token:
+        return jsonify({"error": "invalid_payload"}), 400
+    try:
+        resp = req.post(
+            TOKEN_ISSUER_VALIDATE_DEVICE_URL,
+            json={"device_token": device_token, "qr_token": qr_token},
+            headers={
+                "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=6,
+        )
+        if resp.status_code >= 400:
+            return jsonify({"error": "validate_failed", "status": resp.status_code}), 502
+        data = resp.json()
+    except req.RequestException:
+        return jsonify({"error": "upstream_unreachable"}), 502
+    # On ne propage que ce qui est utile à la PWA. Surtout pas le user_sub
+    # ou autre PII si pas déjà connu (le device_token portait déjà ces
+    # claims, donc on ne révèle rien de neuf).
+    return jsonify({
+        "valid": bool(data.get("valid")),
+        "retention_until": data.get("retention_until"),
+        "refreshed_device_token": data.get("refreshed_device_token"),
+    })
+
+
 @app.route("/api/device/session/<qr_token>")
 def api_device_session(qr_token):
     """Session bootstrap for device enrollment flow."""

@@ -1344,7 +1344,37 @@ function _formatRemaining(remainingMs) {
     return `${Math.max(1, min)} min`;
 }
 
+// Heartbeat optionnel : si le user a cliqué « Renouveler » côté mydevices,
+// retention_expires_at en DB a bumpé mais notre token local porte encore
+// l'ancien retention_until. On demande à upload-portal un device_token
+// rafraîchi (qui fait le proxy vers token-issuer.validate-device). Si OK,
+// on remplace le token en localStorage. Best-effort — silencieux si fail.
+async function _refreshDeviceTokenIfNeeded() {
+    const t = getDeviceToken();
+    if (!t) return;
+    try {
+        const r = await fetch('/api/device/heartbeat', {
+            method: 'POST',
+            headers: { 'X-Device-Token': t, 'Content-Type': 'application/json' },
+            cache: 'no-store',
+        });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d && d.refreshed_device_token) {
+            setDeviceToken(d.refreshed_device_token);
+            console.debug('[expiry] device_token refreshed (renew côté mydevices)');
+        }
+    } catch (e) { /* silencieux */ }
+}
+
 function updateExpiryBanner() {
+    // Avant d'évaluer l'expiration, on tente une heartbeat pour récupérer
+    // une éventuelle extension de rétention décidée côté mydevices. Le
+    // résultat met à jour localStorage ; on relit ensuite le token.
+    _refreshDeviceTokenIfNeeded().then(() => _renderExpiryBanner());
+}
+
+function _renderExpiryBanner() {
     const banner = document.getElementById('expiry-banner');
     if (!banner) return;
     // Priorité au retention_until du device token (= durée d'enrôlement

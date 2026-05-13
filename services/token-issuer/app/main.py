@@ -583,15 +583,36 @@ def validate_device():
 
         rec.last_seen_at = now
         db.commit()
+
+        # Re-issue le device_token quand le retention_until figé dans le
+        # token diverge de la valeur DB (cas typique : l'utilisateur a
+        # cliqué « Renouveler » côté mydevices, on a bumpé
+        # retention_expires_at à now+360h, mais le token JWT que le
+        # téléphone conserve dans localStorage porte encore l'ancienne
+        # valeur → la PWA affiche l'ancienne expiration). On renvoie un
+        # `refreshed_device_token` que la PWA pourra setter en
+        # localStorage à la prochaine heartbeat.
+        refreshed_device_token = None
+        db_retention_ts = int(rec.retention_expires_at.timestamp())
+        if retention_until != db_retention_ts:
+            try:
+                fresh_payload = dict(payload)
+                fresh_payload["retention_until"] = db_retention_ts
+                refreshed_device_token = create_device_token(fresh_payload, INTERNAL_API_TOKEN)
+            except Exception:
+                logger.exception("Failed to refresh device_token for %s", rec.id)
+                refreshed_device_token = None
+
         return jsonify(
             {
                 "valid": True,
                 "device_id": str(rec.id),
                 "user_sub": rec.user_sub,
-                "retention_until": int(rec.retention_expires_at.timestamp()),
+                "retention_until": db_retention_ts,
                 "device_name": rec.device_name,
                 "status": rec.status,
                 "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else None,
+                "refreshed_device_token": refreshed_device_token,
             }
         )
     finally:
