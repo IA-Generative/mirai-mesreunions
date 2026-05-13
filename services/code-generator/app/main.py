@@ -3571,16 +3571,25 @@ function _formatQueueHint(d) {
     return txt;
 }
 
-// Poll global : scanne tous les widgets [data-queue-hint-for] présents dans
-// le DOM (liste compacte ET vue détail). Si un widget porte un
-// `data-queue-job-id` (posé par loadTranscriptStatus quand le payload
-// transcript-status expose un kevent_job_id), on fait UN fetch par job
-// pour avoir position+ETA précis ; sinon un seul fetch générique partagé.
+// Poll global : scanne UNIQUEMENT les widgets queue-hint marqués comme
+// pollables (data-pollable="1") — c'est-à-dire ceux dont le fichier
+// associé est encore dans un statut polling (kevent_queued/transcribing/
+// processing). Les widgets sur des fichiers terminaux (kevent_completed,
+// kevent_failed, kevent_partially_completed) restent dans le DOM mais
+// sans le flag pollable → on ne les met PAS à jour, on les vide même
+// si le fichier vient juste de transiter vers un état terminal.
 async function _pollQueueHintAll() {
-    const widgets = document.querySelectorAll('[data-queue-hint-for]');
+    const widgets = document.querySelectorAll('[data-queue-hint-for][data-pollable="1"]');
+    // Vide les widgets qui ne sont plus pollables (transition kevent_*ing →
+    // kevent_completed/failed/partially) — sinon le dernier texte du poll
+    // précédent reste affiché de façon trompeuse ("Réservation de la file…"
+    // sur un fichier terminal).
+    document.querySelectorAll('[data-queue-hint-for]:not([data-pollable="1"])').forEach((el) => {
+        if (el.textContent) el.textContent = '';
+    });
     if (widgets.length === 0) return;
 
-    // Regroupe les widgets par job_id (string ou null pour "générique").
+    // Regroupe par job_id (null = générique).
     const byJobId = new Map();
     widgets.forEach((el) => {
         const jid = (el.getAttribute('data-queue-job-id') || '').trim() || null;
@@ -3588,7 +3597,6 @@ async function _pollQueueHintAll() {
         byJobId.get(jid).push(el);
     });
 
-    // Fetch 1 payload par groupe (générique + un par job_id distinct).
     await Promise.all(Array.from(byJobId.entries()).map(async ([jid, els]) => {
         const url = jid
             ? `/api/queue-status?service_type=audio&job_id=${encodeURIComponent(jid)}`
@@ -3612,7 +3620,11 @@ function ensureQueueHintPolling() {
     if (_queueHintTimer) return;          // déjà actif
     _pollQueueHintAll();                  // 1er appel immédiat
     _queueHintTimer = setInterval(() => {
-        if (document.querySelectorAll('[data-queue-hint-for]').length === 0) {
+        // Auto-stop : plus AUCUN widget pollable dans le DOM.
+        if (document.querySelectorAll('[data-queue-hint-for][data-pollable="1"]').length === 0) {
+            // Un dernier passage pour vider les widgets non-pollables qui
+            // auraient encore du texte résiduel.
+            _pollQueueHintAll();
             clearInterval(_queueHintTimer);
             _queueHintTimer = null;
             return;
@@ -5565,19 +5577,27 @@ async function loadTranscriptStatus(fileId, container) {
                 // tant qu'il existe au moins un fichier non-terminal (liste
                 // ou détail). Le poll global ensureQueueHintPolling est
                 // idempotent + auto-stop quand plus aucun widget dispo.
-                if (!_TERMINAL_TS.has(status)) {
-                    // Propage le kevent_job_id sur tous les widgets queue-hint
-                    // de ce fichier — _pollQueueHintAll s'en sert pour faire un
-                    // fetch précis (position + ETA) au lieu du générique.
-                    if (data.kevent_job_id) {
-                        document.querySelectorAll(
-                            `[data-queue-hint-for="${fileId}"]`
-                        ).forEach((el) => {
+                // Pollabilité : on marque le widget queue-hint comme pollable
+                // tant que le statut est non-terminal. _pollQueueHintAll ne
+                // touchera plus les widgets non-pollables et videra leur texte
+                // — ça évite "⏳ Réservation de la file…" qui restait sur les
+                // fichiers passés à kevent_failed/_completed/_partially.
+                const isPollable = !_TERMINAL_TS.has(status);
+                document.querySelectorAll(
+                    `[data-queue-hint-for="${fileId}"]`
+                ).forEach((el) => {
+                    if (isPollable) {
+                        el.setAttribute('data-pollable', '1');
+                        if (data.kevent_job_id) {
                             el.setAttribute('data-queue-job-id', data.kevent_job_id);
-                        });
+                        }
+                    } else {
+                        el.removeAttribute('data-pollable');
+                        el.removeAttribute('data-queue-job-id');
+                        el.textContent = '';
                     }
-                    ensureQueueHintPolling();
-                }
+                });
+                if (isPollable) ensureQueueHintPolling();
                 // Zone résumé : on n'affiche que les key_points (pas le
                 // label statut "Pipeline Kevent partiel..." qui est déjà
                 // sur la pastille via tooltip).

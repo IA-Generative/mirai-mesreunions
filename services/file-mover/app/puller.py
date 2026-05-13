@@ -395,50 +395,60 @@ def _resume_orphaned_kevent_polls() -> None:
 
 
 def _resume_one_kevent_poll(audio_file_id: str, job_id: str) -> None:
-    """Rejoint un poll Kevent pour un fichier audio. Si le job est encore
-    en cours, attend la fin ; si terminé, applique le résultat ; si TTL'd
-    (404), marque la row en kevent_failed."""
+    """Diagnostic d'un poll Kevent orphelin (pod précédent mort en cours).
+
+    ⚠ Première version : on NE marque PAS kevent_failed agressivement,
+    parce qu'on n'a pas (encore) le code pour ré-engager le pipeline
+    downstream (diarization → LLM → CR) à partir d'un résultat Whisper
+    obtenu post-resume. Marquer failed = l'utilisateur croit que la
+    transcription a échoué alors qu'elle est peut-être dispo côté Kevent.
+
+    Comportement pour l'instant :
+    - Si le job est TTL'd (404) → log WARNING, status reste tel quel.
+      L'UI restera en kevent_queued/processing jusqu'à ce que le user
+      ré-upload ou que le watchdog suivant le déclare definitive.
+    - Si le job est encore en cours → log INFO, status inchangé.
+      Le user n'aura pas de résultat mais ne verra pas "failed" non plus.
+    - Si erreur transitoire → log warning, status inchangé.
+
+    À itérer : refactor _transcribe_via_kevent en sous-fonctions composables
+    pour que cette reprise puisse continuer le pipeline depuis n'importe
+    quelle étape. Tracking : voir issue #TODO.
+    """
     client = _build_kevent_client()
     if client is None:
         logger.warning("orphan resume %s: kevent client unavailable", audio_file_id)
         return
     try:
-        # On reprend juste le poll (skip submission) sur le job_id stocké.
-        logger.info("orphan resume %s: polling kevent job_id=%s", audio_file_id, job_id)
+        logger.info("orphan resume %s: probing kevent job_id=%s", audio_file_id, job_id)
         try:
-            client.resume_job(
-                service_type=KEVENT_ASYNC_SERVICE_TYPE,
-                job_id=job_id,
-                poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
-                timeout=float(KEVENT_ASYNC_TIMEOUT_SECONDS or KEVENT_HTTP_TIMEOUT_SECONDS),
+            # On utilise get_job (1 fetch) plutôt que wait_for_job (boucle
+            # de poll bloquante) pour juste diagnostiquer l'état actuel
+            # sans s'engager dans une attente longue qu'on ne peut pas
+            # consommer en aval.
+            info = client.get_job(KEVENT_ASYNC_SERVICE_TYPE, job_id)
+            status = (info.get("status") or "").lower()
+            logger.warning(
+                "orphan resume %s: kevent job %s status=%s — pipeline downstream non re-engagé. "
+                "Statut DB inchangé, l'utilisateur doit ré-uploader si nécessaire.",
+                audio_file_id, job_id, status,
             )
-            # ⚠ Le résultat n'est pas re-injecté dans le pipeline downstream
-            # (correction sigles, etc.) — ce serait dupliquer le code de
-            # _transcribe_via_kevent. Pour cette première version, on
-            # marque juste kevent_failed avec un message clair pour signaler
-            # à l'utilisateur de ré-uploader. La pipeline complète sera
-            # ré-engageable dans une itération ultérieure (refactor de
-            # _transcribe_via_kevent en sous-fonctions prenant transcription
-            # déjà obtenue). Pour l'instant, on délivre la robustesse de
-            # détection — pas la reprise du pipeline complet.
-            _set_user_audio_status(
-                audio_file_id, "kevent_failed",
-                transcription_engine="kevent",
-            )
-            logger.info("orphan resume %s: job %s done (marked failed — re-upload needed for full pipeline)",
-                        audio_file_id, job_id)
         except KeventApplicativeError as exc:
             msg = str(exc)
             if "not found" in msg.lower() or "404" in msg:
-                logger.warning("orphan resume %s: job %s TTL'd côté Kevent, marking failed",
-                               audio_file_id, job_id)
-                _set_user_audio_status(audio_file_id, "kevent_failed",
-                                       transcription_engine="kevent")
+                logger.warning(
+                    "orphan resume %s: kevent job %s TTL'd (404) — statut DB inchangé, "
+                    "l'utilisateur doit ré-uploader.",
+                    audio_file_id, job_id,
+                )
             else:
-                logger.exception("orphan resume %s: job %s applicative error", audio_file_id, job_id)
+                logger.exception("orphan resume %s: applicative error on %s",
+                                 audio_file_id, job_id)
         except KeventTransientError:
-            logger.warning("orphan resume %s: transient error on job %s — will retry via watchdog",
-                           audio_file_id, job_id)
+            logger.warning(
+                "orphan resume %s: transient error on %s — retry via watchdog",
+                audio_file_id, job_id,
+            )
     except Exception:
         logger.exception("orphan resume %s: unexpected error", audio_file_id)
 
