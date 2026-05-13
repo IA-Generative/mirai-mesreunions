@@ -2782,8 +2782,25 @@ INDEX_TEMPLATE = """
         .icon-btn[disabled]:hover { background: transparent; color: #64748b; border-color: transparent; }
         /* Variante "purge" plus marquée — camion poubelle, action lourde */
         .icon-btn-purge { color: #b91c1c; }
-        .icon-btn-purge svg { width: 1.2rem; height: 1.2rem; }
+        .icon-btn-purge svg { width: 1.7rem; height: 1.3rem; }
         .icon-btn-purge:hover { background: #b91c1c; color: #fff; border-color: #991b1b; }
+        /* Mini-poubelle qui s'élève + bascule au hover du bouton purge —
+           petite touche humoristique d'éboueurs au travail. */
+        .icon-btn-purge .purge-bin {
+            transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-origin: 4px 17px;
+        }
+        .icon-btn-purge:hover .purge-bin {
+            transform: translate(8px, -4px) rotate(75deg);
+        }
+        .icon-btn-purge .purge-workers {
+            transition: opacity 0.3s ease;
+            opacity: 0.7;
+        }
+        .icon-btn-purge:hover .purge-workers { opacity: 1; }
+        /* Mode avancé : .advanced-only n'est visible que si body.adv-mode est posée. */
+        .advanced-only { display: none !important; }
+        body.adv-mode .advanced-only { display: inline-flex !important; }
         .file-row-expand {
             border: 1px solid transparent; background: transparent;
             cursor: pointer; color: #475569; font-size: 0.78rem;
@@ -3401,13 +3418,47 @@ INDEX_TEMPLATE = """
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
-                <button type="button" id="purge-btn" class="icon-btn icon-btn-purge" disabled
+                <!-- Action lourde « tout mettre à la corbeille ». Cachée par
+                     défaut, visible uniquement en mode avancé (toggle ON ou
+                     Alt enfoncé) via .advanced-only + body.adv-mode. Icône
+                     composée : benne à ordures + 2 silhouettes d'éboueurs +
+                     mini-poubelle qui bascule au hover (animation CSS). -->
+                <button type="button" id="purge-btn" class="icon-btn icon-btn-purge advanced-only" disabled
                         onclick="purgeSessions()"
                         title="Mettre toute la liste à la corbeille (purgée définitivement après 30 jours)"
                         aria-label="Tout mettre à la corbeille">
-                    <!-- Camion poubelle — action lourde qui touche TOUTES les
-                         sessions. Icône inline (peuplée aussi par JS si écrasée). -->
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="width:1.2rem;height:1.2rem;"><path d="M2 17h2V7a1 1 0 0 1 1-1h9v11h2"/><path d="M14 10h4l3 4v3h-2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 10v3M9 10v3M11 10v3"/></svg>
+                    <svg viewBox="0 0 32 24" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+                         aria-hidden="true" class="purge-icon-svg">
+                        <!-- mini-poubelle prête à être chargée (anime translateY au hover) -->
+                        <g class="purge-bin">
+                          <rect x="2" y="14" width="4" height="6" rx="0.4"/>
+                          <line x1="1.5" y1="14" x2="6.5" y2="14"/>
+                          <line x1="3" y1="13" x2="5" y2="13"/>
+                        </g>
+                        <!-- benne du camion + cabine -->
+                        <path d="M8 8h13v12H8z" fill="currentColor" fill-opacity="0.08"/>
+                        <path d="M8 8h13v12H8z"/>
+                        <path d="M21 12h4l3 3v5h-7z" fill="currentColor" fill-opacity="0.05"/>
+                        <path d="M21 12h4l3 3v5h-7z"/>
+                        <path d="M22 14h3" />
+                        <!-- 4 stries verticales sur la benne -->
+                        <path d="M11 9v10M14 9v10M17 9v10"/>
+                        <!-- roues -->
+                        <circle cx="12" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
+                        <circle cx="12" cy="21" r="1.6"/>
+                        <circle cx="24" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
+                        <circle cx="24" cy="21" r="1.6"/>
+                        <!-- 2 silhouettes d'éboueurs (têtes + corps simplifiés) à l'arrière du camion -->
+                        <g class="purge-workers">
+                          <!-- éboueur 1 -->
+                          <circle cx="29" cy="10" r="1.1" fill="currentColor" fill-opacity="0.2"/>
+                          <path d="M28.3 11.2v3.2M29.6 11.2v3.2"/>
+                          <!-- éboueur 2 -->
+                          <circle cx="30.5" cy="11.5" r="1" fill="currentColor" fill-opacity="0.2"/>
+                          <path d="M29.9 12.5v2.8M31.1 12.5v2.8"/>
+                        </g>
+                    </svg>
                 </button>
             </div>
             <!-- "Transferts en cours" : un bloc par fichier in-flight avec
@@ -3717,10 +3768,13 @@ function effectiveAdvancedDl() { return _dlAdvancedMode || _altPeek; }
 
 function updateAdvancedToggleUi() {
     const btn = document.getElementById('advanced-toggle');
-    if (!btn) return;
-    btn.classList.toggle('is-on', _dlAdvancedMode);
-    btn.classList.toggle('is-peek', _altPeek);
-    btn.setAttribute('aria-pressed', _dlAdvancedMode ? 'true' : 'false');
+    if (btn) {
+        btn.classList.toggle('is-on', _dlAdvancedMode);
+        btn.classList.toggle('is-peek', _altPeek);
+        btn.setAttribute('aria-pressed', _dlAdvancedMode ? 'true' : 'false');
+    }
+    // body.adv-mode pilote la visibilité de .advanced-only (camion poubelle, etc.).
+    document.body.classList.toggle('adv-mode', effectiveAdvancedDl());
 }
 
 function toggleAdvancedDl() {
