@@ -780,9 +780,14 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
 
     # 3e. Meeting analysis (large model).
     if KEVENT_MEETING_ANALYSIS_ENABLED and llm is not None:
-        # Same logic — analyse on the cleanest available text.
+        # Same logic — analyse on the cleanest available text. On passe
+        # speaker_tagged_text (si dispo) pour que le LLM puisse distinguer
+        # participants_presents vs participants_cites (B7).
         source = updates.get("cleaned_text") or base_for_llm
-        analysis = mi.analyse_meeting(source, llm, LLM_MODEL_LARGE)
+        analysis = mi.analyse_meeting(
+            source, llm, LLM_MODEL_LARGE,
+            speaker_tagged_text=updates.get("speaker_tagged_text") or speaker_tagged,
+        )
         serialized = mi.serialize_analysis(analysis)
         if serialized is not None:
             updates["meeting_analysis_json"] = serialized

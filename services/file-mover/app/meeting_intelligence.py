@@ -238,15 +238,67 @@ def reformulate(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
     )
 
 
-def analyse_meeting(transcript: str, llm: LLMClient, model: str) -> Optional[dict]:
+_SPEAKER_LABEL_RE = __import__("re").compile(r"\bSPEAKER_\d+\b|^\s*\*\*\s*([^*:]+?)\s*\*\*\s*:", __import__("re").MULTILINE)
+
+
+def _extract_speaker_labels(speaker_tagged_text: Optional[str]) -> list[str]:
+    """Extrait la liste de labels locuteurs distincts du transcript tagué.
+
+    Renvoie [] si rien trouvé. Capture les patterns "SPEAKER_NN" (output
+    pyannote brut) ET les noms après *_naming_ via le formatage Markdown
+    "**Nom**: " utilisé par diarization_merger.
+    """
+    if not speaker_tagged_text:
+        return []
+    labels = set()
+    for m in _SPEAKER_LABEL_RE.finditer(speaker_tagged_text):
+        # Group 0 = whole match (SPEAKER_NN), group 1 = name from **X**:
+        token = (m.group(1) or m.group(0)).strip()
+        if token:
+            labels.add(token)
+    # Tri stable : noms réels d'abord, SPEAKER_NN ensuite, par index numérique
+    def _key(s: str):
+        if s.startswith("SPEAKER_"):
+            try: return (1, int(s.split("_", 1)[1]))
+            except ValueError: return (1, 999)
+        return (0, s.lower())
+    return sorted(labels, key=_key)
+
+
+def analyse_meeting(transcript: str, llm: LLMClient, model: str,
+                    speaker_tagged_text: Optional[str] = None) -> Optional[dict]:
     """
     Ask the (large) LLM for the structured 5-section meeting analysis.
+
+    ``speaker_tagged_text`` (optionnel) permet au LLM de distinguer
+    participants_presents (ceux qui ont parlé) vs participants_cites
+    (mentions textuelles). Si None ou vide, on indique au LLM que la
+    diarization est indisponible — le tableau participants_presents sera
+    vide et seul participants_cites sera peuplé.
+
     Returns the parsed dict, or None on failure (so the caller leaves the
     column NULL rather than store invalid JSON).
     """
     if not transcript.strip():
         return None
-    prompt = _render(_load_prompt("meeting_analysis"), transcript)
+    speakers = _extract_speaker_labels(speaker_tagged_text)
+    if speakers:
+        hint = (
+            "- Locuteurs ayant pris la parole dans cet enregistrement "
+            "(diarization pyannote) : " + ", ".join(speakers) + ". "
+            "Toute personne ne figurant PAS dans cette liste mais nommée "
+            "dans le texte doit aller dans participants_cites, pas dans "
+            "participants_presents.\n"
+        )
+    else:
+        hint = (
+            "- ⚠ Diarization indisponible pour ce transcript. Ne renvoie "
+            "PAS de participants_presents (tableau vide). Liste les "
+            "personnes nommées dans participants_cites uniquement, sans "
+            "deviner qui a pris la parole.\n"
+        )
+    raw = _load_prompt("meeting_analysis").replace("{SPEAKER_HINT}", hint)
+    prompt = _render(raw, transcript)
     messages = [{"role": "user", "content": prompt}]
     try:
         return llm.chat_json(model, messages)

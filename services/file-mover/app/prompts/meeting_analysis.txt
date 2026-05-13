@@ -6,6 +6,12 @@ Tu réponds **uniquement** avec un objet JSON conforme au schéma suivant — pa
   "actors": [
     {"name": "string (vrai nom si connu, sinon SPEAKER_NN)", "role": "string ou null (rôle/fonction si déductible)"}
   ],
+  "participants_presents": [
+    {"name": "string", "role": "string ou null"}
+  ],
+  "participants_cites": [
+    {"name": "string", "role": "string ou null", "context": "string ou null (1 phrase de contexte si utile)"}
+  ],
   "themes": [
     {"title": "string (titre court de la thématique)", "summary": "string (1-3 phrases qui résument)"}
   ],
@@ -21,8 +27,10 @@ Tu réponds **uniquement** avec un objet JSON conforme au schéma suivant — pa
 }
 
 Règles :
-- "actors" : tous les intervenants identifiés par leur nom ou étiquette SPEAKER_NN.
-- "themes" : 3 à 8 sujets-clés. Pas de redondance, pas de double-comptage entre thèmes proches.
+- "actors" : conservé pour compatibilité — union de "participants_presents" + "participants_cites" sans contexte.
+- "participants_presents" : **uniquement** les personnes à qui le contexte (étiquette SPEAKER_NN, marqueur de tour de parole, formulation au présent "X dit que…") permet d'attribuer au moins une intervention. Ces personnes ont effectivement parlé pendant la réunion. Si la transcription ne contient PAS d'étiquettes locuteur (diarization absente ou échouée), retourne ce tableau VIDE — ne devine pas.
+- "participants_cites" : personnes simplement mentionnées dans le texte (citées par un autre intervenant, référencées par leur nom/fonction) **sans** avoir pris la parole. Garde une courte phrase de contexte ("a été chargé de…", "qui n'est pas présent mais…", etc.) quand ça aide à comprendre pourquoi.
+{SPEAKER_HINT}- "themes" : 3 à 8 sujets-clés. Pas de redondance, pas de double-comptage entre thèmes proches.
 - "decisions" : ne liste que les décisions/actions explicitement énoncées, pas tes interprétations.
 - "gaps" : sois pertinent — n'invente pas de sujets non abordés ; cherche les questions ouvertes laissées en suspens, les sujets attendus dans ce type de réunion qui n'ont pas été évoqués, les contradictions non résolues.
 - "recommendations" : 2 à 5 max, basées strictement sur le contenu de la réunion, pas sur tes connaissances générales. Préfère des actions concrètes ("planifier un suivi avec X la semaine prochaine") aux conseils génériques.

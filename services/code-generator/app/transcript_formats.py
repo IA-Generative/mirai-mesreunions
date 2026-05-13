@@ -25,7 +25,12 @@ from typing import Any
 # ─── Markdown formatter for meeting analysis JSON ───────────────────────────
 
 _SECTION_TITLES = {
-    "actors": "Acteurs présents",
+    # Nouvelles clés (B7) — séparation présents / cités. On garde la clé
+    # legacy "actors" comme fallback rétro-compatible si participants_presents
+    # et participants_cites sont tous deux absents/vides.
+    "participants_presents": "Participants présents",
+    "participants_cites": "Personnes citées",
+    "actors": "Acteurs",
     "themes": "Thématiques abordées",
     "decisions": "Décisions et points en action",
     "gaps": "Sujets non abordés",
@@ -67,7 +72,15 @@ def meeting_analysis_to_markdown(analysis: dict | str) -> str:
     if not isinstance(analysis, dict):
         return ""
     out: list[str] = ["# Compte-rendu de réunion\n"]
+    # Si les nouvelles clés (B7) sont présentes et non vides, on saute la
+    # clé legacy "actors" (redondante). Sinon on garde "actors" pour les
+    # anciens compte-rendus en DB générés avant le déploiement de B7.
+    has_new_participants = bool(
+        analysis.get("participants_presents") or analysis.get("participants_cites")
+    )
     for key, title in _SECTION_TITLES.items():
+        if key == "actors" and has_new_participants:
+            continue  # skip legacy, on a déjà séparé en présents/cités
         items = analysis.get(key)
         if not items:
             continue
