@@ -432,6 +432,46 @@ def enroll_device():
             if rec:
                 enroll_reason = "fused_fp_window"
 
+        # 2b. Rebind par fingerprint (sans fenêtre temporelle) : un device
+        #     active+confirmed existe sur ce qr_token avec le MÊME fp_hash
+        #     que la requête entrante, mais le device_key ne matche pas.
+        #     C'est typiquement le cas "PWA a perdu son localStorage" :
+        #     - l'utilisateur a fait un Reset / clear data / réinstall PWA,
+        #     - ou son SW cache a été purgé,
+        #     - ou iOS a évincé son localStorage.
+        #     Dans tous ces cas l'utilisateur est légitime (il a accès au
+        #     qr_token URL, qui est le secret d'accès), il a juste perdu
+        #     son token côté client. On rebind donc à la row existante en
+        #     rotant le device_key. Audit log warning pour détecter les
+        #     abus si jamais le modèle de menace évolue.
+        if not rec and fp_hash:
+            rebind_candidate = (
+                db.query(DeviceEnrollment)
+                .filter(
+                    DeviceEnrollment.qr_token == qr_token,
+                    DeviceEnrollment.fp_hash == fp_hash,
+                    DeviceEnrollment.status == "active",
+                    DeviceEnrollment.confirmed_at.isnot(None),
+                )
+                .first()
+            )
+            if rebind_candidate:
+                old_device_key = (rebind_candidate.device_key or "")[:12]
+                old_device_id = str(rebind_candidate.id)
+                rec = rebind_candidate
+                # Rotate device_key : on accepte la nouvelle valeur générée
+                # côté client. Le HMAC du device_token sera invalidé pour
+                # quiconque détient l'ancien device_key (sécurité par
+                # rotation, pas par révocation).
+                rec.device_key = device_key[:255]
+                enroll_reason = "rebind_fp"
+                logger.warning(
+                    "Device rebind by fingerprint match: device_id=%s qr_token=%s "
+                    "old_device_key=%s… new_device_key=%s… fp_hash=%s…",
+                    old_device_id, qr_token, old_device_key,
+                    device_key[:12], fp_hash[:12],
+                )
+
         if rec:
             # Refresh metadata; do NOT change confirmed_at here (only heartbeat
             # or upload confirms). Extend retention/purge windows.
