@@ -241,6 +241,27 @@ def api_transcript_status(file_id):
     return jsonify(data)
 
 
+@app.route("/api/queue-status")
+def api_queue_status():
+    """Stub local du proxy queue-status. Renvoie un payload réaliste pour
+    exercer la branche « N jobs en attente » du hint UI. Modifier les
+    valeurs ci-dessous pour tester d'autres scénarios :
+      - your_position=1 → "⏳ En tête de file"
+      - your_position=3, pending_total=5 → "Position 3/5 — env. 1 min 30 s"
+      - pending_total=0, processing_total=1 → "⏳ Tour suivant"
+      - pending_total=0, processing_total=0 → "⏳ Réservation de la file…"
+    """
+    return jsonify({
+        "pending_total": 2,
+        "processing_total": 1,
+        "your_position": None,    # passe à un nombre quand kevent_job_id sera persisté (Phase 2)
+        "eta_seconds": None,
+        "throughput_per_min": 0.4,
+        "stale": False,
+        "fetched_at": _iso(datetime.now(timezone.utc)),
+    })
+
+
 @app.route("/api/file/normalization-impact/<file_id>")
 def api_normalization_impact(file_id):
     return jsonify({
