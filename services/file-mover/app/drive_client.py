@@ -50,7 +50,18 @@ class DriveError(Exception):
 
 
 class DriveAuthError(DriveError):
-    """Refresh expired/revoked, or 401/403 from Drive. No retry."""
+    """Refresh expired/revoked, or 401/403 from Drive. No retry.
+
+    ``status_code`` distingue les causes : 401 = la session/access token
+    n'est pas valide (re-login utile) ; 403 = le token est valide mais
+    l'utilisateur n'a pas accès à cette ressource précise (re-login
+    inutile, c'est une question de permission Drive sur le folder/item).
+    None pour les erreurs côté Keycloak (refresh expiré, etc.).
+    """
+
+    def __init__(self, message: str, *, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class DriveTransientError(DriveError):
@@ -223,7 +234,10 @@ class DriveClient:
         except req.RequestException as exc:
             raise DriveTransientError(f"Drive download unreachable: {exc}") from exc
         if resp.status_code in (401, 403):
-            raise DriveAuthError(f"Drive download {resp.status_code} for item {item_id}")
+            raise DriveAuthError(
+                f"Drive download {resp.status_code} for item {item_id}",
+                status_code=resp.status_code,
+            )
         if resp.status_code >= 500:
             raise DriveTransientError(f"Drive download 5xx: {resp.status_code}")
         if resp.status_code >= 400:
@@ -241,7 +255,10 @@ class DriveClient:
     @staticmethod
     def _raise_for_status(resp, context: str) -> None:
         if resp.status_code in (401, 403):
-            raise DriveAuthError(f"{context} → {resp.status_code} (token rejected by Drive)")
+            raise DriveAuthError(
+                f"{context} → {resp.status_code} (token rejected by Drive)",
+                status_code=resp.status_code,
+            )
         if resp.status_code >= 500:
             raise DriveTransientError(f"{context} → {resp.status_code}")
         if resp.status_code >= 400:

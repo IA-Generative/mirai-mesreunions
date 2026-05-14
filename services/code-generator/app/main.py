@@ -2639,7 +2639,20 @@ def api_meeting_prep():
         # ── List + download + extract corpus ──
         try:
             corpus_text, used = _meeting_prep.assemble_corpus(drive, access_token, folder_id)
-        except _meeting_prep.DriveAuthError:
+        except _meeting_prep.DriveAuthError as exc:
+            status_code = getattr(exc, "status_code", None)
+            logger.warning(
+                "meeting_prep: Drive auth error on folder %s (status=%s): %s",
+                folder_id, status_code, exc,
+            )
+            # 401 = access token rejected → session refresh issue.
+            # 403 = token valide mais pas accès à ce dossier précis.
+            # None = autre erreur classée auth (peu probable ici).
+            if status_code == 403:
+                return jsonify({
+                    "error": "Vous n'avez pas accès à ce dossier sur le Drive. Vérifiez l'URL collée ou demandez l'accès au propriétaire.",
+                    "code": "drive_forbidden",
+                }), 403
             return jsonify({
                 "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
                 "code": "drive_auth",
@@ -2647,7 +2660,8 @@ def api_meeting_prep():
         except _meeting_prep.DriveApplicativeError as exc:
             logger.info("meeting_prep: Drive applicative error on folder %s: %s", folder_id, exc)
             return jsonify({
-                "error": "Dossier Drive introuvable ou accès refusé.",
+                "error": "Dossier Drive introuvable. Vérifiez l'URL ou l'identifiant collé.",
+                "code": "drive_not_found",
             }), 404
         except _meeting_prep.DriveTransientError as exc:
             logger.warning("meeting_prep: Drive transient error on folder %s: %s", folder_id, exc)
@@ -2796,8 +2810,12 @@ def api_test_drive_access():
         result["error"] = f"Keycloak temporairement indisponible : {exc}"
         return jsonify(result), 200
 
-    # Step 3 : ping Drive — un simple GET racine. Tout statut < 500 vaut
-    # « Drive reachable » (un 401/403 prouve déjà que le service répond).
+    # Step 3 : ping Drive — GET racine. On distingue 3 cas :
+    #   - 2xx → Drive joignable ET token accepté → drive_reachable=true
+    #   - 401/403 → Drive joignable mais token refusé → drive_reachable=false
+    #     avec un message explicite ; ce cas signale typiquement un mismatch
+    #     de realm Keycloak entre code-generator et mesfichiers
+    #   - 5xx ou exception → drive_reachable=false, "Drive injoignable"
     try:
         import requests as _req
         resp = _req.get(
@@ -2805,8 +2823,14 @@ def api_test_drive_access():
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
         )
-        if resp.status_code < 500:
+        result["drive_status_code"] = resp.status_code
+        if 200 <= resp.status_code < 300:
             result["drive_reachable"] = True
+        elif resp.status_code in (401, 403):
+            result["error"] = (
+                f"Drive a refusé le token (HTTP {resp.status_code}). "
+                "Le Drive et le SSO partagent-ils bien le même realm Keycloak ?"
+            )
         else:
             result["error"] = f"Drive HTTP {resp.status_code}"
     except Exception as exc:
