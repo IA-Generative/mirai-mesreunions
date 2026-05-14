@@ -2878,6 +2878,29 @@ def api_test_drive_access():
     result["drive_user_status"] = drive_user_status
     result["drive_user"] = drive_user
 
+    # Step 5 (optionnel) : probe ciblé sur ?folder_id=<id>. Permet de
+    # comparer cookie-vs-bearer sur un dossier précis quand la liste
+    # des enfants échoue. On dump la réponse complète (status + body
+    # tronqué + 3 headers utiles) pour diagnostic.
+    folder_id = request.args.get("folder_id", "").strip()
+    if folder_id:
+        result["children_probe"] = {"folder_id": folder_id}
+        try:
+            resp = _req.get(
+                DRIVE_BASE_URL.rstrip("/") + f"/api/v1.0/items/{folder_id}/children/",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            result["children_probe"]["status_code"] = resp.status_code
+            result["children_probe"]["content_type"] = resp.headers.get("content-type")
+            result["children_probe"]["www_authenticate"] = resp.headers.get("www-authenticate")
+            try:
+                result["children_probe"]["body_json"] = resp.json()
+            except Exception:
+                result["children_probe"]["body_text"] = (resp.text or "")[:500]
+        except Exception as exc:
+            result["children_probe"]["error"] = str(exc)
+
     return jsonify(result), 200
 
 
@@ -7663,13 +7686,29 @@ PREP_BRIEF_TEMPLATE = r"""
       out.innerHTML = 'Test en cours…';
       out.style.color = '';
       try {
-        var resp = await fetch('/api/meeting-prep/test-drive');
+        // Si l'utilisateur a déjà saisi un dossier Drive, on pousse son
+        // id dans la query pour tester aussi le listing children/ — c'est
+        // ce probe qui révèle les 403 spécifiques aux sous-collections.
+        var folderInput = document.getElementById('drive_folder');
+        var folderRaw = folderInput ? folderInput.value.trim() : '';
+        var url = '/api/meeting-prep/test-drive';
+        if (folderRaw) {
+          var match = folderRaw.match(/\/(?:items|folders)\/([^\/?#\s]+)/);
+          var folderId = match ? match[1] : folderRaw;
+          url += '?folder_id=' + encodeURIComponent(folderId);
+        }
+        var resp = await fetch(url);
         var data = await resp.json().catch(function () { return {}; });
         var rows = [
           ['Refresh token stocké', !!data.token_stored],
           ['Échange OIDC réussi', !!data.exchange_ok],
           ['Drive accessible', !!data.drive_reachable],
         ];
+        if (data.children_probe) {
+          var cp = data.children_probe;
+          rows.push(['Listing du dossier (' + (cp.status_code || '?') + ')',
+                     cp.status_code >= 200 && cp.status_code < 300]);
+        }
         out.innerHTML = rows.map(function (r) {
           return '<div>' + (r[1] ? '✅' : '❌') + ' ' + escapeHtml(r[0]) + '</div>';
         }).join('') + (data.error
