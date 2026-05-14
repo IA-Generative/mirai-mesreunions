@@ -322,8 +322,11 @@ def test_test_drive_full_success_path(cg):
     # Le handler fait `import requests as _req` localement puis _req.get(...).
     # On patch le binding sur le module requests dans sys.modules, vu sous
     # le nom utilisé localement.
+    # Le handler fait 2 GET : /items/ pour le ping et /users/me/ pour le
+    # diagnostic identité. Les 2 doivent renvoyer du JSON sérialisable.
     fake_resp = MagicMock()
     fake_resp.status_code = 200
+    fake_resp.json.return_value = {"id": "stub-user", "email": "stub@local"}
 
     with patch.object(mod, "fetch_ciphertext", return_value=b"ciphertext"), \
          patch.object(mod, "decrypt_secret", return_value="refresh-xyz"), \

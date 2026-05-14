@@ -2837,6 +2837,47 @@ def api_test_drive_access():
         logger.warning("test-drive: drive ping failed: %s", exc)
         result["error"] = f"Drive injoignable : {exc}"
 
+    # Step 4 (diagnostic) : décoder les claims de l'access_token (sans
+    # vérifier la signature — c'est juste un debug aid) et appeler
+    # /users/me/ avec le bearer pour comparer l'identité côté Drive vs
+    # celle attendue côté navigateur. Cf symptome 403 "mismatch identité"
+    # documenté en mai 2026.
+    import base64 as _b64
+    import json as _json
+    claims = {}
+    try:
+        parts = access_token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = _json.loads(_b64.urlsafe_b64decode(padded.encode()))
+    except Exception as exc:
+        logger.warning("test-drive: failed to decode JWT claims: %s", exc)
+    result["token_claims"] = {
+        k: claims.get(k)
+        for k in ("sub", "email", "preferred_username", "given_name",
+                  "family_name", "iss", "aud", "azp", "scope")
+        if k in claims
+    }
+
+    drive_user = None
+    drive_user_status = None
+    try:
+        resp = _req.get(
+            DRIVE_BASE_URL.rstrip("/") + "/api/v1.0/users/me/",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        drive_user_status = resp.status_code
+        if resp.status_code < 500:
+            try:
+                drive_user = resp.json()
+            except Exception:
+                drive_user = {"_raw": (resp.text or "")[:300]}
+    except Exception as exc:
+        drive_user = {"_error": str(exc)}
+    result["drive_user_status"] = drive_user_status
+    result["drive_user"] = drive_user
+
     return jsonify(result), 200
 
 
