@@ -71,7 +71,31 @@ LLMApplicativeError = llm_client_mod.LLMApplicativeError
 
 # ─── Prompt template path ─────────────────────────────────────────
 
-PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "conductor_brief.txt")
+PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+PROMPT_FILES_BY_TYPE = {
+    "general": "conductor_brief.txt",
+    "one_on_one": "one_on_one.txt",
+    "project_update": "project_update.txt",
+    "steering_committee": "steering_committee.txt",
+    "brainstorm": "brainstorm.txt",
+}
+DEFAULT_MEETING_TYPE = "general"
+
+# Backwards-compat default — points to the historical "general" prompt so
+# callers that don't pass a meeting_type get the same behaviour as before.
+PROMPT_PATH = os.path.join(PROMPTS_DIR, PROMPT_FILES_BY_TYPE[DEFAULT_MEETING_TYPE])
+
+
+def prompt_path_for_type(meeting_type: Optional[str]) -> str:
+    """Resolve a meeting_type slug to the absolute path of its prompt file.
+
+    Unknown / empty values fall back to the general prompt (no exception);
+    the route validates the whitelist explicitly so this is just a safety
+    net for any internal caller.
+    """
+    key = (meeting_type or "").strip().lower() or DEFAULT_MEETING_TYPE
+    filename = PROMPT_FILES_BY_TYPE.get(key, PROMPT_FILES_BY_TYPE[DEFAULT_MEETING_TYPE])
+    return os.path.join(PROMPTS_DIR, filename)
 
 
 # ─── Drive folder ID parsing ──────────────────────────────────────
