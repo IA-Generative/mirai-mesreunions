@@ -222,6 +222,36 @@ flowchart TD
 > Whisper + pyannote + intelligence de réunion LLM cf
 > [docs/integrate-with-kevent.md](integrate-with-kevent.md)).
 
+### Évolution prévue — Pipeline V2 backend Kevent (DAG composable)
+
+**Statut : planifié, non implémenté** (cf. `~/.claude/plans/federated-finding-whisper.md`).
+
+Le backend `kevent` actuel exécute le pipeline post-pull dans une
+fonction monolithique `_transcribe_via_kevent` qui bloque un thread
+file-puller 15-30 min et perd l'état au moindre rollout / OOM. La
+refonte cible découpe ce monolithe en **9 step functions idempotentes**
+pilotées chacune par sa propre queue RabbitMQ, avec un **fan-out
+parallèle post-whisper** :
+
+```mermaid
+flowchart LR
+  W["whisper"] --> D["diarize"]
+  W --> G["glossary"]
+  W --> O["oob_cleaning"]
+  W --> R["reformulation"]
+  W --> CR1["meeting_cr v1<br/>(provisoire)"]
+  W --> SG1["suggest v1<br/>(provisoire)"]
+  D --> M["merge"]
+  M --> SN["speaker_names"]
+  SN --> CR2["meeting_cr v2<br/>(final)"]
+  SN --> SG2["suggest v2<br/>(final)"]
+```
+
+Bénéfice principal : TTFV (temps avant 1er compte-rendu utile) passe
+de ~25 min à ~5 min, en affichant en UI un compte-rendu provisoire
+sans locuteurs pendant que pyannote tourne. Détail complet dans
+[docs/integrate-with-kevent.md](integrate-with-kevent.md#évolution-prévue--pipeline-v2-dag-composable-sprint-reliability).
+
 ## Reseau Et Politiques
 
 ```mermaid

@@ -367,3 +367,74 @@ pas de migration DB.
 - Token-based observability (Langfuse) pour suivre le coût LLM
 - Webhook entrant pour notifier la fin d'un long pipeline
 - Multilangue (aujourd'hui auto-détection Whisper, prompts en français)
+
+## Évolution prévue — Pipeline V2 (DAG composable, sprint reliability)
+
+**Statut : planifié, non implémenté.** Plan détaillé dans
+`~/.claude/plans/federated-finding-whisper.md` (Sprint 1).
+
+**Constat actuel** : `_transcribe_via_kevent` est monolithique, bloque
+un thread file-puller 15-30 min, et toute interruption (OOM, rollout,
+HPA scale-down) entraîne une perte irréversible (message RabbitMQ acké
+d'avance, TTL Kevent gateway expiré au resume). Vécu en prod-bêta le
+2026-05-13 sur un fichier de 53 MB.
+
+**Refonte cible** :
+
+1. **Découpage en step functions idempotentes** (`run_whisper`,
+   `run_diarize`, `run_merge`, `run_speaker_names`, `run_glossary`,
+   `run_oob_cleaning`, `run_reformulation`, `run_meeting_cr`,
+   `run_suggest`). Chaque step lit son input depuis la DB/S3, skip si
+   son output est déjà présent (idempotent), écrit son output et émet
+   le message RabbitMQ suivant.
+
+2. **1 queue RabbitMQ par étape** (`pipeline.whisper.next`,
+   `pipeline.diarize.next`, …). Pod-kill = redelivery sur un autre pod
+   = reprise propre. Plus de perte.
+
+3. **DAG au lieu de chaîne — fan-out parallèle post-whisper** :
+
+```
+                  ┌─→ diarize ──────────────┐
+                  ├─→ glossary              │
+audio ─→ whisper ─┼─→ oob_cleaning          ├─→ merge ─→ speaker_names ─→ meeting_cr (v2 final)
+                  ├─→ reformulation         │                                 │
+                  └─→ meeting_cr (v1 draft) ─→ UI update             ─────────┴─→ suggest (v2)
+                  └─→ suggest (v1 draft) ────→ UI update
+```
+
+   Les 3 LLM steps insensibles aux locuteurs (`glossary`,
+   `oob_cleaning`, `reformulation`) tournent en parallèle de
+   `diarize` dès que whisper finit. `meeting_cr` et `suggest` font
+   un **double pass** : v1 sans locuteurs (rapide, affiché en UI
+   comme « provisoire »), puis v2 avec locuteurs après
+   `speaker_names`.
+
+4. **State machine DB explicite** (`pipeline_stage`,
+   `pipeline_stage_status`, `kevent_jobs_json` JSONB,
+   `meeting_analysis_version`, `suggested_filename_version`) +
+   table d'audit `pipeline_events` pour traçabilité 30j.
+
+5. **Idempotence + lock Redis** par `(file_id, step_name[, version])`
+   pour empêcher 2 pods de traiter la même row+step en parallèle
+   (RabbitMQ at-least-once peut redeliver).
+
+**Gain UX estimé** (médiane fichier 30 min audio) :
+
+| Visible utilisateur | Pipeline actuel | Pipeline V2 |
+|---|---|---|
+| 1er texte transcrit | ~3 min | ~3 min |
+| Compte-rendu utile | ~25 min | **~5 min** (v1 sans locuteurs) |
+| Compte-rendu final | ~25 min | ~20 min (v2 avec locuteurs) |
+
+**Coût additionnel accepté** : 1 appel LLM `meeting_cr` en plus par
+fichier (~quelques centimes) — accord avec la prémisse de coût LLM
+faible vs gain UX majeur (TTFV de ~25 min → ~5 min).
+
+**Anti-patterns du pipeline actuel à NE PAS répliquer** :
+
+- Ack RabbitMQ avant call long bloquant
+- Gros payload (53 MB audio bytes) maintenu en RAM tout le pipeline
+- Resume qui marque `kevent_failed` agressivement (faux négatifs UX)
+- Colonne `kevent_job_id` unique écrasée whisper → pyannote
+- Pas de state machine, statuts Kevent et Mirai mélangés

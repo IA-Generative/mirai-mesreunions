@@ -540,6 +540,17 @@ flowchart TD
   C -->|non| SKIP["Pas de transcription<br/>(audio optimisé voix conservé)"]
 ```
 
+> **Roadmap pipeline V2 (backend Kevent)** — planifié, non implémenté :
+> refonte du `_transcribe_via_kevent` monolithique en **9 step functions
+> idempotentes** (1 queue RabbitMQ par étape) avec **fan-out parallèle
+> post-whisper** : `glossary`, `oob_cleaning`, `reformulation` et un
+> `meeting_cr` *provisoire* (v1 sans locuteurs) sont lancés en parallèle
+> de `diarize`, puis `meeting_cr` *final* (v2 avec locuteurs) est rejoué
+> après `speaker_names`. Cible : TTFV (1er compte-rendu utile visible
+> en UI) ramené de ~25 min à ~5 min. Plan complet :
+> `~/.claude/plans/federated-finding-whisper.md` et section *Évolution
+> prévue* dans [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md#évolution-prévue--pipeline-v2-dag-composable-sprint-reliability).
+
 ## Formats audio supportés
 
 MP3, WAV, OGG, FLAC, M4A, AAC, WMA, OPUS, WEBM
