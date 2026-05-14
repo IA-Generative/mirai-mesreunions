@@ -53,3 +53,7 @@ deploy/kubernetes/environments/**/*.local.env
 deploy/kubernetes/environments/**/*.local.md
 deploy/kubernetes/environments/**/*.local.sh
 **/*.local.md
+
+# Audio source & rapports locaux — non versionnés (gros binaires + scratch).
+/datasets/
+/reports/
