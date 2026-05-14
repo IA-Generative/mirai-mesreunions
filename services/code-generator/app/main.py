@@ -2597,8 +2597,25 @@ INDEX_TEMPLATE = """
         .qr-container img { border-radius: 8px; }
         .expires { color: #888; font-size: 0.85rem; margin-top: 0.5rem; }
         .sessions-list { margin-top: 1rem; }
+        /* Onglet "Mes réunions" en mode liste : la carte occupe la hauteur
+           restante du viewport, et la liste interne scrolle. min-height
+           plutôt que height : sur les rares écrans très courts, on garde
+           un repli naturel sans clipping. */
+        .tab-pane[data-tab="transfers"] {
+            display: flex; flex-direction: column;
+            min-height: calc(100vh - 180px);
+        }
+        #recent-activities-panel {
+            display: flex; flex-direction: column;
+            flex: 1 1 auto; min-height: 0;
+        }
+        /* La zone réunions prend toute la hauteur restante du panneau.
+           flex-grow + min-height:0 est l'incantation indispensable pour
+           qu'un enfant scrollable se comporte bien dans un parent flex
+           column. */
         .sessions-list {
-            max-height: 420px;
+            flex: 1 1 auto;
+            min-height: 0;
             overflow-y: auto;
             padding-right: 0.25rem;
         }
@@ -2606,7 +2623,49 @@ INDEX_TEMPLATE = """
            fiche occupe toute la hauteur naturelle, le scroll vit au niveau
            de la page (plus naturel sur mobile et desktop). */
         .tab-pane[data-tab="transfers"].detail-active .sessions-list {
-            max-height: none; overflow: visible; padding-right: 0;
+            flex: 0 0 auto; min-height: 0; overflow: visible; padding-right: 0;
+        }
+        /* Toolbar tri/upload alignée au-dessus de la liste */
+        .reunions-toolbar {
+            display: flex; align-items: center; gap: 0.6rem;
+            margin-top: 0.3rem; margin-bottom: 0.4rem;
+            flex-wrap: wrap;
+        }
+        .reunions-toolbar .sort-toggle {
+            font-size: 0.78rem; padding: 0.25rem 0.6rem;
+            background: #fff; color: #1e293b;
+            border: 1px solid #cbd5e1; border-radius: 999px;
+            cursor: pointer; user-select: none;
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            transition: background 0.12s ease, border-color 0.12s ease;
+        }
+        .reunions-toolbar .sort-toggle:hover {
+            background: #f1f5f9; border-color: #94a3b8;
+        }
+        .reunions-toolbar .sort-toggle-arrow {
+            font-size: 0.7rem; line-height: 1; color: #475569;
+        }
+        .reunions-toolbar .file-count {
+            font-size: 0.78rem; color: #64748b;
+        }
+        /* Cas par défaut : la date n'a pas été surchargée par l'utilisateur,
+           on l'affiche en italique pour signaler "date d'upload" (= valeur
+           héritée). Quand l'utilisateur édite la date de réunion depuis la
+           fiche détaillée, la classe is-overridden retire l'italique. */
+        .file-row-meta-date.is-default { font-style: italic; color: #64748b; }
+        .file-row-meta-date.is-overridden { font-style: normal; color: #1e293b; font-weight: 500; }
+        /* Pastille "device" inline à droite du titre dans la liste à plat.
+           Reste très discrète — sa raison d'être : remplacer le wrapping
+           par session qui groupait visuellement les fichiers par device. */
+        .file-row-device {
+            font-size: 0.7rem; color: #64748b;
+            background: #f1f5f9; border-radius: 6px;
+            padding: 0.02rem 0.4rem;
+            white-space: nowrap;
+            margin-left: 0.3rem;
+        }
+        .file-row-device.is-local {
+            background: #dbeafe; color: #1d4ed8;
         }
         .session-item {
             padding: 0.75rem; background: #f8f9fa; border-radius: 8px;
@@ -3724,6 +3783,17 @@ INDEX_TEMPLATE = """
                  son propre chemin de fer + statut transcription inline.
                  Disparaît quand 0 transfert en cours. -->
             <div class="transfer-live" id="transfer-live" style="display:none;"></div>
+            <!-- Toolbar : tri date asc/desc + compteur. Tri persisté en
+                 localStorage (mydevices.sort.dir, défaut "desc"). -->
+            <div class="reunions-toolbar" id="reunions-toolbar">
+                <button type="button" class="sort-toggle" id="sort-toggle-btn"
+                        onclick="toggleSortDir()"
+                        title="Inverser l'ordre de tri (date de réunion ; à défaut, date d'upload)">
+                    <span class="sort-toggle-label">Plus récent d'abord</span>
+                    <span class="sort-toggle-arrow">▼</span>
+                </button>
+                <span class="file-count" id="file-count" aria-live="polite"></span>
+            </div>
             <div class="sessions-list" id="sessions-list">
                 <p style="color:#999; font-size:0.85rem;">Chargement...</p>
             </div>
@@ -3736,6 +3806,35 @@ INDEX_TEMPLATE = """
 const impactCache = {};
 const impactLoading = new Set();
 let showAllDevices = false;
+// Ordre de tri courant pour la liste à plat des réunions. Persisté côté
+// localStorage pour survivre au reload. "desc" = plus récent d'abord (par
+// défaut, le plus naturel après ajout d'un upload).
+let _sortDir = (() => {
+    try { return localStorage.getItem('mydevices.sort.dir') === 'asc' ? 'asc' : 'desc'; }
+    catch (e) { return 'desc'; }
+})();
+
+function toggleSortDir() {
+    _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
+    try { localStorage.setItem('mydevices.sort.dir', _sortDir); } catch (e) {}
+    _refreshSortToggleUi();
+    // Re-render à partir du snapshot existant sans rappeler l'API.
+    loadSessions({ force: true });
+}
+
+function _refreshSortToggleUi() {
+    const btn = document.getElementById('sort-toggle-btn');
+    if (!btn) return;
+    const label = btn.querySelector('.sort-toggle-label');
+    const arrow = btn.querySelector('.sort-toggle-arrow');
+    if (_sortDir === 'desc') {
+        if (label) label.textContent = 'Plus récent d\\'abord';
+        if (arrow) arrow.textContent = '▼';
+    } else {
+        if (label) label.textContent = 'Plus ancien d\\'abord';
+        if (arrow) arrow.textContent = '▲';
+    }
+}
 // Map qr_token → {device_name, status, retention_expires_at} populée par
 // loadDevices. Sert à enrichir l'en-tête de chaque session dans la liste
 // des transferts (montre "iPhone CODE (active)" au lieu de juste "CODE").
@@ -4912,9 +5011,11 @@ async function loadSessions(opts) {
         }
 
         if (sessions.length === 0) {
-            container.innerHTML = '<p style="color:#999;font-size:0.85rem;">Aucune session</p>';
+            container.innerHTML = '<p style="color:#999;font-size:0.85rem;">Aucune réunion</p>';
             const purgeBtn = document.getElementById('purge-btn');
             if (purgeBtn) purgeBtn.disabled = true;
+            const countLabel = document.getElementById('file-count');
+            if (countLabel) countLabel.textContent = '';
             return;
         }
 
@@ -4925,22 +5026,26 @@ async function loadSessions(opts) {
             ? sessions.filter(s => (s.uploads || []).some(u => u.id === _detailFileId))
             : sessions;
 
-        const renderedItems = sessionsToRender.map(s => {
-            const isActive = s.status === 'active' && new Date(s.expires_at) > new Date();
-            const statusClass = isActive ? 'status-active' : 'status-expired';
-            const sessionStatusLabel = isActive ? 'Actif' : 'Expiré';
-            const remainingDownloads = Math.max(0, (s.max_uploads || 0) - (s.upload_count || 0));
-            const recentUploadsCount = (s.uploads || []).filter((f) => {
-                const created = new Date(f.created_at || f.updated_at || 0).getTime();
-                if (!Number.isFinite(created) || created <= 0) return false;
-                return (Date.now() - created) <= (24 * 60 * 60 * 1000);
-            }).length;
-            const expiresAtMs = new Date(s.expires_at).getTime();
-            const expiringSoon = Number.isFinite(expiresAtMs)
-                && (expiresAtMs - Date.now()) <= (2 * 24 * 60 * 60 * 1000);
-            const renewNeedsAttention = remainingDownloads < 2 || expiringSoon;
+        // Aplatir tous les fichiers de toutes les sessions, puis trier par
+        // date de réunion (override utilisateur) ou à défaut date d'upload.
+        // L'ancien wrapping par session a disparu — la session n'est plus
+        // qu'une donnée portée par chaque entrée (pour la chip "device").
+        const allFileEntries = [];
+        for (const s of sessionsToRender) {
+            for (const f of (s.uploads || [])) {
+                if (_detailFileId && _detailFileId !== f.id) continue;
+                allFileEntries.push({ f, s });
+            }
+        }
+        allFileEntries.sort((a, b) => {
+            const ka = (a.f.meeting_datetime || a.f.created_at || '');
+            const kb = (b.f.meeting_datetime || b.f.created_at || '');
+            const cmp = ka < kb ? -1 : (ka > kb ? 1 : 0);
+            return cmp * (_sortDir === 'desc' ? -1 : 1);
+        });
+        _refreshSortToggleUi();
 
-            const filesHtml = (s.uploads || []).map(f => {
+        const rowsHtml = allFileEntries.map(({ f, s }) => {
                 // Si une vue détail est active et ce fichier n'est pas le
                 // détail demandé, on le saute (un seul fichier visible).
                 if (_detailFileId && _detailFileId !== f.id) return '';
@@ -4950,8 +5055,24 @@ async function loadSessions(opts) {
                     : '';
                 const progress = pipelineProgress(f.status, f.status_message);
                 const fileStatusClass = `file-badge-${f.status || 'pending'}`;
-                const fileDateLabel = _formatDateCompact(f.created_at);
+                // Date affichée : on prend la date *de réunion* surchargée par
+                // l'utilisateur si disponible, sinon la date d'upload. La
+                // classe is-default/is-overridden pilote l'italique (italique
+                // = pas modifié par l'utilisateur).
+                const dateSource = f.meeting_datetime || f.created_at;
+                const fileDateLabel = _formatDateCompact(dateSource);
+                const dateClass = f.meeting_datetime_overridden ? 'is-overridden' : 'is-default';
                 const fileDurLabel = _formatDuration(f.audio_duration_seconds);
+                // Label "device" affiché en chip inline. Priorité :
+                // 1) device_label fourni par le serveur (sessions L-XXX :
+                //    "Upload local") ; 2) nom du device enrôlé associé au
+                //    qr_token via _devicesByQrToken ; 3) simple_code en
+                //    dernier recours.
+                const _devForRow = _devicesByQrToken[s.qr_token || ''];
+                const deviceLabelForRow = s.device_label
+                    || (_devForRow && _devForRow.name)
+                    || s.simple_code
+                    || '';
                 const analyseClass = (progress.scan === 100 && !progress.blocked) ? 'done'
                     : (progress.active === 'analyse' ? (progress.blocked ? 'blocked' : 'active') : '');
                 const transcodeClass = (progress.transcode === 100) ? 'done'
@@ -5072,6 +5193,14 @@ async function loadSessions(opts) {
                                title="${escapeHtml(f.original_filename)}">
                                 ${escapeHtml(f.original_filename)}
                             </a>
+                            <!-- Chip "device" inline : remplace le wrapping par
+                                 session qu'on avait avant le passage en liste
+                                 à plat. Affiche le nom du device enrôlé (ou
+                                 'Upload local' pour les sessions L-XXXXXXXX). -->
+                            <span class="file-row-device ${s.is_local_upload ? 'is-local' : ''}"
+                                  title="${escapeHtml(s.simple_code || '')}">
+                                ${escapeHtml(deviceLabelForRow)}
+                            </span>
                             <!-- Hint file d'attente Kevent (visible uniquement
                                  quand le pipeline est en cours — peuplé par
                                  _pollQueueHintAll via /api/queue-status,
@@ -5085,7 +5214,8 @@ async function loadSessions(opts) {
                                 <span class="file-row-expand-label">détails</span>
                             </button>
                             <span class="file-row-meta">
-                                <span class="file-row-meta-date">${escapeHtml(fileDateLabel)}</span>
+                                <span class="file-row-meta-date ${dateClass}"
+                                      title="${f.meeting_datetime_overridden ? 'Date de réunion saisie par l\\'utilisateur' : 'Date d\\'upload (cliquez le fichier pour saisir la vraie date de réunion)'}">${escapeHtml(fileDateLabel)}</span>
                                 ${fileDurLabel ? `<span class="file-row-meta-dur">${escapeHtml(fileDurLabel)}</span>` : ''}
                             </span>
                             <button type="button" class="icon-btn file-row-delete"
@@ -5143,7 +5273,7 @@ async function loadSessions(opts) {
                          derrière le bouton (i) qui ouvre un modal. -->
                     <div class="file-detail-techline">
                         <span class="file-row-meta">
-                            <span class="file-row-meta-date">${escapeHtml(fileDateLabel)}</span>
+                            <span class="file-row-meta-date ${dateClass}">${escapeHtml(fileDateLabel)}</span>
                             ${fileDurLabel ? `<span class="file-row-meta-dur">${escapeHtml(fileDurLabel)}</span>` : ''}
                         </span>
                         <span class="file-detail-source-filename"
@@ -5183,86 +5313,16 @@ async function loadSessions(opts) {
                 </div>`;
             }).join('');
 
-                // Lifecycle bucket from server-computed state. UI labels +
-                // delete-button confirmation severity vary per bucket.
-                const lifecycle = s.lifecycle_state || (isActive ? 'pending_enrollment' : 'expired_unused');
-                const labels = {
-                    pending_enrollment: 'En attente d\\'enrôlement',
-                    enrolled:           'Enrôlé',
-                    expired_unused:     'Inutilisée (jetable)',
-                    expired_consumed:   'Expirée — fichiers conservés',
-                };
-                const stateLabel = labels[lifecycle] || sessionStatusLabel;
-                const stateBadgeClass = lifecycle === 'enrolled' ? 'status-active'
-                    : lifecycle === 'pending_enrollment' ? 'status-active'
-                    : 'status-expired';
-                const allowSilentDelete = (lifecycle === 'expired_unused' || lifecycle === 'pending_enrollment')
-                    && (s.upload_count || 0) === 0;
+        container.innerHTML = rowsHtml
+            || '<p style="color:#999;font-size:0.85rem;">Aucune réunion</p>';
 
-                // Sessions actives (enrolled / pending_enrollment) : UI
-                // épurée — on cache les actions globales (renouveler,
-                // supprimer-session) et le compteur de quota qui n'a pas de
-                // valeur pour l'utilisateur quotidien (la rétention device
-                // pilote, et le quota est haut). Tout reste accessible dans
-                // le bucket "Sessions inutilisées (jetables)" où la session
-                // est figée/morte.
-                const isActiveBucket = (lifecycle === 'pending_enrollment' || lifecycle === 'enrolled');
-                const sessionDeleteBtn = isActiveBucket ? '' : `
-                    <button type="button" class="icon-btn"
-                            data-session-delete="${s.simple_code}"
-                            onclick="deleteSession('${s.simple_code}', ${allowSilentDelete})"
-                            title="Mettre cette session à la corbeille (purgée définitivement après 30 jours)"
-                            aria-label="Mettre la session à la corbeille">${ICONS.trash}</button>`;
-                const sessionRenewBtn = isActiveBucket ? '' : `
-                    <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary btn-renew-mini ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
-                            onclick="renewSession('${s.id}')">Renouveller</button>`;
-                const quotaLine = isActiveBucket ? '' : `
-                    <span style="float:right;color:#888;">restants: ${remainingDownloads} (utilisés: ${s.upload_count}/${s.max_uploads}) | récents 24h: ${recentUploadsCount}</span>`;
-                // Header : on remplace "CODE + Enrôlé" par
-                // "DeviceName CODE (status)" inspiré de l'onglet
-                // "Mes appareils". Fallback sur l'ancien format si aucun
-                // device matching trouvé (cas pending_enrollment).
-                const dev = _devicesByQrToken[(s.qr_token || '')];
-                const headerInner = dev
-                    ? `<span class="session-device-name">${escapeHtml(dev.name)}</span>
-                       <span class="code">${escapeHtml(s.simple_code)}</span>
-                       <span class="status-badge ${stateBadgeClass}">(${escapeHtml(dev.status)})</span>`
-                    : `<span class="code">${escapeHtml(s.simple_code)}</span>
-                       <span class="status-badge ${stateBadgeClass}">${escapeHtml(stateLabel)}</span>`;
-                return `<div class="session-item" data-session-row="${s.simple_code}" data-lifecycle="${lifecycle}">
-                ${headerInner}
-                ${sessionRenewBtn}
-                ${sessionDeleteBtn}
-                ${quotaLine}
-                ${filesHtml}
-            </div>`;
-            });
-
-        // Bucket sessions by lifecycle for visual grouping. `expired_consumed`
-        // (QR grace passée mais fichiers uploadés + device enrôlé) reste dans
-        // le bucket actif : l'utilisateur veut écouter/voir ses fichiers
-        // tant que le device est valide (rétention 15j), pas devoir déplier
-        // une section repliée par défaut.
-        const buckets = { active: [], obsolete: [] };
-        sessionsToRender.forEach((s, i) => {
-            const lc = s.lifecycle_state;
-            const html = renderedItems[i];
-            if (lc === 'expired_unused') buckets.obsolete.push(html);
-            else buckets.active.push(html);
-        });
-        const collapsibleSection = (title, items, id) => items.length === 0 ? '' : `
-            <details id="${id}" style="margin-top:0.5rem;">
-                <summary style="cursor:pointer;font-size:0.84rem;color:#475569;padding:0.3rem 0;">
-                    ${title} (${items.length})
-                </summary>
-                <div style="margin-top:0.4rem;">${items.join('')}</div>
-            </details>`;
-        container.innerHTML = `
-            ${buckets.active.join('')}
-            ${collapsibleSection('Sessions inutilisées (jetables)', buckets.obsolete, 'obsolete-sessions')}
-        `;
-
-        const fileCount = sessions.reduce((acc, s) => acc + ((s.uploads || []).length), 0);
+        const fileCount = allFileEntries.length;
+        const countLabel = document.getElementById('file-count');
+        if (countLabel) {
+            countLabel.textContent = fileCount
+                ? `${fileCount} réunion${fileCount > 1 ? 's' : ''}`
+                : '';
+        }
         const purgeBtn = document.getElementById('purge-btn');
         if (purgeBtn) purgeBtn.disabled = fileCount === 0;
 
