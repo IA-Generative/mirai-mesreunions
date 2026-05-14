@@ -534,6 +534,7 @@ def index():
         user=user,
         short_ttl_enabled=ALLOW_SHORT_QR_TTL_SECONDS_TEST,
         device_retention_days=max(1, DEVICE_TOKEN_RETENTION_HOURS // 24),
+        allowed_audio_extensions=",".join(ALLOWED_AUDIO_EXTENSIONS),
     )
 
 
@@ -2667,6 +2668,54 @@ INDEX_TEMPLATE = """
         .file-row-device.is-local {
             background: #dbeafe; color: #1d4ed8;
         }
+        /* Zone d'upload local : 2 boutons côte à côte + un overlay
+           drag&drop sur l'ensemble du header pour rester accessible
+           tactile (clic) et drag desktop. La progression batch s'affiche
+           juste en dessous, en occupant une ligne complète. */
+        .local-upload-zone {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            margin-left: auto;
+        }
+        .local-upload-btn {
+            font-size: 0.78rem; padding: 0.25rem 0.6rem;
+            background: #fff; color: #1d4ed8;
+            border: 1px solid #93c5fd; border-radius: 6px;
+            cursor: pointer; user-select: none;
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            transition: background 0.12s ease, border-color 0.12s ease;
+            white-space: nowrap;
+        }
+        .local-upload-btn:hover {
+            background: #eff6ff; border-color: #60a5fa;
+        }
+        .local-upload-btn:disabled {
+            opacity: 0.6; cursor: not-allowed;
+        }
+        .local-upload-btn-icon { font-size: 0.95rem; line-height: 1; }
+        .local-upload-progress {
+            display: none;
+            width: 100%; margin-top: 0.25rem;
+            font-size: 0.78rem; color: #1e293b;
+        }
+        .local-upload-progress.is-active { display: block; }
+        .local-upload-progress-bar {
+            height: 4px; background: #e0e7ef; border-radius: 999px;
+            margin-top: 0.18rem; overflow: hidden;
+        }
+        .local-upload-progress-bar-fill {
+            height: 100%; background: #2563eb; width: 0%;
+            transition: width 0.18s ease;
+        }
+        .local-upload-progress-errors {
+            color: #b91c1c; font-size: 0.74rem; margin-top: 0.15rem;
+            white-space: pre-wrap;
+        }
+        /* Surbrillance pendant un drag&drop au-dessus du header. */
+        .recent-activities-panel.is-dragover .dsfr-inline-actions {
+            outline: 2px dashed #93c5fd;
+            outline-offset: 4px;
+            border-radius: 6px;
+        }
         .session-item {
             padding: 0.75rem; background: #f8f9fa; border-radius: 8px;
             margin-bottom: 0.5rem; font-size: 0.85rem;
@@ -3774,6 +3823,34 @@ INDEX_TEMPLATE = """
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
+                <!-- Upload local (sans QR). 2 boutons cachant des <input
+                     type="file"> + une zone drag&drop sur tout le header.
+                     Le pipeline AV→transcode→transfer→kevent prend le
+                     relais comme pour un upload PWA classique. -->
+                <div class="local-upload-zone">
+                    <button type="button" class="local-upload-btn"
+                            id="local-upload-files-btn"
+                            onclick="document.getElementById('local-upload-files-input').click()"
+                            title="Sélectionner un ou plusieurs fichiers audio">
+                        <span class="local-upload-btn-icon">📁</span>
+                        <span>Fichiers</span>
+                    </button>
+                    <button type="button" class="local-upload-btn"
+                            id="local-upload-folder-btn"
+                            onclick="document.getElementById('local-upload-folder-input').click()"
+                            title="Sélectionner un dossier — tous les fichiers audio à l'intérieur seront uploadés">
+                        <span class="local-upload-btn-icon">📂</span>
+                        <span>Dossier</span>
+                    </button>
+                    <input type="file" id="local-upload-files-input"
+                           accept="audio/*" multiple
+                           style="display:none;"
+                           onchange="handleLocalUploadInput(this)" />
+                    <input type="file" id="local-upload-folder-input"
+                           webkitdirectory directory multiple
+                           style="display:none;"
+                           onchange="handleLocalUploadInput(this)" />
+                </div>
                 <!-- Action lourde « tout mettre à la corbeille ». Cachée par
                      défaut, visible uniquement en mode avancé (toggle ON ou
                      Alt enfoncé) via .advanced-only + body.adv-mode. Icône
@@ -3816,6 +3893,18 @@ INDEX_TEMPLATE = """
                         </g>
                     </svg>
                 </button>
+            </div>
+            <!-- Progression batch upload local. Affichée seulement quand
+                 un upload est en cours. Tient sur 1 ligne + une barre. -->
+            <div class="local-upload-progress" id="local-upload-progress">
+                <div>
+                    <span id="local-upload-progress-label">Upload en cours…</span>
+                    <span id="local-upload-progress-count" style="color:#64748b;"></span>
+                </div>
+                <div class="local-upload-progress-bar">
+                    <div class="local-upload-progress-bar-fill" id="local-upload-progress-fill"></div>
+                </div>
+                <div class="local-upload-progress-errors" id="local-upload-progress-errors"></div>
             </div>
             <!-- "Transferts en cours" : un bloc par fichier in-flight avec
                  son propre chemin de fer + statut transcription inline.
@@ -4247,6 +4336,149 @@ async function resetMeetingDatetime(fileId) {
     const input = document.querySelector(`[data-meeting-dt-for="${fileId}"]`);
     if (input) input.value = '';
     await _doSaveMeetingDatetime(fileId, null, input);
+}
+
+// Extensions audio acceptées (recopie côté client de ALLOWED_AUDIO_EXTENSIONS).
+// Sert au filtre dossier (le picker dossier ne filtre pas par extension).
+const _ALLOWED_AUDIO_EXT_SET = new Set(
+    "{{ allowed_audio_extensions }}".split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
+);
+function _isAudioFileForUpload(file) {
+    if (!file || !file.name || file.size === 0) return false;
+    const idx = file.name.lastIndexOf('.');
+    if (idx <= 0) return false;
+    const ext = file.name.slice(idx + 1).toLowerCase();
+    return _ALLOWED_AUDIO_EXT_SET.has(ext);
+}
+
+let _localUploadInFlight = false;
+
+function handleLocalUploadInput(inputEl) {
+    if (!inputEl || !inputEl.files || inputEl.files.length === 0) return;
+    const files = Array.from(inputEl.files);
+    uploadLocalFiles(files);
+    // Réinitialise pour autoriser un re-pick du même fichier ensuite.
+    inputEl.value = '';
+}
+
+async function uploadLocalFiles(files) {
+    if (_localUploadInFlight) return;
+    if (!files || files.length === 0) return;
+    const audioFiles = files.filter(_isAudioFileForUpload);
+    const filteredOut = files.length - audioFiles.length;
+    if (audioFiles.length === 0) {
+        alert(`Aucun fichier audio valide trouvé. Extensions acceptées : ${Array.from(_ALLOWED_AUDIO_EXT_SET).join(', ')}`);
+        return;
+    }
+
+    _localUploadInFlight = true;
+    const progress = document.getElementById('local-upload-progress');
+    const label = document.getElementById('local-upload-progress-label');
+    const count = document.getElementById('local-upload-progress-count');
+    const fill = document.getElementById('local-upload-progress-fill');
+    const errors = document.getElementById('local-upload-progress-errors');
+    const filesBtn = document.getElementById('local-upload-files-btn');
+    const folderBtn = document.getElementById('local-upload-folder-btn');
+    if (progress) progress.classList.add('is-active');
+    if (errors) errors.textContent = '';
+    if (filesBtn) filesBtn.disabled = true;
+    if (folderBtn) folderBtn.disabled = true;
+
+    const total = audioFiles.length;
+    let okCount = 0;
+    const failed = [];
+    for (let i = 0; i < total; i++) {
+        const file = audioFiles[i];
+        if (label) label.textContent = `Upload de "${file.name}"…`;
+        if (count) count.textContent = ` (${i + 1}/${total})`;
+        try {
+            await _uploadOneLocal(file);
+            okCount += 1;
+        } catch (e) {
+            failed.push(`${file.name}: ${e.message || 'échec'}`);
+        }
+        if (fill) fill.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+    }
+
+    if (label) label.textContent = failed.length
+        ? `${okCount}/${total} fichier(s) uploadé(s)`
+        : `✓ ${okCount} fichier(s) uploadé(s)`;
+    if (count) count.textContent = filteredOut > 0 ? ` (${filteredOut} non-audio ignoré(s))` : '';
+    if (errors && failed.length) errors.textContent = failed.join('\\n');
+    if (filesBtn) filesBtn.disabled = false;
+    if (folderBtn) folderBtn.disabled = false;
+    _localUploadInFlight = false;
+
+    // Refresh de la liste pour faire apparaître les nouveaux fichiers.
+    loadSessions({ force: true });
+    // Cache la barre après quelques secondes si tout est OK.
+    if (!failed.length) {
+        setTimeout(() => {
+            if (progress) progress.classList.remove('is-active');
+            if (fill) fill.style.width = '0%';
+        }, 3000);
+    }
+}
+
+function _uploadOneLocal(file) {
+    return new Promise((resolve, reject) => {
+        const fd = new FormData();
+        fd.append('file', file);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/my-upload');
+        xhr.timeout = 120000; // 2 min/file pour les gros audios
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+                const label = document.getElementById('local-upload-progress-label');
+                const pct = Math.round((e.loaded / e.total) * 100);
+                if (label) label.textContent = `Upload de "${file.name}" (${pct}%)…`;
+            }
+        };
+        xhr.onload = () => {
+            let data;
+            try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) { data = {}; }
+            if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
+            reject(new Error(data.error || `HTTP ${xhr.status}`));
+        };
+        xhr.onerror = () => reject(new Error('erreur réseau'));
+        xhr.ontimeout = () => reject(new Error('timeout (>2min)'));
+        xhr.send(fd);
+    });
+}
+
+// Drag & drop : capture sur le header pour rester découvrable. Ignore le
+// drop si on tombe sur un input/button — laisse le comportement natif.
+function _initLocalUploadDnD() {
+    const host = document.querySelector('.recent-activities-panel');
+    if (!host) return;
+    let dragDepth = 0;
+    host.addEventListener('dragenter', (e) => {
+        if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+        e.preventDefault();
+        dragDepth += 1;
+        host.classList.add('is-dragover');
+    });
+    host.addEventListener('dragleave', () => {
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) host.classList.remove('is-dragover');
+    });
+    host.addEventListener('dragover', (e) => {
+        if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+            e.preventDefault();
+        }
+    });
+    host.addEventListener('drop', (e) => {
+        dragDepth = 0;
+        host.classList.remove('is-dragover');
+        if (!e.dataTransfer || !e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+        e.preventDefault();
+        uploadLocalFiles(Array.from(e.dataTransfer.files));
+    });
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _initLocalUploadDnD);
+} else {
+    _initLocalUploadDnD();
 }
 // Durée de rétention device en jours (lue depuis DEVICE_TOKEN_RETENTION_HOURS
 // côté serveur — 15j en prod-bêta, 7j par défaut). Sert aux messages de
