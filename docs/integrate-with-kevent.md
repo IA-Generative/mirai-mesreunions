@@ -163,11 +163,16 @@ Tous validés depuis la VM build-vm — cf
    for m in 004_kevent_transcription.sql \
             005_kevent_glossary_correction.sql \
             006_kevent_suggested_filename.sql; do
-     kubectl --kubeconfig=$INT exec deploy/postgres-internal -- \
+     kubectl --kubeconfig=$INT -n audio-internal \
+       exec -i statefulset/postgres-internal -- \
        psql -U audio_int -d audio_upload_int \
-       -f /app/migrations/internal/$m
+       < migrations/internal/$m
    done
    ```
+   Note : `postgres-internal` est un **StatefulSet** dans le namespace
+   `audio-internal` (pas un Deployment). On passe le SQL via stdin
+   (`-i`) plutôt qu'un fichier interne au pod — ça évite de devoir
+   rebuilder l'image postgres pour chaque nouvelle migration.
 
 2. **Provisionner le Secret** `kevent-api-key` dans `audio-internal` :
    ```bash
