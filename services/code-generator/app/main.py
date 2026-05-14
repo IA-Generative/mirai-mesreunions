@@ -3198,6 +3198,44 @@ INDEX_TEMPLATE = """
         }
         .file-detail-rename-btn { white-space: nowrap; }
         .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
+        /* Info "Uploadé le ..." à droite du titre : rappel discret de la
+           date d'upload (immuable) — utile à côté de la date de réunion
+           éditable juste en dessous. */
+        .file-detail-upload-info {
+            font-size: 0.74rem; color: #64748b;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        /* Bloc d'édition "Date de la réunion" + bouton reset.
+           datetime-local input compact pour rester homogène avec le DSFR. */
+        .file-detail-meeting-row {
+            display: flex; align-items: center; flex-wrap: wrap;
+            gap: 0.5rem; margin: 0.15rem 0 0.35rem 0.6rem;
+            font-size: 0.82rem; color: #475569;
+        }
+        .file-detail-meeting-label {
+            font-weight: 600; color: #1e293b;
+        }
+        .file-detail-meeting-input {
+            font-size: 0.84rem; padding: 0.2rem 0.4rem;
+            border: 1px solid #cbd5e1; border-radius: 6px;
+            background: #fff; color: #0f172a;
+        }
+        .file-detail-meeting-input:focus { outline: none; border-color: #94a3b8; }
+        .file-detail-meeting-reset {
+            font-size: 0.85rem; line-height: 1;
+            width: 1.6rem; height: 1.6rem; padding: 0;
+            border: 1px solid #cbd5e1; border-radius: 50%;
+            background: #fff; color: #475569; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .file-detail-meeting-reset:hover { background: #f1f5f9; border-color: #94a3b8; }
+        .file-detail-meeting-reset:disabled { opacity: 0.3; cursor: not-allowed; }
+        .file-detail-meeting-status {
+            font-size: 0.74rem; color: #64748b;
+        }
+        .file-detail-meeting-status.saved { color: #166534; }
+        .file-detail-meeting-status.error { color: #b91c1c; }
         .file-detail-techline {
             display: flex; align-items: center; justify-content: space-between;
             gap: 0.45rem; margin: 0 0 0.15rem 0.6rem;
@@ -4133,6 +4171,82 @@ function _formatDuration(seconds) {
     const m = Math.floor(seconds / 60);
     const s = Math.round(seconds % 60);
     return m > 0 ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`;
+}
+
+// Convertit une ISO 8601 ("2026-05-14T13:42:00+02:00" ou avec Z) au format
+// attendu par <input type="datetime-local"> ("YYYY-MM-DDTHH:MM" en heure
+// locale). Renvoie '' si l'entrée est invalide.
+function _isoToDatetimeLocal(iso) {
+    if (!iso) return '';
+    try {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '';
+        // toLocaleString en sv-SE renvoie "YYYY-MM-DD HH:MM:SS" — on remplace
+        // l'espace par T et on tronque les secondes.
+        const s = d.toLocaleString('sv-SE');
+        return s.slice(0, 16).replace(' ', 'T');
+    } catch (e) { return ''; }
+}
+
+// Convertit la valeur d'un <input type="datetime-local"> ("YYYY-MM-DDTHH:MM")
+// en ISO 8601 avec offset local (envoyée au serveur pour stockage TZ-aware).
+function _datetimeLocalToIso(value) {
+    if (!value) return null;
+    // Construire un Date à partir de la chaîne locale. new Date(str sans TZ)
+    // interprète l'heure comme locale ; toISOString convertit en UTC.
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString();
+}
+
+let _meetingDtSaveTimers = new Map();
+
+async function saveMeetingDatetime(fileId, inputEl) {
+    if (!fileId || !inputEl) return;
+    const raw = (inputEl.value || '').trim();
+    const iso = raw ? _datetimeLocalToIso(raw) : null;
+    // Si l'utilisateur a vidé le champ : équivalent à un reset (NULL côté serveur).
+    // Debounce léger pour éviter de spammer le PATCH si change+blur tirent
+    // tous les deux dans la même ms.
+    const prevTimer = _meetingDtSaveTimers.get(fileId);
+    if (prevTimer) clearTimeout(prevTimer);
+    const timer = setTimeout(() => _doSaveMeetingDatetime(fileId, iso, inputEl), 80);
+    _meetingDtSaveTimers.set(fileId, timer);
+}
+
+async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
+    const statusEl = document.querySelector(`[data-meeting-dt-status-for="${fileId}"]`);
+    const resetBtn = document.querySelector(`[data-meeting-dt-reset-for="${fileId}"]`);
+    if (statusEl) { statusEl.textContent = 'Enregistrement…'; statusEl.className = 'file-detail-meeting-status'; }
+    try {
+        const resp = await fetch(`/api/file/${fileId}/meeting-datetime`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ meeting_datetime: iso }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || !data.ok) throw new Error(data.error || 'save_failed');
+        if (statusEl) {
+            statusEl.textContent = '✓ Enregistré';
+            statusEl.className = 'file-detail-meeting-status saved';
+            setTimeout(() => { if (statusEl.textContent === '✓ Enregistré') statusEl.textContent = ''; }, 2500);
+        }
+        if (resetBtn) resetBtn.disabled = !data.meeting_datetime_overridden;
+        // Re-charge la liste pour refléter le nouveau tri + l'italique mis à
+        // jour. Force=true contourne le diff sur snapshot.
+        loadSessions({ force: true });
+    } catch (e) {
+        if (statusEl) {
+            statusEl.textContent = '✗ Échec sauvegarde';
+            statusEl.className = 'file-detail-meeting-status error';
+        }
+    }
+}
+
+async function resetMeetingDatetime(fileId) {
+    const input = document.querySelector(`[data-meeting-dt-for="${fileId}"]`);
+    if (input) input.value = '';
+    await _doSaveMeetingDatetime(fileId, null, input);
 }
 // Durée de rétention device en jours (lue depuis DEVICE_TOKEN_RETENTION_HOURS
 // côté serveur — 15j en prod-bêta, 7j par défaut). Sert aux messages de
@@ -5266,6 +5380,32 @@ async function loadSessions(opts) {
                                 onclick="renameDetailTitle('${f.id}', this)" disabled>
                             Renommer
                         </button>
+                        <span class="file-detail-upload-info"
+                              title="Date d'upload du fichier (immuable, technique)">
+                            Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
+                        </span>
+                    </div>
+                    <!-- Date *réelle* de la réunion, surchargée par
+                         l'utilisateur. NULL côté serveur = pas d'override,
+                         l'UI retombe sur created_at pour l'affichage et
+                         le tri. Le bouton ↺ remet à NULL (clear). -->
+                    <div class="file-detail-meeting-row">
+                        <span class="file-detail-meeting-label">Date de la réunion :</span>
+                        <input type="datetime-local"
+                               class="file-detail-meeting-input"
+                               data-meeting-dt-for="${f.id}"
+                               value="${_isoToDatetimeLocal(f.meeting_datetime) || ''}"
+                               placeholder="${_isoToDatetimeLocal(f.created_at) || ''}"
+                               onchange="saveMeetingDatetime('${f.id}', this)"
+                               onblur="saveMeetingDatetime('${f.id}', this)" />
+                        <button class="file-detail-meeting-reset"
+                                data-meeting-dt-reset-for="${f.id}"
+                                title="Effacer la date de réunion (retombe sur la date d'upload)"
+                                aria-label="Effacer la date de réunion"
+                                onclick="resetMeetingDatetime('${f.id}')"
+                                ${f.meeting_datetime ? '' : 'disabled'}>↺</button>
+                        <span class="file-detail-meeting-status"
+                              data-meeting-dt-status-for="${f.id}"></span>
                     </div>
                     <!-- Ligne sous le titre : juste date+durée à gauche +
                          bouton (i) coloré à droite. Les infos techniques
