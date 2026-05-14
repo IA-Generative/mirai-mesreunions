@@ -16,3 +16,8 @@ eventlet==0.37.0
 # (.docx via python-docx, .odt via odfpy). No LibreOffice binary needed.
 python-docx==1.1.2
 odfpy==1.4.1
+# Document text extraction for the meeting-prep route (reads user-supplied
+# prep documents from suitenumerique/drive). docx + odt + odp reuse the
+# libraries above; we only add the formats not yet covered.
+pypdf==5.1.0
+python-pptx==1.0.2

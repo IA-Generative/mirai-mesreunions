@@ -58,10 +58,16 @@ def _llm_raising(exc):
 
 # --- prompts loading ------------------------------------------------------
 
-def test_prompts_directory_contains_4_required_files():
-    """The pipeline depends on these 4 prompts being shipped with the image."""
+def test_prompts_directory_contains_required_files():
+    """The pipeline depends on these prompts being shipped with the image."""
     prompts_dir = os.path.join(ROOT, "services", "file-mover", "app", "prompts")
-    expected = {"speaker_names.txt", "oob_cleaning.txt", "reformulation.txt", "meeting_analysis.txt"}
+    expected = {
+        "speaker_names.txt",
+        "oob_cleaning.txt",
+        "reformulation.txt",
+        "meeting_analysis.txt",
+        "absentee_summary.txt",
+    }
     actual = set(os.listdir(prompts_dir))
     missing = expected - actual
     assert not missing, f"Missing prompts: {missing}"
@@ -70,7 +76,13 @@ def test_prompts_directory_contains_4_required_files():
 def test_prompts_contain_transcript_placeholder():
     """All prompts must use the {TRANSCRIPT} placeholder so the orchestrator can substitute."""
     prompts_dir = os.path.join(ROOT, "services", "file-mover", "app", "prompts")
-    for name in ("speaker_names.txt", "oob_cleaning.txt", "reformulation.txt", "meeting_analysis.txt"):
+    for name in (
+        "speaker_names.txt",
+        "oob_cleaning.txt",
+        "reformulation.txt",
+        "meeting_analysis.txt",
+        "absentee_summary.txt",
+    ):
         with open(os.path.join(prompts_dir, name), encoding="utf-8") as f:
             content = f.read()
         assert "{TRANSCRIPT}" in content, f"{name} missing the {{TRANSCRIPT}} placeholder"
@@ -192,3 +204,37 @@ def test_serialize_analysis_returns_json_string():
 
 def test_serialize_analysis_none_passthrough():
     assert MI.serialize_analysis(None) is None
+
+
+# --- summarise_for_absentee ----------------------------------------------
+
+def test_summarise_for_absentee_returns_llm_output():
+    fake = _llm_returning("Voici un débrief pour les absents...")
+    assert MI.summarise_for_absentee("xx", fake, "m") == "Voici un débrief pour les absents..."
+
+
+def test_summarise_for_absentee_returns_none_on_llm_error():
+    fake = _llm_raising(LLM_MOD.LLMTransientError("timeout"))
+    assert MI.summarise_for_absentee("xx", fake, "m") is None
+
+
+def test_summarise_for_absentee_empty_transcript_returns_none():
+    fake = MagicMock(spec=LLM_MOD.LLMClient)
+    assert MI.summarise_for_absentee("", fake, "m") is None
+    fake.chat.assert_not_called()
+
+
+def test_summarise_for_absentee_uses_chat_not_chat_json():
+    """The absentee debrief is plain prose, not structured JSON — must call chat()."""
+    fake = _llm_returning("texte libre")
+    MI.summarise_for_absentee("transcript content", fake, "model-medium")
+    fake.chat.assert_called_once()
+    fake.chat_json.assert_not_called()
+
+
+def test_summarise_for_absentee_passes_transcript_into_prompt():
+    """The prompt template must receive the transcript via {TRANSCRIPT} substitution."""
+    fake = _llm_returning("ok")
+    MI.summarise_for_absentee("CONTENU UNIQUE 123", fake, "m")
+    sent_messages = fake.chat.call_args.args[1] if fake.chat.call_args.args else fake.chat.call_args.kwargs["messages"]
+    assert "CONTENU UNIQUE 123" in sent_messages[0]["content"]

@@ -197,6 +197,11 @@ OIDC_OFFLINE_ACCESS = _bool("OIDC_OFFLINE_ACCESS", False)
 OIDC_TOKEN_ENDPOINT = _str("OIDC_TOKEN_ENDPOINT", "")
 OIDC_REFRESH_TOKEN_FERNET_KEY = _str("OIDC_REFRESH_TOKEN_FERNET_KEY", "")
 
+# suitenumerique/drive (mesfichiers) — pre-meeting prep route reads
+# preparation documents from the user's Drive. Auth reuses the OIDC refresh
+# token already captured at login (same Keycloak realm).
+DRIVE_BASE_URL = _str("DRIVE_BASE_URL", "")
+
 # Kevent backend (when TRANSCRIPTION_BACKEND=kevent). The Mirai inference
 # gateway exposes Whisper (transcription) and pyannote (diarization) over
 # multipart sync POSTs; auth is the non-standard "apikey: Bearer <token>"
@@ -235,6 +240,10 @@ KEVENT_GLOSSARY_MAX_TERMS_PER_CALL = _int("KEVENT_GLOSSARY_MAX_TERMS_PER_CALL", 
 # title used as the stem of user-facing download filenames. NULL = fallback to
 # original filename + slot suffix.
 KEVENT_FILENAME_SUGGESTION_ENABLED = _bool("KEVENT_FILENAME_SUGGESTION_ENABLED", False)
+# LLM-based self-contained debrief written for people who missed the meeting
+# (medium model). Produced after meeting_analysis so the prompt can rely on the
+# cleanest text available. NULL when the toggle is off or the LLM call fails.
+KEVENT_ABSENTEE_SUMMARY_ENABLED = _bool("KEVENT_ABSENTEE_SUMMARY_ENABLED", False)
 # Async / job-based mode for Kevent transcribe + diarize. When true, file-puller
 # uses POST /jobs/{service_type} + GET /jobs/{type}/{id} polling instead of the
 # blocking sync endpoints. Useful for long files where the sync HTTP connection

@@ -108,6 +108,8 @@ def test_render_contains_expected_landmarks(rendered_html):
         "Mode avancé",              # toggle power-user
         "_buildInfoTooltip",        # checklist du (i)
         "file-detail-source-filename",  # nom de fichier audio bleuté en détail
+        "Préparer une réunion",     # 5e onglet (piste 1 meeting-prep first-class)
+        "data-trash-kind=\"brief\"", # corbeille unifiée — briefs aux côtés des fichiers
     ]
     for needle in must_have:
         assert needle in rendered_html, f"Motif attendu absent du rendu : {needle!r}"

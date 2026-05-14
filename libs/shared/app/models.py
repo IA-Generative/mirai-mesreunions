@@ -7,9 +7,15 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, String, Integer, DateTime, Boolean, Text, Float,
-    Enum as SAEnum, ForeignKey, Index
+    Enum as SAEnum, ForeignKey, Index, JSON
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+
+# Au déploiement réel (postgres), on stocke en JSONB pour requêtes et
+# indexes GIN. En tests (SQLite), JSONB n'est pas reconnu ; on retombe
+# sur le type générique JSON. ``with_variant`` permet de garder une seule
+# déclaration de colonne tout en exposant le DDL natif à postgres.
+_JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
 from sqlalchemy.orm import declarative_base, relationship
 import enum
 
@@ -309,6 +315,8 @@ class UserAudioFile(InternalBase):
                               comment="User-specified actual meeting date/time override")
     key_points_summary = Column(Text, nullable=True,
                                 comment="LLM-generated 3-5 bullet summary of the meeting key points (one short sentence each); displayed as subtitle in mydevices UI; NULL if step disabled or failed")
+    absentee_summary = Column(Text, nullable=True,
+                              comment="self-contained 150-300 words debrief written for people who missed the meeting; NULL if KEVENT_ABSENTEE_SUMMARY_ENABLED off or step failed")
 
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -355,6 +363,57 @@ class OidcRefreshToken(InternalBase):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class MeetingBrief(InternalBase):
+    """Brief de pré-réunion produit par /api/meeting-prep.
+
+    Avant la migration 008, le brief était généré par appel LLM puis
+    renvoyé au browser sans persistance — un objet jetable. Cette table
+    le hisse au rang d'objet de première classe :
+
+      * isolation par ``user_sub`` (OIDC sub), comme ``UserAudioFile`` ;
+      * soft-delete via ``trashed_at`` (NULL = visible, NOT NULL = corbeille),
+        même grammaire que ``UploadedFile.trashed_at`` ;
+      * purge auto 30j déclenchée par code-generator (TRASH_RETENTION_DAYS).
+
+    L'écriture/lecture depuis code-generator (zone externe) passe par
+    token-issuer ``/api/v1/briefs/*`` (relais cross-cluster, cf. le pattern
+    de ``rename_file_by_session``). Pas d'accès direct DB cross-cluster.
+    """
+    __tablename__ = "meeting_briefs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_sub = Column(String(255), nullable=False, index=True,
+                      comment="OIDC subject identifier — owner of the brief")
+
+    # Champs saisis par l'utilisateur dans le wizard.
+    subject = Column(Text, nullable=True)
+    drive_folder_id = Column(Text, nullable=True)
+    role = Column(Text, nullable=True)
+    expectation = Column(Text, nullable=True)
+    focus = Column(_JSON_TYPE, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+
+    # Sortie du LLM (structuré) + métadonnées des documents ingérés.
+    brief_json = Column(_JSON_TYPE, nullable=True)
+    documents = Column(_JSON_TYPE, nullable=True)
+
+    # Titre éditable côté UI (par défaut: subject). Cap 500 car. comme
+    # suggested_filename pour les fichiers audio.
+    title = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=True,
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    # Corbeille (soft-delete). NULL = visible. Cf. UploadedFile.trashed_at.
+    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # Les index partiels (filter trashed_at IS [NOT] NULL) sont créés par
+    # la migration 010_meeting_briefs.sql. Ils ne sont pas redéclarés ici
+    # pour éviter qu'init_tables() en crée des versions non-partielles.
 
 
 class TranscriptionEvent(InternalBase):

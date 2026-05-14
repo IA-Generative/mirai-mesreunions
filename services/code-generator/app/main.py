@@ -37,8 +37,11 @@ from libs.shared.app.config import (
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
     OIDC_OFFLINE_ACCESS, DEVICE_TOKEN_RETENTION_HOURS,
     UPLOAD_MAX_FILE_SIZE_MB, ALLOWED_AUDIO_EXTENSIONS, RabbitMQConfig,
+    DRIVE_BASE_URL, OIDC_TOKEN_ENDPOINT,
+    LITELLM_BASE_URL, LITELLM_API_KEY, LLM_MODEL_MEDIUM, LLM_HTTP_TIMEOUT_SECONDS,
 )
-from libs.shared.app.oidc_refresh_store import store_refresh_token
+from libs.shared.app.oidc_refresh_store import store_refresh_token, fetch_ciphertext
+from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
 from libs.shared.app.models import (
     ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus, UploadTokenOption
 )
@@ -302,11 +305,24 @@ def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
     Appelé en début de chaque GET /api/my-sessions pour assurer le
     "vidage automatique" promis dans l'UI sans dépendre d'un cron externe.
     Retourne (sessions_purged, files_purged, s3_objects_deleted).
+
+    Briefs (zone interne) : on relaie vers token-issuer
+    /api/v1/briefs/purge avec le même seuil. Best-effort — un échec réseau
+    ne casse pas le balayage des fichiers.
     """
     threshold = datetime.now(timezone.utc) - timedelta(days=TRASH_RETENTION_DAYS)
     sessions_purged = 0
     files_purged = 0
     objects_deleted = 0
+    briefs_purged = 0
+    try:
+        result = request_internal_device_api(
+            "POST", "/api/v1/briefs/purge",
+            json_body={"user_sub": user_sub, "older_than_days": TRASH_RETENTION_DAYS},
+        )
+        briefs_purged = int(result.get("purged") or 0)
+    except Exception:
+        logger.debug("trash purge: brief purge relay failed for user=%s", user_sub, exc_info=True)
 
     # 1) Fichiers individuels en corbeille — leur session peut être active.
     trashed_files = (
@@ -372,9 +388,10 @@ def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
 
     if sessions_purged or files_purged:
         db.commit()
+    if sessions_purged or files_purged or briefs_purged:
         logger.info(
-            "trash purge: user=%s sessions=%s files=%s s3_objects=%s",
-            user_sub, sessions_purged, files_purged, objects_deleted,
+            "trash purge: user=%s sessions=%s files=%s s3_objects=%s briefs=%s",
+            user_sub, sessions_purged, files_purged, objects_deleted, briefs_purged,
         )
     return sessions_purged, files_purged, objects_deleted
 
@@ -2081,9 +2098,39 @@ def api_my_trash():
             "files_count": len(s.uploads),
         } for s in sessions_q]
 
+        # Briefs en corbeille — relayés depuis token-issuer (zone interne).
+        # Best-effort : un échec ne casse pas le rendu des fichiers/sessions.
+        briefs_list = []
+        try:
+            data = request_internal_device_api(
+                "GET", "/api/v1/briefs",
+                params={"user_sub": user["sub"], "trashed": "true", "limit": 200},
+            )
+            for b in data.get("briefs", []):
+                trashed_iso = b.get("trashed_at")
+                days_left = None
+                if trashed_iso:
+                    try:
+                        ts = datetime.fromisoformat(trashed_iso.replace("Z", "+00:00"))
+                        days_left = max(
+                            0,
+                            TRASH_RETENTION_DAYS - (now - ts.astimezone(timezone.utc)).days,
+                        )
+                    except Exception:
+                        days_left = None
+                briefs_list.append({
+                    "id": b.get("id"),
+                    "title": b.get("title") or b.get("subject") or "(sans titre)",
+                    "trashed_at": trashed_iso,
+                    "days_left": days_left,
+                })
+        except Exception:
+            logger.debug("trash listing: brief relay failed", exc_info=True)
+
         return jsonify({
             "files": files_list,
             "sessions": sessions_list,
+            "briefs": briefs_list,
             "retention_days": TRASH_RETENTION_DAYS,
         })
     finally:
@@ -2431,6 +2478,353 @@ def api_file_normalization_impact(file_id):
         return jsonify({"error": "Analyse indisponible"}), 500
     finally:
         db.close()
+
+
+# ─── Meeting-prep wizard ────────────────────────────────────
+
+# Imported lazily-at-module-load (sibling file in this app package). The
+# module pulls drive_client / doc_extractor / llm_client from
+# services/file-mover/app/ via importlib — see meeting_prep.py for the
+# rationale (shared runtime image, no module duplication).
+from app import meeting_prep as _meeting_prep  # noqa: E402
+
+
+def _meeting_prep_configured() -> tuple[bool, str]:
+    """Return (ok, reason) describing whether the brief route can run.
+
+    Three downstream dependencies are required: the Drive base URL, the
+    Keycloak token endpoint (to exchange refresh→access), and a LiteLLM
+    endpoint+key for the LLM call. Any missing piece short-circuits with a
+    user-facing French error rather than a 500 stacktrace.
+    """
+    if not OIDC_OFFLINE_ACCESS:
+        return False, "Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé."
+    if not DRIVE_BASE_URL:
+        return False, "DRIVE_BASE_URL n'est pas configuré côté serveur."
+    if not OIDC_TOKEN_ENDPOINT:
+        return False, "OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur."
+    if not LITELLM_BASE_URL or not LITELLM_API_KEY:
+        return False, "Le LLM (LiteLLM) n'est pas configuré côté serveur."
+    return True, ""
+
+
+@app.route("/meeting-prep")
+@require_auth
+def meeting_prep_page():
+    """Deep-link historique → onglet « Préparer une réunion » de mydevices.
+
+    Avant la piste 1 (alignement objet), cette route rendait sa propre page
+    PREP_BRIEF_TEMPLATE. Désormais le wizard est intégré comme 5e onglet
+    de mydevices ; on redirige les anciens liens (et bookmarks) vers
+    ``/?tab=brief`` pour conserver la deep-linkability.
+    """
+    return redirect("/?tab=brief", code=302)
+
+
+@app.route("/meeting-prep/new")
+@require_auth
+def meeting_prep_new_page():
+    """Page wizard plein écran — création d'un nouveau brief.
+
+    Atteignable depuis le bouton « Nouveau brief » de l'onglet
+    « Préparer une réunion ». Garde le PREP_BRIEF_TEMPLATE existant
+    comme parcours de création (4 questions). Une fois soumis, le brief
+    est persisté et listé dans l'onglet.
+    """
+    user = get_current_user()
+    return render_template_string(PREP_BRIEF_TEMPLATE, user=user)
+
+
+@app.route("/api/meeting-prep", methods=["POST"])
+@require_auth
+def api_meeting_prep():
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+
+    ok, reason = _meeting_prep_configured()
+    if not ok:
+        return jsonify({"error": reason}), 503
+
+    payload = request.get_json(silent=True) or {}
+    subject = (payload.get("subject") or "").strip()
+    folder_raw = (payload.get("drive_folder") or "").strip()
+    role_viewpoint = (payload.get("role") or "").strip()
+    expectation = (payload.get("expectation") or "").strip()
+    duration_raw = payload.get("duration_minutes")
+    focus_raw = payload.get("focus") or []
+
+    if not subject:
+        return jsonify({"error": "Le sujet de la réunion est requis."}), 400
+    if not folder_raw:
+        return jsonify({"error": "L'identifiant ou l'URL du dossier Drive est requis."}), 400
+    folder_id = _meeting_prep.extract_folder_id(folder_raw)
+    if not folder_id:
+        return jsonify({"error": "Identifiant de dossier Drive invalide."}), 400
+    if not role_viewpoint:
+        return jsonify({"error": "Le rôle dans la réunion est requis."}), 400
+    if not expectation:
+        return jsonify({"error": "L'attente principale est requise."}), 400
+    try:
+        duration_minutes = int(duration_raw)
+    except (TypeError, ValueError):
+        return jsonify({"error": "La durée doit être un nombre entier de minutes."}), 400
+    if duration_minutes <= 0 or duration_minutes > 600:
+        return jsonify({"error": "La durée doit être comprise entre 1 et 600 minutes."}), 400
+    if not isinstance(focus_raw, list):
+        return jsonify({"error": "Le champ focus doit être une liste."}), 400
+    focus_areas = [str(x).strip() for x in focus_raw if str(x).strip()]
+
+    # ── Fetch + decrypt the stored refresh token ──
+    ciphertext = fetch_ciphertext(user_sub)
+    if not ciphertext:
+        return jsonify({
+            "error": "Aucun token Drive enregistré. Déconnectez-vous puis reconnectez-vous pour réautoriser l'accès au Drive.",
+            "code": "no_refresh_token",
+        }), 401
+    try:
+        refresh_token = decrypt_secret(ciphertext)
+    except Exception:
+        logger.exception("meeting_prep: failed to decrypt refresh token for sub=%s", user_sub)
+        return jsonify({"error": "Token Drive illisible côté serveur."}), 500
+
+    drive = _meeting_prep.DriveClient(
+        base_url=DRIVE_BASE_URL,
+        oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+        oidc_client_id=oidc_cfg.client_id,
+        oidc_client_secret=oidc_cfg.client_secret,
+    )
+
+    # ── Exchange refresh → access ──
+    try:
+        access_token = drive.exchange_refresh(refresh_token)
+    except _meeting_prep.DriveAuthError:
+        logger.warning("meeting_prep: refresh rejected by Keycloak for sub=%s", user_sub)
+        return jsonify({
+            "error": "Le jeton Drive a expiré. Déconnectez-vous puis reconnectez-vous.",
+            "code": "refresh_rejected",
+        }), 401
+    except _meeting_prep.DriveTransientError as exc:
+        logger.warning("meeting_prep: Keycloak transient on token exchange: %s", exc)
+        return jsonify({"error": "Le service d'identité est temporairement indisponible."}), 502
+
+    # ── List + download + extract corpus ──
+    try:
+        corpus_text, used = _meeting_prep.assemble_corpus(drive, access_token, folder_id)
+    except _meeting_prep.DriveAuthError:
+        return jsonify({
+            "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
+            "code": "drive_auth",
+        }), 401
+    except _meeting_prep.DriveApplicativeError as exc:
+        logger.info("meeting_prep: Drive applicative error on folder %s: %s", folder_id, exc)
+        return jsonify({
+            "error": "Dossier Drive introuvable ou accès refusé.",
+        }), 404
+    except _meeting_prep.DriveTransientError as exc:
+        logger.warning("meeting_prep: Drive transient error on folder %s: %s", folder_id, exc)
+        return jsonify({"error": "Le Drive est temporairement indisponible."}), 502
+
+    # ── Build prompt + call LLM ──
+    try:
+        template_text = _meeting_prep.load_prompt_template()
+    except Exception:
+        logger.exception("meeting_prep: failed to load prompt template")
+        return jsonify({"error": "Modèle de prompt indisponible."}), 500
+
+    prompt = _meeting_prep.build_prompt(
+        template_text,
+        objective=subject,
+        duration_minutes=duration_minutes,
+        role_viewpoint=role_viewpoint,
+        expectation=expectation,
+        focus_areas=focus_areas,
+        prep_docs_text=corpus_text,
+    )
+
+    llm = _meeting_prep.LLMClient(
+        base_url=LITELLM_BASE_URL,
+        api_key=LITELLM_API_KEY,
+        timeout=LLM_HTTP_TIMEOUT_SECONDS,
+    )
+    try:
+        brief = llm.chat_json(
+            model=LLM_MODEL_MEDIUM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except _meeting_prep.LLMAuthError:
+        logger.exception("meeting_prep: LiteLLM auth failed")
+        return jsonify({"error": "Le service LLM a refusé la requête (clé invalide)."}), 502
+    except _meeting_prep.LLMTransientError as exc:
+        logger.warning("meeting_prep: LiteLLM transient: %s", exc)
+        return jsonify({"error": "Le service LLM est temporairement indisponible."}), 502
+    except _meeting_prep.LLMApplicativeError as exc:
+        logger.warning("meeting_prep: LiteLLM applicative error: %s", exc)
+        return jsonify({"error": "Le LLM n'a pas pu produire un brief exploitable."}), 502
+
+    # Persiste le brief avant de répondre — passe par token-issuer car la
+    # table meeting_briefs vit en zone interne (cf. rename_file_by_session
+    # pour le pattern de relais cross-cluster).
+    brief_id = None
+    try:
+        created = request_internal_device_api(
+            "POST",
+            "/api/v1/briefs",
+            json_body={
+                "user_sub": user_sub,
+                "subject": subject,
+                "drive_folder_id": folder_id,
+                "role": role_viewpoint,
+                "expectation": expectation,
+                "focus": focus_areas,
+                "duration_minutes": duration_minutes,
+                "brief_json": brief,
+                "documents": used,
+                "title": subject,
+            },
+        )
+        brief_id = (created.get("brief") or {}).get("id")
+    except Exception:
+        # On ne casse pas l'UX si la persistance échoue — l'utilisateur
+        # reçoit son brief, mais sans brief_id (pas de listing/rename
+        # ultérieur). Tracé pour investigation.
+        logger.exception("meeting_prep: failed to persist brief for sub=%s", user_sub)
+
+    return jsonify({"brief": brief, "documents": used, "brief_id": brief_id})
+
+
+# ─── Meeting-prep CRUD (relais vers token-issuer interne) ───
+
+@app.route("/api/meeting-prep", methods=["GET"])
+@require_auth
+def api_list_meeting_briefs():
+    """Liste les briefs actifs (non corbeille) de l'utilisateur, 50 derniers."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        data = request_internal_device_api(
+            "GET", "/api/v1/briefs",
+            params={"user_sub": user_sub, "limit": 50, "trashed": "false"},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "list_failed"}), status
+    return jsonify({"briefs": data.get("briefs", [])})
+
+
+@app.route("/api/meeting-prep/<brief_id>", methods=["GET"])
+@require_auth
+def api_get_meeting_brief(brief_id: str):
+    """Lit un brief (404 si trashed ou autre user_sub)."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        data = request_internal_device_api(
+            "GET", f"/api/v1/briefs/{brief_id}",
+            params={"user_sub": user_sub},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        try:
+            body = err.response.json() if err.response is not None else {}
+        except Exception:
+            body = {}
+        return jsonify({"error": body.get("error", "get_failed")}), status
+    return jsonify(data)
+
+
+@app.route("/api/meeting-prep/<brief_id>/rename", methods=["POST"])
+@require_auth
+def api_rename_meeting_brief(brief_id: str):
+    """Renomme le titre d'un brief (≤120 car., contrat aligné sur les fichiers)."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    new_title = (payload.get("title") or "").strip()
+    if not new_title:
+        return jsonify({"error": "title is required"}), 400
+    if len(new_title) > 120:
+        return jsonify({"error": "title too long"}), 400
+    try:
+        data = request_internal_device_api(
+            "POST", f"/api/v1/briefs/{brief_id}/rename",
+            json_body={"user_sub": user_sub, "title": new_title},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "rename_failed"}), status
+    return jsonify({"ok": True, "title": data.get("title", new_title)})
+
+
+@app.route("/api/meeting-prep/<brief_id>/amend", methods=["POST"])
+@require_auth
+def api_amend_meeting_brief(brief_id: str):
+    """Édition manuelle des champs ``brief_json`` (option a, pas de ré-appel LLM)."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    new_brief_json = payload.get("brief_json")
+    if not isinstance(new_brief_json, dict):
+        return jsonify({"error": "brief_json must be an object"}), 400
+    try:
+        data = request_internal_device_api(
+            "POST", f"/api/v1/briefs/{brief_id}/amend",
+            json_body={"user_sub": user_sub, "brief_json": new_brief_json},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "amend_failed"}), status
+    return jsonify(data)
+
+
+@app.route("/api/meeting-prep/<brief_id>", methods=["DELETE"])
+@require_auth
+def api_trash_meeting_brief(brief_id: str):
+    """Soft-delete : envoie le brief en corbeille (trashed_at = now())."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        request_internal_device_api(
+            "DELETE", f"/api/v1/briefs/{brief_id}",
+            json_body={"user_sub": user_sub},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "delete_failed"}), status
+    return jsonify({"ok": True, "trashed": True})
+
+
+@app.route("/api/meeting-prep/<brief_id>/restore", methods=["POST"])
+@require_auth
+def api_restore_meeting_brief(brief_id: str):
+    """Restaure un brief depuis la corbeille (clear trashed_at)."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        request_internal_device_api(
+            "POST", f"/api/v1/briefs/{brief_id}/restore",
+            json_body={"user_sub": user_sub},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "restore_failed"}), status
+    return jsonify({"ok": True, "restored": True})
+
+
+@app.route("/api/meeting-prep/<brief_id>/permanently", methods=["DELETE"])
+@require_auth
+def api_hard_delete_meeting_brief(brief_id: str):
+    """Hard-delete d'un brief déjà en corbeille (bouton 'Supprimer définitivement')."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        request_internal_device_api(
+            "DELETE", f"/api/v1/briefs/{brief_id}/permanently",
+            json_body={"user_sub": user_sub},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "delete_failed"}), status
+    return jsonify({"ok": True, "deleted": True})
 
 
 # ─── HTML Template ──────────────────────────────────────────
@@ -3685,11 +4079,13 @@ INDEX_TEMPLATE = """
         </div>
         <div class="header-user">
           <span class="header-user-name">{{ user.name or user.email }}</span>
-          <a class="fr-link" href="/logout">Déconnexion</a>
-          <button type="button" id="advanced-toggle" class="advanced-toggle"
-                  onclick="toggleAdvancedDl(this)"
-                  title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
-                  aria-pressed="false">Mode avancé</button>
+          <div style="display:flex;gap:0.6rem;justify-content:flex-end;align-items:center;">
+            <a class="fr-link" href="/logout">Déconnexion</a>
+            <button type="button" id="advanced-toggle" class="advanced-toggle"
+                    onclick="toggleAdvancedDl(this)"
+                    title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
+                    aria-pressed="false">Mode avancé</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3708,6 +4104,9 @@ INDEX_TEMPLATE = """
         <button type="button" class="tab-btn" role="tab" data-tab="transfers" id="tab-btn-transfers">
             Mes réunions (IA)
         </button>
+        <button type="button" class="tab-btn" role="tab" data-tab="brief" id="tab-btn-brief">
+            Préparer une réunion
+        </button>
         <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
             Mes appareils
         </button>
@@ -3718,6 +4117,56 @@ INDEX_TEMPLATE = """
             Corbeille
         </button>
     </nav>
+
+    <div class="card tab-pane" data-tab="brief">
+        <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
+        <div id="brief-list-view">
+            <div class="dsfr-inline-actions">
+                <h1 style="font-size:1.1rem;">Préparer une réunion</h1>
+                <a href="/meeting-prep/new" class="btn-primary fr-btn fr-btn--sm">Nouveau brief</a>
+            </div>
+            <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
+                Vos briefs de pré-réunion sont conservés et restent éditables.
+                La corbeille les retient 30 jours avant suppression définitive.
+            </p>
+            <div id="brief-list" style="font-size:0.86rem;color:#64748b;">
+                Chargement des briefs...
+            </div>
+        </div>
+        <!-- Sous-vue détail : brief courant + Renommer + Amender -->
+        <div id="brief-detail-view" style="display:none;">
+            <div style="margin-bottom:0.6rem;">
+                <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="showBriefList()">← Retour à la liste</button>
+            </div>
+            <h1 id="brief-detail-title" style="font-size:1.1rem;">Brief</h1>
+            <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
+            <div style="display:flex;gap:0.4rem;margin:0.6rem 0;">
+                <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="renameBriefPrompt()">Renommer</button>
+                <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="toggleAmendBrief()">Amender (édition manuelle)</button>
+            </div>
+            <pre id="brief-detail-json"
+                 style="background:#f6f6f6;border:1px solid #e5e5e5;border-radius:0.4rem;
+                        padding:0.8rem;font-size:0.78rem;white-space:pre-wrap;
+                        max-height:60vh;overflow:auto;"></pre>
+            <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
+                <p style="font-size:0.8rem;color:#64748b;">
+                    Édition manuelle (JSON brut). Pas de ré-appel LLM.
+                </p>
+                <textarea id="brief-amend-text"
+                          style="width:100%;min-height:240px;font-family:monospace;
+                                 font-size:0.78rem;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.5rem;"></textarea>
+                <div style="display:flex;gap:0.4rem;margin-top:0.4rem;">
+                    <button type="button" class="btn-primary fr-btn fr-btn--sm"
+                            onclick="saveAmendBrief()">Enregistrer</button>
+                    <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                            onclick="toggleAmendBrief()">Annuler</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <div class="card tab-pane" data-tab="trash">
         <div class="dsfr-inline-actions">
@@ -6355,6 +6804,9 @@ function setupTabs() {
             if (target === 'trash') {
                 loadTrash();
             }
+            if (target === 'brief') {
+                loadBriefs();
+            }
             activateTab(target);
         });
     });
@@ -6368,7 +6820,8 @@ async function loadTrash() {
         const data = await resp.json();
         const files = data.files || [];
         const sessions = data.sessions || [];
-        if (files.length === 0 && sessions.length === 0) {
+        const briefs = data.briefs || [];
+        if (files.length === 0 && sessions.length === 0 && briefs.length === 0) {
             container.innerHTML = `<p style="color:#64748b;font-size:0.85rem;">
                 La corbeille est vide. Les éléments supprimés y restent ${data.retention_days || 30} jours avant suppression définitive.
             </p>`;
@@ -6396,7 +6849,20 @@ async function loadTrash() {
                 </button>
             </div>
         `).join('');
-        container.innerHTML = sessionsHtml + filesHtml;
+        const briefsHtml = briefs.map(b => `
+            <div class="trash-item" data-trash-kind="brief">
+                <span class="trash-item-type">[Brief]</span>
+                <span class="trash-item-name">${escapeHtml(b.title || '(sans titre)')}</span>
+                <span class="trash-item-meta">reste ${b.days_left == null ? '?' : b.days_left} j avant purge</span>
+                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="restoreBrief('${b.id}')">Restaurer</button>
+                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                        onclick="deleteBriefPermanently('${b.id}', '${escapeHtml(b.title || '').replace(/'/g, '&#39;')}')">
+                    Supprimer définitivement
+                </button>
+            </div>
+        `).join('');
+        container.innerHTML = sessionsHtml + filesHtml + briefsHtml;
     } catch (e) {
         container.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur chargement corbeille.</p>`;
     }
@@ -6424,6 +6890,164 @@ async function restoreSession(simpleCode) {
     } catch (e) { showToast('Restauration échouée.', 'error'); }
 }
 
+// ─── Brief de réunion — onglet « Préparer une réunion » ───────────────
+//
+// État courant : briefId affiché en détail. null = vue liste.
+let _briefDetailId = null;
+
+async function loadBriefs() {
+    const container = document.getElementById('brief-list');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/meeting-prep');
+        const data = await resp.json();
+        const briefs = (data && data.briefs) || [];
+        if (briefs.length === 0) {
+            container.innerHTML = `<p style="color:#94a3b8;">
+                Aucun brief pour le moment.
+                <a href="/meeting-prep/new" class="fr-link">Préparer une réunion ?</a>
+            </p>`;
+            return;
+        }
+        container.innerHTML = briefs.map(b => {
+            const date = (b.created_at || '').slice(0, 16).replace('T', ' ');
+            const title = b.title || b.subject || '(sans titre)';
+            return `
+            <div class="trash-item" style="display:flex;gap:0.5rem;align-items:center;padding:0.4rem 0;border-bottom:1px solid #f1f5f9;">
+                <span class="trash-item-name" style="flex:1;">
+                    <a href="#" class="fr-link" onclick="event.preventDefault();showBriefDetail('${b.id}');">${escapeHtml(title)}</a>
+                </span>
+                <span class="trash-item-meta" style="color:#94a3b8;font-size:0.78rem;">${escapeHtml(date)}</span>
+                <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        onclick="showBriefDetail('${b.id}')">Ouvrir</button>
+                <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                        onclick="deleteBrief('${b.id}', '${escapeHtml(title).replace(/'/g, '&#39;')}')">
+                    Supprimer
+                </button>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        container.innerHTML = `<p style="color:#b91c1c;">Erreur chargement briefs.</p>`;
+    }
+}
+
+function showBriefList() {
+    _briefDetailId = null;
+    document.getElementById('brief-list-view').style.display = '';
+    document.getElementById('brief-detail-view').style.display = 'none';
+    loadBriefs();
+}
+
+async function showBriefDetail(briefId) {
+    _briefDetailId = briefId;
+    document.getElementById('brief-list-view').style.display = 'none';
+    document.getElementById('brief-detail-view').style.display = '';
+    const titleEl = document.getElementById('brief-detail-title');
+    const metaEl = document.getElementById('brief-detail-meta');
+    const jsonEl = document.getElementById('brief-detail-json');
+    const amendPane = document.getElementById('brief-amend-pane');
+    amendPane.style.display = 'none';
+    titleEl.textContent = 'Chargement...';
+    metaEl.textContent = '';
+    jsonEl.textContent = '';
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}`);
+        if (!r.ok) throw new Error('fetch failed');
+        const d = await r.json();
+        const b = d.brief || {};
+        titleEl.textContent = b.title || b.subject || '(sans titre)';
+        const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
+        metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
+        jsonEl.textContent = JSON.stringify(b.brief_json || {}, null, 2);
+        document.getElementById('brief-amend-text').value = JSON.stringify(b.brief_json || {}, null, 2);
+    } catch (e) {
+        titleEl.textContent = 'Erreur';
+        jsonEl.textContent = String(e);
+    }
+}
+
+async function renameBriefPrompt() {
+    if (!_briefDetailId) return;
+    const current = document.getElementById('brief-detail-title').textContent || '';
+    const next = prompt('Nouveau titre du brief (max 120 caractères) :', current);
+    if (next == null) return;
+    const trimmed = next.trim();
+    if (!trimmed) return;
+    try {
+        const r = await fetch(`/api/meeting-prep/${_briefDetailId}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: trimmed }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'rename_failed');
+        document.getElementById('brief-detail-title').textContent = d.title || trimmed;
+        showToast('Brief renommé.', 'success');
+    } catch (e) { showToast('Renommage échoué.', 'error'); }
+}
+
+function toggleAmendBrief() {
+    const pane = document.getElementById('brief-amend-pane');
+    pane.style.display = (pane.style.display === 'none') ? '' : 'none';
+}
+
+async function saveAmendBrief() {
+    if (!_briefDetailId) return;
+    const text = document.getElementById('brief-amend-text').value;
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) { showToast('JSON invalide.', 'error'); return; }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        showToast('Le brief doit être un objet JSON.', 'error');
+        return;
+    }
+    try {
+        const r = await fetch(`/api/meeting-prep/${_briefDetailId}/amend`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ brief_json: parsed }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'amend_failed');
+        showToast('Brief amendé.', 'success');
+        showBriefDetail(_briefDetailId);
+    } catch (e) { showToast('Amendement échoué.', 'error'); }
+}
+
+async function deleteBrief(briefId, titleRaw) {
+    const title = (titleRaw || '').replace(/&#39;/g, "'");
+    if (!confirm(`Mettre « ${title} » à la corbeille ?`)) return;
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}`, { method: 'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'delete_failed');
+        showToast('Brief envoyé à la corbeille.', 'success');
+        loadBriefs();
+    } catch (e) { showToast('Suppression échouée.', 'error'); }
+}
+
+async function restoreBrief(briefId) {
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}/restore`, { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'restore_failed');
+        showToast('Brief restauré.', 'success');
+        loadTrash();
+    } catch (e) { showToast('Restauration échouée.', 'error'); }
+}
+
+async function deleteBriefPermanently(briefId, titleRaw) {
+    const title = (titleRaw || '').replace(/&#39;/g, "'");
+    if (!confirm(`Supprimer définitivement « ${title} » ? Cette action est irréversible.`)) return;
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}/permanently`, { method: 'DELETE' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || 'delete_failed');
+        showToast('Brief supprimé définitivement.', 'success');
+        loadTrash();
+    } catch (e) { showToast('Suppression définitive échouée.', 'error'); }
+}
+
 async function deleteFilePermanently(fileId, filenameRaw) {
     const filename = (filenameRaw || '').replace(/&#39;/g, "'");
     if (!confirm(`Supprimer définitivement « ${filename} » ?\\n\\nLe fichier sera retiré de S3 et de la base. Cette action est irréversible.`)) return;
@@ -6439,13 +7063,23 @@ function pickDefaultTab(hasActiveDevice) {
     if (_tabsInitialised) return;
     _tabsInitialised = true;
     let target = null;
-    try { target = sessionStorage.getItem('mydevices-active-tab'); } catch (e) {}
+    // Deep-link ?tab=<id> (utilisé par la redirection /meeting-prep -> /?tab=brief).
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const queryTab = params.get('tab');
+        if (queryTab) { target = queryTab; }
+    } catch (e) {}
+    if (!target) {
+        try { target = sessionStorage.getItem('mydevices-active-tab'); } catch (e) {}
+    }
     if (!target) {
         // Sans device : on guide direct vers le formulaire d'enrôlement.
         // Avec device : vue principale = transferts/analyses.
         target = hasActiveDevice ? 'transfers' : 'generate';
     }
     activateTab(target);
+    if (target === 'brief') { try { loadBriefs(); } catch (e) {} }
+    if (target === 'trash') { try { loadTrash(); } catch (e) {} }
 }
 
 setupTabs();
@@ -6468,6 +7102,328 @@ loadDevices().then(() => loadSessions({ force: true })).catch(() => loadSessions
 </script>
 <script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
 <script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
+</body>
+</html>
+"""
+
+
+PREP_BRIEF_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MIrAI - Préparer un brief de réunion</title>
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/pwa-icon-192.png">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { background:#f6f6f6; color:#161616; margin:0; min-height:100vh; }
+    .page { max-width: 760px; margin:0 auto; padding:1.5rem 1rem 3rem; }
+    .card { background:#fff; border:1px solid #e5e5e5; border-radius:0.5rem;
+            padding:1.25rem; margin-bottom:1rem; }
+    h1 { font-size: 1.3rem; color:#1a1a2e; margin:0 0 0.4rem; }
+    .banner { background:#eef3fb; border:1px solid #cfd9eb; padding:0.85rem 1rem;
+              border-radius:0.5rem; font-size:0.9rem; color:#1a2640;
+              margin-bottom: 1rem; line-height: 1.45; }
+    .banner strong { display:block; margin-bottom:0.2rem; font-size:0.95rem; }
+    .question { margin-bottom: 1.15rem; }
+    .question > label { display:block; font-size:0.9rem; font-weight:600;
+                        color:#1a1a2e; margin-bottom:0.35rem; }
+    .question .hint { font-size:0.78rem; color:#64748b; margin-bottom:0.4rem; }
+    input[type=text], input[type=number], textarea {
+      width:100%; padding:0.55rem 0.7rem; border:1px solid #d0d5dd;
+      border-radius:6px; font-size:0.92rem; background:#fff; color:#161616;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus { outline:2px solid #6a6af4; outline-offset:0; }
+    .chips { display:flex; flex-wrap:wrap; gap:0.4rem; margin-top:0.4rem; }
+    .chip { display:inline-block; padding:0.25rem 0.6rem; background:#f1f3f9;
+            border:1px solid #d8def0; border-radius:999px; font-size:0.78rem;
+            color:#33396b; cursor:pointer; user-select:none; }
+    .chip:hover { background:#e3e8f6; }
+    .focus-grid { display:grid; grid-template-columns: 1fr 1fr; gap:0.35rem 1rem;
+                  margin-top:0.2rem; }
+    .focus-grid label { font-size:0.85rem; font-weight:400; color:#1a1a2e;
+                        display:flex; align-items:center; gap:0.45rem;
+                        cursor:pointer; }
+    .actions { display:flex; justify-content:space-between; align-items:center;
+               margin-top:0.5rem; }
+    .btn { padding:0.55rem 0.95rem; border-radius:6px; border:none;
+           font-size:0.9rem; font-weight:600; cursor:pointer; }
+    .btn-primary { background:#000091; color:#fff; }
+    .btn-primary:disabled { background:#94a3b8; cursor:not-allowed; }
+    .btn-secondary { background:#fff; color:#000091; border:1px solid #000091; }
+    .status { margin-top:0.8rem; padding:0.55rem 0.75rem; border-radius:6px;
+              font-size:0.85rem; display:none; }
+    .status.info { background:#eef3fb; color:#1a2640; display:block; }
+    .status.err { background:#fbe5e5; color:#7a1f1f; display:block; }
+    .brief-output { white-space: normal; }
+    .brief-section { margin-bottom: 0.9rem; }
+    .brief-section h3 { font-size:0.95rem; color:#1a1a2e; margin:0 0 0.35rem; }
+    .brief-section ul { margin: 0; padding-left: 1.2rem; }
+    .brief-section li { font-size: 0.88rem; margin-bottom: 0.2rem; }
+    .doc-list { font-size: 0.78rem; color: #475569; margin-top: 0.5rem; }
+    .doc-list li.ingested { color: #1a4d2b; }
+    .doc-list li.skipped, .doc-list li.error { color: #7a4a1f; }
+    .header-bar { display:flex; justify-content:space-between; align-items:baseline;
+                  margin-bottom:0.8rem; }
+    .header-bar .who { font-size:0.78rem; color:#475569; }
+    .header-bar a { font-size:0.85rem; color:#000091; }
+  </style>
+</head>
+<body>
+<main class="page">
+  <div class="header-bar">
+    <span class="who">{{ user.name or user.email }}</span>
+    <span><a href="/">Retour à l'accueil</a> · <a href="/logout">Déconnexion</a></span>
+  </div>
+
+  <div class="banner">
+    <strong>📋 Préparer votre brief de réunion</strong>
+    L'IA lit vos documents de prép (Drive) et produit un brief personnalisé +
+    un glossaire qui servira à mieux retranscrire l'audio de la réunion.
+    4 questions rapides pour adapter le brief à votre besoin.
+  </div>
+
+  <form id="prep-form" class="card" autocomplete="off">
+    <h1>Brief de réunion</h1>
+
+    <div class="question">
+      <label for="subject">Sujet de la réunion *</label>
+      <div class="hint">En une phrase, le thème ou la décision principale.</div>
+      <input type="text" id="subject" name="subject" required maxlength="500"
+             placeholder="Ex : Arbitrer la trajectoire budgétaire 2027 du programme X">
+    </div>
+
+    <div class="question">
+      <label for="drive_folder">Dossier Drive *</label>
+      <div class="hint">Collez l'URL du dossier mesfichiers (ou l'identifiant brut).</div>
+      <input type="text" id="drive_folder" name="drive_folder" required
+             placeholder="https://mesfichiers.…/explorer/items/xxxxxxxx">
+    </div>
+
+    <div class="question">
+      <label for="role">1. Quel est votre rôle dans cette réunion ? *</label>
+      <input type="text" id="role" name="role" required maxlength="300"
+             placeholder="J'anime la réunion, je participe, je dois décider…">
+      <div class="chips" data-target="role">
+        <span class="chip">J'anime la réunion</span>
+        <span class="chip">J'y participe</span>
+        <span class="chip">Je dois décider</span>
+        <span class="chip">Je découvre l'équipe</span>
+        <span class="chip">J'observe</span>
+      </div>
+    </div>
+
+    <div class="question">
+      <label for="expectation">2. Qu'attendez-vous principalement de ce brief ? *</label>
+      <input type="text" id="expectation" name="expectation" required maxlength="300"
+             placeholder="Comprendre le contexte, anticiper les objections…">
+      <div class="chips" data-target="expectation">
+        <span class="chip">Comprendre le contexte</span>
+        <span class="chip">Préparer ma prise de parole</span>
+        <span class="chip">Anticiper les objections</span>
+        <span class="chip">Valider une décision</span>
+        <span class="chip">Apprendre le vocabulaire</span>
+      </div>
+    </div>
+
+    <div class="question">
+      <label>3. Sur quoi concentrer l'analyse ? (plusieurs choix possibles)</label>
+      <div class="focus-grid">
+        <label><input type="checkbox" name="focus" value="Aspects budgétaires"> Aspects budgétaires</label>
+        <label><input type="checkbox" name="focus" value="Risques et points de vigilance"> Risques et points de vigilance</label>
+        <label><input type="checkbox" name="focus" value="Décisions à prendre"> Décisions à prendre</label>
+        <label><input type="checkbox" name="focus" value="Historique des échanges"> Historique des échanges</label>
+        <label><input type="checkbox" name="focus" value="Acronymes et jargon"> Acronymes et jargon</label>
+        <label><input type="checkbox" name="focus" value="Parties prenantes"> Parties prenantes</label>
+        <label><input type="checkbox" name="focus" value="Calendrier et jalons"> Calendrier et jalons</label>
+      </div>
+    </div>
+
+    <div class="question">
+      <label for="duration">4. Durée prévue de la réunion *</label>
+      <input type="text" id="duration" name="duration" required
+             placeholder="Ex : 1 heure">
+      <div class="chips" data-target="duration">
+        <span class="chip" data-minutes="15">15 minutes</span>
+        <span class="chip" data-minutes="30">30 minutes</span>
+        <span class="chip" data-minutes="60">1 heure</span>
+        <span class="chip" data-minutes="120">2 heures</span>
+        <span class="chip" data-minutes="240">Demi-journée</span>
+        <span class="chip" data-minutes="480">Journée complète</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <a class="btn btn-secondary" href="/">Annuler</a>
+      <button id="submit-btn" class="btn btn-primary" type="submit">Générer le brief</button>
+    </div>
+
+    <div id="status" class="status"></div>
+  </form>
+
+  <div id="result" class="card" style="display:none;">
+    <h1>Brief généré</h1>
+    <div id="brief" class="brief-output"></div>
+    <h3 style="margin-top:1rem;font-size:0.9rem;color:#1a1a2e;">Documents ingérés</h3>
+    <ul id="docs" class="doc-list"></ul>
+  </div>
+</main>
+
+<script>
+  // Chip-to-input behaviour: clicking a chip fills the target text field
+  // (and stores a parsed numeric value for the "duration" chips). The user
+  // can then edit the filled text freely — chip is suggestion, not lock-in.
+  document.querySelectorAll('.chips').forEach(function (group) {
+    var targetId = group.getAttribute('data-target');
+    var target = document.getElementById(targetId);
+    if (!target) return;
+    group.querySelectorAll('.chip').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        target.value = chip.textContent.trim();
+        if (chip.dataset.minutes) {
+          target.dataset.minutes = chip.dataset.minutes;
+        } else {
+          delete target.dataset.minutes;
+        }
+        target.focus();
+      });
+    });
+  });
+  // If the user types a custom duration like "45 minutes" or "1h30", we
+  // parse it client-side; chip clicks short-circuit by setting dataset.minutes.
+  function parseDurationMinutes(raw) {
+    if (!raw) return null;
+    var s = raw.trim().toLowerCase();
+    var explicit = document.getElementById('duration').dataset.minutes;
+    if (explicit) {
+      var n = parseInt(explicit, 10);
+      if (!isNaN(n) && n > 0) return n;
+    }
+    if (s === 'demi-journée') return 240;
+    if (s === 'journée complète' || s === 'journée') return 480;
+    var hM = s.match(/^(\d+)\s*h\s*(\d+)?$/);
+    if (hM) return parseInt(hM[1], 10) * 60 + (hM[2] ? parseInt(hM[2], 10) : 0);
+    var hOnly = s.match(/^(\d+)\s*(heure|heures|h)$/);
+    if (hOnly) return parseInt(hOnly[1], 10) * 60;
+    var mOnly = s.match(/^(\d+)\s*(minute|minutes|min|m)?$/);
+    if (mOnly) return parseInt(mOnly[1], 10);
+    return null;
+  }
+
+  var statusEl = document.getElementById('status');
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg;
+    statusEl.className = 'status ' + (kind || 'info');
+  }
+  function clearStatus() { statusEl.className = 'status'; statusEl.textContent = ''; }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function renderBrief(brief) {
+    var html = '';
+    function section(title, body) {
+      if (!body) return '';
+      return '<div class="brief-section"><h3>' + escapeHtml(title) + '</h3>' + body + '</div>';
+    }
+    function asUl(items, fmt) {
+      if (!Array.isArray(items) || !items.length) return '';
+      return '<ul>' + items.map(function (it) {
+        return '<li>' + (fmt ? fmt(it) : escapeHtml(it)) + '</li>';
+      }).join('') + '</ul>';
+    }
+    html += section('Objectif reformulé', brief.objective_reformulated
+                    ? '<p>' + escapeHtml(brief.objective_reformulated) + '</p>' : '');
+    html += section('Contexte', brief.context_recap
+                    ? '<p>' + escapeHtml(brief.context_recap) + '</p>' : '');
+    html += section('Agenda', asUl(brief.agenda, function (a) {
+      return '<strong>' + escapeHtml(a.title || '') + '</strong>'
+           + (a.duration_minutes ? ' (' + a.duration_minutes + ' min)' : '')
+           + (a.objective ? ' — ' + escapeHtml(a.objective) : '')
+           + asUl(a.key_questions);
+    }));
+    html += section('Fils ouverts', asUl(brief.open_threads, function (t) {
+      return escapeHtml(t.item || '') + (t.source ? ' <em>(' + escapeHtml(t.source) + ')</em>' : '');
+    }));
+    html += section('Notes participants', asUl(brief.participants_notes, function (p) {
+      return '<strong>' + escapeHtml(p.name || '') + '</strong> — ' + escapeHtml(p.note || '');
+    }));
+    html += section("Questions d'ouverture", asUl(brief.opening_questions));
+    html += section('Points de vigilance', asUl(brief.risk_points));
+    html += section('Checklist de préparation', asUl(brief.preparation_checklist));
+    return html || '<p>(Brief vide — le LLM n\'a rien produit d\'exploitable.)</p>';
+  }
+
+  function renderDocs(docs) {
+    var ul = document.getElementById('docs');
+    ul.innerHTML = '';
+    (docs || []).forEach(function (d) {
+      var li = document.createElement('li');
+      li.className = (d.status === 'ingested') ? 'ingested'
+                   : (d.status && d.status.indexOf('error') === 0) ? 'error' : 'skipped';
+      var label = d.name + ' — ' + d.status;
+      if (d.chars) label += ' (' + d.chars + ' car.)';
+      li.textContent = label;
+      ul.appendChild(li);
+    });
+  }
+
+  document.getElementById('prep-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    clearStatus();
+    document.getElementById('result').style.display = 'none';
+
+    var subject = document.getElementById('subject').value.trim();
+    var folder = document.getElementById('drive_folder').value.trim();
+    var role = document.getElementById('role').value.trim();
+    var expectation = document.getElementById('expectation').value.trim();
+    var duration = parseDurationMinutes(document.getElementById('duration').value);
+    var focus = Array.from(document.querySelectorAll('input[name="focus"]:checked'))
+                     .map(function (cb) { return cb.value; });
+
+    if (!subject || !folder || !role || !expectation) {
+      setStatus('Tous les champs marqués * sont requis.', 'err');
+      return;
+    }
+    if (!duration) {
+      setStatus('Durée non reconnue — utilisez une suggestion ou un format comme "45 minutes", "1h30".', 'err');
+      return;
+    }
+
+    var btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    setStatus('Lecture du Drive et génération du brief en cours…', 'info');
+    try {
+      var resp = await fetch('/api/meeting-prep', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject: subject, drive_folder: folder, role: role,
+          expectation: expectation, duration_minutes: duration, focus: focus,
+        }),
+      });
+      var data = await resp.json().catch(function () { return {}; });
+      if (!resp.ok) {
+        setStatus(data.error || ('Erreur ' + resp.status), 'err');
+        return;
+      }
+      clearStatus();
+      document.getElementById('brief').innerHTML = renderBrief(data.brief || {});
+      renderDocs(data.documents || []);
+      document.getElementById('result').style.display = 'block';
+      document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
+    } catch (err) {
+      setStatus('Erreur réseau : ' + (err && err.message ? err.message : err), 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+</script>
 </body>
 </html>
 """

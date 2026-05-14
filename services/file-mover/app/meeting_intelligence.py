@@ -1,10 +1,10 @@
 """
-Orchestration of the four LLM-driven post-transcription steps used by the
+Orchestration of the LLM-driven post-transcription steps used by the
 ``kevent`` backend. Each step is independent and best-effort: a failure
 just leaves the corresponding output column NULL — the raw transcription
 still ships.
 
-The four steps:
+The steps, in pipeline order:
 
   1. ``extract_speaker_names(text, llm, model_small)`` — small model parses
      introductions in the dialogue ("Bonjour je suis Jean") and returns a
@@ -22,6 +22,10 @@ The four steps:
   4. ``analyse_meeting(text, llm, model_large)`` — large model produces
      the 5-section structured JSON: actors / themes / decisions /
      gaps / recommendations.
+
+  5. ``summarise_for_absentee(text, llm, model_medium)`` — medium model
+     produces a 150-300 words self-contained debrief that someone who
+     missed the meeting can read alone to be back up to speed.
 
 Prompts live in the sibling ``prompts/`` directory so they can be edited
 without touching the orchestration logic.
@@ -304,6 +308,24 @@ def analyse_meeting(transcript: str, llm: LLMClient, model: str,
         return llm.chat_json(model, messages)
     except LLMError:
         logger.warning("meeting_analysis: LLM call failed", exc_info=True)
+        return None
+
+
+def summarise_for_absentee(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
+    """
+    Produce a self-contained 150-300 words debrief written for someone who
+    missed the meeting. Operates on the cleanest available transcript
+    (caller's choice — typically ``cleaned_text`` if available). Returns
+    None on empty input or LLM failure so the caller leaves the column NULL.
+    """
+    if not transcript.strip():
+        return None
+    prompt = _render(_load_prompt("absentee_summary"), transcript)
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        return llm.chat(model, messages)
+    except LLMError:
+        logger.warning("absentee_summary: LLM call failed", exc_info=True)
         return None
 
 

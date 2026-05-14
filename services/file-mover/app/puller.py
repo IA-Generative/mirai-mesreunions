@@ -55,6 +55,7 @@ from libs.shared.app.config import (
     KEVENT_GLOSSARY_CORRECTION_ENABLED, KEVENT_GLOSSARY_DIR,
     KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
     KEVENT_FILENAME_SUGGESTION_ENABLED,
+    KEVENT_ABSENTEE_SUMMARY_ENABLED,
     KEVENT_ASYNC_MODE, KEVENT_ASYNC_SERVICE_TYPE,
     KEVENT_ASYNC_TRANSCRIPTION_OPERATION, KEVENT_ASYNC_DIARIZATION_OPERATION,
     KEVENT_ASYNC_POLL_INTERVAL_SECONDS, KEVENT_ASYNC_TIMEOUT_SECONDS,
@@ -802,6 +803,17 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         serialized = mi.serialize_analysis(analysis)
         if serialized is not None:
             updates["meeting_analysis_json"] = serialized
+        else:
+            final_status = "kevent_partially_completed"
+
+    # 3f. Absentee debrief (medium model). Self-contained 150-300 words written
+    # for someone who missed the meeting. Best-effort: a failure just leaves
+    # the column NULL.
+    if KEVENT_ABSENTEE_SUMMARY_ENABLED and llm is not None:
+        source = updates.get("cleaned_text") or base_for_llm
+        summary = mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM)
+        if summary:
+            updates["absentee_summary"] = summary
         else:
             final_status = "kevent_partially_completed"
 

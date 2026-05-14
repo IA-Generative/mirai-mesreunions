@@ -33,7 +33,7 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent
+from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent, MeetingBrief
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -1182,6 +1182,346 @@ def admin_revoke_all_devices():
         )
         db.commit()
         return jsonify({"ok": True, "revoked": int(updated)})
+    finally:
+        db.close()
+
+
+# ─── MeetingBrief CRUD (zone interne) ───────────────────────
+#
+# La table meeting_briefs vit en zone INTERNE (postgres-internal) — comme
+# user_audio_files. Code-generator (zone externe) ne peut pas l'attaquer
+# directement ; il relaie via les endpoints ci-dessous, exactement comme
+# il le fait pour rename/delete des fichiers (cf. rename_file_by_session,
+# delete_file_by_session).
+#
+# Toutes les routes sont authentifiées par INTERNAL_API_TOKEN bearer.
+# L'isolation utilisateur reste à la charge du serveur : chaque appel
+# transporte explicitement ``user_sub`` et tout lookup le filtre.
+
+def _brief_to_dict(b: MeetingBrief, *, with_full: bool = False) -> dict:
+    """Sérialise un MeetingBrief pour la réponse JSON.
+
+    ``with_full=False`` produit la vue listing (pas de brief_json/documents
+    pour ne pas alourdir le payload). ``with_full=True`` ajoute les champs
+    lourds pour la vue détail.
+    """
+    out = {
+        "id": str(b.id),
+        "user_sub": b.user_sub,
+        "subject": b.subject,
+        "title": b.title or b.subject,
+        "role": b.role,
+        "expectation": b.expectation,
+        "duration_minutes": b.duration_minutes,
+        "drive_folder_id": b.drive_folder_id,
+        "focus": b.focus,
+        "created_at": b.created_at.isoformat() if b.created_at else None,
+        "updated_at": b.updated_at.isoformat() if b.updated_at else None,
+        "trashed_at": b.trashed_at.isoformat() if b.trashed_at else None,
+    }
+    if with_full:
+        out["brief_json"] = b.brief_json
+        out["documents"] = b.documents
+    return out
+
+
+@app.route("/api/v1/briefs", methods=["POST"])
+def create_brief():
+    """Persiste un nouveau brief de réunion.
+
+    Auth: INTERNAL_API_TOKEN. Body: ``user_sub`` + champs du brief
+    (subject, role, expectation, focus, duration_minutes, drive_folder_id,
+    brief_json, documents, title).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        b = MeetingBrief(
+            user_sub=user_sub,
+            subject=(data.get("subject") or None),
+            drive_folder_id=(data.get("drive_folder_id") or None),
+            role=(data.get("role") or None),
+            expectation=(data.get("expectation") or None),
+            focus=data.get("focus"),
+            duration_minutes=data.get("duration_minutes"),
+            brief_json=data.get("brief_json"),
+            documents=data.get("documents"),
+            title=(data.get("title") or data.get("subject") or None),
+        )
+        db.add(b)
+        db.commit()
+        db.refresh(b)
+        logger.info("MeetingBrief created: id=%s user_sub=%s", b.id, user_sub)
+        return jsonify({"ok": True, "brief": _brief_to_dict(b, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs", methods=["GET"])
+def list_briefs():
+    """Liste les briefs actifs ou en corbeille pour ``user_sub``.
+
+    Query: ``user_sub`` (obligatoire), ``trashed`` (``true``|``false``,
+    défaut ``false``), ``limit`` (défaut 50).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    trashed_flag = (request.args.get("trashed") or "false").lower() in {"1", "true", "yes"}
+    try:
+        limit = max(1, min(200, int(request.args.get("limit") or 50)))
+    except ValueError:
+        limit = 50
+
+    db = SessionLocal()
+    try:
+        q = db.query(MeetingBrief).filter(MeetingBrief.user_sub == user_sub)
+        if trashed_flag:
+            q = q.filter(MeetingBrief.trashed_at.isnot(None)).order_by(MeetingBrief.trashed_at.desc())
+        else:
+            q = q.filter(MeetingBrief.trashed_at.is_(None)).order_by(MeetingBrief.created_at.desc())
+        rows = q.limit(limit).all()
+        return jsonify({"briefs": [_brief_to_dict(b) for b in rows]})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>", methods=["GET"])
+def get_brief(brief_id: str):
+    """Lecture détaillée d'un brief (404 si trashed ou autre user_sub)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({"brief": _brief_to_dict(b, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/rename", methods=["POST"])
+def rename_brief(brief_id: str):
+    """Renomme le titre d'un brief (≤120 car., contrat identique aux fichiers)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    new_title = (data.get("title") or "").strip()
+    if not user_sub or not new_title:
+        return jsonify({"error": "user_sub and title required"}), 400
+    new_title = new_title[:120]
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_found"}), 404
+        b.title = new_title
+        db.commit()
+        return jsonify({"ok": True, "title": new_title})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/amend", methods=["POST"])
+def amend_brief(brief_id: str):
+    """Édition manuelle des champs ``brief_json`` (option a — pas de ré-appel LLM).
+
+    Body: ``user_sub`` + ``brief_json`` (dict complet à substituer).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if "brief_json" not in data:
+        return jsonify({"error": "brief_json required"}), 400
+    new_brief_json = data.get("brief_json")
+    if not isinstance(new_brief_json, dict):
+        return jsonify({"error": "brief_json must be an object"}), 400
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_found"}), 404
+        b.brief_json = new_brief_json
+        db.commit()
+        db.refresh(b)
+        return jsonify({"ok": True, "brief": _brief_to_dict(b, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>", methods=["DELETE"])
+def trash_brief(brief_id: str):
+    """Soft-delete : positionne ``trashed_at = now()``."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_found"}), 404
+        b.trashed_at = datetime.now(timezone.utc)
+        db.commit()
+        return jsonify({"ok": True, "trashed": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/restore", methods=["POST"])
+def restore_brief(brief_id: str):
+    """Restaure un brief depuis la corbeille (clear ``trashed_at``)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_in_trash"}), 404
+        b.trashed_at = None
+        db.commit()
+        return jsonify({"ok": True, "restored": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/permanently", methods=["DELETE"])
+def hard_delete_brief(brief_id: str):
+    """Hard-delete d'un brief en corbeille (depuis purge ou bouton UI)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        b = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.id == brief_id,
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not b:
+            return jsonify({"error": "not_in_trash"}), 404
+        db.delete(b)
+        db.commit()
+        return jsonify({"ok": True, "deleted": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/purge", methods=["POST"])
+def purge_briefs():
+    """Hard-delete des briefs en corbeille depuis > N jours pour ``user_sub``.
+
+    Appelé par code-generator depuis ``_purge_expired_trash`` pour étendre
+    le balayage opportuniste à la zone interne.
+    Body: ``{"user_sub": "...", "older_than_days": 30}``.
+    Réponse: ``{"ok": True, "purged": <int>}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        older_than_days = max(1, int(data.get("older_than_days") or 30))
+    except (TypeError, ValueError):
+        older_than_days = 30
+    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.isnot(None),
+                MeetingBrief.trashed_at < threshold,
+            )
+            .all()
+        )
+        n = 0
+        for b in rows:
+            db.delete(b)
+            n += 1
+        if n:
+            db.commit()
+            logger.info("MeetingBrief purge: user=%s purged=%d", user_sub, n)
+        return jsonify({"ok": True, "purged": n})
     finally:
         db.close()
 

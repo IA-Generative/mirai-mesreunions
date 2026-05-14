@@ -379,6 +379,7 @@ def create_app() -> Flask:
                         "transcription_preview": (match.transcription_text[:120] + "...")
                         if (match and match.transcription_text and len(match.transcription_text) > 120)
                         else (match.transcription_text if match else None),
+                        "absentee_summary": (match.absentee_summary if match else None),
                         "normalization_impact": norm_impact,
                         "normalization_error": norm_error,
                         "internal_bucket": "internal" if match else None,
@@ -1101,6 +1102,7 @@ function renderSessions(data) {
               ? `<div class=\"muted warn\">normalisation: analyse indisponible</div>`
               : '')))}
         ${f.transcription_preview ? `<div class=\"muted\">transcription: ${esc(f.transcription_preview)}</div>` : ''}
+        ${f.absentee_summary ? `<details class=\"muted\"><summary>resume pour les absents</summary><div style=\"white-space:pre-wrap;margin-top:0.5em\">${esc(f.absentee_summary)}</div></details>` : ''}
         ${f.internal_key ? `
           <div class=\"file-actions muted\">
             <a href=\"api/s3/download?bucket=${encodeURIComponent(f.internal_bucket)}&key=${encodeURIComponent(f.internal_key)}\">Telecharger</a>
