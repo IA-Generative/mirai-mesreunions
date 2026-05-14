@@ -2489,22 +2489,23 @@ def api_file_normalization_impact(file_id):
 from app import meeting_prep as _meeting_prep  # noqa: E402
 
 
-def _meeting_prep_configured() -> tuple[bool, str]:
+def _meeting_prep_configured(*, requires_drive: bool = True) -> tuple[bool, str]:
     """Return (ok, reason) describing whether the brief route can run.
 
-    Three downstream dependencies are required: the Drive base URL, the
-    Keycloak token endpoint (to exchange refresh→access), and a LiteLLM
-    endpoint+key for the LLM call. Any missing piece short-circuits with a
-    user-facing French error rather than a 500 stacktrace.
+    Le LLM (LiteLLM) est toujours requis ; le Drive ne l'est que si l'appelant
+    a effectivement fourni un dossier (``requires_drive=True``). Cela permet
+    au wizard de fonctionner sans dossier Drive même si DRIVE_BASE_URL n'est
+    pas configuré.
     """
-    if not OIDC_OFFLINE_ACCESS:
-        return False, "Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé."
-    if not DRIVE_BASE_URL:
-        return False, "DRIVE_BASE_URL n'est pas configuré côté serveur."
-    if not OIDC_TOKEN_ENDPOINT:
-        return False, "OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur."
     if not LITELLM_BASE_URL or not LITELLM_API_KEY:
         return False, "Le LLM (LiteLLM) n'est pas configuré côté serveur."
+    if requires_drive:
+        if not OIDC_OFFLINE_ACCESS:
+            return False, "Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé."
+        if not DRIVE_BASE_URL:
+            return False, "DRIVE_BASE_URL n'est pas configuré côté serveur."
+        if not OIDC_TOKEN_ENDPOINT:
+            return False, "OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur."
     return True, ""
 
 
@@ -2532,7 +2533,17 @@ def meeting_prep_new_page():
     est persisté et listé dans l'onglet.
     """
     user = get_current_user()
-    return render_template_string(PREP_BRIEF_TEMPLATE, user=user)
+    return render_template_string(
+        PREP_BRIEF_TEMPLATE, user=user, drive_base_url=(DRIVE_BASE_URL or "")
+    )
+
+
+# Whitelist des types de réunion acceptés par le wizard. Tout sub-set des
+# clés exposées par meeting_prep.PROMPT_FILES_BY_TYPE — l'inconnu retombe
+# silencieusement sur "general" (cf. prompt_path_for_type).
+_ALLOWED_MEETING_TYPES = frozenset({
+    "general", "one_on_one", "project_update", "steering_committee", "brainstorm",
+})
 
 
 @app.route("/api/meeting-prep", methods=["POST"])
@@ -2541,25 +2552,30 @@ def api_meeting_prep():
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
 
-    ok, reason = _meeting_prep_configured()
-    if not ok:
-        return jsonify({"error": reason}), 503
-
     payload = request.get_json(silent=True) or {}
     subject = (payload.get("subject") or "").strip()
     folder_raw = (payload.get("drive_folder") or "").strip()
+
+    # LLM toujours requis ; Drive seulement si l'utilisateur a passé un folder.
+    ok, reason = _meeting_prep_configured(requires_drive=bool(folder_raw))
+    if not ok:
+        return jsonify({"error": reason}), 503
     role_viewpoint = (payload.get("role") or "").strip()
     expectation = (payload.get("expectation") or "").strip()
     duration_raw = payload.get("duration_minutes")
     focus_raw = payload.get("focus") or []
+    meeting_type_raw = (payload.get("meeting_type") or "").strip().lower()
 
     if not subject:
         return jsonify({"error": "Le sujet de la réunion est requis."}), 400
-    if not folder_raw:
-        return jsonify({"error": "L'identifiant ou l'URL du dossier Drive est requis."}), 400
-    folder_id = _meeting_prep.extract_folder_id(folder_raw)
-    if not folder_id:
-        return jsonify({"error": "Identifiant de dossier Drive invalide."}), 400
+
+    # Le dossier Drive est désormais optionnel : si fourni, on le valide ;
+    # sinon on saute toute la séquence DriveClient et le corpus reste vide.
+    folder_id: "str | None" = None
+    if folder_raw:
+        folder_id = _meeting_prep.extract_folder_id(folder_raw)
+        if not folder_id:
+            return jsonify({"error": "Identifiant de dossier Drive invalide."}), 400
     if not role_viewpoint:
         return jsonify({"error": "Le rôle dans la réunion est requis."}), 400
     if not expectation:
@@ -2574,61 +2590,76 @@ def api_meeting_prep():
         return jsonify({"error": "Le champ focus doit être une liste."}), 400
     focus_areas = [str(x).strip() for x in focus_raw if str(x).strip()]
 
-    # ── Fetch + decrypt the stored refresh token ──
-    ciphertext = fetch_ciphertext(user_sub)
-    if not ciphertext:
-        return jsonify({
-            "error": "Aucun token Drive enregistré. Déconnectez-vous puis reconnectez-vous pour réautoriser l'accès au Drive.",
-            "code": "no_refresh_token",
-        }), 401
-    try:
-        refresh_token = decrypt_secret(ciphertext)
-    except Exception:
-        logger.exception("meeting_prep: failed to decrypt refresh token for sub=%s", user_sub)
-        return jsonify({"error": "Token Drive illisible côté serveur."}), 500
-
-    drive = _meeting_prep.DriveClient(
-        base_url=DRIVE_BASE_URL,
-        oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
-        oidc_client_id=oidc_cfg.client_id,
-        oidc_client_secret=oidc_cfg.client_secret,
+    # Type de réunion : whitelist stricte, fallback "general" si vide ou
+    # inconnu. La valeur normalisée sert à choisir le prompt ET à être
+    # persistée dans brief_json["_meta"]["meeting_type"].
+    meeting_type = (
+        meeting_type_raw
+        if meeting_type_raw in _ALLOWED_MEETING_TYPES
+        else _meeting_prep.DEFAULT_MEETING_TYPE
     )
 
-    # ── Exchange refresh → access ──
-    try:
-        access_token = drive.exchange_refresh(refresh_token)
-    except _meeting_prep.DriveAuthError:
-        logger.warning("meeting_prep: refresh rejected by Keycloak for sub=%s", user_sub)
-        return jsonify({
-            "error": "Le jeton Drive a expiré. Déconnectez-vous puis reconnectez-vous.",
-            "code": "refresh_rejected",
-        }), 401
-    except _meeting_prep.DriveTransientError as exc:
-        logger.warning("meeting_prep: Keycloak transient on token exchange: %s", exc)
-        return jsonify({"error": "Le service d'identité est temporairement indisponible."}), 502
+    # ── Drive (optionnel) : si folder_id est None, on skippe toute la
+    # séquence DriveClient et le corpus reste vide. ──
+    corpus_text = ""
+    used: list = []
+    if folder_id:
+        ciphertext = fetch_ciphertext(user_sub)
+        if not ciphertext:
+            return jsonify({
+                "error": "Aucun token Drive enregistré. Déconnectez-vous puis reconnectez-vous pour réautoriser l'accès au Drive.",
+                "code": "no_refresh_token",
+            }), 401
+        try:
+            refresh_token = decrypt_secret(ciphertext)
+        except Exception:
+            logger.exception("meeting_prep: failed to decrypt refresh token for sub=%s", user_sub)
+            return jsonify({"error": "Token Drive illisible côté serveur."}), 500
 
-    # ── List + download + extract corpus ──
-    try:
-        corpus_text, used = _meeting_prep.assemble_corpus(drive, access_token, folder_id)
-    except _meeting_prep.DriveAuthError:
-        return jsonify({
-            "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
-            "code": "drive_auth",
-        }), 401
-    except _meeting_prep.DriveApplicativeError as exc:
-        logger.info("meeting_prep: Drive applicative error on folder %s: %s", folder_id, exc)
-        return jsonify({
-            "error": "Dossier Drive introuvable ou accès refusé.",
-        }), 404
-    except _meeting_prep.DriveTransientError as exc:
-        logger.warning("meeting_prep: Drive transient error on folder %s: %s", folder_id, exc)
-        return jsonify({"error": "Le Drive est temporairement indisponible."}), 502
+        drive = _meeting_prep.DriveClient(
+            base_url=DRIVE_BASE_URL,
+            oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+            oidc_client_id=oidc_cfg.client_id,
+            oidc_client_secret=oidc_cfg.client_secret,
+        )
+
+        # ── Exchange refresh → access ──
+        try:
+            access_token = drive.exchange_refresh(refresh_token)
+        except _meeting_prep.DriveAuthError:
+            logger.warning("meeting_prep: refresh rejected by Keycloak for sub=%s", user_sub)
+            return jsonify({
+                "error": "Le jeton Drive a expiré. Déconnectez-vous puis reconnectez-vous.",
+                "code": "refresh_rejected",
+            }), 401
+        except _meeting_prep.DriveTransientError as exc:
+            logger.warning("meeting_prep: Keycloak transient on token exchange: %s", exc)
+            return jsonify({"error": "Le service d'identité est temporairement indisponible."}), 502
+
+        # ── List + download + extract corpus ──
+        try:
+            corpus_text, used = _meeting_prep.assemble_corpus(drive, access_token, folder_id)
+        except _meeting_prep.DriveAuthError:
+            return jsonify({
+                "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
+                "code": "drive_auth",
+            }), 401
+        except _meeting_prep.DriveApplicativeError as exc:
+            logger.info("meeting_prep: Drive applicative error on folder %s: %s", folder_id, exc)
+            return jsonify({
+                "error": "Dossier Drive introuvable ou accès refusé.",
+            }), 404
+        except _meeting_prep.DriveTransientError as exc:
+            logger.warning("meeting_prep: Drive transient error on folder %s: %s", folder_id, exc)
+            return jsonify({"error": "Le Drive est temporairement indisponible."}), 502
 
     # ── Build prompt + call LLM ──
     try:
-        template_text = _meeting_prep.load_prompt_template()
+        template_text = _meeting_prep.load_prompt_template(
+            _meeting_prep.prompt_path_for_type(meeting_type)
+        )
     except Exception:
-        logger.exception("meeting_prep: failed to load prompt template")
+        logger.exception("meeting_prep: failed to load prompt template (type=%s)", meeting_type)
         return jsonify({"error": "Modèle de prompt indisponible."}), 500
 
     prompt = _meeting_prep.build_prompt(
@@ -2661,6 +2692,18 @@ def api_meeting_prep():
         logger.warning("meeting_prep: LiteLLM applicative error: %s", exc)
         return jsonify({"error": "Le LLM n'a pas pu produire un brief exploitable."}), 502
 
+    # Annoter le brief avec le type de réunion choisi par l'utilisateur.
+    # On le glisse dans un sous-objet "_meta" pour éviter toute collision
+    # avec les clés produites par le LLM (objective_reformulated, agenda…).
+    # Aucune migration de schema nécessaire : brief_json est déjà un jsonb
+    # arbitraire côté postgres-internal.
+    if isinstance(brief, dict):
+        meta = brief.get("_meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["meeting_type"] = meeting_type
+        brief["_meta"] = meta
+
     # Persiste le brief avant de répondre — passe par token-issuer car la
     # table meeting_briefs vit en zone interne (cf. rename_file_by_session
     # pour le pattern de relais cross-cluster).
@@ -2689,7 +2732,88 @@ def api_meeting_prep():
         # ultérieur). Tracé pour investigation.
         logger.exception("meeting_prep: failed to persist brief for sub=%s", user_sub)
 
-    return jsonify({"brief": brief, "documents": used, "brief_id": brief_id})
+    return jsonify({
+        "brief": brief,
+        "documents": used,
+        "brief_id": brief_id,
+        "meeting_type": meeting_type,
+    })
+
+
+@app.route("/api/meeting-prep/test-drive", methods=["GET"])
+@require_auth
+def api_test_drive_access():
+    """Diagnostic en 3 étapes pour le bouton « Tester l'accès » du wizard.
+
+    Renvoie systématiquement 200 (c'est un diagnostic — un échec doit être
+    rendu visuellement avec le détail, pas via un HTTP status). La réponse
+    contient ``token_stored``, ``exchange_ok``, ``drive_reachable``,
+    ``drive_base_url`` et un éventuel ``error`` parlant côté UI.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+
+    result = {
+        "token_stored": False,
+        "exchange_ok": False,
+        "drive_reachable": False,
+        "drive_base_url": DRIVE_BASE_URL or None,
+        "error": None,
+    }
+
+    # Step 1 : refresh token stocké ?
+    ciphertext = fetch_ciphertext(user_sub)
+    if not ciphertext:
+        result["error"] = "Aucun refresh token enregistré. Déconnectez-vous puis reconnectez-vous."
+        return jsonify(result), 200
+    result["token_stored"] = True
+
+    # Step 2 : déchiffrement + échange Keycloak.
+    try:
+        refresh_token = decrypt_secret(ciphertext)
+    except Exception:
+        logger.exception("test-drive: failed to decrypt refresh token for sub=%s", user_sub)
+        result["error"] = "Refresh token illisible (clé Fernet absente côté serveur ?)."
+        return jsonify(result), 200
+
+    if not DRIVE_BASE_URL or not OIDC_TOKEN_ENDPOINT:
+        result["error"] = "DRIVE_BASE_URL ou OIDC_TOKEN_ENDPOINT manquant côté serveur."
+        return jsonify(result), 200
+
+    drive = _meeting_prep.DriveClient(
+        base_url=DRIVE_BASE_URL,
+        oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+        oidc_client_id=oidc_cfg.client_id,
+        oidc_client_secret=oidc_cfg.client_secret,
+    )
+    try:
+        access_token = drive.exchange_refresh(refresh_token)
+        result["exchange_ok"] = True
+    except _meeting_prep.DriveAuthError as exc:
+        result["error"] = f"Échange refresh→access refusé : {exc}"
+        return jsonify(result), 200
+    except _meeting_prep.DriveTransientError as exc:
+        result["error"] = f"Keycloak temporairement indisponible : {exc}"
+        return jsonify(result), 200
+
+    # Step 3 : ping Drive — un simple GET racine. Tout statut < 500 vaut
+    # « Drive reachable » (un 401/403 prouve déjà que le service répond).
+    try:
+        import requests as _req
+        resp = _req.get(
+            DRIVE_BASE_URL.rstrip("/") + "/api/v1.0/items/",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        )
+        if resp.status_code < 500:
+            result["drive_reachable"] = True
+        else:
+            result["error"] = f"Drive HTTP {resp.status_code}"
+    except Exception as exc:
+        logger.warning("test-drive: drive ping failed: %s", exc)
+        result["error"] = f"Drive injoignable : {exc}"
+
+    return jsonify(result), 200
 
 
 # ─── Meeting-prep CRUD (relais vers token-issuer interne) ───
@@ -7190,6 +7314,21 @@ PREP_BRIEF_TEMPLATE = r"""
     <h1>Brief de réunion</h1>
 
     <div class="question">
+      <label for="meeting_type">Type de réunion *</label>
+      <div class="hint">Le brief sera structuré selon ce type.</div>
+      <select id="meeting_type" name="meeting_type" required
+              style="width:100%; padding:0.55rem 0.7rem; border:1px solid #d0d5dd;
+                     border-radius:6px; font-size:0.92rem; background:#fff;
+                     color:#161616; font-family: inherit;">
+        <option value="general">Général</option>
+        <option value="one_on_one">Entretien 1:1</option>
+        <option value="project_update">Point projet / équipe</option>
+        <option value="steering_committee">Comité de pilotage (COPIL)</option>
+        <option value="brainstorm">Atelier / brainstorm</option>
+      </select>
+    </div>
+
+    <div class="question">
       <label for="subject">Sujet de la réunion *</label>
       <div class="hint">En une phrase, le thème ou la décision principale.</div>
       <input type="text" id="subject" name="subject" required maxlength="500"
@@ -7197,10 +7336,29 @@ PREP_BRIEF_TEMPLATE = r"""
     </div>
 
     <div class="question">
-      <label for="drive_folder">Dossier Drive *</label>
-      <div class="hint">Collez l'URL du dossier mesfichiers (ou l'identifiant brut).</div>
-      <input type="text" id="drive_folder" name="drive_folder" required
+      <label for="drive_folder">Dossier Drive</label>
+      <div class="hint">Optionnel — si renseigné, les documents seront lus pour enrichir le brief. Collez l'URL du dossier mesfichiers (ou l'identifiant brut).</div>
+      <input type="text" id="drive_folder" name="drive_folder"
              placeholder="https://mesfichiers.…/explorer/items/xxxxxxxx">
+      <div class="drive-actions" style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.5rem; align-items:center;">
+        {% if drive_base_url %}
+        <a id="open-drive-btn" class="btn btn-secondary" style="padding:0.35rem 0.7rem; font-size:0.82rem; text-decoration:none; display:inline-block;"
+           href="{{ drive_base_url }}" target="_blank" rel="noopener">
+          Ouvrir mes fichiers ↗
+        </a>
+        {% else %}
+        <a id="open-drive-btn" class="btn btn-secondary" style="padding:0.35rem 0.7rem; font-size:0.82rem; text-decoration:none; display:inline-block; opacity:0.5; cursor:not-allowed;"
+           href="#" aria-disabled="true" title="DRIVE_BASE_URL non configuré côté serveur"
+           onclick="event.preventDefault(); return false;">
+          Ouvrir mes fichiers ↗
+        </a>
+        {% endif %}
+        <button type="button" id="test-drive-btn" class="btn btn-secondary"
+                style="padding:0.35rem 0.7rem; font-size:0.82rem;">
+          Tester l'accès
+        </button>
+      </div>
+      <div id="test-drive-result" aria-live="polite" style="margin-top:0.5rem; font-size:0.82rem;"></div>
     </div>
 
     <div class="question">
@@ -7380,13 +7538,15 @@ PREP_BRIEF_TEMPLATE = r"""
 
     var subject = document.getElementById('subject').value.trim();
     var folder = document.getElementById('drive_folder').value.trim();
+    var meetingType = document.getElementById('meeting_type').value;
     var role = document.getElementById('role').value.trim();
     var expectation = document.getElementById('expectation').value.trim();
     var duration = parseDurationMinutes(document.getElementById('duration').value);
     var focus = Array.from(document.querySelectorAll('input[name="focus"]:checked'))
                      .map(function (cb) { return cb.value; });
 
-    if (!subject || !folder || !role || !expectation) {
+    // Le dossier Drive est désormais optionnel — on ne le bloque plus côté client.
+    if (!subject || !role || !expectation) {
       setStatus('Tous les champs marqués * sont requis.', 'err');
       return;
     }
@@ -7397,7 +7557,10 @@ PREP_BRIEF_TEMPLATE = r"""
 
     var btn = document.getElementById('submit-btn');
     btn.disabled = true;
-    setStatus('Lecture du Drive et génération du brief en cours…', 'info');
+    setStatus(folder
+      ? 'Lecture du Drive et génération du brief en cours…'
+      : 'Génération du brief en cours…',
+      'info');
     try {
       var resp = await fetch('/api/meeting-prep', {
         method: 'POST',
@@ -7405,6 +7568,7 @@ PREP_BRIEF_TEMPLATE = r"""
         body: JSON.stringify({
           subject: subject, drive_folder: folder, role: role,
           expectation: expectation, duration_minutes: duration, focus: focus,
+          meeting_type: meetingType,
         }),
       });
       var data = await resp.json().catch(function () { return {}; });
@@ -7423,6 +7587,37 @@ PREP_BRIEF_TEMPLATE = r"""
       btn.disabled = false;
     }
   });
+
+  // Bouton « Tester l'accès » — diagnostic en 3 étapes sur /api/meeting-prep/test-drive.
+  var testBtn = document.getElementById('test-drive-btn');
+  if (testBtn) {
+    testBtn.addEventListener('click', async function () {
+      var btn = this;
+      var out = document.getElementById('test-drive-result');
+      btn.disabled = true;
+      out.innerHTML = 'Test en cours…';
+      out.style.color = '';
+      try {
+        var resp = await fetch('/api/meeting-prep/test-drive');
+        var data = await resp.json().catch(function () { return {}; });
+        var rows = [
+          ['Refresh token stocké', !!data.token_stored],
+          ['Échange OIDC réussi', !!data.exchange_ok],
+          ['Drive accessible', !!data.drive_reachable],
+        ];
+        out.innerHTML = rows.map(function (r) {
+          return '<div>' + (r[1] ? '✅' : '❌') + ' ' + escapeHtml(r[0]) + '</div>';
+        }).join('') + (data.error
+          ? '<div style="color:#c00;margin-top:0.25rem">' + escapeHtml(data.error) + '</div>'
+          : '');
+      } catch (e) {
+        out.textContent = 'Erreur réseau : ' + (e && e.message ? e.message : e);
+        out.style.color = '#c00';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
 </script>
 </body>
 </html>
