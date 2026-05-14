@@ -2626,28 +2626,26 @@ INDEX_TEMPLATE = """
         .tab-pane[data-tab="transfers"].detail-active .sessions-list {
             flex: 0 0 auto; min-height: 0; overflow: visible; padding-right: 0;
         }
-        /* Toolbar tri/upload alignée au-dessus de la liste */
-        .reunions-toolbar {
-            display: flex; align-items: center; gap: 0.6rem;
-            margin-top: 0.3rem; margin-bottom: 0.4rem;
-            flex-wrap: wrap;
-        }
-        .reunions-toolbar .sort-toggle {
-            font-size: 0.78rem; padding: 0.25rem 0.6rem;
+        /* Tri date + compteur intégrés sur la même ligne que le titre
+           "Mes réunions (IA)" (à sa droite). Pas de wrapper toolbar. */
+        .dsfr-inline-actions .sort-toggle {
+            font-size: 0.78rem; padding: 0.2rem 0.55rem;
             background: #fff; color: #1e293b;
             border: 1px solid #cbd5e1; border-radius: 999px;
             cursor: pointer; user-select: none;
             display: inline-flex; align-items: center; gap: 0.3rem;
             transition: background 0.12s ease, border-color 0.12s ease;
+            white-space: nowrap;
         }
-        .reunions-toolbar .sort-toggle:hover {
+        .dsfr-inline-actions .sort-toggle:hover {
             background: #f1f5f9; border-color: #94a3b8;
         }
-        .reunions-toolbar .sort-toggle-arrow {
+        .dsfr-inline-actions .sort-toggle-arrow {
             font-size: 0.7rem; line-height: 1; color: #475569;
         }
-        .reunions-toolbar .file-count {
+        .dsfr-inline-actions .file-count {
             font-size: 0.78rem; color: #64748b;
+            white-space: nowrap;
         }
         /* Cas par défaut : la date n'a pas été surchargée par l'utilisateur,
            on l'affiche en italique pour signaler "date d'upload" (= valeur
@@ -3823,6 +3821,16 @@ INDEX_TEMPLATE = """
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
+                <!-- Tri date + compteur sur la même ligne que le titre, à
+                     droite de "Mes réunions (IA)". Tri persisté en
+                     localStorage (mydevices.sort.dir, défaut "desc"). -->
+                <button type="button" class="sort-toggle" id="sort-toggle-btn"
+                        onclick="toggleSortDir()"
+                        title="Inverser l'ordre de tri (date de réunion ; à défaut, date d'upload)">
+                    <span class="sort-toggle-label">Plus récent d'abord</span>
+                    <span class="sort-toggle-arrow">▼</span>
+                </button>
+                <span class="file-count" id="file-count" aria-live="polite"></span>
                 <!-- Upload local (sans QR). 2 boutons cachant des <input
                      type="file"> + une zone drag&drop sur tout le header.
                      Le pipeline AV→transcode→transfer→kevent prend le
@@ -3910,17 +3918,6 @@ INDEX_TEMPLATE = """
                  son propre chemin de fer + statut transcription inline.
                  Disparaît quand 0 transfert en cours. -->
             <div class="transfer-live" id="transfer-live" style="display:none;"></div>
-            <!-- Toolbar : tri date asc/desc + compteur. Tri persisté en
-                 localStorage (mydevices.sort.dir, défaut "desc"). -->
-            <div class="reunions-toolbar" id="reunions-toolbar">
-                <button type="button" class="sort-toggle" id="sort-toggle-btn"
-                        onclick="toggleSortDir()"
-                        title="Inverser l'ordre de tri (date de réunion ; à défaut, date d'upload)">
-                    <span class="sort-toggle-label">Plus récent d'abord</span>
-                    <span class="sort-toggle-arrow">▼</span>
-                </button>
-                <span class="file-count" id="file-count" aria-live="polite"></span>
-            </div>
             <div class="sessions-list" id="sessions-list">
                 <p style="color:#999; font-size:0.85rem;">Chargement...</p>
             </div>
