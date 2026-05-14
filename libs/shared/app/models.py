@@ -301,6 +301,12 @@ class UserAudioFile(InternalBase):
                                    comment="5-section structured analysis: actors/themes/decisions/gaps/recommendations")
     suggested_filename = Column(String(255), nullable=True,
                                 comment="LLM-suggested short title (4-8 words), used by user-facing downloads as filename stem; NULL if KEVENT_FILENAME_SUGGESTION_ENABLED off or step failed")
+    # Date/heure *réelle* de la réunion telle que renseignée par l'utilisateur
+    # depuis la fiche détaillée mydevices. NULL = pas d'override (l'UI retombe
+    # sur created_at pour l'affichage et le tri). Persisté en zone interne car
+    # info utilisateur durable, cohérent avec suggested_filename.
+    meeting_datetime = Column(DateTime(timezone=True), nullable=True,
+                              comment="User-specified actual meeting date/time override")
     key_points_summary = Column(Text, nullable=True,
                                 comment="LLM-generated 3-5 bullet summary of the meeting key points (one short sentence each); displayed as subtitle in mydevices UI; NULL if step disabled or failed")
 

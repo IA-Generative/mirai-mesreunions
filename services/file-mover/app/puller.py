@@ -1270,6 +1270,53 @@ def queue_status():
     return jsonify(dataclasses.asdict(summary))
 
 
+@app.route("/api/v1/audio/meeting-datetimes", methods=["GET"])
+def audio_meeting_datetimes():
+    """Bulk map (simple_code, original_filename) → meeting_datetime override.
+
+    Renvoie uniquement les rows ayant un override non-NULL — sert au
+    code-generator pour enrichir la liste mydevices d'un seul aller-retour
+    (au lieu de N appels lookup individuels). Format compact :
+    ``{"items": [{"simple_code","original_filename","meeting_datetime"}]}``.
+    Auth = INTERNAL_API_TOKEN bearer.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_not_ready"}), 503
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(
+                UserAudioFile.original_session_code,
+                UserAudioFile.original_filename,
+                UserAudioFile.meeting_datetime,
+            )
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.meeting_datetime.isnot(None),
+            )
+            .all()
+        )
+        items = [
+            {
+                "simple_code": code,
+                "original_filename": name,
+                "meeting_datetime": dt.isoformat() if dt else None,
+            }
+            for (code, name, dt) in rows
+        ]
+        return jsonify({"items": items})
+    except Exception:
+        logger.exception("audio_meeting_datetimes failed")
+        return jsonify({"error": "internal_error"}), 500
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/audio/lookup", methods=["POST"])
 def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.
@@ -1334,6 +1381,9 @@ def audio_lookup():
             "suggested_filename": row.suggested_filename,
             "key_points_summary": row.key_points_summary,
             "kevent_job_id": row.kevent_job_id,
+            "meeting_datetime": (
+                row.meeting_datetime.isoformat() if row.meeting_datetime else None
+            ),
         })
     except Exception:
         logger.exception("audio_lookup failed")

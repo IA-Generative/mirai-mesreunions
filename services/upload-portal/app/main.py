@@ -14,13 +14,11 @@ import time
 import json
 import requests as req
 from datetime import datetime, timezone, timedelta
-from io import BytesIO
 from uuid import uuid4
 
 from flask import Flask, request, jsonify, render_template, abort, redirect, url_for, send_from_directory
 from flask_socketio import SocketIO, emit, join_room
 from sqlalchemy import text
-from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -32,8 +30,10 @@ from libs.shared.app.config import (
 )
 from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
-from libs.shared.app.s3_helper import upload_fileobj, ensure_bucket, delete_object
-from libs.shared.app.queue_helper import publish_message, QUEUE_AV_SCAN, RabbitMQConfig
+from libs.shared.app.s3_helper import ensure_bucket, delete_object
+from libs.shared.app.upload_helpers import (
+    is_allowed_audio_filename, build_stored_filename, store_audio_to_s3, publish_av_scan_message,
+)
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import verify_device_token, utc_now_ts
 
@@ -157,10 +157,7 @@ def can_view_status(session_obj) -> bool:
 
 
 def allowed_file(filename: str) -> bool:
-    if "." not in filename:
-        return False
-    ext = filename.rsplit(".", 1)[1].lower()
-    return ext in ALLOWED_AUDIO_EXTENSIONS
+    return is_allowed_audio_filename(filename)
 
 
 def _extract_device_token() -> str:
@@ -807,18 +804,12 @@ def api_upload(qr_token):
         return jsonify({"error": "Fichier vide."}), 400
 
     # Build stored filename: {simple_code}_{uuid}_{original_name}
-    safe_name = secure_filename(file.filename)
-    stored_name = f"{session_obj.simple_code}_{uuid4().hex[:8]}_{safe_name}"
+    stored_name = build_stored_filename(session_obj.simple_code, file.filename)
 
     # Upload to S3
     try:
-        upload_fileobj(
-            s3_cfg,
-            stored_name,
-            BytesIO(file_data),
-            content_type=file.content_type or "application/octet-stream",
-        )
-    except Exception as e:
+        store_audio_to_s3(s3_cfg, stored_name, file_data, file.content_type)
+    except Exception:
         logger.exception("S3 upload failed")
         return jsonify({"error": "Erreur lors de l'upload. Réessayez."}), 500
 
@@ -848,16 +839,17 @@ def api_upload(qr_token):
 
     # Publish to antivirus queue
     try:
-        publish_message(rabbit_cfg, QUEUE_AV_SCAN, {
-            "file_id": file_id,
-            "session_id": str(session_obj.id),
-            "stored_filename": stored_name,
-            "original_filename": file.filename,
-            "simple_code": session_obj.simple_code,
-            "user_sub": session_obj.user_sub,
-            "user_email": session_obj.user_email,
-        })
-    except Exception as e:
+        publish_av_scan_message(
+            rabbit_cfg,
+            file_id=file_id,
+            session_id=str(session_obj.id),
+            stored_filename=stored_name,
+            original_filename=file.filename,
+            simple_code=session_obj.simple_code,
+            user_sub=session_obj.user_sub,
+            user_email=session_obj.user_email,
+        )
+    except Exception:
         logger.exception("Failed to publish to queue")
 
     # Notify via WebSocket

@@ -920,6 +920,68 @@ def rename_file_by_session():
         db.close()
 
 
+@app.route("/api/v1/files/by-session/meeting-datetime", methods=["POST"])
+def set_meeting_datetime_by_session():
+    """Surcharge la date/heure de réunion (UserAudioFile.meeting_datetime).
+
+    Auth: INTERNAL_API_TOKEN bearer.
+    Body: ``{"user_sub","simple_code","original_filename","meeting_datetime": "ISO 8601" | null}``
+    Matching identique à rename_file_by_session. ``meeting_datetime = null``
+    efface l'override (retour à la date d'upload côté UI).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    simple_code = (data.get("simple_code") or "").strip()
+    original_filename = (data.get("original_filename") or "").strip()
+    raw_dt = data.get("meeting_datetime")
+    if not user_sub or not simple_code or not original_filename:
+        return jsonify({
+            "error": "user_sub, simple_code and original_filename are required"
+        }), 400
+
+    new_dt = None
+    if raw_dt is not None:
+        if not isinstance(raw_dt, str) or not raw_dt.strip():
+            return jsonify({"error": "meeting_datetime must be an ISO 8601 string or null"}), 400
+        try:
+            parsed = datetime.fromisoformat(raw_dt.strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            new_dt = parsed
+        except Exception:
+            return jsonify({"error": "meeting_datetime not parseable as ISO 8601"}), 400
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserAudioFile)
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.original_session_code == simple_code,
+                UserAudioFile.original_filename == original_filename,
+            )
+            .all()
+        )
+        if not rows:
+            return jsonify({"error": "not_found"}), 404
+        for af in rows:
+            af.meeting_datetime = new_dt
+        db.commit()
+        logger.info(
+            "Meeting datetime updated: user_sub=%s simple_code=%s file=%s → %s (%d rows)",
+            user_sub, simple_code, original_filename, new_dt.isoformat() if new_dt else None, len(rows),
+        )
+        return jsonify({
+            "ok": True,
+            "rows_updated": len(rows),
+            "meeting_datetime": new_dt.isoformat() if new_dt else None,
+        })
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/devices/<device_id>", methods=["DELETE"])
 def delete_device(device_id: str):
     """Permanently remove a device enrollment row.

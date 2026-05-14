@@ -36,6 +36,7 @@ from libs.shared.app.config import (
     MAX_UPLOADS_PER_SESSION, SECRET_KEY, UPLOAD_PORTAL_BASE_URL, load_s3_upload, load_s3_processed, load_s3_internal,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, TOKEN_ISSUER_API_URL, INTERNAL_API_TOKEN,
     OIDC_OFFLINE_ACCESS, DEVICE_TOKEN_RETENTION_HOURS,
+    UPLOAD_MAX_FILE_SIZE_MB, ALLOWED_AUDIO_EXTENSIONS, RabbitMQConfig,
 )
 from libs.shared.app.oidc_refresh_store import store_refresh_token
 from libs.shared.app.models import (
@@ -44,6 +45,9 @@ from libs.shared.app.models import (
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.s3_helper import download_fileobj, delete_object, object_exists
+from libs.shared.app.upload_helpers import (
+    is_allowed_audio_filename, build_stored_filename, store_audio_to_s3, publish_av_scan_message,
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -59,6 +63,10 @@ s3_upload_cfg = load_s3_upload()
 s3_processed_cfg = load_s3_processed()
 s3_internal_cfg = load_s3_internal()
 SessionLocal = None
+rabbit_cfg = RabbitMQConfig()
+# Limite alignée sur upload-portal pour rester cohérent quand l'utilisateur
+# uploade directement depuis mydevices (POST /api/my-upload).
+app.config["MAX_CONTENT_LENGTH"] = UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOW_SHORT_QR_TTL_SECONDS_TEST = os.getenv("ALLOW_SHORT_QR_TTL_SECONDS_TEST", "").lower() in {"1", "true", "yes"}
 PUBLIC_HOST = os.getenv("PUBLIC_HOST", "").strip()
 NORMALIZATION_ANALYSIS_MAX_SECONDS = max(30, int(os.getenv("NORMALIZATION_ANALYSIS_MAX_SECONDS", "180")))
@@ -210,17 +218,19 @@ def request_token_from_internal(
     return resp.json()
 
 
-def request_file_puller_api(path: str, *, json_body=None, timeout: int = 10) -> dict | None:
-    """POST to file-puller's internal API. Returns the parsed JSON or None on 404.
+def request_file_puller_api(path: str, *, json_body=None, params=None, method: str = "POST", timeout: int = 10) -> dict | None:
+    """Call file-puller's internal API. Returns the parsed JSON or None on 404.
 
     Used by the user-facing transcript download endpoints to fetch the
     user_audio_files row that lives in postgres-internal. Auth =
     INTERNAL_API_TOKEN (same bearer file-puller uses for /api/v1/pull).
     """
     base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://file-puller:8090").rstrip("/")
-    resp = req.post(
+    resp = req.request(
+        method,
         f"{base}{path}",
         json=json_body,
+        params=params,
         headers={
             "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
             "Content-Type": "application/json",
@@ -787,6 +797,26 @@ def api_my_sessions():
             UploadSession.trashed_at.is_(None),
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
+        # Bulk-fetch des overrides "date de réunion" (zone interne). Un seul
+        # appel → file-puller renvoie uniquement les rows non-NULL. Map indexée
+        # par (simple_code, original_filename) pour l'enrichissement par fichier.
+        meeting_dt_overrides: dict[tuple[str, str], str] = {}
+        try:
+            bulk = request_file_puller_api(
+                "/api/v1/audio/meeting-datetimes",
+                method="GET",
+                params={"user_sub": user["sub"]},
+            )
+            if isinstance(bulk, dict):
+                for it in (bulk.get("items") or []):
+                    code = (it.get("simple_code") or "").strip()
+                    name = (it.get("original_filename") or "").strip()
+                    dt = it.get("meeting_datetime")
+                    if code and name and dt:
+                        meeting_dt_overrides[(code, name)] = dt
+        except Exception:
+            logger.debug("meeting-datetimes bulk fetch failed (non-fatal)", exc_info=True)
+
         # On récupère la liste des devices encore actifs pour cet utilisateur
         # (token-issuer GET /api/v1/devices). Permet à _compute_lifecycle_state
         # de décider "enrolled" même quand session.expires_at est dans le passé,
@@ -867,6 +897,7 @@ def api_my_sessions():
                     except Exception:
                         logger.debug("Unable to verify transferred object presence for %s", f.id, exc_info=True)
 
+                override_dt = meeting_dt_overrides.get((s.simple_code, f.original_filename))
                 uploads.append({
                     "id": str(f.id),
                     "original_filename": f.original_filename,
@@ -876,6 +907,8 @@ def api_my_sessions():
                     "audio_duration_seconds": f.audio_duration_seconds,
                     "created_at": f.created_at.isoformat(),
                     "updated_at": f.updated_at.isoformat() if f.updated_at else None,
+                    "meeting_datetime": override_dt,
+                    "meeting_datetime_overridden": override_dt is not None,
                     "download_url": f"/api/file/download/{f.id}",
                     "stream_url": f"/api/file/stream/{f.id}",
                     "source_available": source_available,
@@ -889,6 +922,7 @@ def api_my_sessions():
                     "transferred_stream_url": f"/api/file/stream-transferred/{f.id}" if transferred_available else None,
                     "impact_url": f"/api/file/normalization-impact/{f.id}",
                 })
+            is_local = (s.simple_code or "").startswith(_LOCAL_UPLOAD_SIMPLE_CODE_PREFIX)
             result.append({
                 "id": str(s.id),
                 "simple_code": s.simple_code,
@@ -902,6 +936,8 @@ def api_my_sessions():
                     s,
                     has_active_device=(s.qr_token or "") in active_qr_tokens,
                 ),
+                "is_local_upload": is_local,
+                "device_label": _LOCAL_UPLOAD_DEVICE_LABEL if is_local else None,
                 "uploads": uploads,
             })
         if reconciled:
@@ -1634,6 +1670,7 @@ def api_file_transcript_status(file_id):
             "outputs": flags,
             "suggested_filename": audio.get("suggested_filename"),
             "key_points_summary": audio.get("key_points_summary"),
+            "meeting_datetime": audio.get("meeting_datetime"),
             # Permet à l'UI de demander la position d'attente précise via
             # /api/queue-status?job_id=… plutôt que le générique
             # "N jobs en attente" (Phase 2 du sprint queue hint).
@@ -1785,6 +1822,199 @@ def api_rename_file(file_id):
         return jsonify({"ok": True, "title": data.get("new_title", new_title)})
     finally:
         db.close()
+
+
+# ─── Upload local (sans QR / sans device-token) ──────────────────────────────
+# Marqueur en tête de simple_code identifiant les sessions créées par
+# /api/my-upload (utilisateur authentifié OIDC, upload depuis le navigateur).
+# La présence de ce préfixe sert à : (a) afficher "Upload local" comme device,
+# (b) éviter qu'une session locale soit confondue avec une session QR
+# multi-device.
+_LOCAL_UPLOAD_SIMPLE_CODE_PREFIX = "L-"
+_LOCAL_UPLOAD_MAX_PER_SESSION = 9999
+_LOCAL_UPLOAD_DEVICE_LABEL = "Upload local"
+
+
+def _get_or_create_local_upload_session(db, user) -> UploadSession:
+    """Trouve une session 'upload local' active réutilisable, sinon en crée
+    une neuve. On veut une seule virtual-session par utilisateur tant qu'elle
+    n'a pas saturé son quota — ça évite de spammer la table à chaque batch.
+    """
+    sess = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.user_sub == user["sub"],
+            UploadSession.simple_code.like(f"{_LOCAL_UPLOAD_SIMPLE_CODE_PREFIX}%"),
+            UploadSession.status == SessionStatus.ACTIVE,
+            UploadSession.trashed_at.is_(None),
+            UploadSession.upload_count < UploadSession.max_uploads,
+        )
+        .order_by(UploadSession.created_at.desc())
+        .first()
+    )
+    if sess:
+        return sess
+    # Création : simple_code "L-XXXXXXXX" (10 chars, respecte VARCHAR(10)).
+    # qr_token : random 64-hex pour respecter l'index UNIQUE. expires_at très
+    # loin dans le futur — l'endpoint /api/my-upload ne consulte pas cette
+    # date (auth OIDC, pas device-token).
+    suffix = secrets.token_hex(4).upper()  # 8 chars hex
+    simple_code = f"{_LOCAL_UPLOAD_SIMPLE_CODE_PREFIX}{suffix}"
+    new = UploadSession(
+        id=uuid4(),
+        user_sub=user.get("sub"),
+        user_email=user.get("email"),
+        user_display_name=user.get("name") or user.get("preferred_username"),
+        simple_code=simple_code,
+        qr_token=secrets.token_hex(32),
+        status=SessionStatus.ACTIVE,
+        max_uploads=_LOCAL_UPLOAD_MAX_PER_SESSION,
+        upload_count=0,
+        ttl_minutes=0,
+        expires_at=datetime.now(timezone.utc) + timedelta(days=365 * 50),
+    )
+    db.add(new)
+    db.flush()  # garantit que l'ID est dispo + détecte les collisions tôt
+    return new
+
+
+@app.route("/api/my-upload", methods=["POST"])
+@require_auth
+def api_my_upload():
+    """Upload local d'un fichier audio depuis mydevices (sans QR / device-token).
+
+    L'utilisateur est déjà authentifié OIDC, donc on peut court-circuiter le
+    flow PWA mobile. Le fichier rejoint le pipeline existant
+    (AV → transcode → transfer → kevent) via une virtual-session marquée
+    ``L-XXXXXXXX``. Côté UI le device sera affiché comme "Upload local".
+
+    Body multipart: ``file=<binary>``. Réponse identique à l'upload-portal :
+    ``{file_id, filename, status, remaining}``.
+    """
+    user = get_current_user()
+    if "file" not in request.files:
+        return jsonify({"error": "Aucun fichier sélectionné."}), 400
+    file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "Nom de fichier vide."}), 400
+    if not is_allowed_audio_filename(file.filename):
+        return jsonify({
+            "error": f"Format non supporté. Formats acceptés : {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
+        }), 400
+
+    file_data = file.read()
+    file_size = len(file_data)
+    if file_size == 0:
+        return jsonify({"error": "Fichier vide."}), 400
+
+    db = SessionLocal()
+    try:
+        session_obj = _get_or_create_local_upload_session(db, user)
+        stored_name = build_stored_filename(session_obj.simple_code, file.filename)
+        try:
+            store_audio_to_s3(s3_upload_cfg, stored_name, file_data, file.content_type)
+        except Exception:
+            db.rollback()
+            logger.exception("S3 upload failed for local upload")
+            return jsonify({"error": "Erreur lors de l'upload. Réessayez."}), 500
+
+        uploaded_file = UploadedFile(
+            id=uuid4(),
+            session_id=session_obj.id,
+            original_filename=file.filename,
+            stored_filename=stored_name,
+            file_size_bytes=file_size,
+            mime_type=file.content_type,
+            status=UploadStatus.PENDING,
+            status_message="Fichier reçu (upload local), en attente d'analyse antivirale...",
+        )
+        db.add(uploaded_file)
+        session_obj.upload_count += 1
+        db.commit()
+        file_id = str(uploaded_file.id)
+        simple_code = session_obj.simple_code
+        user_sub = session_obj.user_sub
+        user_email = session_obj.user_email
+        session_id_str = str(session_obj.id)
+        remaining = max(0, session_obj.max_uploads - session_obj.upload_count)
+    finally:
+        db.close()
+
+    try:
+        publish_av_scan_message(
+            rabbit_cfg,
+            file_id=file_id,
+            session_id=session_id_str,
+            stored_filename=stored_name,
+            original_filename=file.filename,
+            simple_code=simple_code,
+            user_sub=user_sub,
+            user_email=user_email,
+        )
+    except Exception:
+        logger.exception("Failed to publish to QUEUE_AV_SCAN for local upload")
+
+    return jsonify({
+        "file_id": file_id,
+        "filename": file.filename,
+        "status": "pending",
+        "remaining": remaining,
+    })
+
+
+@app.route("/api/file/<file_id>/meeting-datetime", methods=["PATCH"])
+@require_auth
+def api_set_meeting_datetime(file_id):
+    """Surcharge la date/heure de réunion (zone interne).
+
+    Body: ``{"meeting_datetime": "ISO 8601" | null}``. Persiste via token-issuer
+    ``POST /api/v1/files/by-session/meeting-datetime`` (matching identique au
+    rename : user_sub + simple_code + original_filename). ``null`` efface
+    l'override.
+    """
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    if "meeting_datetime" not in payload:
+        return jsonify({"error": "meeting_datetime field required (string or null)"}), 400
+    raw_dt = payload.get("meeting_datetime")
+    if raw_dt is not None and (not isinstance(raw_dt, str) or not raw_dt.strip()):
+        return jsonify({"error": "meeting_datetime must be ISO 8601 string or null"}), 400
+
+    db = SessionLocal()
+    try:
+        file_obj = _get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            return jsonify({"error": "file_not_found"}), 404
+        session_obj = db.query(UploadSession).filter(UploadSession.id == file_obj.session_id).first()
+        if not session_obj:
+            return jsonify({"error": "session_not_found"}), 404
+        try:
+            data = request_internal_device_api(
+                "POST",
+                "/api/v1/files/by-session/meeting-datetime",
+                json_body={
+                    "user_sub": user["sub"],
+                    "simple_code": session_obj.simple_code,
+                    "original_filename": file_obj.original_filename,
+                    "meeting_datetime": raw_dt.strip() if isinstance(raw_dt, str) else None,
+                },
+            )
+        except req.HTTPError as err:
+            if err.response is not None:
+                try:
+                    body = err.response.json()
+                except Exception:
+                    body = {"error": "internal_api_error"}
+                return jsonify({"error": body.get("error", "meeting_datetime_failed")}), err.response.status_code
+            return jsonify({"error": "meeting_datetime_failed"}), 502
+        return jsonify({
+            "ok": True,
+            "meeting_datetime": data.get("meeting_datetime"),
+            "meeting_datetime_overridden": data.get("meeting_datetime") is not None,
+        })
+    finally:
+        db.close()
+
 
 
 @app.route("/api/my-trash", methods=["GET"])
