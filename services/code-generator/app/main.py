@@ -2512,7 +2512,7 @@ def _meeting_prep_configured(*, requires_drive: bool = True) -> tuple[bool, str]
 @app.route("/meeting-prep")
 @require_auth
 def meeting_prep_page():
-    """Deep-link historique → onglet « Préparer une réunion » de mydevices.
+    """Deep-link historique → onglet « Préparation de réunion » de mydevices.
 
     Avant la piste 1 (alignement objet), cette route rendait sa propre page
     PREP_BRIEF_TEMPLATE. Désormais le wizard est intégré comme 5e onglet
@@ -2528,7 +2528,7 @@ def meeting_prep_new_page():
     """Page wizard plein écran — création d'un nouveau brief.
 
     Atteignable depuis le bouton « Nouveau brief » de l'onglet
-    « Préparer une réunion ». Garde le PREP_BRIEF_TEMPLATE existant
+    « Préparation de réunion ». Garde le PREP_BRIEF_TEMPLATE existant
     comme parcours de création (4 questions). Une fois soumis, le brief
     est persisté et listé dans l'onglet.
     """
@@ -4780,7 +4780,7 @@ INDEX_TEMPLATE = """
             Mes réunions (IA)
         </button>
         <button type="button" class="tab-btn" role="tab" data-tab="brief" id="tab-btn-brief">
-            Préparer une réunion
+            Préparation de réunion
         </button>
         <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
             Mes appareils
@@ -4797,12 +4797,13 @@ INDEX_TEMPLATE = """
         <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
         <div id="brief-list-view">
             <div class="dsfr-inline-actions">
-                <h1 style="font-size:1.1rem;">Préparer une réunion</h1>
+                <h1 style="font-size:1.1rem;">Préparation de réunion</h1>
                 <a href="/meeting-prep/new" class="btn-primary fr-btn fr-btn--sm">Nouveau brief</a>
             </div>
             <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
-                Vos briefs de pré-réunion sont conservés et restent éditables.
-                La corbeille les retient 30 jours avant suppression définitive.
+                Préparez un brief avant chaque réunion : il sera automatiquement
+                rattaché à l'enregistrement audio correspondant pour enrichir la
+                transcription et le compte-rendu.
             </p>
             <!-- Meeting-prep v2 §7 : banner purge invitée pour briefs > 90j
                  sans audio lié. Rendu conditionnel par loadBriefs() via la
@@ -4820,7 +4821,11 @@ INDEX_TEMPLATE = """
                             onclick="dismissOlderThan90dBanner()">Plus tard</button>
                 </div>
             </div>
-            <div id="brief-list" style="font-size:0.86rem;color:#64748b;">
+            <!-- Liste des briefs masquée par défaut — l'onglet est désormais un
+                 point d'entrée vers la création. Les briefs existants restent
+                 accessibles via le détail d'un fichier audio lié (badge « 📋 »
+                 dans l'onglet « Mes réunions ») et via la corbeille. -->
+            <div id="brief-list" style="display:none;" aria-hidden="true">
                 Chargement des briefs...
             </div>
         </div>
@@ -4862,17 +4867,159 @@ INDEX_TEMPLATE = """
                         max-height:60vh;overflow:auto;"></pre>
             <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
                 <p style="font-size:0.8rem;color:#64748b;">
-                    Édition manuelle (JSON brut). Pas de ré-appel LLM.
+                    Édition manuelle. Pas de ré-appel LLM.
                 </p>
-                <textarea id="brief-amend-text"
-                          style="width:100%;min-height:240px;font-family:monospace;
-                                 font-size:0.78rem;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.5rem;"></textarea>
-                <div style="display:flex;gap:0.4rem;margin-top:0.4rem;">
-                    <button type="button" class="btn-primary fr-btn fr-btn--sm"
-                            onclick="saveAmendBrief()">Enregistrer</button>
-                    <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
-                            onclick="toggleAmendBrief()">Annuler</button>
-                </div>
+                <form id="brief-amend-form" data-amend-form
+                      onsubmit="event.preventDefault();saveAmendBrief();return false;">
+                    <!-- Section 1 : Vue d'ensemble -->
+                    <fieldset class="brief-amend-section" data-section="overview"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="0"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Vue d'ensemble
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <label class="fr-label" for="amend-objective" style="font-size:0.8rem;">
+                                Objectif reformulé
+                                <span style="color:#94a3b8;font-weight:normal;">(80–200 caractères suggérés)</span>
+                            </label>
+                            <textarea id="amend-objective" rows="3" required
+                                      style="width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.4rem;font-size:0.85rem;"
+                                      aria-describedby="amend-objective-count"></textarea>
+                            <div id="amend-objective-count" style="font-size:0.72rem;color:#94a3b8;text-align:right;">0 caractères</div>
+                            <div style="margin-top:0.4rem;">
+                                <label style="font-size:0.8rem;">
+                                    <input type="checkbox" id="amend-context-null"> Pas de contexte
+                                </label>
+                                <label class="fr-label" for="amend-context" style="font-size:0.8rem;">
+                                    Rappel du contexte
+                                </label>
+                                <textarea id="amend-context" rows="4"
+                                          style="width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.4rem;font-size:0.85rem;"></textarea>
+                            </div>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 2 : Agenda -->
+                    <fieldset class="brief-amend-section" data-section="agenda"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="1"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Agenda
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-agenda-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-agenda-item
+                                    onclick="addAmendAgendaItem()"
+                                    style="margin-top:0.4rem;">+ Ajouter un point</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 3 : Notes participants -->
+                    <fieldset class="brief-amend-section" data-section="participants"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="2"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Notes participants
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-participants-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-participant
+                                    onclick="addAmendParticipant()"
+                                    style="margin-top:0.4rem;">+ Ajouter un participant</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 4 : Points en suspens -->
+                    <fieldset class="brief-amend-section" data-section="threads"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="3"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Points en suspens
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-threads-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-thread
+                                    onclick="addAmendThread()"
+                                    style="margin-top:0.4rem;">+ Ajouter un point en suspens</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 5 : Questions d'ouverture -->
+                    <fieldset class="brief-amend-section" data-section="opening"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="4"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Questions d'ouverture
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-opening-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-opening-question
+                                    onclick="addAmendOpeningQuestion()"
+                                    style="margin-top:0.4rem;">+ Ajouter une question</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 6 : Risques -->
+                    <fieldset class="brief-amend-section" data-section="risks"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="5"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Risques
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-risks-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-risk
+                                    onclick="addAmendRisk()"
+                                    style="margin-top:0.4rem;">+ Ajouter un risque</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 7 : Checklist préparation -->
+                    <fieldset class="brief-amend-section" data-section="checklist"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="6"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Checklist préparation
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-checklist-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                    data-add-checklist-item
+                                    onclick="addAmendChecklistItem()"
+                                    style="margin-top:0.4rem;">+ Ajouter un point</button>
+                        </div>
+                    </fieldset>
+
+                    <div style="display:flex;gap:0.4rem;margin-top:0.6rem;align-items:center;">
+                        <button type="submit" id="amend-save-btn"
+                                class="btn-primary fr-btn fr-btn--sm">Enregistrer</button>
+                        <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                                onclick="toggleAmendBrief()">Annuler</button>
+                        <span id="amend-save-spinner" style="display:none;font-size:0.8rem;color:#64748b;">
+                            Enregistrement…
+                        </span>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
@@ -7599,7 +7746,7 @@ async function restoreSession(simpleCode) {
     } catch (e) { showToast('Restauration échouée.', 'error'); }
 }
 
-// ─── Brief de réunion — onglet « Préparer une réunion » ───────────────
+// ─── Brief de réunion — onglet « Préparation de réunion » ───────────────
 //
 // État courant : briefId affiché en détail. null = vue liste.
 let _briefDetailId = null;
@@ -7617,7 +7764,7 @@ async function loadBriefs() {
         if (briefs.length === 0) {
             container.innerHTML = `<p style="color:#94a3b8;">
                 Aucun brief pour le moment.
-                <a href="/meeting-prep/new" class="fr-link">Préparer une réunion ?</a>
+                <a href="/meeting-prep/new" class="fr-link">Préparation de réunion ?</a>
             </p>`;
             return;
         }
@@ -7671,7 +7818,7 @@ async function showBriefDetail(briefId) {
         const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
         metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
         jsonEl.textContent = JSON.stringify(b.brief_json || {}, null, 2);
-        document.getElementById('brief-amend-text').value = JSON.stringify(b.brief_json || {}, null, 2);
+        fillAmendForm(b.brief_json || {});
         // Meeting-prep v2 §7 — sections audio liés + chaîne de série.
         try { loadBriefAudioFiles(briefId); } catch (e) {}
         try { loadBriefSeries(briefId); } catch (e) {}
@@ -7831,33 +7978,405 @@ async function renameBriefPrompt() {
     } catch (e) { showToast('Renommage échoué.', 'error'); }
 }
 
+// Préserve les sous-clés non-éditées du brief_json (notamment _meta.meeting_type
+// posé côté serveur) pour les ré-injecter au save.
+let _amendBriefOriginal = {};
+
 function toggleAmendBrief() {
     const pane = document.getElementById('brief-amend-pane');
-    pane.style.display = (pane.style.display === 'none') ? '' : 'none';
+    const opening = pane.style.display === 'none';
+    pane.style.display = opening ? '' : 'none';
+    if (opening) restoreAmendSectionsState();
+}
+
+// ─── Helpers DOM pour les listes répétables ───────────────────────────────
+function _amendInputRow(value, placeholder) {
+    const row = document.createElement('div');
+    row.className = 'amend-input-row';
+    row.style.cssText = 'display:flex;gap:0.3rem;align-items:center;';
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = value || '';
+    inp.placeholder = placeholder || '';
+    inp.style.cssText = 'flex:1;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;font-size:0.85rem;';
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'btn-primary fr-btn fr-btn--sm fr-btn--tertiary-no-outline';
+    rm.textContent = '×';
+    rm.setAttribute('aria-label', 'Supprimer');
+    rm.onclick = () => row.remove();
+    row.appendChild(inp);
+    row.appendChild(rm);
+    return row;
+}
+
+function _amendCard() {
+    const card = document.createElement('div');
+    card.className = 'amend-card';
+    card.style.cssText = 'border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.6rem;background:#fafbfc;';
+    return card;
+}
+
+function _amendCardHeader(label, onRemove) {
+    const hd = document.createElement('div');
+    hd.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:0.3rem;';
+    const left = document.createElement('span');
+    left.style.cssText = 'font-size:0.78rem;color:#64748b;';
+    left.innerHTML = '<span aria-hidden="true" style="cursor:grab;">⋮⋮</span> ' + label;
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'btn-primary fr-btn fr-btn--sm fr-btn--tertiary-no-outline';
+    rm.textContent = '✕';
+    rm.setAttribute('aria-label', 'Retirer');
+    rm.onclick = onRemove;
+    hd.appendChild(left);
+    hd.appendChild(rm);
+    return hd;
+}
+
+// ─── Add-row functions ────────────────────────────────────────────────────
+function addAmendAgendaItem(data) {
+    const list = document.getElementById('amend-agenda-list');
+    if (!list) return;
+    const item = data || { title: '', duration_minutes: 5, objective: '', key_questions: [] };
+    const card = _amendCard();
+    card.classList.add('amend-agenda-card');
+    const header = _amendCardHeader('Point d\\'agenda', () => card.remove());
+    card.appendChild(header);
+
+    const grid = document.createElement('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:2fr 1fr;gap:0.4rem;';
+    const titleWrap = document.createElement('div');
+    titleWrap.innerHTML = '<label class="fr-label" style="font-size:0.75rem;">Titre</label>';
+    const titleInp = document.createElement('input');
+    titleInp.type = 'text';
+    titleInp.className = 'amend-agenda-title';
+    titleInp.value = item.title || '';
+    titleInp.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    titleWrap.appendChild(titleInp);
+    const durWrap = document.createElement('div');
+    durWrap.innerHTML = '<label class="fr-label" style="font-size:0.75rem;">Durée (min)</label>';
+    const durInp = document.createElement('input');
+    durInp.type = 'number';
+    durInp.min = '1';
+    durInp.className = 'amend-agenda-duration';
+    durInp.value = Number(item.duration_minutes) || 5;
+    durInp.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    durWrap.appendChild(durInp);
+    grid.appendChild(titleWrap);
+    grid.appendChild(durWrap);
+    card.appendChild(grid);
+
+    const objLbl = document.createElement('label');
+    objLbl.className = 'fr-label';
+    objLbl.style.cssText = 'font-size:0.75rem;margin-top:0.3rem;display:block;';
+    objLbl.textContent = 'Objectif';
+    card.appendChild(objLbl);
+    const objTxt = document.createElement('textarea');
+    objTxt.rows = 2;
+    objTxt.className = 'amend-agenda-objective';
+    objTxt.value = item.objective || '';
+    objTxt.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    card.appendChild(objTxt);
+
+    const qLbl = document.createElement('label');
+    qLbl.className = 'fr-label';
+    qLbl.style.cssText = 'font-size:0.75rem;margin-top:0.3rem;display:block;';
+    qLbl.textContent = 'Questions clés';
+    card.appendChild(qLbl);
+    const qList = document.createElement('div');
+    qList.className = 'amend-agenda-questions';
+    qList.style.cssText = 'display:flex;flex-direction:column;gap:0.25rem;';
+    (item.key_questions || []).forEach(q => qList.appendChild(_amendInputRow(q, 'Question clé')));
+    card.appendChild(qList);
+    const addQ = document.createElement('button');
+    addQ.type = 'button';
+    addQ.className = 'btn-primary fr-btn fr-btn--sm fr-btn--tertiary';
+    addQ.textContent = '+ Question';
+    addQ.style.marginTop = '0.25rem';
+    addQ.onclick = () => qList.appendChild(_amendInputRow('', 'Question clé'));
+    card.appendChild(addQ);
+
+    list.appendChild(card);
+}
+
+function addAmendParticipant(data) {
+    const list = document.getElementById('amend-participants-list');
+    if (!list) return;
+    const item = data || { name: '', note: '' };
+    const card = _amendCard();
+    card.classList.add('amend-participant-card');
+    card.appendChild(_amendCardHeader('Participant', () => card.remove()));
+    const nameLbl = document.createElement('label');
+    nameLbl.className = 'fr-label';
+    nameLbl.style.cssText = 'font-size:0.75rem;display:block;';
+    nameLbl.textContent = 'Nom';
+    card.appendChild(nameLbl);
+    const nameInp = document.createElement('input');
+    nameInp.type = 'text';
+    nameInp.className = 'amend-participant-name';
+    nameInp.value = item.name || '';
+    nameInp.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    card.appendChild(nameInp);
+    const noteLbl = document.createElement('label');
+    noteLbl.className = 'fr-label';
+    noteLbl.style.cssText = 'font-size:0.75rem;display:block;margin-top:0.3rem;';
+    noteLbl.textContent = 'Note';
+    card.appendChild(noteLbl);
+    const noteTxt = document.createElement('textarea');
+    noteTxt.rows = 2;
+    noteTxt.className = 'amend-participant-note';
+    noteTxt.value = item.note || '';
+    noteTxt.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    card.appendChild(noteTxt);
+    list.appendChild(card);
+}
+
+function addAmendThread(data) {
+    const list = document.getElementById('amend-threads-list');
+    if (!list) return;
+    const item = data || { item: '', source: '' };
+    const card = _amendCard();
+    card.classList.add('amend-thread-card');
+    card.appendChild(_amendCardHeader('Point en suspens', () => card.remove()));
+    const itemLbl = document.createElement('label');
+    itemLbl.className = 'fr-label';
+    itemLbl.style.cssText = 'font-size:0.75rem;display:block;';
+    itemLbl.textContent = 'Item';
+    card.appendChild(itemLbl);
+    const itemTxt = document.createElement('textarea');
+    itemTxt.rows = 2;
+    itemTxt.className = 'amend-thread-item';
+    itemTxt.value = item.item || '';
+    itemTxt.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    card.appendChild(itemTxt);
+    const srcLbl = document.createElement('label');
+    srcLbl.className = 'fr-label';
+    srcLbl.style.cssText = 'font-size:0.75rem;display:block;margin-top:0.3rem;';
+    srcLbl.textContent = 'Source (optionnel)';
+    card.appendChild(srcLbl);
+    const srcInp = document.createElement('input');
+    srcInp.type = 'text';
+    srcInp.className = 'amend-thread-source';
+    srcInp.value = item.source || '';
+    srcInp.style.cssText = 'width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem;font-size:0.85rem;';
+    card.appendChild(srcInp);
+    list.appendChild(card);
+}
+
+function addAmendOpeningQuestion(value) {
+    const list = document.getElementById('amend-opening-list');
+    if (!list) return;
+    list.appendChild(_amendInputRow(value || '', 'Question d\\'ouverture'));
+}
+
+function addAmendRisk(value) {
+    const list = document.getElementById('amend-risks-list');
+    if (!list) return;
+    list.appendChild(_amendInputRow(value || '', 'Risque'));
+}
+
+function addAmendChecklistItem(value) {
+    const list = document.getElementById('amend-checklist-list');
+    if (!list) return;
+    list.appendChild(_amendInputRow(value || '', 'Élément de checklist'));
+}
+
+// ─── Fill form from brief_json ────────────────────────────────────────────
+function fillAmendForm(briefJson) {
+    _amendBriefOriginal = (briefJson && typeof briefJson === 'object' && !Array.isArray(briefJson)) ? briefJson : {};
+    const objEl = document.getElementById('amend-objective');
+    if (objEl) {
+        objEl.value = _amendBriefOriginal.objective_reformulated || '';
+        _updateAmendObjectiveCount();
+    }
+    const ctxEl = document.getElementById('amend-context');
+    const ctxNullEl = document.getElementById('amend-context-null');
+    if (ctxEl && ctxNullEl) {
+        const ctx = _amendBriefOriginal.context_recap;
+        if (ctx === null || ctx === undefined) {
+            ctxNullEl.checked = true;
+            ctxEl.value = '';
+            ctxEl.disabled = true;
+        } else {
+            ctxNullEl.checked = false;
+            ctxEl.value = ctx;
+            ctxEl.disabled = false;
+        }
+    }
+
+    // Clear lists
+    ['amend-agenda-list','amend-participants-list','amend-threads-list',
+     'amend-opening-list','amend-risks-list','amend-checklist-list'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '';
+    });
+
+    (_amendBriefOriginal.agenda || []).forEach(it => addAmendAgendaItem(it));
+    (_amendBriefOriginal.participants_notes || []).forEach(it => addAmendParticipant(it));
+    (_amendBriefOriginal.open_threads || []).forEach(it => addAmendThread(it));
+    (_amendBriefOriginal.opening_questions || []).forEach(v => addAmendOpeningQuestion(v));
+    (_amendBriefOriginal.risk_points || []).forEach(v => addAmendRisk(v));
+    (_amendBriefOriginal.preparation_checklist || []).forEach(v => addAmendChecklistItem(v));
+}
+
+function _updateAmendObjectiveCount() {
+    const inp = document.getElementById('amend-objective');
+    const out = document.getElementById('amend-objective-count');
+    if (inp && out) out.textContent = `${inp.value.length} caractères`;
+}
+
+// ─── Build brief_json from form ───────────────────────────────────────────
+function buildAmendBriefJson() {
+    // Preserve original brief_json (notamment _meta posé côté serveur).
+    const out = JSON.parse(JSON.stringify(_amendBriefOriginal || {}));
+
+    const objEl = document.getElementById('amend-objective');
+    out.objective_reformulated = (objEl && objEl.value || '').trim();
+
+    const ctxNullEl = document.getElementById('amend-context-null');
+    const ctxEl = document.getElementById('amend-context');
+    if (ctxNullEl && ctxNullEl.checked) {
+        out.context_recap = null;
+    } else {
+        out.context_recap = (ctxEl && ctxEl.value || '').trim();
+    }
+
+    const agenda = [];
+    document.querySelectorAll('#amend-agenda-list .amend-agenda-card').forEach(card => {
+        const title = (card.querySelector('.amend-agenda-title') || {}).value || '';
+        const dur = parseInt((card.querySelector('.amend-agenda-duration') || {}).value || '0', 10) || 0;
+        const obj = (card.querySelector('.amend-agenda-objective') || {}).value || '';
+        const qs = [];
+        card.querySelectorAll('.amend-agenda-questions input[type="text"]').forEach(inp => {
+            const v = (inp.value || '').trim();
+            if (v) qs.push(v);
+        });
+        agenda.push({ title: title.trim(), duration_minutes: dur, objective: obj.trim(), key_questions: qs });
+    });
+    out.agenda = agenda;
+
+    const participants = [];
+    document.querySelectorAll('#amend-participants-list .amend-participant-card').forEach(card => {
+        const name = ((card.querySelector('.amend-participant-name') || {}).value || '').trim();
+        const note = ((card.querySelector('.amend-participant-note') || {}).value || '').trim();
+        participants.push({ name, note });
+    });
+    out.participants_notes = participants;
+
+    const threads = [];
+    document.querySelectorAll('#amend-threads-list .amend-thread-card').forEach(card => {
+        const itm = ((card.querySelector('.amend-thread-item') || {}).value || '').trim();
+        const src = ((card.querySelector('.amend-thread-source') || {}).value || '').trim();
+        threads.push({ item: itm, source: src || null });
+    });
+    out.open_threads = threads;
+
+    const _collect = (sel) => {
+        const arr = [];
+        document.querySelectorAll(sel).forEach(inp => {
+            const v = (inp.value || '').trim();
+            if (v) arr.push(v);
+        });
+        return arr;
+    };
+    out.opening_questions = _collect('#amend-opening-list input[type="text"]');
+    out.risk_points = _collect('#amend-risks-list input[type="text"]');
+    out.preparation_checklist = _collect('#amend-checklist-list input[type="text"]');
+
+    return out;
+}
+
+function _validateAmendForm() {
+    const errs = [];
+    const obj = (document.getElementById('amend-objective') || {}).value || '';
+    if (!obj.trim()) errs.push('L\\'objectif reformulé est obligatoire.');
+    let agendaIdx = 0;
+    document.querySelectorAll('#amend-agenda-list .amend-agenda-card').forEach(card => {
+        agendaIdx += 1;
+        const title = ((card.querySelector('.amend-agenda-title') || {}).value || '').trim();
+        const dur = parseInt((card.querySelector('.amend-agenda-duration') || {}).value || '0', 10) || 0;
+        if (!title) errs.push(`Agenda #${agendaIdx} : titre manquant.`);
+        if (dur <= 0) errs.push(`Agenda #${agendaIdx} : durée doit être > 0.`);
+    });
+    return errs;
 }
 
 async function saveAmendBrief() {
     if (!_briefDetailId) return;
-    const text = document.getElementById('brief-amend-text').value;
-    let parsed;
-    try { parsed = JSON.parse(text); }
-    catch (e) { showToast('JSON invalide.', 'error'); return; }
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        showToast('Le brief doit être un objet JSON.', 'error');
+    const errs = _validateAmendForm();
+    if (errs.length) {
+        showToast(errs[0], 'error');
         return;
     }
+    const briefJson = buildAmendBriefJson();
+    const btn = document.getElementById('amend-save-btn');
+    const spin = document.getElementById('amend-save-spinner');
+    if (btn) btn.disabled = true;
+    if (spin) spin.style.display = '';
     try {
         const r = await fetch(`/api/meeting-prep/${_briefDetailId}/amend`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ brief_json: parsed }),
+            body: JSON.stringify({ brief_json: briefJson }),
         });
         const d = await r.json();
         if (!r.ok || !d.ok) throw new Error(d.error || 'amend_failed');
         showToast('Brief amendé.', 'success');
+        const pane = document.getElementById('brief-amend-pane');
+        if (pane) pane.style.display = 'none';
         showBriefDetail(_briefDetailId);
-    } catch (e) { showToast('Amendement échoué.', 'error'); }
+    } catch (e) {
+        showToast('Amendement échoué.', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+        if (spin) spin.style.display = 'none';
+    }
 }
+
+// ─── Sections collapsibles : toggle + persistance sessionStorage ──────────
+function _amendSectionKey(idx) { return `brief-amend-section-${idx}-collapsed`; }
+
+function _setAmendSectionCollapsed(header, collapsed) {
+    const fs = header.closest('.brief-amend-section');
+    if (!fs) return;
+    const body = fs.querySelector('.brief-amend-section-body');
+    const chev = header.querySelector('.brief-amend-chevron');
+    if (body) body.style.display = collapsed ? 'none' : '';
+    if (chev) chev.textContent = collapsed ? '▸' : '▾';
+}
+
+function restoreAmendSectionsState() {
+    document.querySelectorAll('.brief-amend-section-header[data-section-toggle]').forEach(hd => {
+        const idx = hd.getAttribute('data-section-toggle');
+        let collapsed = false;
+        try { collapsed = sessionStorage.getItem(_amendSectionKey(idx)) === '1'; } catch (e) {}
+        _setAmendSectionCollapsed(hd, collapsed);
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.brief-amend-section-header[data-section-toggle]').forEach(hd => {
+        hd.addEventListener('click', () => {
+            const fs = hd.closest('.brief-amend-section');
+            if (!fs) return;
+            const body = fs.querySelector('.brief-amend-section-body');
+            const collapsed = !(body && body.style.display === 'none') ? true : false;
+            _setAmendSectionCollapsed(hd, collapsed);
+            const idx = hd.getAttribute('data-section-toggle');
+            try { sessionStorage.setItem(_amendSectionKey(idx), collapsed ? '1' : '0'); } catch (e) {}
+        });
+    });
+    const objEl = document.getElementById('amend-objective');
+    if (objEl) objEl.addEventListener('input', _updateAmendObjectiveCount);
+    const ctxNullEl = document.getElementById('amend-context-null');
+    if (ctxNullEl) ctxNullEl.addEventListener('change', () => {
+        const ctxEl = document.getElementById('amend-context');
+        if (!ctxEl) return;
+        ctxEl.disabled = ctxNullEl.checked;
+        if (ctxNullEl.checked) ctxEl.value = '';
+    });
+});
 
 async function deleteBrief(briefId, titleRaw) {
     const title = (titleRaw || '').replace(/&#39;/g, "'");

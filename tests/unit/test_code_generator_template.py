@@ -108,11 +108,28 @@ def test_render_contains_expected_landmarks(rendered_html):
         "Mode avancé",              # toggle power-user
         "_buildInfoTooltip",        # checklist du (i)
         "file-detail-source-filename",  # nom de fichier audio bleuté en détail
-        "Préparer une réunion",     # 5e onglet (piste 1 meeting-prep first-class)
+        "Préparation de réunion",   # 5e onglet (piste 1 meeting-prep first-class)
         "data-trash-kind=\"brief\"", # corbeille unifiée — briefs aux côtés des fichiers
+        # Sprint meeting-prep amend UI : éditeur structuré (remplace textarea JSON).
+        "data-amend-form",
+        "data-add-agenda-item",
+        "data-add-participant",
+        "data-add-thread",
+        "data-add-opening-question",
+        "data-add-risk",
+        "data-add-checklist-item",
     ]
     for needle in must_have:
         assert needle in rendered_html, f"Motif attendu absent du rendu : {needle!r}"
+
+    # Assertion négative : l'ancienne textarea JSON brut a bien disparu de la
+    # fonction qui peuple le pane « Amender ». On vérifie que le pattern
+    # exact qui copiait le JSON dans la textarea n'apparaît plus.
+    forbidden = "brief-amend-text').value = JSON.stringify(b.brief_json"
+    assert forbidden not in rendered_html, (
+        "L'ancien comportement (textarea remplie avec JSON.stringify(brief_json)) "
+        "est toujours présent — l'éditeur structuré n'a pas remplacé l'éditeur brut."
+    )
 
 
 def test_render_user_name_injected(rendered_html):
