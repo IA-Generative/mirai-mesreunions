@@ -2944,35 +2944,36 @@ def api_test_drive_access():
         except Exception as exc:
             result["download_probe"]["error"] = str(exc)
 
-    # Step 7 (optionnel) : probe media-auth — l'ability "media_auth": true
-    # suggère que mesfichiers a un endpoint dédié pour obtenir un token
-    # short-lived (cookie signé ou query param) qui permet d'accéder à
-    # /media/. On essaye plusieurs conventions DRF courantes pour voir
-    # laquelle existe : GET puis POST sur /api/v1.0/items/<id>/media-auth/.
+    # Step 7 (optionnel) : probe media-auth. Mesfichiers utilise
+    # /api/v1.0/items/media-auth/ (detail=False) avec X-Original-URL pour
+    # déterminer l'item, et retourne dans les HEADERS de réponse les
+    # SigV4 AWS (Authorization, X-Amz-Date, X-Amz-Content-SHA256) que
+    # nginx-ingress doit ré-injecter sur la requête S3 amont. Si ces
+    # headers sont absents en sortie, nginx proxifie sans signature → S3 403.
+    # On dump TOUS les headers de réponse pour diag.
     if first_child_id:
-        result["media_auth_probes"] = []
-        for method in ("GET", "POST"):
-            url_ma = DRIVE_BASE_URL.rstrip("/") + f"/api/v1.0/items/{first_child_id}/media-auth/"
-            probe = {"method": method, "url": url_ma}
+        media_path = f"/media/item/{first_child_id}/probe.bin"
+        url_ma = DRIVE_BASE_URL.rstrip("/") + "/api/v1.0/items/media-auth/"
+        probe = {"url": url_ma, "x_original_url": media_path}
+        try:
+            resp = _req.get(
+                url_ma,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "X-Original-URL": media_path,
+                },
+                timeout=10,
+                allow_redirects=False,
+            )
+            probe["status_code"] = resp.status_code
+            probe["all_headers"] = dict(resp.headers)
             try:
-                resp = _req.request(
-                    method,
-                    url_ma,
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=10,
-                    allow_redirects=False,
-                )
-                probe["status_code"] = resp.status_code
-                probe["content_type"] = resp.headers.get("content-type")
-                probe["set_cookie"] = resp.headers.get("set-cookie")
-                probe["location"] = resp.headers.get("location")
-                try:
-                    probe["body_json"] = resp.json()
-                except Exception:
-                    probe["body_text"] = (resp.text or "")[:300]
-            except Exception as exc:
-                probe["error"] = str(exc)
-            result["media_auth_probes"].append(probe)
+                probe["body_json"] = resp.json()
+            except Exception:
+                probe["body_text"] = (resp.text or "")[:300]
+        except Exception as exc:
+            probe["error"] = str(exc)
+        result["media_auth_probe"] = probe
 
     return jsonify(result), 200
 
