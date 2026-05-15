@@ -63,4 +63,7 @@ DOCUMENTS DE PRÉPARATION ET COMPTES-RENDUS ANTÉRIEURS extraits du Drive (peut 
 
 COMPTES-RENDUS D'ATELIERS ANTÉRIEURS isolément identifiables (extraits — peut être vide) :
 {PRIOR_MEETINGS}
+
+RÉUNION PRÉCÉDENTE de cette série — points clés extraits par le pipeline (peut être vide) :
+{PRIOR_KEY_POINTS}
 ---

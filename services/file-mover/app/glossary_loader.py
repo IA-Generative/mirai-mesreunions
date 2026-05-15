@@ -156,3 +156,35 @@ def filter_relevant(terms: list[str], transcript: str, max_terms: int) -> list[s
     candidates.sort(key=lambda x: (-x[0], x[1]))
     selected = sorted({t for _, t in candidates[:max_terms]})
     return selected
+
+
+# ─── Glossaire utilisateur (§5c du plan meeting-prep v2) ─────────
+
+
+def load_user_glossary(user_sub: str, db) -> set:
+    """Charge le glossaire utilisateur depuis ``user_glossary_terms``.
+
+    Cap 300 termes (limite plus haute = bruit + augmente la latence du
+    ``filter_relevant`` en aval). Exclut ``blacklisted = TRUE``. Tri
+    ``(occurrence_count DESC, last_seen_at DESC)`` pour favoriser les
+    termes les plus utilisés.
+
+    ``db`` est une SQLAlchemy session déjà ouverte par le caller (typiquement
+    file-puller). Best-effort : si la table n'existe pas (migration non
+    appliquée), retourne un set vide en logguant un warning.
+    """
+    try:
+        from sqlalchemy import text as _sql_text
+        rows = db.execute(
+            _sql_text(
+                "SELECT term FROM user_glossary_terms "
+                "WHERE user_sub = :u AND NOT blacklisted "
+                "ORDER BY occurrence_count DESC, last_seen_at DESC "
+                "LIMIT 300"
+            ),
+            {"u": user_sub},
+        ).fetchall()
+        return {r[0] for r in rows}
+    except Exception as exc:
+        logger.warning("load_user_glossary failed for user=%s: %s", user_sub, exc)
+        return set()

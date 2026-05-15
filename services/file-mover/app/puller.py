@@ -319,9 +319,16 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "cleaned_text",
         "reformulated_text",
         "meeting_analysis_json",
+        "absentee_summary",
         "suggested_filename",
         "key_points_summary",
         "kevent_job_id",
+        # meeting-prep v2 — reprocess tracking
+        "meeting_brief_id",
+        "reprocess_version",
+        "reprocessed_with_brief_id",
+        "last_reprocessed_at",
+        "reprocess_history",
     }
     db = SessionLocal()
     try:
@@ -511,6 +518,139 @@ def _orphan_watchdog_loop() -> None:
                              _ORPHAN_WATCHDOG_INTERVAL_S)
 
 
+def _run_llm_chain_for_audio(
+    base_for_llm: str,
+    speaker_tagged: Optional[str],
+    *,
+    llm,
+    glossary_terms: Optional[list[str]] = None,
+    include_metadata: bool = True,
+) -> tuple[dict, str]:
+    """Exécute la chaîne LLM post-transcription (steps 3b-bis → 3f).
+
+    Sous-fonction composable extraite de ``_transcribe_via_kevent`` (cf
+    refactor meeting-prep v2 §A) pour être réutilisée par
+    ``POST /api/v1/audio/<id>/reprocess`` (cf §5.2 du plan).
+
+    Paramètres :
+      - ``base_for_llm`` : texte de départ (speaker_tagged ou transcription).
+      - ``speaker_tagged`` : texte taggé par locuteur (si dispo) ; sert au
+        ``meeting_analysis`` pour distinguer participants présents vs cités.
+      - ``glossary_terms`` : liste explicite de termes à passer au
+        glossary_correction. Si ``None``, fallback sur ``_GLOSSARY_TERMS``
+        (statique chargé au boot). Le caller peut fusionner statique +
+        brief + user-glossary.
+      - ``include_metadata`` : True pour le run initial (suggéré_filename,
+        key_points). False pour les reprocess (on garde l'existant).
+
+    Retourne ``(updates, status_delta)`` où :
+      - ``updates`` est un dict de colonnes à écrire (clé → valeur).
+      - ``status_delta`` est ``"kevent_completed"`` (succès) ou
+        ``"kevent_partially_completed"`` (au moins une étape obligatoire
+        a renvoyé None).
+    """
+    updates: dict = {}
+    status_delta = "kevent_completed"
+    glossary = list(glossary_terms) if glossary_terms is not None else list(_GLOSSARY_TERMS)
+
+    if llm is None:
+        # Pas de LiteLLM configuré → on sort sans tenter aucune étape.
+        return updates, status_delta
+
+    # 3b-bis. Glossary correction.
+    if KEVENT_GLOSSARY_CORRECTION_ENABLED and glossary:
+        corrected = mi.apply_glossary_correction(
+            base_for_llm, llm, LLM_MODEL_MEDIUM,
+            glossary_terms=glossary,
+            max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+        )
+        if corrected:
+            updates["glossary_corrected_text"] = corrected
+            base_for_llm = corrected
+
+    # 3b-ter. Suggested filename + key points (1er run uniquement).
+    if include_metadata and KEVENT_FILENAME_SUGGESTION_ENABLED:
+        meta = mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL)
+        if meta:
+            if meta.get("title"):
+                updates["suggested_filename"] = meta["title"]
+            kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
+            if kp_serialized:
+                updates["key_points_summary"] = kp_serialized
+
+    # 3c. OOB cleaning.
+    if KEVENT_OOB_CLEANING_ENABLED:
+        cleaned = mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM)
+        if cleaned:
+            updates["cleaned_text"] = cleaned
+        else:
+            status_delta = "kevent_partially_completed"
+
+    # 3d. Reformulation.
+    if KEVENT_REFORMULATION_ENABLED:
+        source = updates.get("cleaned_text") or base_for_llm
+        reformulated = mi.reformulate(source, llm, LLM_MODEL_MEDIUM)
+        if reformulated:
+            updates["reformulated_text"] = reformulated
+        else:
+            status_delta = "kevent_partially_completed"
+
+    # 3e. Meeting analysis.
+    if KEVENT_MEETING_ANALYSIS_ENABLED:
+        source = updates.get("cleaned_text") or base_for_llm
+        analysis = mi.analyse_meeting(
+            source, llm, LLM_MODEL_LARGE,
+            speaker_tagged_text=speaker_tagged,
+        )
+        serialized = mi.serialize_analysis(analysis)
+        if serialized is not None:
+            updates["meeting_analysis_json"] = serialized
+        else:
+            status_delta = "kevent_partially_completed"
+
+    # 3f. Absentee summary.
+    if KEVENT_ABSENTEE_SUMMARY_ENABLED:
+        source = updates.get("cleaned_text") or base_for_llm
+        summary = mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM)
+        if summary:
+            updates["absentee_summary"] = summary
+        else:
+            status_delta = "kevent_partially_completed"
+
+    return updates, status_delta
+
+
+def _fetch_brief_glossary_terms(brief_id, db) -> tuple[list[str], Optional[str]]:
+    """Charge le brief par id et retourne ``(glossary_terms, initial_prompt)``.
+
+    ``glossary_terms`` est la liste extraite via
+    ``extract_full_glossary_terms_from_brief()`` (cap 200).
+    ``initial_prompt`` est la phrase Whisper via
+    ``extract_whisper_initial_prompt()`` (cap 50 termes / 200 tokens).
+
+    Best-effort : tout échec → ``([], None)`` + warning loggé.
+    """
+    if not brief_id:
+        return [], None
+    try:
+        from libs.shared.app.models import MeetingBrief
+        from app.glossary_from_brief import (
+            extract_full_glossary_terms_from_brief,
+            extract_whisper_initial_prompt,
+        )
+        brief = db.query(MeetingBrief).filter(MeetingBrief.id == brief_id).first()
+        if brief is None:
+            return [], None
+        bjson = brief.brief_json or {}
+        documents = brief.documents or []
+        terms = sorted(extract_full_glossary_terms_from_brief(bjson, documents))
+        initial = extract_whisper_initial_prompt(bjson, documents) or None
+        return terms, initial
+    except Exception:
+        logger.exception("fetch_brief_glossary_terms failed for brief=%s", brief_id)
+        return [], None
+
+
 def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                             file_data, payload: dict) -> None:
     """
@@ -580,6 +720,35 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             logger.exception("Failed to persist kevent_job_id=%s for %s",
                              job_id, audio_file_id)
 
+    # meeting-prep v2 §5.1bis : si l'audio est déjà auto-lié à un brief
+    # (auto_link_audio_to_brief() a tourné en amont dans _perform_pull),
+    # on extrait un mini-glossaire ciblé (≤50 termes ≈ 200 tokens) et on
+    # le passe en ``initial_prompt`` Whisper. Best-effort : si la lookup
+    # ou l'extraction échoue, on tombe en transcription nominale.
+    initial_prompt_for_whisper: Optional[str] = None
+    brief_glossary_terms_for_llm: list[str] = []
+    try:
+        if SessionLocal is not None:
+            _db_probe = SessionLocal()
+            try:
+                rec = _db_probe.query(UserAudioFile).filter(
+                    UserAudioFile.id == audio_file_id
+                ).first()
+                brief_id = getattr(rec, "meeting_brief_id", None) if rec else None
+                if brief_id:
+                    terms, prompt = _fetch_brief_glossary_terms(brief_id, _db_probe)
+                    brief_glossary_terms_for_llm = terms
+                    initial_prompt_for_whisper = prompt
+                    if prompt:
+                        logger.info(
+                            "kevent: initial_prompt=%d chars for brief=%s (audio=%s)",
+                            len(prompt), brief_id, audio_file_id,
+                        )
+            finally:
+                _db_probe.close()
+    except Exception:
+        logger.exception("kevent: failed to load brief glossary for audio=%s", audio_file_id)
+
     def _kevent_transcribe():
         if KEVENT_ASYNC_MODE:
             return client.transcribe_async(
@@ -592,6 +761,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
                 on_submitted=_on_kevent_submitted,
+                initial_prompt=initial_prompt_for_whisper,
             )
         return client.transcribe(
             audio_bytes=audio_bytes,
@@ -742,80 +912,46 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     # if available (richer context for the model), else the raw transcript.
     base_for_llm = speaker_tagged or text
 
-    # 3b-bis. Glossary correction (medium model) — fixes administrative acronyms
-    # phonetically mistranscribed by Whisper (cf docs/integrate-with-kevent.md
-    # § Glossaire). Runs BEFORE OOB cleaning so cleaning + reformulation +
-    # analysis all see the corrected sigles.
-    if KEVENT_GLOSSARY_CORRECTION_ENABLED and llm is not None and _GLOSSARY_TERMS:
-        corrected = mi.apply_glossary_correction(
-            base_for_llm, llm, LLM_MODEL_MEDIUM,
-            glossary_terms=_GLOSSARY_TERMS,
-            max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
-        )
-        if corrected:
-            updates["glossary_corrected_text"] = corrected
-            base_for_llm = corrected  # downstream steps see the corrected text
-        # No status downgrade if no relevant terms (None) — glossary is
-        # opportunistic, not a required step.
+    # Steps 3b-bis → 3f via la sous-fonction composable (refactor v2 §A).
+    # Le glossaire effectif fusionne le statique avec les termes du brief
+    # auto-lié (si présent), pour que glossary_correction LLM corrige
+    # AUSSI les sigles découverts via le brief.
+    effective_glossary: list[str] = list(_GLOSSARY_TERMS)
+    if brief_glossary_terms_for_llm:
+        existing = set(effective_glossary)
+        for t in brief_glossary_terms_for_llm:
+            if t not in existing:
+                effective_glossary.append(t)
+                existing.add(t)
 
-    # 3b-ter. Suggested filename + 3-5 key points via the small LLM (one
-    # chat_json call → cheapest LLM step in the pipeline). Used by the
-    # user-facing downloads to produce filenames like "Réunion budget Q3
-    # 2026-05-09.docx" and to render a subtitle in the mydevices file list.
-    if KEVENT_FILENAME_SUGGESTION_ENABLED and llm is not None:
-        meta = mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL)
-        if meta:
-            if meta.get("title"):
-                updates["suggested_filename"] = meta["title"]
-            kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
-            if kp_serialized:
-                updates["key_points_summary"] = kp_serialized
-        # No status downgrade — metadata is opportunistic.
+    # Charge le glossaire utilisateur global (§5c) pour ce user_sub.
+    try:
+        if SessionLocal is not None:
+            _db_g = SessionLocal()
+            try:
+                user_sub_g = (payload or {}).get("user_sub") or ""
+                if user_sub_g:
+                    from app.glossary_loader import load_user_glossary
+                    user_terms = load_user_glossary(user_sub_g, _db_g) or set()
+                    existing = set(effective_glossary)
+                    for t in user_terms:
+                        if t and t not in existing:
+                            effective_glossary.append(t)
+                            existing.add(t)
+            finally:
+                _db_g.close()
+    except Exception:
+        logger.exception("kevent: failed to load user glossary for audio=%s", audio_file_id)
 
-    # 3c. Out-of-band cleaning (medium model).
-    if KEVENT_OOB_CLEANING_ENABLED and llm is not None:
-        cleaned = mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM)
-        if cleaned:
-            updates["cleaned_text"] = cleaned
-        else:
-            final_status = "kevent_partially_completed"
-
-    # 3d. Reformulation (medium model).
-    if KEVENT_REFORMULATION_ENABLED and llm is not None:
-        # Prefer the cleaned text when available — fewer parasites = better narrative.
-        source = updates.get("cleaned_text") or base_for_llm
-        reformulated = mi.reformulate(source, llm, LLM_MODEL_MEDIUM)
-        if reformulated:
-            updates["reformulated_text"] = reformulated
-        else:
-            final_status = "kevent_partially_completed"
-
-    # 3e. Meeting analysis (large model).
-    if KEVENT_MEETING_ANALYSIS_ENABLED and llm is not None:
-        # Same logic — analyse on the cleanest available text. On passe
-        # speaker_tagged_text (si dispo) pour que le LLM puisse distinguer
-        # participants_presents vs participants_cites (B7).
-        source = updates.get("cleaned_text") or base_for_llm
-        analysis = mi.analyse_meeting(
-            source, llm, LLM_MODEL_LARGE,
-            speaker_tagged_text=updates.get("speaker_tagged_text") or speaker_tagged,
-        )
-        serialized = mi.serialize_analysis(analysis)
-        if serialized is not None:
-            updates["meeting_analysis_json"] = serialized
-        else:
-            final_status = "kevent_partially_completed"
-
-    # 3f. Absentee debrief (medium model). Self-contained 150-300 words written
-    # for someone who missed the meeting. Best-effort: a failure just leaves
-    # the column NULL.
-    if KEVENT_ABSENTEE_SUMMARY_ENABLED and llm is not None:
-        source = updates.get("cleaned_text") or base_for_llm
-        summary = mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM)
-        if summary:
-            updates["absentee_summary"] = summary
-        else:
-            final_status = "kevent_partially_completed"
+    chain_updates, chain_status = _run_llm_chain_for_audio(
+        base_for_llm, speaker_tagged,
+        llm=llm,
+        glossary_terms=effective_glossary,
+        include_metadata=True,
+    )
+    updates.update(chain_updates)
+    if chain_status == "kevent_partially_completed":
+        final_status = "kevent_partially_completed"
 
     _set_user_audio_status(audio_file_id, final_status, **updates)
     logger.info(
@@ -1014,6 +1150,32 @@ def _perform_pull(payload: dict) -> dict:
                     payload=payload,
                 )
             elif backend == "kevent":
+                # meeting-prep v2 §B : auto-lien amont avant transcription.
+                # Idempotent : si meeting_brief_id déjà set (typiquement
+                # un retry queue), on saute. Pas de raise : tout échec
+                # downgrade silencieusement en "pas de brief lié".
+                try:
+                    if not audio_file.meeting_brief_id:
+                        brief_id, _scored = auto_link_audio_to_brief(
+                            audio_id=audio_file.id,
+                            user_sub=user_sub,
+                            audio_filename=payload.get("original_filename") or transcoded_filename,
+                            audio_upload_at=audio_file.created_at,
+                            db=db,
+                        )
+                        if brief_id:
+                            audio_file.meeting_brief_id = brief_id
+                            db.commit()
+                            logger.info(
+                                "auto-link: audio=%s linked to brief=%s",
+                                audio_file.id, brief_id,
+                            )
+                except Exception:
+                    logger.exception(
+                        "auto-link: failed for audio=%s (non-fatal, continuing without brief link)",
+                        audio_file.id,
+                    )
+
                 _set_user_audio_status(
                     audio_file.id,
                     "kevent_transcribing",
@@ -1425,6 +1587,305 @@ def pull_trigger():
         logger.exception("Trigger-driven drain failed")
         return jsonify({"error": "drain_failed"}), 500
     return jsonify({"status": "ok", "drained": handled})
+
+
+# ─── Meeting-prep v2 : auto-link audio↔brief (cf §4 du plan) ────
+
+
+def _tokenize_fr(s: str) -> set:
+    """Tokenisation simple FR pour le scoring Jaccard."""
+    import re as _re
+    if not s:
+        return set()
+    return {t for t in _re.findall(r"[a-z0-9éèêàâïôûç]{3,}", s.lower())}
+
+
+def _score_brief_for_audio(brief, audio_filename: str,
+                            audio_upload_at: datetime,
+                            already_linked_briefs: set) -> tuple:
+    """Calcule le score multi-signaux d'un brief candidat pour un audio.
+
+    Retourne ``(score, breakdown)``. Cf §4 du plan : poids
+    similarity=0.30, temporal=0.40, drive_colocation=0.10,
+    engagement=0.10, anti_rebound=0.10.
+    """
+    bsubj = (getattr(brief, "subject", None) or getattr(brief, "title", None) or "") + " "
+    bj = getattr(brief, "brief_json", None) or {}
+    if isinstance(bj, dict):
+        bsubj += (bj.get("objective_reformulated") or "")
+    a_tokens = _tokenize_fr(audio_filename)
+    b_tokens = _tokenize_fr(bsubj)
+    union = a_tokens | b_tokens
+    sim = (len(a_tokens & b_tokens) / len(union)) if union else 0.0
+
+    # Proximité temporelle.
+    prox = 0.0
+    bc = getattr(brief, "created_at", None)
+    if bc and audio_upload_at:
+        delta_hours = abs((audio_upload_at - bc).total_seconds()) / 3600.0
+        if delta_hours <= 24:
+            prox = 1.0
+        elif delta_hours >= 24 * 14:
+            prox = 0.0
+        else:
+            prox = 1.0 - (delta_hours - 24) / (24 * 14 - 24)
+
+    # Co-localisation Drive (préfixe commun ≥ 4 chars).
+    drive_loc = 0.0
+    folder = getattr(brief, "drive_folder_id", None) or ""
+    if folder and audio_filename:
+        common = 0
+        for ca, cb in zip(audio_filename.lower(), folder.lower()):
+            if ca == cb:
+                common += 1
+            else:
+                break
+        if common >= 4:
+            drive_loc = 1.0
+
+    # Engagement récent.
+    engagement = 0.0
+    lv = getattr(brief, "last_viewed_at", None)
+    if lv:
+        delta = datetime.now(timezone.utc) - lv
+        if delta.total_seconds() <= 24 * 3600:
+            engagement = 1.0
+
+    # Anti-rebond.
+    anti_rebound = 0.0 if str(brief.id) in already_linked_briefs else 1.0
+
+    score = 0.30 * sim + 0.40 * prox + 0.10 * drive_loc + 0.10 * engagement + 0.10 * anti_rebound
+    return score, {
+        "similarity": round(sim, 3),
+        "temporal": round(prox, 3),
+        "drive_colocation": round(drive_loc, 3),
+        "engagement": round(engagement, 3),
+        "anti_rebound": round(anti_rebound, 3),
+    }
+
+
+def auto_link_audio_to_brief(audio_id, user_sub: str,
+                              audio_filename: str,
+                              audio_upload_at: datetime,
+                              *, db=None,
+                              score_threshold: float = 0.55,
+                              top2_gap: float = 0.15):
+    """Auto-lien déterministe avant transcription (§4 du plan).
+
+    Match strict : top-1 > ``score_threshold`` ET écart ≥ ``top2_gap`` avec
+    le top-2 (sinon ambiguïté). Pas de DB write si pas de match.
+
+    Retourne ``(brief_id|None, scored_candidates)``. Le caller persiste
+    ``UserAudioFile.meeting_brief_id`` s'il y a match. ``db`` peut être
+    fourni pour tests ; sinon ouvre une SessionLocal locale.
+    """
+    from libs.shared.app.models import MeetingBrief
+    owns_db = db is None
+    if owns_db:
+        if SessionLocal is None:
+            return None, []
+        db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        candidates = (
+            db.query(MeetingBrief)
+            .filter(
+                MeetingBrief.user_sub == user_sub,
+                MeetingBrief.trashed_at.is_(None),
+                MeetingBrief.created_at > cutoff,
+            )
+            .all()
+        )
+        if not candidates:
+            return None, []
+
+        # Récupère l'ensemble des briefs déjà liés à un audio (anti-rebond).
+        from libs.shared.app.models import UserAudioFile as _UAF
+        linked_brief_ids = {
+            str(r.meeting_brief_id)
+            for r in db.query(_UAF)
+            .filter(_UAF.user_sub == user_sub,
+                    _UAF.meeting_brief_id.isnot(None))
+            .all()
+        }
+
+        scored = []
+        for b in candidates:
+            score, breakdown = _score_brief_for_audio(
+                b, audio_filename, audio_upload_at, linked_brief_ids,
+            )
+            scored.append({
+                "brief_id": str(b.id),
+                "score": score,
+                "breakdown": breakdown,
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        if not scored:
+            return None, []
+        top1 = scored[0]
+        if top1["score"] <= score_threshold:
+            return None, scored
+        if len(scored) >= 2:
+            gap = top1["score"] - scored[1]["score"]
+            if gap < top2_gap:
+                return None, scored
+        return top1["brief_id"], scored
+    finally:
+        if owns_db:
+            db.close()
+
+
+# ─── Re-traitement avec glossaire amendé (§5 du plan) ────────────
+
+
+@app.route("/api/v1/audio/<audio_id>/reprocess", methods=["POST"])
+def reprocess_audio(audio_id: str):
+    """Relance la chaîne LLM (glossary_correction → ... → meeting_analysis)
+    avec un glossaire fusionné (statique + termes du brief + glossaire user).
+
+    Body: ``{user_sub, glossary_from_brief_id?, force?}``.
+
+    Idempotence : si ``reprocessed_with_brief_id == glossary_from_brief_id``
+    et ``!force`` → 200 avec ``{reprocessed: false, reason: 'idempotent'}``.
+    Pose un advisory lock postgres sur audio_id pour éviter concurrence.
+
+    .. note::
+
+       **Implémentation partielle (meeting-prep v2).** Le squelette du flux
+       (idempotence, lock, lecture du brief, fusion glossaire) est en place,
+       mais la séquence LLM (glossary_correction → oob_cleaning →
+       reformulation → meeting_analysis → absentee_summary) n'est PAS
+       encore branchée — elle dépend d'une factorisation de
+       ``_transcribe_via_kevent`` en sous-fonctions composables (cf TODO
+       l.415 du fichier). Pour l'instant, l'endpoint répond 501 quand un
+       run effectif est demandé, sauf pour le cas idempotent.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    brief_id = data.get("glossary_from_brief_id") or None
+    force = bool(data.get("force"))
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+
+    from libs.shared.app.models import UserAudioFile
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        if not uaf.transcription_text and not uaf.speaker_tagged_text:
+            return jsonify({"error": "no_transcription"}), 410
+
+        # Idempotence.
+        prev = str(uaf.reprocessed_with_brief_id) if uaf.reprocessed_with_brief_id else None
+        if not force and prev == (brief_id or None):
+            return jsonify({"reprocessed": False, "reason": "idempotent"}), 200
+
+        # Advisory lock postgres (best-effort — pas en SQLite).
+        try:
+            db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:k1, :k2)"),
+                {"k1": 4242, "k2": hash(str(audio_id)) & 0x7FFFFFFF},
+            )
+        except Exception:
+            pass  # SQLite ou pg_locks indisponible.
+
+        # Snapshot état actuel → reprocess_history (cap 5 FIFO).
+        prev_entry = {
+            "version": int(uaf.reprocess_version or 0),
+            "at": datetime.now(timezone.utc).isoformat(),
+            "brief_id": prev,
+            "glossary_term_count": None,  # rempli plus bas
+            "prev": {
+                "glossary_corrected_text": uaf.glossary_corrected_text,
+                "reformulated_text": uaf.reformulated_text,
+                "key_points_summary": uaf.key_points_summary,
+                "meeting_analysis_json": uaf.meeting_analysis_json,
+            },
+        }
+        history = list(uaf.reprocess_history or [])
+
+        # Construit le glossaire fusionné : statique + brief + user.
+        effective_glossary: list[str] = list(_GLOSSARY_TERMS)
+        seen = set(effective_glossary)
+        brief_terms_added = 0
+        if brief_id:
+            brief_terms, _ = _fetch_brief_glossary_terms(brief_id, db)
+            for t in brief_terms:
+                if t and t not in seen:
+                    effective_glossary.append(t)
+                    seen.add(t)
+                    brief_terms_added += 1
+        try:
+            from app.glossary_loader import load_user_glossary
+            for t in load_user_glossary(user_sub, db) or set():
+                if t and t not in seen:
+                    effective_glossary.append(t)
+                    seen.add(t)
+        except Exception:
+            logger.exception("reprocess: failed to load user glossary for %s", user_sub)
+        prev_entry["glossary_term_count"] = len(effective_glossary)
+
+        # Pose status intermédiaire + bump version.
+        new_version = int(uaf.reprocess_version or 0) + 1
+        history.append(prev_entry)
+        if len(history) > 5:
+            history = history[-5:]
+        try:
+            uaf.transcription_status = "kevent_reprocessing"
+            uaf.reprocess_version = new_version
+            uaf.reprocess_history = history
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("reprocess: failed to commit reprocessing status for %s", audio_id)
+            return jsonify({"error": "db_write_failed"}), 500
+
+        # Relance la chaîne LLM via la sous-fonction composable.
+        # SKIP transcription / diarisation / speaker_naming.
+        base_for_llm = uaf.speaker_tagged_text or uaf.glossary_corrected_text or uaf.transcription_text
+        speaker_tagged = uaf.speaker_tagged_text
+        llm = _build_llm_client()
+        chain_updates, chain_status = _run_llm_chain_for_audio(
+            base_for_llm, speaker_tagged,
+            llm=llm,
+            glossary_terms=effective_glossary,
+            include_metadata=False,  # garde le filename/key_points existants
+        )
+
+        # Status final + tracking reprocess.
+        final_status = (
+            "kevent_completed"
+            if chain_status == "kevent_completed"
+            else "kevent_partially_completed"
+        )
+        chain_updates["reprocessed_with_brief_id"] = brief_id
+        chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
+        _set_user_audio_status(audio_id, final_status, **chain_updates)
+
+        logger.info(
+            "reprocess: audio=%s done version=%d brief_id=%s glossary_terms=%d outputs=%d",
+            audio_id, new_version, brief_id, len(effective_glossary), len(chain_updates),
+        )
+        return jsonify({
+            "reprocessed": True,
+            "glossary_terms_used": len(effective_glossary),
+            "brief_terms_added": brief_terms_added,
+            "version": new_version,
+            "status": final_status,
+        }), 200
+    finally:
+        db.close()
 
 
 def create_app():

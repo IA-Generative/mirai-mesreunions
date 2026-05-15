@@ -30,7 +30,10 @@ _SECTION_TITLES = {
     # et participants_cites sont tous deux absents/vides.
     "participants_presents": "Participants présents",
     "participants_cites": "Personnes citées",
-    "actors": "Acteurs",
+    # Meeting-prep v2 §8 : la clé legacy "actors" est rendue sous "Acteurs
+    # présents" pour aligner avec les tests / l'UX (anciens CRs B7-) ; les
+    # nouveaux CRs utilisent participants_presents/participants_cites.
+    "actors": "Acteurs présents",
     "themes": "Thématiques abordées",
     "decisions": "Décisions et points en action",
     "gaps": "Sujets non abordés",
@@ -39,23 +42,107 @@ _SECTION_TITLES = {
 
 
 def _stringify(value: Any) -> str:
-    """Convert a JSON-ish value to a human-readable single line."""
+    """Fallback : convertit une valeur en ligne lisible.
+
+    Meeting-prep v2 §8 : ne dump JAMAIS les clés JSON en clair (``name:``,
+    ``role:``, etc.) — cause originale du bug d'affichage du CR. Pour les
+    dicts, on s'appuie sur les renderers par section (cf
+    ``_render_*``) ; ce fallback est utilisé uniquement pour des dicts non
+    structurés rencontrés à l'usage. Heuristique : on extrait les valeurs,
+    pas les clés.
+    """
     if isinstance(value, str):
         return value.strip()
     if isinstance(value, (int, float, bool)) or value is None:
         return "" if value is None else str(value)
     if isinstance(value, dict):
-        # Render dicts as "key: value" pairs separated by " — "
+        # Concatène les valeurs scalaires, ignore les clés (évite "name:").
         parts = []
-        for k, v in value.items():
+        for v in value.values():
             sv = _stringify(v)
-            if not sv or sv.lower() in ("none", "null"):
-                continue
-            parts.append(f"{k}: {sv}")
+            if sv and sv.lower() not in ("none", "null"):
+                parts.append(sv)
         return " — ".join(parts)
     if isinstance(value, list):
         return ", ".join(_stringify(v) for v in value if _stringify(v))
     return str(value)
+
+
+# ─── Renderers par section (§8 du plan) ─────────────────────────────────────
+
+
+def _render_participant(item: Any) -> str:
+    """Rendu d'un participant : ``Nom (Rôle)`` ou ``Nom — Contexte`` si cités."""
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return _stringify(item)
+    name = (item.get("name") or "").strip()
+    role = (item.get("role") or "").strip()
+    context = (item.get("context") or "").strip()
+    parts = [name] if name else []
+    if role:
+        parts[-1] = f"{name} ({role})" if name else f"({role})"
+    if context:
+        parts.append(context)
+    return " — ".join(p for p in parts if p)
+
+
+def _render_theme(item: Any) -> str:
+    """Rendu d'un thème : ``**Titre** — Résumé``."""
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return _stringify(item)
+    title = (item.get("title") or "").strip()
+    summary = (item.get("summary") or "").strip()
+    if title and summary:
+        return f"**{title}** — {summary}"
+    return title or summary or _stringify(item)
+
+
+def _render_decision(item: Any) -> str:
+    """Rendu d'une décision : ``Item (👤 Owner, ⏰ Due)``."""
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return _stringify(item)
+    text = (item.get("item") or item.get("summary") or item.get("title") or "").strip()
+    owner = (item.get("owner") or "").strip()
+    due = (item.get("due") or "").strip()
+    suffix_parts: list[str] = []
+    if owner:
+        suffix_parts.append(f"👤 {owner}")
+    if due:
+        suffix_parts.append(f"⏰ {due}")
+    if suffix_parts and text:
+        return f"{text} ({', '.join(suffix_parts)})"
+    return text or _stringify(item)
+
+
+def _render_plain(item: Any) -> str:
+    """Rendu d'une recommandation / gap : valeur seule, pas de clé."""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        # Préférence : item ou summary > toute autre clé.
+        for k in ("item", "summary", "title", "name"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return _stringify(item)
+    return _stringify(item)
+
+
+_SECTION_RENDERERS = {
+    "participants_presents": _render_participant,
+    "participants_cites": _render_participant,
+    "actors": _render_participant,
+    "themes": _render_theme,
+    "decisions": _render_decision,
+    "gaps": _render_plain,
+    "recommendations": _render_plain,
+}
 
 
 def meeting_analysis_to_markdown(analysis: dict | str) -> str:
@@ -85,13 +172,14 @@ def meeting_analysis_to_markdown(analysis: dict | str) -> str:
         if not items:
             continue
         out.append(f"\n## {title}\n")
+        renderer = _SECTION_RENDERERS.get(key, _render_plain)
         if isinstance(items, list):
             for it in items:
-                line = _stringify(it)
+                line = renderer(it)
                 if line:
                     out.append(f"- {line}\n")
         else:
-            line = _stringify(items)
+            line = renderer(items)
             if line:
                 out.append(f"{line}\n")
     return "".join(out).rstrip() + "\n"

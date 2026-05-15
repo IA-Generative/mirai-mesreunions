@@ -28,7 +28,10 @@ Règles générales :
 - Tout en français. Ton neutre et concret, pas de formules creuses ("aligner les parties prenantes", "créer de la valeur").
 - "objective_reformulated" : rends le sujet actionnable — il doit être possible de dire "objectif atteint / non atteint" à la fin de la réunion.
 - "agenda" : 3 à 6 points. Si le sujet tient en un seul point, ne gonfle pas artificiellement. La somme des "duration_minutes" doit correspondre à {DURATION_MINUTES} minus 5-10 min de marge (intro + clôture). Pas de point < 5 min.
-- "open_threads" : ne liste que des éléments réellement présents dans {PRIOR_MEETINGS} (décisions non appliquées, actions sans suite, questions laissées ouvertes). Tableau vide si rien de pertinent ou pas d'historique fourni — n'invente pas.
+- "open_threads" : ne liste que des éléments réellement présents dans {PRIOR_MEETINGS}
+
+RÉUNION PRÉCÉDENTE de cette série — points clés extraits par le pipeline (peut être vide) :
+{PRIOR_KEY_POINTS} (décisions non appliquées, actions sans suite, questions laissées ouvertes). Tableau vide si rien de pertinent ou pas d'historique fourni — n'invente pas.
 - "participants_notes" : tableau vide si tu n'as pas d'éléments factuels. Pas de stéréotypes ("développeur donc technique"). Uniquement si un document mentionne explicitement leur position/expertise.
 - "opening_questions" : conçues pour engager, pas pour vérifier (pas "tout le monde a lu le doc ?"). Adapte la formulation au rôle (cf. règles d'adaptation ci-dessous).
 - "risk_points" : sois concret. "Le sujet X n'a pas été tranché en réunion précédente, attendez-vous à une relance" plutôt que "risque de désaccord".

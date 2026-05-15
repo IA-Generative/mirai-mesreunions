@@ -246,6 +246,14 @@ _REQUIRED_PLACEHOLDERS = (
     "{PRIOR_MEETINGS}",
 )
 
+# Placeholder optionnel (meeting-prep v2 §6). Présent dans les 5 templates,
+# substitué par les key_points_summary du dernier audio lié au brief parent
+# de la série. Non listé en REQUIRED pour permettre une migration progressive
+# des templates sans casser load_prompt_template().
+_OPTIONAL_PLACEHOLDERS = (
+    "{PRIOR_KEY_POINTS}",
+)
+
 
 def load_prompt_template(path: str = PROMPT_PATH) -> str:
     with open(path, "r", encoding="utf-8") as handle:
@@ -268,6 +276,7 @@ def build_prompt(
     focus_areas: list[str],
     prep_docs_text: str,
     prior_meetings_text: str = "",
+    prior_key_points_text: str = "",
 ) -> str:
     """Substitute the wizard fields into the prompt template.
 
@@ -285,4 +294,5 @@ def build_prompt(
         .replace("{FOCUS_AREAS}", focus_repr)
         .replace("{PREP_DOCS}", prep_docs_text.strip() or "(aucun document fourni)")
         .replace("{PRIOR_MEETINGS}", prior_meetings_text.strip() or "(aucun)")
+        .replace("{PRIOR_KEY_POINTS}", prior_key_points_text.strip() or "(aucun)")
     )

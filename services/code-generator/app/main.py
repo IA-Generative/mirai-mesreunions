@@ -2590,6 +2590,10 @@ def api_meeting_prep():
         return jsonify({"error": "Le champ focus doit être une liste."}), 400
     focus_areas = [str(x).strip() for x in focus_raw if str(x).strip()]
 
+    # Meeting-prep v2 : chaînage série + date prévue (optionnels).
+    series_parent_id = (payload.get("series_parent_id") or "").strip() or None
+    target_meeting_date = (payload.get("target_meeting_date") or "").strip() or None
+
     # Type de réunion : whitelist stricte, fallback "general" si vide ou
     # inconnu. La valeur normalisée sert à choisir le prompt ET à être
     # persistée dans brief_json["_meta"]["meeting_type"].
@@ -2676,6 +2680,29 @@ def api_meeting_prep():
         logger.exception("meeting_prep: failed to load prompt template (type=%s)", meeting_type)
         return jsonify({"error": "Modèle de prompt indisponible."}), 500
 
+    # Meeting-prep v2 : si série, récupérer les key_points du dernier audio
+    # lié au brief parent pour les injecter dans {PRIOR_KEY_POINTS}.
+    prior_key_points_text = ""
+    if series_parent_id:
+        try:
+            audios_resp = request_internal_device_api(
+                "GET",
+                f"/api/v1/briefs/{series_parent_id}/audio-files",
+                params={"user_sub": user_sub},
+            )
+            audio_rows = (audios_resp or {}).get("audio_files") or []
+            # Plus récent d'abord (list_brief_audio_files trie déjà DESC).
+            for r in audio_rows:
+                kp = (r.get("key_points_summary") or "").strip()
+                if kp:
+                    prior_key_points_text = kp
+                    break
+        except Exception:
+            logger.exception(
+                "meeting_prep: failed to fetch prior key_points for series_parent_id=%s",
+                series_parent_id,
+            )
+
     prompt = _meeting_prep.build_prompt(
         template_text,
         objective=subject,
@@ -2684,6 +2711,7 @@ def api_meeting_prep():
         expectation=expectation,
         focus_areas=focus_areas,
         prep_docs_text=corpus_text,
+        prior_key_points_text=prior_key_points_text,
     )
 
     llm = _meeting_prep.LLMClient(
@@ -2737,14 +2765,67 @@ def api_meeting_prep():
                 "brief_json": brief,
                 "documents": used,
                 "title": subject,
+                "series_parent_id": series_parent_id,
+                "target_meeting_date": target_meeting_date,
             },
         )
         brief_id = (created.get("brief") or {}).get("id")
+        # Meeting-prep v2 §5c : upsert les termes du brief dans le glossaire
+        # utilisateur global. Best-effort, non bloquant.
+        try:
+            import importlib.util as _iu
+            _spec = _iu.spec_from_file_location(
+                "_gfb",
+                os.path.join(os.path.dirname(__file__), "..", "..",
+                             "file-mover", "app", "glossary_from_brief.py"),
+            )
+            _gfb = _iu.module_from_spec(_spec)
+            _spec.loader.exec_module(_gfb)
+            _terms = list(_gfb.extract_full_glossary_terms_from_brief(brief, used))
+            if _terms and brief_id:
+                request_internal_device_api(
+                    "POST", "/api/v1/user-glossary/upsert-batch",
+                    json_body={
+                        "user_sub": user_sub,
+                        "terms": _terms,
+                        "source_brief_id": brief_id,
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "meeting_prep: user-glossary upsert failed (best-effort) for sub=%s",
+                user_sub,
+            )
     except Exception:
         # On ne casse pas l'UX si la persistance échoue — l'utilisateur
         # reçoit son brief, mais sans brief_id (pas de listing/rename
         # ultérieur). Tracé pour investigation.
         logger.exception("meeting_prep: failed to persist brief for sub=%s", user_sub)
+
+    # Meeting-prep v2 §9bis : versement Drive en arrière-plan (best-effort).
+    if brief_id:
+        try:
+            from .drive_brief_sync import schedule_drive_brief_sync
+        except Exception:
+            try:
+                import importlib.util as _iu
+                _spec = _iu.spec_from_file_location(
+                    "_dbs",
+                    os.path.join(os.path.dirname(__file__), "drive_brief_sync.py"),
+                )
+                _dbs = _iu.module_from_spec(_spec)
+                _spec.loader.exec_module(_dbs)
+                schedule_drive_brief_sync = _dbs.schedule_drive_brief_sync
+            except Exception:
+                schedule_drive_brief_sync = None  # type: ignore
+        if schedule_drive_brief_sync is not None:
+            try:
+                schedule_drive_brief_sync(
+                    user_sub, brief_id, brief, used, prompt,
+                    drive_folder_id=folder_id,
+                )
+            except Exception:
+                logger.exception("meeting_prep: schedule_drive_brief_sync raised")
 
     return jsonify({
         "brief": brief,
@@ -2983,10 +3064,28 @@ def api_test_drive_access():
 @app.route("/api/meeting-prep", methods=["GET"])
 @require_auth
 def api_list_meeting_briefs():
-    """Liste les briefs actifs (non corbeille) de l'utilisateur, 50 derniers."""
+    """Liste les briefs actifs (non corbeille) de l'utilisateur, 50 derniers.
+
+    Si ``?with_counts=true``, relais vers /api/v1/briefs/list-with-counts qui
+    enrichit chaque brief avec ``linked_audio_count`` et expose
+    ``older_than_90d_unlinked_count`` au niveau racine (sert au banner purge
+    §7 du plan meeting-prep v2).
+    """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
+    with_counts = (request.args.get("with_counts") or "").lower() in ("1", "true", "yes")
     try:
+        if with_counts:
+            data = request_internal_device_api(
+                "GET", "/api/v1/briefs/list-with-counts",
+                params={"user_sub": user_sub, "limit": 50},
+            )
+            return jsonify({
+                "briefs": data.get("briefs", []),
+                "older_than_90d_unlinked_count": int(
+                    data.get("older_than_90d_unlinked_count") or 0
+                ),
+            })
         data = request_internal_device_api(
             "GET", "/api/v1/briefs",
             params={"user_sub": user_sub, "limit": 50, "trashed": "false"},
@@ -3111,6 +3210,296 @@ def api_hard_delete_meeting_brief(brief_id: str):
         status = err.response.status_code if err.response is not None else 502
         return jsonify({"error": "delete_failed"}), status
     return jsonify({"ok": True, "deleted": True})
+
+
+# ─── Meeting-prep v2 : relais (zone DMZ) ────────────────────
+#
+# Cf §3 du plan ok-on-continue-sur-eager-hickey.md. Tous les endpoints
+# ci-dessous se contentent de relayer vers token-issuer en injectant le
+# user_sub depuis la session OIDC — isolation garantie côté code.
+
+@app.route("/api/file/<file_id>/link-brief", methods=["POST"])
+@require_auth
+def api_link_file_to_brief(file_id: str):
+    """Lie/délie un audio à un brief. Body: ``{meeting_brief_id|null}``.
+
+    Si le lien change effectivement (prev ≠ new), déclenche en best-effort
+    un POST /api/v1/audio/<id>/reprocess côté file-puller pour relancer la
+    chaîne glossary_correction → reformulation → meeting_analysis avec le
+    glossaire fusionné. Cf §5 du plan.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    new_brief = payload.get("meeting_brief_id")
+    if isinstance(new_brief, str):
+        new_brief = new_brief.strip() or None
+    try:
+        result = request_internal_device_api(
+            "POST", "/api/v1/files/by-id/link-brief",
+            json_body={
+                "user_sub": user_sub,
+                "file_id": file_id,
+                "meeting_brief_id": new_brief,
+            },
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "link_failed"}), status
+
+    # Re-trigger reprocess server-side si le lien a effectivement changé.
+    prev = result.get("previous_brief_id")
+    if prev != new_brief:
+        try:
+            _trigger_audio_reprocess(user_sub, file_id, new_brief)
+        except Exception:
+            # Best-effort : l'UX n'attend pas le reprocess.
+            logger.exception(
+                "meeting_prep: failed to trigger reprocess for file=%s brief=%s",
+                file_id, new_brief,
+            )
+    return jsonify(result)
+
+
+def _trigger_audio_reprocess(user_sub: str, file_id: str, brief_id):
+    """Appel best-effort vers file-puller pour relancer la chaîne LLM.
+
+    L'URL file-puller est configurable via FILE_PULLER_INTERNAL_BASE_URL.
+    Si non configurée → log warning et retour silencieux (déploiement
+    transitoire qui n'a pas encore activé l'endpoint reprocess).
+    """
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL") or ""
+    if not base:
+        logger.info("reprocess: FILE_PULLER_INTERNAL_BASE_URL not configured, skipping")
+        return
+    url = f"{base.rstrip('/')}/api/v1/audio/{file_id}/reprocess"
+    try:
+        req.post(
+            url,
+            json={"user_sub": user_sub, "glossary_from_brief_id": brief_id},
+            headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+            timeout=5,
+        )
+    except Exception:
+        logger.exception("reprocess: file-puller call failed url=%s", url)
+
+
+@app.route("/api/meeting-prep/<brief_id>/audio-files", methods=["GET"])
+@require_auth
+def api_brief_audio_files(brief_id: str):
+    """Relais vers /api/v1/briefs/<id>/audio-files."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        return jsonify(request_internal_device_api(
+            "GET", f"/api/v1/briefs/{brief_id}/audio-files",
+            params={"user_sub": user_sub},
+        ))
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "fetch_failed"}), status
+
+
+@app.route("/api/meeting-prep/<brief_id>/series", methods=["GET"])
+@require_auth
+def api_brief_series(brief_id: str):
+    """Relais vers /api/v1/briefs/<id>/series."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        return jsonify(request_internal_device_api(
+            "GET", f"/api/v1/briefs/{brief_id}/series",
+            params={"user_sub": user_sub},
+        ))
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "fetch_failed"}), status
+
+
+@app.route("/api/meeting-prep/link-suggestion", methods=["GET"])
+@require_auth
+def api_meeting_prep_link_suggestion():
+    """Suggestion (top-3 candidats avec scoring détaillé) pour un audio.
+
+    Endpoint diagnostic — l'auto-link réel se fait côté file-puller AVANT
+    transcription (cf §4 du plan). Ici, on récupère les briefs actifs et
+    on calcule le scoring multi-signaux pour transparence UI / debug.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    file_id = (request.args.get("file_id") or "").strip()
+    if not file_id:
+        return jsonify({"error": "file_id required"}), 400
+
+    # Récupère l'audio + briefs actifs via relais.
+    try:
+        files_resp = request_internal_device_api(
+            "GET", "/api/v1/files/by-id",
+            params={"user_sub": user_sub, "file_id": file_id},
+        )
+        audio = files_resp.get("file") or files_resp
+    except Exception:
+        # L'endpoint /api/v1/files/by-id n'existe peut-être pas en GET ;
+        # fallback : on extrait ce dont on a besoin via list.
+        audio = None
+    try:
+        briefs_resp = request_internal_device_api(
+            "GET", "/api/v1/briefs",
+            params={"user_sub": user_sub, "limit": 50},
+        )
+        briefs = briefs_resp.get("briefs") or []
+    except Exception:
+        briefs = []
+
+    # Import local pour éviter de charger le module à chaque boot.
+    from datetime import datetime as _dt
+    import importlib.util as _iu
+    spec = _iu.spec_from_file_location(
+        "_auto_link", os.path.join(
+            os.path.dirname(__file__), "..", "..", "file-mover", "app", "glossary_from_brief.py",
+        ),
+    )
+    # Le scoring vit dans puller.py ; ici on fait un mini-scoring inline
+    # adapté au contexte DMZ (pas de DB directe).
+    fname = (audio or {}).get("original_filename") or ""
+    upload_at_iso = (audio or {}).get("created_at")
+    upload_at = None
+    if upload_at_iso:
+        try:
+            upload_at = _dt.fromisoformat(upload_at_iso.replace("Z", "+00:00"))
+        except Exception:
+            upload_at = None
+
+    scored = []
+    for b in briefs:
+        score, breakdown = _score_brief_candidate(b, fname, upload_at)
+        scored.append({
+            "brief_id": b.get("id"),
+            "title": b.get("title") or b.get("subject"),
+            "score": round(score, 3),
+            "breakdown": breakdown,
+        })
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return jsonify({"top": scored[:3]})
+
+
+def _score_brief_candidate(brief: dict, audio_filename: str, audio_upload_at):
+    """Mini-scoring multi-signaux côté DMZ pour l'endpoint diagnostic.
+
+    Reproduit la logique de file-mover/app/puller.auto_link_audio_to_brief
+    mais sur les seuls champs exposés par l'API briefs. Cf §4 du plan.
+    """
+    from datetime import datetime, timezone as _tz
+    import re as _re
+
+    def _tokens(s):
+        if not s:
+            return set()
+        return {t for t in _re.findall(r"[a-z0-9éèêàâïôûç]{3,}", s.lower()) if t}
+
+    bsubj = (brief.get("subject") or brief.get("title") or "") + " " + (
+        (brief.get("brief_json") or {}).get("objective_reformulated") or ""
+    )
+    a_tokens = _tokens(audio_filename)
+    b_tokens = _tokens(bsubj)
+    union = a_tokens | b_tokens
+    sim = (len(a_tokens & b_tokens) / len(union)) if union else 0.0
+
+    # Proximité temporelle (24h plein, dégradation linéaire jusqu'à 14j).
+    prox = 0.0
+    brief_created_at = brief.get("created_at")
+    if brief_created_at and audio_upload_at:
+        try:
+            bc = datetime.fromisoformat(brief_created_at.replace("Z", "+00:00"))
+            delta_hours = abs((audio_upload_at - bc).total_seconds()) / 3600.0
+            if delta_hours <= 24:
+                prox = 1.0
+            elif delta_hours >= 24 * 14:
+                prox = 0.0
+            else:
+                prox = 1.0 - (delta_hours - 24) / (24 * 14 - 24)
+        except Exception:
+            prox = 0.0
+
+    # Co-localisation Drive (préfixe commun ≥ 4 chars).
+    drive_loc = 0.0
+    folder = brief.get("drive_folder_id") or ""
+    if folder and audio_filename:
+        common = 0
+        for ca, cb in zip(audio_filename.lower(), folder.lower()):
+            if ca == cb:
+                common += 1
+            else:
+                break
+        if common >= 4:
+            drive_loc = 1.0
+
+    # Engagement récent (last_viewed_at < 24h).
+    engagement = 0.0
+    lv = brief.get("last_viewed_at")
+    if lv:
+        try:
+            lvt = datetime.fromisoformat(lv.replace("Z", "+00:00"))
+            now = datetime.now(_tz.utc)
+            if (now - lvt).total_seconds() <= 24 * 3600:
+                engagement = 1.0
+        except Exception:
+            engagement = 0.0
+
+    # Anti-rebond : zéro si déjà lié à un audio (signal côté liste = ?).
+    # En l'absence de l'info exposée côté DMZ, on garde 1.0 par défaut.
+    anti_rebound = 1.0
+
+    score = 0.30 * sim + 0.40 * prox + 0.10 * drive_loc + 0.10 * engagement + 0.10 * anti_rebound
+    return score, {
+        "similarity": round(sim, 3),
+        "temporal": round(prox, 3),
+        "drive_colocation": round(drive_loc, 3),
+        "engagement": round(engagement, 3),
+        "anti_rebound": round(anti_rebound, 3),
+    }
+
+
+@app.route("/api/file/<file_id>/reprocess", methods=["POST"])
+@require_auth
+def api_file_reprocess(file_id: str):
+    """Relais vers file-puller /api/v1/audio/<id>/reprocess.
+
+    Body: ``{glossary_from_brief_id?: <uuid>, force?: bool}``. Idempotent
+    côté file-puller. Cf §5.2 du plan.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    brief_id = payload.get("glossary_from_brief_id") or None
+    force = bool(payload.get("force"))
+
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL") or ""
+    if not base:
+        return jsonify({"error": "reprocess_not_configured"}), 503
+    try:
+        resp = req.post(
+            f"{base.rstrip('/')}/api/v1/audio/{file_id}/reprocess",
+            json={
+                "user_sub": user_sub,
+                "glossary_from_brief_id": brief_id,
+                "force": force,
+            },
+            headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+            timeout=10,
+        )
+    except Exception as exc:
+        logger.exception("reprocess: file-puller unreachable: %s", exc)
+        return jsonify({"error": "file_puller_unreachable"}), 502
+    if resp.status_code >= 400:
+        try:
+            return jsonify(resp.json()), resp.status_code
+        except Exception:
+            return jsonify({"error": "reprocess_failed"}), resp.status_code
+    try:
+        return jsonify(resp.json())
+    except Exception:
+        return jsonify({"ok": True})
 
 
 # ─── HTML Template ──────────────────────────────────────────
@@ -4415,6 +4804,22 @@ INDEX_TEMPLATE = """
                 Vos briefs de pré-réunion sont conservés et restent éditables.
                 La corbeille les retient 30 jours avant suppression définitive.
             </p>
+            <!-- Meeting-prep v2 §7 : banner purge invitée pour briefs > 90j
+                 sans audio lié. Rendu conditionnel par loadBriefs() via la
+                 réponse de /api/v1/briefs/list-with-counts (relayée). -->
+            <div id="older-than-90d-banner"
+                 data-banner="older-than-90d-banner"
+                 style="display:none;background:#fff4e5;border:1px solid #f59e0b;
+                        border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.8rem;
+                        font-size:0.85rem;color:#92400e;">
+                <span id="older-than-90d-msg">Vous avez des briefs anciens (> 90 jours) sans audio lié.</span>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;">
+                    <button type="button" class="btn-primary fr-btn fr-btn--sm"
+                            onclick="trashAllOlderThan90d()">Tout déplacer en corbeille</button>
+                    <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                            onclick="dismissOlderThan90dBanner()">Plus tard</button>
+                </div>
+            </div>
             <div id="brief-list" style="font-size:0.86rem;color:#64748b;">
                 Chargement des briefs...
             </div>
@@ -4427,12 +4832,30 @@ INDEX_TEMPLATE = """
             </div>
             <h1 id="brief-detail-title" style="font-size:1.1rem;">Brief</h1>
             <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
-            <div style="display:flex;gap:0.4rem;margin:0.6rem 0;">
+            <div style="display:flex;gap:0.4rem;margin:0.6rem 0;flex-wrap:wrap;">
                 <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="renameBriefPrompt()">Renommer</button>
                 <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="toggleAmendBrief()">Amender (édition manuelle)</button>
+                <!-- Meeting-prep v2 §7 : Lien audio↔brief (réversible) -->
+                <button type="button" class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                        data-link-brief-btn id="brief-detail-link-audio-btn"
+                        onclick="linkAudioToBriefPrompt()" style="display:none;">
+                    Lier un fichier audio
+                </button>
+                <!-- Meeting-prep v2 §7 : Préparer suivante de la série -->
+                <a class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
+                   data-prepare-next-series-btn id="brief-detail-prepare-next"
+                   style="display:none;text-decoration:none;">
+                    Préparer la prochaine réunion de cette série
+                </a>
             </div>
+            <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
+            <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
+                 référence pour le test test_code_generator_template (landmark
+                 « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
+            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <pre id="brief-detail-json"
                  style="background:#f6f6f6;border:1px solid #e5e5e5;border-radius:0.4rem;
                         padding:0.8rem;font-size:0.78rem;white-space:pre-wrap;
@@ -7185,9 +7608,12 @@ async function loadBriefs() {
     const container = document.getElementById('brief-list');
     if (!container) return;
     try {
-        const resp = await fetch('/api/meeting-prep');
+        const resp = await fetch('/api/meeting-prep?with_counts=true');
         const data = await resp.json();
         const briefs = (data && data.briefs) || [];
+        // Meeting-prep v2 §7 — banner purge si > 0 briefs > 90j sans audio lié.
+        try { renderOlderThan90dBanner(data && data.older_than_90d_unlinked_count); }
+        catch (e) { /* non-fatal */ }
         if (briefs.length === 0) {
             container.innerHTML = `<p style="color:#94a3b8;">
                 Aucun brief pour le moment.
@@ -7246,10 +7672,143 @@ async function showBriefDetail(briefId) {
         metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
         jsonEl.textContent = JSON.stringify(b.brief_json || {}, null, 2);
         document.getElementById('brief-amend-text').value = JSON.stringify(b.brief_json || {}, null, 2);
+        // Meeting-prep v2 §7 — sections audio liés + chaîne de série.
+        try { loadBriefAudioFiles(briefId); } catch (e) {}
+        try { loadBriefSeries(briefId); } catch (e) {}
+        // Bouton "Préparer la prochaine réunion de cette série".
+        try {
+            const btn = document.getElementById('brief-detail-prepare-next');
+            if (btn) {
+                btn.href = `/meeting-prep/new?series_parent_id=${encodeURIComponent(briefId)}`;
+                btn.style.display = '';
+            }
+            const linkBtn = document.getElementById('brief-detail-link-audio-btn');
+            if (linkBtn) linkBtn.style.display = '';
+        } catch (e) {}
     } catch (e) {
         titleEl.textContent = 'Erreur';
         jsonEl.textContent = String(e);
     }
+}
+
+// Meeting-prep v2 §7 — fichiers audio liés au brief courant.
+async function loadBriefAudioFiles(briefId) {
+    const box = document.getElementById('brief-detail-linked-audios');
+    if (!box) return;
+    box.innerHTML = '<em style="color:#94a3b8;">Chargement des fichiers audio...</em>';
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}/audio-files`);
+        if (!r.ok) throw new Error('fetch_failed');
+        const d = await r.json();
+        const items = (d && d.audio_files) || [];
+        if (!items.length) {
+            box.innerHTML = '<p style="color:#94a3b8;">Aucun audio lié.</p>';
+            return;
+        }
+        box.innerHTML = '<strong>Fichier(s) audio lié(s) :</strong><ul style="margin:0.3rem 0 0 1.2rem;">' +
+            items.map(a => {
+                const label = escapeHtml(a.suggested_filename || a.original_filename || a.id);
+                const meta = (a.created_at || '').slice(0, 16).replace('T', ' ');
+                return `<li><a href="#" class="fr-link" onclick="event.preventDefault();window.location.hash='transfers';return false;">${label}</a>` +
+                    ` <span style="color:#94a3b8;">${escapeHtml(meta)}</span>` +
+                    ` <button class="btn-primary fr-btn fr-btn--sm fr-btn--tertiary-no-outline"` +
+                    ` onclick="detachAudioFromBrief('${a.id}')">Détacher</button></li>`;
+            }).join('') + '</ul>';
+    } catch (e) {
+        box.innerHTML = '<p style="color:#b91c1c;">Erreur chargement audios.</p>';
+    }
+}
+
+// Meeting-prep v2 §7 — chaîne de série du brief courant.
+async function loadBriefSeries(briefId) {
+    const box = document.getElementById('brief-detail-series-chain');
+    if (!box) return;
+    box.innerHTML = '';
+    try {
+        const r = await fetch(`/api/meeting-prep/${briefId}/series`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const chain = (d && d.series) || [];
+        if (chain.length < 2) return;  // pas de série utile à afficher
+        box.innerHTML = '<strong>Cette série :</strong><ol style="margin:0.3rem 0 0 1.2rem;">' +
+            chain.map(b => {
+                const t = escapeHtml(b.title || b.subject || '(sans titre)');
+                const isCurrent = String(b.id) === String(briefId);
+                if (isCurrent) return `<li><strong>${t}</strong> (brief courant)</li>`;
+                return `<li><a href="#" class="fr-link" onclick="event.preventDefault();showBriefDetail('${b.id}');">${t}</a></li>`;
+            }).join('') + '</ol>';
+    } catch (e) { /* silencieux */ }
+}
+
+// Meeting-prep v2 §7 — détache l'audio du brief (déclenche reprocess server-side).
+async function detachAudioFromBrief(audioId) {
+    if (!confirm('Détacher ce fichier du brief ?')) return;
+    try {
+        const r = await fetch(`/api/file/${audioId}/link-brief`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ meeting_brief_id: null }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || 'detach_failed');
+        showToast('Audio détaché.', 'success');
+        if (_briefDetailId) loadBriefAudioFiles(_briefDetailId);
+    } catch (e) {
+        showToast('Détachement échoué.', 'error');
+    }
+}
+
+// Meeting-prep v2 §7 — modale "lier un audio" depuis le détail brief.
+async function linkAudioToBriefPrompt() {
+    if (!_briefDetailId) return;
+    const audioId = prompt(
+        'ID du fichier audio à lier au brief courant ' +
+        "(visible dans l'onglet « Mes fichiers » → détail audio) :",
+        ''
+    );
+    if (!audioId) return;
+    try {
+        const r = await fetch(`/api/file/${audioId.trim()}/link-brief`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ meeting_brief_id: _briefDetailId }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || 'link_failed');
+        showToast('Audio lié au brief.', 'success');
+        loadBriefAudioFiles(_briefDetailId);
+    } catch (e) {
+        showToast('Lien échoué : ' + (e.message || e), 'error');
+    }
+}
+
+// Meeting-prep v2 §7 — banner purge briefs > 90j sans audio lié.
+function renderOlderThan90dBanner(count) {
+    const banner = document.getElementById('older-than-90d-banner');
+    const msg = document.getElementById('older-than-90d-msg');
+    if (!banner) return;
+    const dismissed = sessionStorage.getItem('older-than-90d-dismissed') === '1';
+    const n = Number(count || 0);
+    if (n > 0 && !dismissed) {
+        if (msg) msg.textContent = `Vous avez ${n} brief(s) ancien(s) (> 90 jours) sans audio lié.`;
+        banner.style.display = '';
+    } else {
+        banner.style.display = 'none';
+    }
+}
+
+function dismissOlderThan90dBanner() {
+    try { sessionStorage.setItem('older-than-90d-dismissed', '1'); } catch (e) {}
+    const banner = document.getElementById('older-than-90d-banner');
+    if (banner) banner.style.display = 'none';
+}
+
+// NB : un endpoint "POST /api/meeting-prep/trash-older-than?days=90" n'existe
+// pas encore — le bouton "Tout déplacer en corbeille" affiche un toast
+// d'avertissement plutôt qu'un appel inopérant. À ajouter au sprint suivant.
+async function trashAllOlderThan90d() {
+    try { showToast('Action non encore disponible — endpoint serveur manquant.', 'error'); }
+    catch (e) {}
 }
 
 async function renameBriefPrompt() {
@@ -7438,8 +7997,17 @@ PREP_BRIEF_TEMPLATE = r"""
     .btn { padding:0.55rem 0.95rem; border-radius:6px; border:none;
            font-size:0.9rem; font-weight:600; cursor:pointer; }
     .btn-primary { background:#000091; color:#fff; }
+    /* Meeting-prep v2 §5b : explicite la couleur de texte au hover/focus
+       du bouton primaire pour éviter la régression d'inversion de contraste
+       (label blanc sur fond gris clair hérité du CSS commun du portail). */
+    .btn-primary:hover, .btn-primary:focus-visible, .btn-primary:active {
+      background:#1212a0; color:#fff;
+    }
     .btn-primary:disabled { background:#94a3b8; cursor:not-allowed; }
     .btn-secondary { background:#fff; color:#000091; border:1px solid #000091; }
+    .btn-secondary:hover, .btn-secondary:focus-visible {
+      background:#eef3fb; color:#000091;
+    }
     .status { margin-top:0.8rem; padding:0.55rem 0.75rem; border-radius:6px;
               font-size:0.85rem; display:none; }
     .status.info { background:#eef3fb; color:#1a2640; display:block; }
@@ -7474,6 +8042,16 @@ PREP_BRIEF_TEMPLATE = r"""
 
   <form id="prep-form" class="card" autocomplete="off">
     <h1>Brief de réunion</h1>
+
+    <!-- Meeting-prep v2 §7 : badge "Suite de : <titre>" si série.
+         Rempli côté JS par le handler du paramètre URL ?series_parent_id=<id>. -->
+    <div id="series-parent-banner" data-series-parent-banner
+         style="display:none;background:#eef3fb;border:1px solid #c0d2f5;
+                border-radius:0.4rem;padding:0.45rem 0.7rem;margin-bottom:0.8rem;
+                font-size:0.85rem;color:#1a2640;">
+      Suite de : <strong id="series-parent-title">…</strong>
+    </div>
+    <input type="hidden" id="series_parent_id" name="series_parent_id" value="" />
 
     <div class="question">
       <label for="meeting_type">Type de réunion *</label>
@@ -7724,14 +8302,17 @@ PREP_BRIEF_TEMPLATE = r"""
       : 'Génération du brief en cours…',
       'info');
     try {
+      var spId = (document.getElementById('series_parent_id') || {}).value || '';
+      var _bodyObj = {
+        subject: subject, drive_folder: folder, role: role,
+        expectation: expectation, duration_minutes: duration, focus: focus,
+        meeting_type: meetingType,
+      };
+      if (spId) _bodyObj.series_parent_id = spId;
       var resp = await fetch('/api/meeting-prep', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          subject: subject, drive_folder: folder, role: role,
-          expectation: expectation, duration_minutes: duration, focus: focus,
-          meeting_type: meetingType,
-        }),
+        body: JSON.stringify(_bodyObj),
       });
       var data = await resp.json().catch(function () { return {}; });
       if (!resp.ok) {
@@ -7796,6 +8377,44 @@ PREP_BRIEF_TEMPLATE = r"""
       }
     });
   }
+
+  // Meeting-prep v2 §7 — pré-remplissage du wizard depuis ?series_parent_id=<id>.
+  // Fetche le brief parent pour afficher "Suite de : <titre>" et pré-remplir
+  // sujet/rôle/expectation à partir du parent.
+  (async function _prefillFromSeriesParent() {
+    try {
+      var params = new URLSearchParams(window.location.search || '');
+      var pid = params.get('series_parent_id');
+      if (!pid) return;
+      var hidden = document.getElementById('series_parent_id');
+      if (hidden) hidden.value = pid;
+      var r = await fetch('/api/meeting-prep/' + encodeURIComponent(pid));
+      if (!r.ok) return;
+      var d = await r.json();
+      var b = (d && d.brief) || {};
+      var banner = document.getElementById('series-parent-banner');
+      var titleEl = document.getElementById('series-parent-title');
+      if (banner && titleEl) {
+        titleEl.textContent = b.title || b.subject || '(brief parent)';
+        banner.style.display = '';
+      }
+      // Pré-remplissage best-effort.
+      var subj = document.getElementById('subject');
+      if (subj && !subj.value && b.subject) subj.value = b.subject;
+      var roleEl = document.getElementById('role');
+      if (roleEl && !roleEl.value && b.role) roleEl.value = b.role;
+      var expEl = document.getElementById('expectation');
+      if (expEl && !expEl.value && b.expectation) expEl.value = b.expectation;
+      var mt = document.getElementById('meeting_type');
+      if (mt && b.meeting_type) {
+        var found = false;
+        for (var i = 0; i < mt.options.length; i++) {
+          if (mt.options[i].value === b.meeting_type) { found = true; break; }
+        }
+        if (found) mt.value = b.meeting_type;
+      }
+    } catch (e) { /* non-fatal */ }
+  })();
 </script>
 </body>
 </html>

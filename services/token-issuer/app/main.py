@@ -33,7 +33,7 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent, MeetingBrief
+from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent, MeetingBrief, UserGlossaryTerm
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -1218,6 +1218,13 @@ def _brief_to_dict(b: MeetingBrief, *, with_full: bool = False) -> dict:
         "created_at": b.created_at.isoformat() if b.created_at else None,
         "updated_at": b.updated_at.isoformat() if b.updated_at else None,
         "trashed_at": b.trashed_at.isoformat() if b.trashed_at else None,
+        # Meeting-prep v2 (migration 011)
+        "series_parent_id": str(b.series_parent_id) if b.series_parent_id else None,
+        "last_viewed_at": b.last_viewed_at.isoformat() if b.last_viewed_at else None,
+        "target_meeting_date": b.target_meeting_date.isoformat() if b.target_meeting_date else None,
+        "drive_prep_folder_id": b.drive_prep_folder_id,
+        "drive_sync_status": b.drive_sync_status,
+        "drive_synced_at": b.drive_synced_at.isoformat() if b.drive_synced_at else None,
     }
     if with_full:
         out["brief_json"] = b.brief_json
@@ -1242,6 +1249,17 @@ def create_brief():
 
     db = SessionLocal()
     try:
+        # Meeting-prep v2 : series_parent_id + target_meeting_date (optionnels)
+        series_parent_id = data.get("series_parent_id")
+        target_meeting_date = data.get("target_meeting_date")
+        if target_meeting_date:
+            try:
+                # Accept "YYYY-MM-DD" or full ISO ; coerce to date.
+                from datetime import date as _date
+                if isinstance(target_meeting_date, str):
+                    target_meeting_date = _date.fromisoformat(target_meeting_date[:10])
+            except Exception:
+                target_meeting_date = None
         b = MeetingBrief(
             user_sub=user_sub,
             subject=(data.get("subject") or None),
@@ -1253,6 +1271,8 @@ def create_brief():
             brief_json=data.get("brief_json"),
             documents=data.get("documents"),
             title=(data.get("title") or data.get("subject") or None),
+            series_parent_id=series_parent_id or None,
+            target_meeting_date=target_meeting_date,
         )
         db.add(b)
         db.commit()
@@ -1316,6 +1336,12 @@ def get_brief(brief_id: str):
         )
         if not b:
             return jsonify({"error": "not_found"}), 404
+        # Bump last_viewed_at pour le scoring d'engagement (§4 du plan).
+        # Skip si la requête a ``track_view=false`` (utile pour les jobs
+        # internes qui ne doivent pas polluer le signal d'engagement).
+        if (request.args.get("track_view") or "true").lower() not in {"false", "0", "no"}:
+            b.last_viewed_at = datetime.now(timezone.utc)
+            db.commit()
         return jsonify({"brief": _brief_to_dict(b, with_full=True)})
     finally:
         db.close()
@@ -1478,6 +1504,459 @@ def hard_delete_brief(brief_id: str):
         db.delete(b)
         db.commit()
         return jsonify({"ok": True, "deleted": True})
+    finally:
+        db.close()
+
+
+# ─── Meeting-prep v2 : lien brief↔audio, série, glossaire user ───
+#
+# Endpoints introduits par le plan ok-on-continue-sur-eager-hickey.md.
+# Tous en zone INTERNE, relayés par code-generator (DMZ). Auth bearer
+# INTERNAL_API_TOKEN. Isolation user_sub respectée.
+
+
+def _audio_file_to_brief_dict(uaf: UserAudioFile) -> dict:
+    """Sérialise un UserAudioFile pour la vue 'audio liés au brief'.
+    Subset minimal pour ne pas saigner les colonnes texte volumineuses."""
+    return {
+        "id": str(uaf.id),
+        "original_filename": uaf.original_filename,
+        "suggested_filename": uaf.suggested_filename,
+        "created_at": uaf.created_at.isoformat() if uaf.created_at else None,
+        "meeting_datetime": uaf.meeting_datetime.isoformat() if uaf.meeting_datetime else None,
+        "key_points_summary": uaf.key_points_summary,
+        "transcription_status": uaf.transcription_status,
+        "meeting_brief_id": str(uaf.meeting_brief_id) if uaf.meeting_brief_id else None,
+        "reprocess_version": uaf.reprocess_version or 0,
+        "reprocessed_with_brief_id": str(uaf.reprocessed_with_brief_id) if uaf.reprocessed_with_brief_id else None,
+        "last_reprocessed_at": uaf.last_reprocessed_at.isoformat() if uaf.last_reprocessed_at else None,
+    }
+
+
+@app.route("/api/v1/files/by-id/link-brief", methods=["POST"])
+def link_audio_to_brief():
+    """Met à jour ``UserAudioFile.meeting_brief_id`` avec isolation user_sub.
+
+    Body: ``{user_sub, file_id, meeting_brief_id|null}``. Si
+    ``meeting_brief_id`` est ``null`` → détache l'audio. Renvoie l'état
+    final du fichier (pour que le caller détecte un changement et déclenche
+    un reprocess server-side).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    file_id = (data.get("file_id") or "").strip()
+    if not user_sub or not file_id:
+        return jsonify({"error": "user_sub and file_id required"}), 400
+    new_brief_id = data.get("meeting_brief_id")  # may be None to detach
+    if isinstance(new_brief_id, str):
+        new_brief_id = new_brief_id.strip() or None
+
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == file_id, UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        # Valide que le brief cible existe et appartient au user (si non null).
+        if new_brief_id is not None:
+            b = (
+                db.query(MeetingBrief)
+                .filter(MeetingBrief.id == new_brief_id,
+                        MeetingBrief.user_sub == user_sub,
+                        MeetingBrief.trashed_at.is_(None))
+                .first()
+            )
+            if not b:
+                return jsonify({"error": "brief_not_found"}), 404
+        prev = str(uaf.meeting_brief_id) if uaf.meeting_brief_id else None
+        uaf.meeting_brief_id = new_brief_id
+        db.commit()
+        logger.info(
+            "audio link-brief: file=%s user=%s prev=%s new=%s",
+            file_id, user_sub, prev, new_brief_id,
+        )
+        return jsonify({
+            "ok": True,
+            "previous_brief_id": prev,
+            "new_brief_id": new_brief_id,
+            "file": _audio_file_to_brief_dict(uaf),
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/audio-files", methods=["GET"])
+def list_brief_audio_files(brief_id: str):
+    """Liste les ``UserAudioFile`` liés au brief, isolés par user_sub."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserAudioFile)
+            .filter(
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.meeting_brief_id == brief_id,
+            )
+            .order_by(UserAudioFile.created_at.desc())
+            .all()
+        )
+        return jsonify({"audio_files": [_audio_file_to_brief_dict(r) for r in rows]})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/<brief_id>/series", methods=["GET"])
+def get_brief_series(brief_id: str):
+    """Renvoie la chaîne complète de la série (parent ascendant + enfants).
+
+    Remonte ``series_parent_id`` jusqu'à la racine (capped 10 niveaux), puis
+    redescend via la sous-requête inverse. Réponse ordonnée du plus ancien
+    au plus récent dans la chaîne.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    MAX_DEPTH = 10
+    try:
+        # Trouver la racine en remontant.
+        current_id = brief_id
+        visited = set()
+        for _ in range(MAX_DEPTH):
+            if current_id in visited:
+                break  # cycle protection
+            visited.add(current_id)
+            b = (
+                db.query(MeetingBrief)
+                .filter(MeetingBrief.id == current_id,
+                        MeetingBrief.user_sub == user_sub)
+                .first()
+            )
+            if not b:
+                return jsonify({"error": "not_found"}), 404
+            if not b.series_parent_id:
+                root_id = str(b.id)
+                break
+            current_id = str(b.series_parent_id)
+        else:
+            root_id = current_id
+
+        # Redescendre depuis la racine.
+        chain = []
+        cursor_id = root_id
+        seen = set()
+        for _ in range(MAX_DEPTH + 1):
+            if cursor_id in seen:
+                break
+            seen.add(cursor_id)
+            b = (
+                db.query(MeetingBrief)
+                .filter(MeetingBrief.id == cursor_id,
+                        MeetingBrief.user_sub == user_sub)
+                .first()
+            )
+            if not b:
+                break
+            chain.append(_brief_to_dict(b))
+            # Cherche un enfant direct (un seul attendu en pratique).
+            child = (
+                db.query(MeetingBrief)
+                .filter(MeetingBrief.series_parent_id == cursor_id,
+                        MeetingBrief.user_sub == user_sub,
+                        MeetingBrief.trashed_at.is_(None))
+                .order_by(MeetingBrief.created_at.asc())
+                .first()
+            )
+            if not child:
+                break
+            cursor_id = str(child.id)
+        return jsonify({"series": chain, "root_id": root_id})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/briefs/list-with-counts", methods=["GET"])
+def list_briefs_with_counts():
+    """Étend ``/api/v1/briefs`` avec ``linked_audio_count`` et
+    ``older_than_90d_unlinked_count`` (banner purge §7 du plan)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        limit = max(1, min(200, int(request.args.get("limit") or 50)))
+    except ValueError:
+        limit = 50
+
+    db = SessionLocal()
+    try:
+        briefs = (
+            db.query(MeetingBrief)
+            .filter(MeetingBrief.user_sub == user_sub,
+                    MeetingBrief.trashed_at.is_(None))
+            .order_by(MeetingBrief.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+        # Précharge en un coup les comptes audio par brief.
+        out = []
+        ninety_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
+        older_unlinked = 0
+        for b in briefs:
+            n = (
+                db.query(UserAudioFile)
+                .filter(UserAudioFile.user_sub == user_sub,
+                        UserAudioFile.meeting_brief_id == b.id)
+                .count()
+            )
+            d = _brief_to_dict(b)
+            d["linked_audio_count"] = int(n)
+            out.append(d)
+            if n == 0 and b.created_at:
+                # SQLite renvoie naive ; postgres renvoie aware.
+                bc = b.created_at
+                if bc.tzinfo is None:
+                    bc = bc.replace(tzinfo=timezone.utc)
+                if bc < ninety_days_ago:
+                    older_unlinked += 1
+        return jsonify({
+            "briefs": out,
+            "older_than_90d_unlinked_count": older_unlinked,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/mark-reprocessed", methods=["POST"])
+def mark_audio_reprocessed(audio_id: str):
+    """Met à jour les flags de re-traitement après un run file-puller.
+
+    Body: ``{user_sub, brief_id|null, version, glossary_term_count, prev_payload}``.
+    ``prev_payload`` (dict) est appendu à ``reprocess_history`` (cap 5, FIFO).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        new_version = int(data.get("version") or (uaf.reprocess_version or 0) + 1)
+        uaf.reprocess_version = new_version
+        brief_id_val = data.get("brief_id")
+        uaf.reprocessed_with_brief_id = brief_id_val or None
+        uaf.last_reprocessed_at = datetime.now(timezone.utc)
+        history = list(uaf.reprocess_history or [])
+        prev_payload = data.get("prev_payload")
+        if prev_payload:
+            history.append({
+                "version": new_version,
+                "at": datetime.now(timezone.utc).isoformat(),
+                "brief_id": brief_id_val,
+                "glossary_term_count": data.get("glossary_term_count"),
+                "prev": prev_payload,
+            })
+            # Cap FIFO 5 entrées.
+            if len(history) > 5:
+                history = history[-5:]
+        uaf.reprocess_history = history
+        db.commit()
+        return jsonify({"ok": True, "version": new_version})
+    finally:
+        db.close()
+
+
+# ─── User glossary (§5c du plan) ──────────────────────────────────
+
+@app.route("/api/v1/user-glossary/upsert-batch", methods=["POST"])
+def upsert_user_glossary_batch():
+    """UPSERT batch dans ``user_glossary_terms``.
+
+    Body: ``{user_sub, terms: [str], source_brief_id?}``. Pour chaque terme :
+    si nouveau → insert (occurrence_count=1) ; si existant non-blacklisted →
+    bump ``occurrence_count``, met à jour ``last_seen_at`` et
+    ``last_source_brief_id``. Termes ``blacklisted = TRUE`` skipped.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    terms = data.get("terms") or []
+    source_brief_id = data.get("source_brief_id") or None
+    if not user_sub or not isinstance(terms, list):
+        return jsonify({"error": "user_sub and terms[] required"}), 400
+
+    now = datetime.now(timezone.utc)
+    inserted = 0
+    bumped = 0
+    skipped = 0
+    db = SessionLocal()
+    try:
+        for raw in terms:
+            term = (raw or "").strip()
+            if not term or len(term) > 255:
+                continue
+            existing = (
+                db.query(UserGlossaryTerm)
+                .filter(UserGlossaryTerm.user_sub == user_sub,
+                        UserGlossaryTerm.term == term)
+                .first()
+            )
+            if existing:
+                if existing.blacklisted:
+                    skipped += 1
+                    continue
+                existing.occurrence_count = (existing.occurrence_count or 1) + 1
+                existing.last_seen_at = now
+                if source_brief_id:
+                    existing.last_source_brief_id = source_brief_id
+                bumped += 1
+            else:
+                row = UserGlossaryTerm(
+                    user_sub=user_sub,
+                    term=term,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    occurrence_count=1,
+                    last_source_brief_id=source_brief_id,
+                )
+                db.add(row)
+                inserted += 1
+        db.commit()
+        return jsonify({
+            "ok": True,
+            "inserted": inserted,
+            "bumped": bumped,
+            "skipped_blacklisted": skipped,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/user-glossary", methods=["GET"])
+def list_user_glossary():
+    """Liste le glossaire utilisateur (cap 300, exclut blacklisted)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        limit = max(1, min(1000, int(request.args.get("limit") or 300)))
+    except ValueError:
+        limit = 300
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserGlossaryTerm)
+            .filter(UserGlossaryTerm.user_sub == user_sub,
+                    UserGlossaryTerm.blacklisted.is_(False))
+            .order_by(UserGlossaryTerm.occurrence_count.desc(),
+                      UserGlossaryTerm.last_seen_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return jsonify({
+            "terms": [
+                {
+                    "term": r.term,
+                    "occurrence_count": r.occurrence_count or 1,
+                    "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
+                    "last_source_brief_id": str(r.last_source_brief_id) if r.last_source_brief_id else None,
+                    "curated_by_user": bool(r.curated_by_user),
+                }
+                for r in rows
+            ]
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/user-glossary/term/<term>", methods=["POST"])
+def update_user_glossary_term(term: str):
+    """Actions UI de curation : delete|promote|update.
+
+    Body: ``{user_sub, action: 'delete'|'promote'|'update', new_term?}``.
+    - delete : passe ``blacklisted = TRUE`` (soft, ne perd pas l'historique)
+    - promote : passe ``curated_by_user = TRUE``
+    - update : remplace le terme (créé nouveau row, blacklist l'ancien)
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    action = (data.get("action") or "").strip().lower()
+    if not user_sub or action not in {"delete", "promote", "update"}:
+        return jsonify({"error": "user_sub and valid action required"}), 400
+
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(UserGlossaryTerm)
+            .filter(UserGlossaryTerm.user_sub == user_sub,
+                    UserGlossaryTerm.term == term)
+            .first()
+        )
+        if not row:
+            return jsonify({"error": "not_found"}), 404
+        if action == "delete":
+            row.blacklisted = True
+        elif action == "promote":
+            row.curated_by_user = True
+        elif action == "update":
+            new_term = (data.get("new_term") or "").strip()
+            if not new_term or new_term == term:
+                return jsonify({"error": "new_term required and different"}), 400
+            # Crée le nouveau et blacklist l'ancien (audit-friendly).
+            existing_new = (
+                db.query(UserGlossaryTerm)
+                .filter(UserGlossaryTerm.user_sub == user_sub,
+                        UserGlossaryTerm.term == new_term)
+                .first()
+            )
+            if existing_new:
+                existing_new.blacklisted = False
+                existing_new.curated_by_user = True
+                existing_new.occurrence_count = max(
+                    existing_new.occurrence_count or 1,
+                    row.occurrence_count or 1,
+                )
+            else:
+                db.add(UserGlossaryTerm(
+                    user_sub=user_sub,
+                    term=new_term,
+                    occurrence_count=row.occurrence_count or 1,
+                    last_source_brief_id=row.last_source_brief_id,
+                    curated_by_user=True,
+                ))
+            row.blacklisted = True
+        db.commit()
+        return jsonify({"ok": True, "action": action})
     finally:
         db.close()
 

@@ -51,6 +51,37 @@ def test_md_skips_empty_sections():
     assert "## Thématiques abordées" not in md  # empty list → skipped
 
 
+def test_md_does_not_leak_raw_json_keys():
+    """§8 du plan v2 : aucune key JSON brute (name:, role:, item:, owner:,
+    due:, title:) ne doit apparaître dans le rendu markdown."""
+    analysis = {
+        "actors": [{"name": "Jean", "role": "PM"}],
+        "themes": [{"title": "Budget", "summary": "Q3"}],
+        "decisions": [{"item": "Valider", "owner": "Jean", "due": "2026-06-01"}],
+    }
+    md = TF.meeting_analysis_to_markdown(analysis)
+    for raw_key in ("name:", "role:", "item:", "title:", "owner:", "due:"):
+        assert raw_key not in md, f"Raw JSON key leaked in output: {raw_key!r}"
+
+
+def test_md_renders_decision_with_owner_and_due():
+    md = TF.meeting_analysis_to_markdown({
+        "decisions": [{"item": "Valider le budget", "owner": "Marie",
+                       "due": "2026-06-01"}],
+    })
+    assert "Valider le budget" in md
+    assert "Marie" in md
+    assert "2026-06-01" in md
+
+
+def test_md_renders_theme_as_bold_title():
+    md = TF.meeting_analysis_to_markdown({
+        "themes": [{"title": "Budget Q3", "summary": "Atterrissage à -5%"}],
+    })
+    assert "**Budget Q3**" in md
+    assert "Atterrissage à -5%" in md
+
+
 def test_md_accepts_json_string():
     raw = json.dumps({"actors": ["Jean"]})
     md = TF.meeting_analysis_to_markdown(raw)

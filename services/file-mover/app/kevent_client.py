@@ -383,6 +383,7 @@ class KeventClient:
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
         on_submitted: Optional[Callable[[str], None]] = None,
+        initial_prompt: Optional[str] = None,
     ) -> dict:
         """Async equivalent of ``transcribe`` — same return shape, polled.
 
@@ -390,10 +391,22 @@ class KeventClient:
         gateway ait accepté le job (avant le premier poll). Permet au caller
         de persister le job_id en DB pour reprise au boot — cf.
         Phase 2bis dans puller.py.
+
+        ``initial_prompt`` (meeting-prep v2 §5.1bis) : si fourni, passé via
+        ``extra_form`` au gateway. Whisper l'utilise comme biais lexical
+        (limite 244 tokens). Le gateway Mirai peut ignorer le champ — pas
+        de régression dans ce cas, le champ supplémentaire est silently
+        dropped. Logger en INFO la longueur pour audit.
         """
         extra: dict = {"response_format": response_format}
         if language:
             extra["language"] = language
+        if initial_prompt:
+            extra["initial_prompt"] = initial_prompt
+            logger.info(
+                "kevent transcribe_async: passing initial_prompt (%d chars)",
+                len(initial_prompt),
+            )
         job_id = self.submit_job(
             audio_bytes, filename, content_type,
             service_type=service_type, operation=operation,

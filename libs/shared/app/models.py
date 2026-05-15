@@ -16,6 +16,13 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 # sur le type générique JSON. ``with_variant`` permet de garder une seule
 # déclaration de colonne tout en exposant le DDL natif à postgres.
 _JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
+
+# UUID variant : pg natif en prod, CHAR(36) en SQLite pour les tests.
+# Utile pour les colonnes UUID introduites par la migration 011 qui doivent
+# rester compilables sur SQLite (tests d'isolation). Les PK ``id`` continuent
+# à utiliser UUID(as_uuid=True) direct (déjà patché dans les fixtures).
+_UUID_TYPE = String(36).with_variant(UUID(as_uuid=True), "postgresql")
+
 from sqlalchemy.orm import declarative_base, relationship
 import enum
 
@@ -321,6 +328,18 @@ class UserAudioFile(InternalBase):
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+    # ─── Liaison brief ↔ audio (migration 011) ─────────────────────
+    # Lien explicite vers le MeetingBrief de préparation. NULL = pas lié.
+    # ON DELETE SET NULL : si le brief est hard-deleted, on conserve l'audio
+    # mais on perd le lien (signal "brief was purged"). FK déclarée en SQL.
+    meeting_brief_id = Column(_UUID_TYPE, nullable=True, index=True)
+    # Tracking du re-traitement post-link avec glossaire amendé. Cf §5.
+    reprocess_version = Column(Integer, nullable=False, default=0)
+    reprocessed_with_brief_id = Column(_UUID_TYPE, nullable=True)
+    last_reprocessed_at = Column(DateTime(timezone=True), nullable=True)
+    reprocess_history = Column(_JSON_TYPE, nullable=False, default=list)
+    suggested_brief_dismissed_id = Column(_UUID_TYPE, nullable=True)
+
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
@@ -411,9 +430,50 @@ class MeetingBrief(InternalBase):
     # Corbeille (soft-delete). NULL = visible. Cf. UploadedFile.trashed_at.
     trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
+    # ─── Meeting-prep v2 (migration 011) ───────────────────────────
+    # Signal d'engagement pour le scoring d'auto-lien (§4 du plan).
+    last_viewed_at = Column(DateTime(timezone=True), nullable=True)
+    # Chaînage série : pointe vers le brief parent dans la chaîne. NULL = racine.
+    series_parent_id = Column(_UUID_TYPE, nullable=True)
+    # Date prévue de la réunion (saisie wizard, default J+1). Optionnel.
+    target_meeting_date = Column(DateTime(timezone=True), nullable=True)
+    # Versement Drive best-effort (cf §9bis du plan).
+    drive_prep_folder_id = Column(Text, nullable=True)
+    drive_prep_root_folder_id = Column(Text, nullable=True)
+    drive_sync_status = Column(Text, nullable=True,
+                               comment="'pending' | 'synced' | 'failed'")
+    drive_synced_at = Column(DateTime(timezone=True), nullable=True)
+
     # Les index partiels (filter trashed_at IS [NOT] NULL) sont créés par
     # la migration 010_meeting_briefs.sql. Ils ne sont pas redéclarés ici
     # pour éviter qu'init_tables() en crée des versions non-partielles.
+
+
+class UserGlossaryTerm(InternalBase):
+    """Glossaire utilisateur global (§5c du plan).
+
+    Accumule au fil de l'eau les termes (sigles, noms propres, jargon métier)
+    extraits des briefs d'un même ``user_sub``. Alimente glossary_correction
+    pour TOUTES les transcriptions de cet utilisateur, y compris audios sans
+    brief lié. Composite PK ``(user_sub, term)`` pour UPSERT idempotent.
+
+    Cap 300 termes au chargement (cf glossary_loader). Cap 200 par appel LLM
+    via filter_relevant() existant.
+    """
+    __tablename__ = "user_glossary_terms"
+
+    user_sub = Column(String(255), primary_key=True)
+    term = Column(String(255), primary_key=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False,
+                           default=lambda: datetime.now(timezone.utc))
+    last_seen_at = Column(DateTime(timezone=True), nullable=False,
+                          default=lambda: datetime.now(timezone.utc))
+    occurrence_count = Column(Integer, nullable=False, default=1)
+    last_source_brief_id = Column(_UUID_TYPE, nullable=True)
+    # Termes ajoutés/validés manuellement par l'utilisateur (UI curation).
+    curated_by_user = Column(Boolean, nullable=False, default=False)
+    # Termes rejetés explicitement, ne plus re-proposer ni utiliser.
+    blacklisted = Column(Boolean, nullable=False, default=False)
 
 
 class TranscriptionEvent(InternalBase):
