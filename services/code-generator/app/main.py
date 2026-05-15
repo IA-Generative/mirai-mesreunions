@@ -2928,7 +2928,7 @@ def api_test_drive_access():
                 headers={"Authorization": f"Bearer {access_token}"},
                 timeout=10,
                 allow_redirects=False,
-                stream=True,  # ne pas charger le body si binaire
+                stream=True,
             )
             result["download_probe"]["status_code"] = resp.status_code
             result["download_probe"]["content_type"] = resp.headers.get("content-type")
@@ -2936,7 +2936,6 @@ def api_test_drive_access():
             result["download_probe"]["www_authenticate"] = resp.headers.get("www-authenticate")
             result["download_probe"]["content_length"] = resp.headers.get("content-length")
             if resp.status_code >= 400:
-                # Lire le body texte pour voir le message d'erreur
                 try:
                     result["download_probe"]["body_text"] = (resp.text or "")[:500]
                 except Exception:
@@ -2944,6 +2943,36 @@ def api_test_drive_access():
             resp.close()
         except Exception as exc:
             result["download_probe"]["error"] = str(exc)
+
+    # Step 7 (optionnel) : probe media-auth — l'ability "media_auth": true
+    # suggère que mesfichiers a un endpoint dédié pour obtenir un token
+    # short-lived (cookie signé ou query param) qui permet d'accéder à
+    # /media/. On essaye plusieurs conventions DRF courantes pour voir
+    # laquelle existe : GET puis POST sur /api/v1.0/items/<id>/media-auth/.
+    if first_child_id:
+        result["media_auth_probes"] = []
+        for method in ("GET", "POST"):
+            url_ma = DRIVE_BASE_URL.rstrip("/") + f"/api/v1.0/items/{first_child_id}/media-auth/"
+            probe = {"method": method, "url": url_ma}
+            try:
+                resp = _req.request(
+                    method,
+                    url_ma,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=10,
+                    allow_redirects=False,
+                )
+                probe["status_code"] = resp.status_code
+                probe["content_type"] = resp.headers.get("content-type")
+                probe["set_cookie"] = resp.headers.get("set-cookie")
+                probe["location"] = resp.headers.get("location")
+                try:
+                    probe["body_json"] = resp.json()
+                except Exception:
+                    probe["body_text"] = (resp.text or "")[:300]
+            except Exception as exc:
+                probe["error"] = str(exc)
+            result["media_auth_probes"].append(probe)
 
     return jsonify(result), 200
 
