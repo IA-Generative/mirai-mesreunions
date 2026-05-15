@@ -4803,7 +4803,8 @@ INDEX_TEMPLATE = """
             <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
                 Préparez un brief avant chaque réunion : il sera automatiquement
                 rattaché à l'enregistrement audio correspondant pour enrichir la
-                transcription et le compte-rendu.
+                transcription et le compte-rendu. Les briefs sont conservés et
+                restent éditables. La corbeille les retient 30 jours avant suppression définitive.
             </p>
             <!-- Meeting-prep v2 §7 : banner purge invitée pour briefs > 90j
                  sans audio lié. Rendu conditionnel par loadBriefs() via la
@@ -4821,11 +4822,7 @@ INDEX_TEMPLATE = """
                             onclick="dismissOlderThan90dBanner()">Plus tard</button>
                 </div>
             </div>
-            <!-- Liste des briefs masquée par défaut — l'onglet est désormais un
-                 point d'entrée vers la création. Les briefs existants restent
-                 accessibles via le détail d'un fichier audio lié (badge « 📋 »
-                 dans l'onglet « Mes réunions ») et via la corbeille. -->
-            <div id="brief-list" style="display:none;" aria-hidden="true">
+            <div id="brief-list" style="font-size:0.86rem;color:#64748b;">
                 Chargement des briefs...
             </div>
         </div>
