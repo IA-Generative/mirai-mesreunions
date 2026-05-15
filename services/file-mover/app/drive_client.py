@@ -76,7 +76,15 @@ class DriveApplicativeError(DriveError):
 
 # Candidate field names on the item metadata that may carry a download URL.
 # Tried in order until one yields a non-empty string.
-_DOWNLOAD_URL_KEYS = ("download_url", "url", "file", "presigned_url", "media_url")
+#
+# Ordre crucial : `url_permalink` d'abord car c'est le seul champ qui pointe
+# systématiquement sur l'API DRF (`/api/v1.0/items/<id>/download/`) qui
+# accepte le bearer token mozilla-django-oidc. Le champ `url` (que mesfichiers
+# remplit sur tous les items) pointe sur `/media/item/<id>/<filename>`, route
+# servie par un middleware d'auth différent (cookie session ou JWT media-auth)
+# qui refuse notre bearer → 403 sur le download alors que le listing passe.
+# Cf diagnostic 2026-05-14 (test-drive children_probe = 200 mais POST = 403).
+_DOWNLOAD_URL_KEYS = ("url_permalink", "download_url", "presigned_url", "url", "file", "media_url")
 
 # DRF base path. Items are the unified resource (folders are items too).
 _API_PREFIX = "/api/v1.0"
