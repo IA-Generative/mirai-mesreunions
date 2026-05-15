@@ -2883,6 +2883,7 @@ def api_test_drive_access():
     # des enfants échoue. On dump la réponse complète (status + body
     # tronqué + 3 headers utiles) pour diagnostic.
     folder_id = request.args.get("folder_id", "").strip()
+    first_child_id = None
     if folder_id:
         result["children_probe"] = {"folder_id": folder_id}
         try:
@@ -2895,11 +2896,54 @@ def api_test_drive_access():
             result["children_probe"]["content_type"] = resp.headers.get("content-type")
             result["children_probe"]["www_authenticate"] = resp.headers.get("www-authenticate")
             try:
-                result["children_probe"]["body_json"] = resp.json()
+                body = resp.json()
+                result["children_probe"]["body_json_keys"] = list(body.keys()) if isinstance(body, dict) else "list"
+                # Récupère le 1er enfant pour le download_probe
+                items = body.get("results", body) if isinstance(body, dict) else body
+                if isinstance(items, list) and items:
+                    first = items[0]
+                    if isinstance(first, dict):
+                        first_child_id = first.get("id")
+                        result["children_probe"]["first_child"] = {
+                            "id": first_child_id,
+                            "title": first.get("title"),
+                            "url": first.get("url"),
+                            "url_permalink": first.get("url_permalink"),
+                        }
             except Exception:
                 result["children_probe"]["body_text"] = (resp.text or "")[:500]
         except Exception as exc:
             result["children_probe"]["error"] = str(exc)
+
+    # Step 6 (optionnel) : probe download du 1er enfant, sans suivre les
+    # redirects, pour voir si /api/.../download/ renvoie 200 directement,
+    # un 302 vers /media/ (bearer rejeté en aval), ou un 302 vers S3
+    # (bearer strippé puis URL signée à appeler).
+    if first_child_id:
+        url_dl = DRIVE_BASE_URL.rstrip("/") + f"/api/v1.0/items/{first_child_id}/download/"
+        result["download_probe"] = {"item_id": first_child_id, "url": url_dl}
+        try:
+            resp = _req.get(
+                url_dl,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+                allow_redirects=False,
+                stream=True,  # ne pas charger le body si binaire
+            )
+            result["download_probe"]["status_code"] = resp.status_code
+            result["download_probe"]["content_type"] = resp.headers.get("content-type")
+            result["download_probe"]["location"] = resp.headers.get("location")
+            result["download_probe"]["www_authenticate"] = resp.headers.get("www-authenticate")
+            result["download_probe"]["content_length"] = resp.headers.get("content-length")
+            if resp.status_code >= 400:
+                # Lire le body texte pour voir le message d'erreur
+                try:
+                    result["download_probe"]["body_text"] = (resp.text or "")[:500]
+                except Exception:
+                    pass
+            resp.close()
+        except Exception as exc:
+            result["download_probe"]["error"] = str(exc)
 
     return jsonify(result), 200
 
