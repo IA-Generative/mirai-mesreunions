@@ -3666,6 +3666,82 @@ INDEX_TEMPLATE = """
         .qr-container { margin: 1rem auto; }
         .qr-container img { border-radius: 8px; }
         .expires { color: #888; font-size: 0.85rem; margin-top: 0.5rem; }
+        /* Header dynamique : libellé de l'onglet actif après "MIrAI". */
+        .header-tab-label { color: #525a87; font-weight: 500; }
+        /* Rendu structuré du détail brief (remplace l'ancien <pre> JSON). */
+        .brief-rendered { margin-top: 0.8rem; display: flex; flex-direction: column; gap: 0.9rem; }
+        .brief-rendered .brief-section {
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 0.5rem;
+            padding: 0.85rem 1rem;
+        }
+        .brief-rendered .brief-section-title {
+            font-size: 0.92rem; font-weight: 700; color: #1a1a2e;
+            margin: 0 0 0.55rem; display: flex; align-items: center; gap: 0.5rem;
+        }
+        .brief-rendered .brief-section-icon {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.8rem; height: 1.8rem; border-radius: 0.4rem;
+            background: #eef2ff; color: #4338ca; font-size: 1rem;
+        }
+        .brief-rendered .brief-objective { font-size: 1rem; color: #161616; line-height: 1.5; }
+        .brief-rendered .brief-context { color: #334155; font-size: 0.9rem; line-height: 1.5; white-space: pre-wrap; }
+        .brief-rendered .brief-agenda { list-style: none; padding: 0; margin: 0; counter-reset: agenda; }
+        .brief-rendered .brief-agenda-item {
+            position: relative; padding: 0.55rem 0.75rem 0.55rem 2.4rem;
+            border-left: 3px solid #4338ca; background: #f8fafc;
+            border-radius: 0 0.35rem 0.35rem 0; margin-bottom: 0.5rem;
+            counter-increment: agenda;
+        }
+        .brief-rendered .brief-agenda-item::before {
+            content: counter(agenda); position: absolute; left: 0.55rem; top: 0.55rem;
+            width: 1.3rem; height: 1.3rem; border-radius: 50%;
+            background: #4338ca; color: #fff; font-size: 0.75rem; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .brief-rendered .brief-agenda-title { font-weight: 600; color: #1a1a2e; font-size: 0.93rem; }
+        .brief-rendered .brief-agenda-duration {
+            display: inline-block; margin-left: 0.45rem; padding: 0.1rem 0.45rem;
+            background: #e0e7ff; color: #3730a3; font-size: 0.72rem; border-radius: 999px;
+            font-weight: 600;
+        }
+        .brief-rendered .brief-agenda-objective { color: #475569; font-size: 0.85rem; margin-top: 0.25rem; }
+        .brief-rendered .brief-agenda-questions {
+            list-style: disc; padding-left: 1.3rem; margin: 0.35rem 0 0;
+            color: #334155; font-size: 0.85rem;
+        }
+        .brief-rendered .brief-participants { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem; }
+        .brief-rendered .brief-participant {
+            background: #fafafa; border: 1px solid #e5e7eb; border-radius: 0.4rem; padding: 0.55rem 0.7rem;
+        }
+        .brief-rendered .brief-participant-name { font-weight: 600; color: #1a1a2e; font-size: 0.88rem; margin-bottom: 0.2rem; }
+        .brief-rendered .brief-participant-note { color: #475569; font-size: 0.82rem; line-height: 1.4; }
+        .brief-rendered .brief-list { list-style: none; padding: 0; margin: 0; }
+        .brief-rendered .brief-list li {
+            padding: 0.4rem 0.55rem 0.4rem 1.9rem; position: relative;
+            border-bottom: 1px solid #f1f5f9; font-size: 0.88rem; color: #1a1a2e;
+        }
+        .brief-rendered .brief-list li:last-child { border-bottom: none; }
+        .brief-rendered .brief-list-questions li::before {
+            content: '?'; position: absolute; left: 0.6rem; top: 0.4rem;
+            color: #4338ca; font-weight: 700;
+        }
+        .brief-rendered .brief-list-risks li::before {
+            content: '⚠'; position: absolute; left: 0.55rem; top: 0.4rem;
+            color: #b45309; font-weight: 700;
+        }
+        .brief-rendered .brief-list-checklist li::before {
+            content: '☐'; position: absolute; left: 0.6rem; top: 0.4rem;
+            color: #16a34a; font-weight: 700; font-size: 1rem;
+        }
+        .brief-rendered .brief-list-threads li {
+            padding-left: 0.8rem; border-left: 3px solid #94a3b8; background: #f8fafc;
+            margin-bottom: 0.35rem; border-radius: 0 0.35rem 0.35rem 0;
+            padding-top: 0.45rem; padding-bottom: 0.45rem;
+        }
+        .brief-rendered .brief-thread-source {
+            display: block; color: #64748b; font-size: 0.78rem; font-style: italic; margin-top: 0.15rem;
+        }
+        .brief-rendered .brief-empty { color: #94a3b8; font-style: italic; font-size: 0.85rem; }
         .sessions-list { margin-top: 1rem; }
         /* Onglet "Mes réunions" en mode liste : la carte occupe la hauteur
            restante du viewport, et la liste interne scrolle. min-height
@@ -4747,7 +4823,7 @@ INDEX_TEMPLATE = """
           </div>
           <div class="fr-header__service">
             <a href="#" title="Accueil MIrAI">
-              <p class="fr-header__service-title">MIrAI - Mes réunions IA <span class="beta-badge">Bêta</span></p>
+              <p class="fr-header__service-title">MIrAI <span id="header-tab-label" class="header-tab-label"></span><span class="beta-badge">Bêta</span></p>
             </a>
             <p class="fr-header__service-tagline">Enregistrez depuis votre mobile, laissez l'IA transcrire et synthétiser vos réunions et notes vocales</p>
           </div>
@@ -4858,10 +4934,7 @@ INDEX_TEMPLATE = """
                  référence pour le test test_code_generator_template (landmark
                  « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
             <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;"></div>
-            <pre id="brief-detail-json"
-                 style="background:#f6f6f6;border:1px solid #e5e5e5;border-radius:0.4rem;
-                        padding:0.8rem;font-size:0.78rem;white-space:pre-wrap;
-                        max-height:60vh;overflow:auto;"></pre>
+            <div id="brief-detail-body" class="brief-rendered"></div>
             <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
                 <p style="font-size:0.8rem;color:#64748b;">
                     Édition manuelle. Pas de ré-appel LLM.
@@ -7635,6 +7708,13 @@ async function loadNormalizationImpact(fileId) {
 // d'un device actif. Persiste le choix dans sessionStorage pour ne pas
 // switcher au refresh.
 let _tabsInitialised = false;
+const TAB_HEADER_LABELS = {
+    transfers: 'Mes réunions IA',
+    brief: 'Préparation de réunion',
+    devices: 'Mes appareils',
+    generate: 'Enrôlement d\\'appareil',
+    trash: 'Corbeille',
+};
 function activateTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
         const on = b.getAttribute('data-tab') === tabName;
@@ -7643,6 +7723,11 @@ function activateTab(tabName) {
     document.querySelectorAll('.tab-pane').forEach((p) => {
         p.classList.toggle('is-active', p.getAttribute('data-tab') === tabName);
     });
+    const headerLabel = document.getElementById('header-tab-label');
+    if (headerLabel) {
+        const txt = TAB_HEADER_LABELS[tabName] || '';
+        headerLabel.textContent = txt ? ' — ' + txt + ' ' : '';
+    }
     try { sessionStorage.setItem('mydevices-active-tab', tabName); } catch (e) {}
 }
 function setupTabs() {
@@ -7794,18 +7879,109 @@ function showBriefList() {
     loadBriefs();
 }
 
+function renderBriefBody(brief_json) {
+    const bj = brief_json || {};
+    const esc = escapeHtml;
+    const parts = [];
+    const objective = (bj.objective_reformulated || '').trim();
+    const context = (bj.context_recap || '').trim();
+    if (objective || context) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">🎯</span>Objectif & contexte</h3>';
+        if (objective) {
+            html += `<p class="brief-objective">${esc(objective)}</p>`;
+        }
+        if (context) {
+            html += `<p class="brief-context" style="margin-top:0.5rem;">${esc(context)}</p>`;
+        }
+        html += '</section>';
+        parts.push(html);
+    }
+    const agenda = Array.isArray(bj.agenda) ? bj.agenda : [];
+    if (agenda.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">📋</span>Ordre du jour</h3><ol class="brief-agenda">';
+        agenda.forEach((it) => {
+            if (!it || typeof it !== 'object') return;
+            const title = esc(it.title || '(sans titre)');
+            const dur = it.duration_minutes ? `<span class="brief-agenda-duration">${parseInt(it.duration_minutes, 10) || 0} min</span>` : '';
+            const objv = (it.objective || '').trim();
+            const kqs = Array.isArray(it.key_questions) ? it.key_questions.filter((q) => (q || '').trim()) : [];
+            let inner = `<div class="brief-agenda-title">${title}${dur}</div>`;
+            if (objv) inner += `<div class="brief-agenda-objective">${esc(objv)}</div>`;
+            if (kqs.length) {
+                inner += '<ul class="brief-agenda-questions">';
+                kqs.forEach((q) => { inner += `<li>${esc(q)}</li>`; });
+                inner += '</ul>';
+            }
+            html += `<li class="brief-agenda-item">${inner}</li>`;
+        });
+        html += '</ol></section>';
+        parts.push(html);
+    }
+    const participants = Array.isArray(bj.participants_notes) ? bj.participants_notes : [];
+    if (participants.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">👥</span>Participants</h3><div class="brief-participants">';
+        participants.forEach((p) => {
+            if (!p || typeof p !== 'object') return;
+            const name = esc(p.name || '');
+            const note = esc(p.note || '');
+            if (!name && !note) return;
+            html += `<div class="brief-participant"><div class="brief-participant-name">${name || '—'}</div><div class="brief-participant-note">${note}</div></div>`;
+        });
+        html += '</div></section>';
+        parts.push(html);
+    }
+    const threads = Array.isArray(bj.open_threads) ? bj.open_threads : [];
+    if (threads.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">🧵</span>Points en suspens</h3><ul class="brief-list brief-list-threads">';
+        threads.forEach((t) => {
+            if (!t || typeof t !== 'object') return;
+            const item = (t.item || '').trim();
+            if (!item) return;
+            const src = (t.source || '').trim();
+            html += `<li>${esc(item)}${src ? `<span class="brief-thread-source">↳ ${esc(src)}</span>` : ''}</li>`;
+        });
+        html += '</ul></section>';
+        parts.push(html);
+    }
+    const openingQs = Array.isArray(bj.opening_questions) ? bj.opening_questions.filter((q) => (q || '').trim()) : [];
+    if (openingQs.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">💬</span>Questions d\\'ouverture</h3><ul class="brief-list brief-list-questions">';
+        openingQs.forEach((q) => { html += `<li>${esc(q)}</li>`; });
+        html += '</ul></section>';
+        parts.push(html);
+    }
+    const risks = Array.isArray(bj.risk_points) ? bj.risk_points.filter((q) => (q || '').trim()) : [];
+    if (risks.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">⚠️</span>Points de vigilance</h3><ul class="brief-list brief-list-risks">';
+        risks.forEach((q) => { html += `<li>${esc(q)}</li>`; });
+        html += '</ul></section>';
+        parts.push(html);
+    }
+    const checklist = Array.isArray(bj.preparation_checklist) ? bj.preparation_checklist.filter((q) => (q || '').trim()) : [];
+    if (checklist.length) {
+        let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">✅</span>À faire avant la réunion</h3><ul class="brief-list brief-list-checklist">';
+        checklist.forEach((q) => { html += `<li>${esc(q)}</li>`; });
+        html += '</ul></section>';
+        parts.push(html);
+    }
+    if (!parts.length) {
+        return '<p class="brief-empty">Aucun contenu structuré dans ce brief.</p>';
+    }
+    return parts.join('');
+}
+
 async function showBriefDetail(briefId) {
     _briefDetailId = briefId;
     document.getElementById('brief-list-view').style.display = 'none';
     document.getElementById('brief-detail-view').style.display = '';
     const titleEl = document.getElementById('brief-detail-title');
     const metaEl = document.getElementById('brief-detail-meta');
-    const jsonEl = document.getElementById('brief-detail-json');
+    const bodyEl = document.getElementById('brief-detail-body');
     const amendPane = document.getElementById('brief-amend-pane');
     amendPane.style.display = 'none';
     titleEl.textContent = 'Chargement...';
     metaEl.textContent = '';
-    jsonEl.textContent = '';
+    bodyEl.innerHTML = '';
     try {
         const r = await fetch(`/api/meeting-prep/${briefId}`);
         if (!r.ok) throw new Error('fetch failed');
@@ -7814,7 +7990,7 @@ async function showBriefDetail(briefId) {
         titleEl.textContent = b.title || b.subject || '(sans titre)';
         const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
         metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
-        jsonEl.textContent = JSON.stringify(b.brief_json || {}, null, 2);
+        bodyEl.innerHTML = renderBriefBody(b.brief_json || {});
         fillAmendForm(b.brief_json || {});
         // Meeting-prep v2 §7 — sections audio liés + chaîne de série.
         try { loadBriefAudioFiles(briefId); } catch (e) {}
