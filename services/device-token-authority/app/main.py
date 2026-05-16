@@ -2,7 +2,7 @@
 Token Issuer Service (Zone Interne)
 ====================================
 Seule autorité de génération des tokens de session (simple_code + qr_token).
-Le code-generator (zone externe) appelle cette API pour obtenir un token.
+Le mydevices-web (zone externe) appelle cette API pour obtenir un token.
 La zone interne est ainsi maître des identifiants de liaison.
 
 FLUX :
@@ -96,7 +96,7 @@ def purge_expired_pending(db) -> int:
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "service": "token-issuer", "zone": "internal"})
+    return jsonify({"status": "ok", "service": "device-token-authority", "zone": "internal"})
 
 
 @app.route("/healthz")
@@ -108,7 +108,7 @@ def healthz():
 def issue_token():
     """
     Génère un couple (simple_code, qr_token) et l'enregistre en base interne.
-    Appelé par le code-generator (zone externe) via API authentifiée.
+    Appelé par le mydevices-web (zone externe) via API authentifiée.
     """
     if not verify_token():
         logger.warning("Unauthorized token issue request from %s", request.remote_addr)
@@ -216,7 +216,7 @@ def issue_token():
 def validate_token(simple_code):
     """
     Vérifie qu'un token existe et est encore valide.
-    Utilisable par le file-puller pour vérifier le matching.
+    Utilisable par le internal-ingester pour vérifier le matching.
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
@@ -767,7 +767,7 @@ def revoke_device(device_id: str):
 def delete_session(simple_code: str):
     """Permanently remove an issued token + its options + any linked devices.
 
-    Used by code-generator when the user clicks "Supprimer cette session" on
+    Used by mydevices-web when the user clicks "Supprimer cette session" on
     a session card. Cascades:
       - issued_token_options (FK on simple_code)
       - device_enrollments  (FK on simple_code, may be 0 rows for never-enrolled codes)
@@ -818,9 +818,9 @@ def delete_session(simple_code: str):
 def delete_file_by_session():
     """Permanently remove a user_audio_files row + its transcription_events.
 
-    Called by code-generator quand l'utilisateur clique "Supprimer ce
+    Called by mydevices-web quand l'utilisateur clique "Supprimer ce
     fichier" depuis mydevices. La suppression côté externe (uploaded_files
-    + S3) est faite par code-generator avant cet appel ; cette route ne
+    + S3) est faite par mydevices-web avant cet appel ; cette route ne
     s'occupe que de la zone interne.
 
     Le lookup se fait sur ``(user_sub, simple_code, original_filename)`` :
@@ -1058,7 +1058,7 @@ def oidc_refresh_store():
     """
     UPSERT a (Fernet-encrypted) OIDC refresh token, keyed by user_sub.
 
-    Called by code-generator and admin-portal after a successful OIDC login
+    Called by mydevices-web and admin-console after a successful OIDC login
     when offline_access was requested. The plaintext token is never sent in
     the body — the caller has already encrypted it with the shared Fernet
     key via libs.shared.app.secrets_crypto.
@@ -1111,9 +1111,9 @@ def oidc_refresh_fetch(user_sub: str):
     """
     Return the stored ciphertext for a given user_sub (or 404).
 
-    Used by file-puller at MCR push time. The decryption happens
-    file-puller-side, so the Fernet key only needs to be present there
-    (and on CG/admin which encrypt). token-issuer is key-blind.
+    Used by internal-ingester at MCR push time. The decryption happens
+    internal-ingester-side, so the Fernet key only needs to be present there
+    (and on CG/admin which encrypt). device-token-authority is key-blind.
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
@@ -1139,7 +1139,7 @@ def oidc_refresh_fetch(user_sub: str):
 @app.route("/api/v1/oidc-refresh-delete/<user_sub>", methods=["DELETE"])
 def oidc_refresh_delete(user_sub: str):
     """
-    Delete the stored refresh token for a user_sub. Called by file-puller
+    Delete the stored refresh token for a user_sub. Called by internal-ingester
     when Keycloak responds invalid_grant (refresh expired/revoked) so the
     next MCR push attempt fails fast in mcr_auth_failed without trying to
     use a known-bad token.
@@ -1193,7 +1193,7 @@ def admin_revoke_all_devices():
 # ─── Preparation CRUD (zone interne) ────────────────────────
 #
 # La table `preparations` vit en zone INTERNE (postgres-internal). Le
-# code-generator (zone externe) relaie via les endpoints ci-dessous, comme
+# mydevices-web (zone externe) relaie via les endpoints ci-dessous, comme
 # il le fait pour rename/delete des fichiers (cf. rename_file_by_session,
 # delete_file_by_session). Migration 012 a éclaté `meeting_briefs` en
 # `preparations` (amont-réunion) et `meetings` (post-réunion).
@@ -1427,7 +1427,7 @@ def list_preparations_with_counts():
 @app.route("/api/v1/preparations/purge", methods=["POST"])
 def purge_preparations():
     """Hard-delete des préparations en corbeille depuis > N jours pour
-    `user_sub`. Appelé par code-generator (`_purge_expired_trash`).
+    `user_sub`. Appelé par mydevices-web (`_purge_expired_trash`).
     Body: `{"user_sub": "...", "older_than_days": 30}`.
     """
     if not verify_token():
@@ -2191,10 +2191,10 @@ def link_meeting_to_audio(meeting_id: str):
 
 # ─── Audio → Preparation linking (raccourci pour l'auto-link) ────
 #
-# Le pipeline file-mover crée un Meeting à l'upload d'un audio (PR2d). Le
+# Le pipeline dmz-to-internal-bridge crée un Meeting à l'upload d'un audio (PR2d). Le
 # présent endpoint set/clear la `preparation_id` du meeting associé à un
 # audio, en créant le meeting au passage s'il n'existe pas. Compense pour
-# PR2c (file-mover encore monolithique côté link).
+# PR2c (dmz-to-internal-bridge encore monolithique côté link).
 
 
 @app.route("/api/v1/files/by-id/link-preparation", methods=["POST"])
@@ -2283,7 +2283,7 @@ def link_audio_to_preparation():
 
 @app.route("/api/v1/audio/<audio_id>/mark-reprocessed", methods=["POST"])
 def mark_audio_reprocessed(audio_id: str):
-    """Met à jour les flags de re-traitement après un run file-puller.
+    """Met à jour les flags de re-traitement après un run internal-ingester.
 
     Body: `{user_sub, preparation_id|null, version, glossary_term_count,
     prev_payload}`. `prev_payload` (dict) est appendu à `reprocess_history`

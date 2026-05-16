@@ -9,7 +9,7 @@ Two ways to learn that a new file is ready:
      **outbound** from inside the protected zone — no inbound connection
      ever crosses the boundary. This is the source of truth.
   2. ``/api/v1/pull-trigger`` HTTP endpoint exposed via Ingress: an
-     optional, bearer-protected wake-up that lets file-mover ask "drain now"
+     optional, bearer-protected wake-up that lets dmz-to-internal-bridge ask "drain now"
      and reach near-zero latency. If anything blocks the trigger (ACL,
      network, token rotated), the polling tick still catches up.
 
@@ -134,7 +134,7 @@ INTERNAL_PURGE_MAX_AGE_DAYS = max(1, int(os.getenv("INTERNAL_PURGE_MAX_AGE_DAYS"
 INTERNAL_PURGE_LOCK_ID = int(os.getenv("INTERNAL_PURGE_LOCK_ID", "910019001"))
 
 EXTERNAL_CALLBACK_URL = os.getenv(
-    "EXTERNAL_CALLBACK_URL", "http://upload-portal:8081/api/notify-status"
+    "EXTERNAL_CALLBACK_URL", "http://mobile-upload-pwa:8081/api/notify-status"
 )
 
 INTERNAL_PUSH_TRIGGER_TOKEN = os.getenv("INTERNAL_PUSH_TRIGGER_TOKEN", "")
@@ -350,7 +350,7 @@ from app.audio_format import to_diarization_format as _to_diarization_format
 
 # ── Phase 2bis : reprise auto des polls Kevent orphelins ─────────────────
 #
-# Quand un pod file-puller meurt (OOM, scale-down, rollout) pendant qu'il
+# Quand un pod internal-ingester meurt (OOM, scale-down, rollout) pendant qu'il
 # poll Kevent pour un fichier, le job continue côté gateway mais plus
 # personne ne récupère le résultat. Le fichier reste figé dans son état
 # de polling (kevent_queued / kevent_transcribing / kevent_processing).
@@ -690,7 +690,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         """Map kevent job statuses → our DB transcription_status so the
         mydevices UI can show 'queued' / 'processing' while polling.
 
-        Also pushes a callback to upload-portal so the mobile PWA can show
+        Also pushes a callback to mobile-upload-pwa so the mobile PWA can show
         the progress in real time (same WebSocket channel as the upload
         phase)."""
         mapped = {
@@ -703,7 +703,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                                        transcription_engine="kevent")
             except Exception:
                 logger.exception("Failed to push intermediate status %s", mapped)
-            # Best-effort callback vers upload-portal pour le PWA mobile.
+            # Best-effort callback vers mobile-upload-pwa pour le PWA mobile.
             external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
             try:
                 notify_external_status(
@@ -1161,7 +1161,7 @@ def _perform_pull(payload: dict) -> dict:
         # On émet le "transferred 100%" AVANT la dispatch backend pour que
         # les notifications kevent (kevent_queued / kevent_processing /
         # kevent_failed) qui suivent puissent légitimement écraser ce
-        # status (le dernier write gagne côté upload-portal). Précédemment
+        # status (le dernier write gagne côté mobile-upload-pwa). Précédemment
         # ce notify était fait après _transcribe_via_kevent et écrasait
         # silencieusement les erreurs d'auth Kevent.
         if auto_transcribe:
@@ -1456,7 +1456,7 @@ def pull_file():
 def queue_status():
     """File d'attente Kevent — proxy lite vers gateway list_jobs.
 
-    Permet à upload-portal / code-generator de surfacer une info brève
+    Permet à mobile-upload-pwa / mydevices-web de surfacer une info brève
     "Position X/Y dans la file" sans exposer la clé API.
 
     Query: ``service_type`` (défaut audio), ``job_id`` (optional → calcule
@@ -1495,7 +1495,7 @@ def audio_meeting_datetimes():
     """Bulk map (simple_code, original_filename) → meeting_datetime override.
 
     Renvoie uniquement les rows ayant un override non-NULL — sert au
-    code-generator pour enrichir la liste mydevices d'un seul aller-retour
+    mydevices-web pour enrichir la liste mydevices d'un seul aller-retour
     (au lieu de N appels lookup individuels). Format compact :
     ``{"items": [{"simple_code","original_filename","meeting_datetime"}]}``.
     Auth = INTERNAL_API_TOKEN bearer.
@@ -1542,7 +1542,7 @@ def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.
 
     Identified by ``(user_sub, original_session_code, stored_filename)``.
-    Used by code-generator to back the user-facing download endpoints
+    Used by mydevices-web to back the user-facing download endpoints
     (transcript .txt/.md/.docx/.odt, meeting-cr .json/.md/.docx/.odt).
     Auth = INTERNAL_API_TOKEN bearer (same as ``/api/v1/pull``) — only
     callable from the internal zone.
@@ -1559,7 +1559,7 @@ def audio_lookup():
         return jsonify({"error": "db_not_ready"}), 503
     db = SessionLocal()
     try:
-        # ``filename`` côté code-generator c'est uploaded_files.transcoded_filename
+        # ``filename`` côté mydevices-web c'est uploaded_files.transcoded_filename
         # (basename, ex: YJENNB_xxx_foo.mp4). Côté user_audio_files,
         # stored_filename est la clé S3 interne complète préfixée par
         # ``<user_sub>/<simple_code>/`` (cf. _perform_pull). On matche

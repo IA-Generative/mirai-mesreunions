@@ -19,7 +19,7 @@ conventional ``/items/{id}/download/`` endpoint. The client supports both:
 and falls back to the ``/download/`` route if none is present.
 
 Errors are classified into the same three families as ``MCRClient`` so the
-caller (upload-portal /api/meeting-prep route) can react uniformly:
+caller (mobile-upload-pwa /api/meeting-prep route) can react uniformly:
 
   - ``DriveAuthError``        : refresh expired/revoked, or 401/403 from
                                 Drive. Caller must wipe the refresh token

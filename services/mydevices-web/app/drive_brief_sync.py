@@ -15,9 +15,9 @@ preps (cf §5c, format 1 terme/ligne trié par fréquence desc, cap 300).
 État actuel : placeholder structuré. La résolution du dossier cible
 (``resolve_drive_target_folder``) et les appels Drive ``items/children/``
 + ``policy`` + ``upload-ended/`` ne sont PAS encore branchés (dépendent de
-la DriveClient existante côté file-mover). Le thread est démarré, capture
+la DriveClient existante côté dmz-to-internal-bridge). Le thread est démarré, capture
 les erreurs, écrit ``drive_sync_status = 'failed'`` en cas d'échec via le
-relais token-issuer (endpoint dédié à ajouter).
+relais device-token-authority (endpoint dédié à ajouter).
 
 NotImplementedError remonté côté logs uniquement — n'impacte pas le
 caller. À finaliser dans le sprint Drive/persistence.
@@ -68,7 +68,7 @@ def _drive_brief_sync_worker(user_sub, brief_id, brief_json, documents,
             brief_id, user_sub,
         )
         # TODO : POST /api/v1/briefs/<id>/drive-sync-status {failed} via
-        # token-issuer pour que l'UI affiche le badge "Réessayer".
+        # device-token-authority pour que l'UI affiche le badge "Réessayer".
 
 
 def _do_sync(user_sub, brief_id, brief_json, documents, used_prompt,
@@ -80,7 +80,7 @@ def _do_sync(user_sub, brief_id, brief_json, documents, used_prompt,
     fonctionne. **Le POST effectif vers Drive (create folder + upload 3-step)
     n'est PAS branché** : il dépend d'extensions à ``DriveClient``
     (``create_folder``, ``upload_file``, ``delete_item``) qui n'existent pas
-    encore dans ``services/file-mover/app/drive_client.py``.
+    encore dans ``services/dmz-to-internal-bridge/app/drive_client.py``.
 
     Pour ne pas bricoler en silence (la corruption Drive est invisible),
     on remonte ``NotImplementedError`` qui est attrapé en amont (worker
@@ -101,7 +101,7 @@ def _do_sync(user_sub, brief_id, brief_json, documents, used_prompt,
          si absent. Sous-dossier "<YYYY-MM-DD>-<slug>" à l'intérieur.
       3. Pour chaque fichier : si même titre existe → delete + recreate.
       4. POST /api/v1/briefs/<id>/drive-sync-status {synced, folder_id, at}
-         via token-issuer (endpoint dédié à ajouter).
+         via device-token-authority (endpoint dédié à ajouter).
 
     Les contenus sont OK et testés (cf test_drive_brief_sync_helpers.py) :
     seul le transport Drive manque.
@@ -131,13 +131,13 @@ def _build_brief_files_payload(brief_json: dict, documents: list,
     _bj2md = brief_json_to_markdown
     _ds2md = documents_source_to_markdown
     try:
-        # Glossaire complet via l'extracteur du file-mover (lazily importé
+        # Glossaire complet via l'extracteur du dmz-to-internal-bridge (lazily importé
         # pour ne pas alourdir le module si jamais cet appel est hors
         # chemin d'exécution courant).
         import sys, importlib.util as _iu
         import os as _os
         _fm_app = _os.path.normpath(_os.path.join(
-            _os.path.dirname(__file__), "..", "..", "file-mover", "app"
+            _os.path.dirname(__file__), "..", "..", "dmz-to-internal-bridge", "app"
         ))
         _spec = _iu.spec_from_file_location(
             "_gfb", _os.path.join(_fm_app, "glossary_from_brief.py")

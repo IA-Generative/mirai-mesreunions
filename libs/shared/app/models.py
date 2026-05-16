@@ -82,7 +82,7 @@ class UploadSession(ExternalBase):
 
     # Corbeille (soft-delete). NULL = visible. NOT NULL = mis à la corbeille
     # le YYYY-MM-DD ; sera définitivement supprimé (DB + S3) après 30 jours
-    # par le balayage opportuniste de code-generator (api_my_sessions).
+    # par le balayage opportuniste de mydevices-web (api_my_sessions).
     trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     uploads = relationship("UploadedFile", back_populates="session", cascade="all, delete-orphan")
@@ -118,7 +118,7 @@ class UploadedFile(ExternalBase):
     audio_duration_seconds = Column(Float, nullable=True)
     audio_sample_rate = Column(Integer, nullable=True)
 
-    # Normalization impact (mesuré par le transcode-worker en pass-1 et
+    # Normalization impact (mesuré par le audio-normalizer en pass-1 et
     # post-transcode). Persisté en DB pour qu'on n'ait plus besoin de
     # redownloader la source S3 — qui est purgée après transcode — quand
     # l'utilisateur clique l'icône info sur mydevices.
@@ -168,7 +168,7 @@ class UploadTokenOption(ExternalBase):
 class IssuedToken(InternalBase):
     """
     Token de session généré côté INTERNE (autorité de confiance).
-    Le code-generator (ext) demande un token via API, l'interne le génère et le stocke.
+    Le mydevices-web (ext) demande un token via API, l'interne le génère et le stocke.
     C'est la source de vérité pour le matching fichier ↔ utilisateur.
     """
     __tablename__ = "issued_tokens"
@@ -288,7 +288,7 @@ class UserAudioFile(InternalBase):
     # Kevent job_id du WHISPER en cours / dernier soumis. Persisté pour :
     # 1) demander la position d'attente au gateway via /api/queue-status?job_id=…
     # 2) reprendre automatiquement un poll orphelin au boot d'un pod
-    #    file-puller (OOM, scale-down, rollout) sans re-uploader.
+    #    internal-ingester (OOM, scale-down, rollout) sans re-uploader.
     kevent_job_id = Column(String(64), nullable=True, index=True,
                             comment="Kevent gateway job_id (Whisper) — track + resume on pod restart")
 
@@ -355,9 +355,9 @@ class OidcRefreshToken(InternalBase):
     """
     Server-side cache of an OIDC refresh token, keyed by user_sub.
 
-    Captured at login on mydevices (code-generator/admin-portal) when the
+    Captured at login on mydevices (mydevices-web/admin-console) when the
     OIDC scope ``offline_access`` is requested. Used asynchronously by
-    file-puller at MCR push time to mint a fresh access token *on behalf
+    internal-ingester at MCR push time to mint a fresh access token *on behalf
     of* the original user — without that user being interactively
     connected anymore.
 
@@ -367,7 +367,7 @@ class OidcRefreshToken(InternalBase):
     Lifecycle:
       - INSERT/UPSERT at user login (latest token wins; Keycloak rotates
         on use so older tokens become invalid anyway).
-      - SELECT-DECRYPT-EXCHANGE at file-puller MCR push.
+      - SELECT-DECRYPT-EXCHANGE at internal-ingester MCR push.
       - DELETE on KC ``invalid_grant`` (refresh expired or revoked) or on
         explicit logout.
     """
@@ -399,10 +399,10 @@ class Preparation(InternalBase):
     exister sans préparation (CR manuel) — cardinalité 0..1 ↔ 0..1.
 
     Isolation par ``user_sub`` (OIDC), soft-delete via ``trashed_at``,
-    purge auto 30j déclenchée par code-generator.
+    purge auto 30j déclenchée par mydevices-web.
 
-    L'écriture/lecture depuis code-generator (zone externe) passe par
-    token-issuer ``/api/v1/preparations/*`` (relais cross-cluster).
+    L'écriture/lecture depuis mydevices-web (zone externe) passe par
+    device-token-authority ``/api/v1/preparations/*`` (relais cross-cluster).
     """
     __tablename__ = "preparations"
 
@@ -463,8 +463,8 @@ class Meeting(InternalBase):
     standalone (CR manuel sans audio, sans prep préalable).
 
     Isolation par ``user_sub`` (OIDC), soft-delete via ``trashed_at``.
-    L'écriture/lecture depuis code-generator (zone externe) passe par
-    token-issuer ``/api/v1/meetings/*``.
+    L'écriture/lecture depuis mydevices-web (zone externe) passe par
+    device-token-authority ``/api/v1/meetings/*``.
     """
     __tablename__ = "meetings"
 

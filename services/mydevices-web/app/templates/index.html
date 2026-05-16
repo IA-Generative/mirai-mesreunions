@@ -1424,7 +1424,7 @@
             <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
             <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
-                 référence pour le test test_code_generator_template (landmark
+                 référence pour le test test_mydevices_web_template (landmark
                  « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
             <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <div id="brief-detail-body" class="brief-rendered"></div>
@@ -2061,7 +2061,7 @@ async function openFileInfoModal(fileId) {
 }
 
 // Renomme le titre suggéré (suggested_filename) du fichier en vue détail.
-// Persiste via POST /api/file/<id>/rename → token-issuer interne.
+// Persiste via POST /api/file/<id>/rename → device-token-authority interne.
 async function renameDetailTitle(fileId, btn) {
     const input = document.querySelector(`[data-detail-title-for="${fileId}"]`);
     if (!input) return;
@@ -2665,7 +2665,7 @@ function schedulePendingDevicesPoll(devices) {
     }
     if (hasPending) {
         // Poll until pending devices either confirm (heartbeat) or are purged
-        // server-side. 15s matches the upload-portal heartbeat cadence so the
+        // server-side. 15s matches the mobile-upload-pwa heartbeat cadence so the
         // user sees the state transition shortly after it happens.
         pendingDevicesPollTimer = setTimeout(() => {
             pendingDevicesPollTimer = null;
@@ -3811,7 +3811,7 @@ async function loadTranscriptStatus(fileId, container) {
         const data = await resp.json();
         if (!data.available) {
             container.innerHTML = '';
-            // re-test dans 30s : la row apparaîtra dès que file-puller a intégré
+            // re-test dans 30s : la row apparaîtra dès que internal-ingester a intégré
             setTimeout(() => loadTranscriptStatus(fileId, container), 30000);
             return;
         }

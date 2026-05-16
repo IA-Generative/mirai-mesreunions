@@ -133,7 +133,7 @@ class KeventClient:
     def _whisper_safe_filename(filename: str) -> str:
         """Renomme l'extension pour matcher la whitelist du gateway Whisper.
 
-        Le gateway accepte ``.mp3 .wav .m4a .ogg .flac``. Le transcode-worker
+        Le gateway accepte ``.mp3 .wav .m4a .ogg .flac``. Le audio-normalizer
         produit du ``.mp4`` (container MP4 + AAC), qui est sémantiquement
         identique à ``.m4a`` côté contenu. On renomme juste l'extension du
         multipart sans toucher aux bytes, sinon le gateway répond

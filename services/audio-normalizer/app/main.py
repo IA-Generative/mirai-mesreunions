@@ -50,7 +50,7 @@ POST_LOUDNORM_FILTER_CHAIN = os.getenv(
     "highpass=f=80,lowpass=f=7000,alimiter=limit=0.95",
 ).strip()
 
-UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://upload-portal:8081")
+UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://mobile-upload-pwa:8081")
 
 
 def notify_portal(session_obj, file_obj, status_msg):

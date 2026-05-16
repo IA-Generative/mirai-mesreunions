@@ -2,8 +2,8 @@
 Symmetric Fernet encryption for at-rest secrets persisted in the database.
 
 Today's only consumer is the OIDC refresh token cache (``oidc_refresh_tokens``
-table populated at user login by code-generator/admin-portal and read by
-file-puller at MCR push time). Other future at-rest secrets — e.g. webhook
+table populated at user login by mydevices-web/admin-console and read by
+internal-ingester at MCR push time). Other future at-rest secrets — e.g. webhook
 signing keys, third-party service tokens — should reuse this helper rather
 than reinvent a Fernet wrapper.
 
@@ -12,8 +12,8 @@ Key management
 The Fernet key is read once from the env var ``OIDC_REFRESH_TOKEN_FERNET_KEY``
 (URL-safe base64, 32 bytes once decoded — exactly what
 ``Fernet.generate_key()`` produces). The same key value MUST be deployed in
-both K8s namespaces that use it (audio-internal for file-puller and code-
-generator/admin-portal in prod-bêta where these services live), otherwise
+both K8s namespaces that use it (audio-internal for internal-ingester and code-
+generator/admin-console in prod-bêta where these services live), otherwise
 ciphertexts written by one service can't be decrypted by another.
 
 Rotation: re-encrypt the entire ``oidc_refresh_tokens`` table with the new

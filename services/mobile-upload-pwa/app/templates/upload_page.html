@@ -1245,7 +1245,7 @@ async function refreshStatus() {
             }
             // Démarre/stoppe l'info-bulle file Kevent selon qu'il reste
             // des fichiers non-terminaux. job_id Kevent n'est pas connu
-            // côté PWA (interne file-puller) → on poll sans job_id pour
+            // côté PWA (interne internal-ingester) → on poll sans job_id pour
             // surfacer le compteur global "N jobs en attente".
             const hasNonTerminal = (data.files || []).some(
                 f => !QUEUE_TERMINAL_STATUSES.has(f.status)
@@ -1346,8 +1346,8 @@ function _formatRemaining(remainingMs) {
 
 // Heartbeat optionnel : si le user a cliqué « Renouveler » côté mydevices,
 // retention_expires_at en DB a bumpé mais notre token local porte encore
-// l'ancien retention_until. On demande à upload-portal un device_token
-// rafraîchi (qui fait le proxy vers token-issuer.validate-device). Si OK,
+// l'ancien retention_until. On demande à mobile-upload-pwa un device_token
+// rafraîchi (qui fait le proxy vers device-token-authority.validate-device). Si OK,
 // on remplace le token en localStorage. Best-effort — silencieux si fail.
 async function _refreshDeviceTokenIfNeeded() {
     const t = getDeviceToken();

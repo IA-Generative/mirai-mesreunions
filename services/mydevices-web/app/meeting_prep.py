@@ -18,7 +18,7 @@ The flow, run synchronously inside the request handler, is::
             ▼
        JSON brief returned to the browser
 
-Drive client / doc extractor / LLM client live in ``services/file-mover/app/``
+Drive client / doc extractor / LLM client live in ``services/dmz-to-internal-bridge/app/``
 because they are first-class components of the post-meeting pipeline; the
 production image co-locates every service's code under ``/app/services`` so
 we can load them by absolute path here without duplicating the modules.
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # /app/services, and tests resolve the repo root the same way. So a
 # path-based import is portable across both contexts.
 _FILE_MOVER_APP = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "file-mover", "app")
+    os.path.join(os.path.dirname(__file__), "..", "..", "dmz-to-internal-bridge", "app")
 )
 
 

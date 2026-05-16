@@ -140,17 +140,17 @@ ALLOWED_AUDIO_EXTENSIONS = _list("ALLOWED_AUDIO_EXTENSIONS", "mp3,wav,ogg,flac,m
 UPLOAD_PORTAL_BASE_URL = _str("UPLOAD_PORTAL_BASE_URL", "http://localhost:8081")
 MYDEVICES_PORTAL_URL = _str("MYDEVICES_PORTAL_URL", "")
 TOKEN_EXPIRY_WARNING_DAYS = _int("TOKEN_EXPIRY_WARNING_DAYS", 7)
-# Rétention device après enrôlement. Source de vérité : token-issuer
+# Rétention device après enrôlement. Source de vérité : device-token-authority
 # (qui applique la valeur lors d'une enroll/renew). Exposé ici pour les
-# autres services (code-generator) qui ont besoin d'afficher la durée
+# autres services (mydevices-web) qui ont besoin d'afficher la durée
 # réelle à l'utilisateur dans les messages de confirmation.
 DEVICE_TOKEN_RETENTION_HOURS = _int("DEVICE_TOKEN_RETENTION_HOURS", 168)
 # Internal-pull cross-cluster channel.
 #   INTERNAL_PUSH_TRIGGER_URL : if it parses as an HTTP(S) URL with a non-empty
-#       host, file-mover will POST a wake-up to that URL after publishing the
+#       host, dmz-to-internal-bridge will POST a wake-up to that URL after publishing the
 #       internal_pull AMQP message; otherwise the trigger is disabled and
-#       file-puller picks the message up at the next polling tick.
-#   INTERNAL_PULL_QUEUE_INTERVAL_SECONDS : how often file-puller drains the
+#       internal-ingester picks the message up at the next polling tick.
+#   INTERNAL_PULL_QUEUE_INTERVAL_SECONDS : how often internal-ingester drains the
 #       internal_pull queue. Acts as a safety net even when the HTTP trigger
 #       is enabled — anything missed by the trigger is caught next tick.
 INTERNAL_PUSH_TRIGGER_URL = _str("INTERNAL_PUSH_TRIGGER_URL", "")
@@ -167,13 +167,13 @@ LOUDNORM_AUTO_DECISION = _bool("LOUDNORM_AUTO_DECISION", True)
 LOUDNORM_RMS_THRESHOLD_DBFS = float(_str("LOUDNORM_RMS_THRESHOLD_DBFS", "-30.0"))
 LOUDNORM_PROBE_OFFSETS_S = _str("LOUDNORM_PROBE_OFFSETS_S", "60,300")
 LOUDNORM_PROBE_DURATION_S = float(_str("LOUDNORM_PROBE_DURATION_S", "5.0"))
-INTERNAL_API_URL = _str("INTERNAL_API_URL", "http://file-puller:8090/api/v1/pull")
+INTERNAL_API_URL = _str("INTERNAL_API_URL", "http://internal-ingester:8090/api/v1/pull")
 INTERNAL_API_TOKEN = _str("INTERNAL_API_TOKEN", "")
-TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://token-issuer:8091/api/v1/issue-token")
+TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://device-token-authority:8091/api/v1/issue-token")
 
 # Transcription backend selection. Mutually exclusive — a file goes to
 # exactly one destination.
-#   TRANSCRIPTION_BACKEND  : "stub" (default, local transcription-stub via
+#   TRANSCRIPTION_BACKEND  : "stub" (default, local transcription-relay via
 #                            the AMQP transcription queue), "mcr" (push to
 #                            the external MCR meeting platform), or
 #                            "kevent" (call the Mirai Kevent gateway for
@@ -182,12 +182,12 @@ TOKEN_ISSUER_API_URL = _str("TOKEN_ISSUER_API_URL", "http://token-issuer:8091/ap
 TRANSCRIPTION_BACKEND = _str("TRANSCRIPTION_BACKEND", "stub")
 
 # MCR backend (when TRANSCRIPTION_BACKEND=mcr). The user-delegated push uses
-# a refresh token captured at OIDC login and exchanged on demand by file-puller.
+# a refresh token captured at OIDC login and exchanged on demand by internal-ingester.
 #   MCR_GATEWAY_URL             : base URL of the MCR API gateway (no trailing /).
-#   OIDC_OFFLINE_ACCESS         : when true, code-generator + admin-portal
+#   OIDC_OFFLINE_ACCESS         : when true, mydevices-web + admin-console
 #                                 request the offline_access scope at login
 #                                 and persist the resulting refresh_token.
-#   OIDC_TOKEN_ENDPOINT         : Keycloak's token endpoint, used by file-puller
+#   OIDC_TOKEN_ENDPOINT         : Keycloak's token endpoint, used by internal-ingester
 #                                 to exchange a refresh_token against an
 #                                 access_token at MCR push time.
 #   OIDC_REFRESH_TOKEN_FERNET_KEY : Fernet key (URL-safe base64) used to
@@ -244,7 +244,7 @@ KEVENT_FILENAME_SUGGESTION_ENABLED = _bool("KEVENT_FILENAME_SUGGESTION_ENABLED",
 # (medium model). Produced after meeting_analysis so the prompt can rely on the
 # cleanest text available. NULL when the toggle is off or the LLM call fails.
 KEVENT_ABSENTEE_SUMMARY_ENABLED = _bool("KEVENT_ABSENTEE_SUMMARY_ENABLED", False)
-# Async / job-based mode for Kevent transcribe + diarize. When true, file-puller
+# Async / job-based mode for Kevent transcribe + diarize. When true, internal-ingester
 # uses POST /jobs/{service_type} + GET /jobs/{type}/{id} polling instead of the
 # blocking sync endpoints. Useful for long files where the sync HTTP connection
 # could be killed by a load-balancer or proxy.

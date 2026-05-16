@@ -56,7 +56,7 @@ _purge_thread_started = False
 EXTERNAL_PURGE_INTERVAL_SECONDS = max(60, int(os.getenv("EXTERNAL_PURGE_INTERVAL_SECONDS", "86400")))
 EXTERNAL_PURGE_MAX_AGE_HOURS = max(1, int(os.getenv("EXTERNAL_PURGE_MAX_AGE_HOURS", "12")))
 EXTERNAL_PURGE_LOCK_ID = int(os.getenv("EXTERNAL_PURGE_LOCK_ID", "810018001"))
-DEVICE_API_PROXY_BASE_URL = os.getenv("DEVICE_API_PROXY_BASE_URL", "http://code-generator:8080").rstrip("/")
+DEVICE_API_PROXY_BASE_URL = os.getenv("DEVICE_API_PROXY_BASE_URL", "http://mydevices-web:8080").rstrip("/")
 TOKEN_ISSUER_ENROLL_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/enroll-proxy"
 TOKEN_ISSUER_VALIDATE_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/validate-proxy"
 DEVICE_REVALIDATE_INTERVAL_SECONDS = max(60, int(os.getenv("DEVICE_REVALIDATE_INTERVAL_SECONDS", "14400")))
@@ -69,7 +69,7 @@ _device_validation_lock = threading.Lock()
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "ok", "service": "upload-portal", "zone": "external"}), 200
+    return jsonify({"status": "ok", "service": "mobile-upload-pwa", "zone": "external"}), 200
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -608,14 +608,14 @@ def api_device_heartbeat():
     """Léger ping pour rafraîchir le device_token côté PWA.
 
     Permet à la PWA mobile (qui ne fait pas autrement de call direct vers
-    token-issuer) de récupérer un device_token mis à jour quand
+    device-token-authority) de récupérer un device_token mis à jour quand
     `retention_expires_at` a été bumpé en DB suite à un clic « Renouveler »
     côté mydevices. La PWA appelle ce endpoint depuis updateExpiryBanner
     (toutes les heures) ; si la réponse contient `refreshed_device_token`,
     elle remplace le token dans localStorage.
 
     Pas d'auth user requise — l'identité est portée par le device_token
-    lui-même (signature HMAC vérifiée côté token-issuer).
+    lui-même (signature HMAC vérifiée côté device-token-authority).
     """
     device_token = _extract_device_token()
     if not device_token:
@@ -870,8 +870,8 @@ def api_upload(qr_token):
 
 @app.route("/api/queue-status")
 def api_queue_status():
-    """Proxy léger vers code-generator /api/queue-status (qui proxy
-    file-puller, qui lui interroge la gateway Kevent).
+    """Proxy léger vers mydevices-web /api/queue-status (qui proxy
+    internal-ingester, qui lui interroge la gateway Kevent).
 
     Query: ``job_id`` (optionnel). Sert la même réponse QueueSummary —
     surface pour la PWA d'info "Position dans la file" sans exposer
@@ -893,7 +893,7 @@ def api_queue_status():
         )
         return resp.json(), resp.status_code
     except Exception:
-        logger.warning("queue-status proxy to code-generator failed", exc_info=True)
+        logger.warning("queue-status proxy to mydevices-web failed", exc_info=True)
         from datetime import datetime as _dt, timezone as _tz
         return jsonify({
             "pending_total": None, "processing_total": None,

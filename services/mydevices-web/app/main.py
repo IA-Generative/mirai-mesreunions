@@ -5,7 +5,7 @@ Authenticated interface (OIDC/Keycloak) for generating QR codes
 and simple codes that link to the upload portal.
 
 CHANGEMENT CLÉ : les tokens (simple_code + qr_token) sont générés
-côté INTERNE par le token-issuer. Ce service ne fait que relayer
+côté INTERNE par le device-token-authority. Ce service ne fait que relayer
 la demande et stocker une copie en base externe pour le suivi.
 """
 
@@ -67,7 +67,7 @@ s3_processed_cfg = load_s3_processed()
 s3_internal_cfg = load_s3_internal()
 SessionLocal = None
 rabbit_cfg = RabbitMQConfig()
-# Limite alignée sur upload-portal pour rester cohérent quand l'utilisateur
+# Limite alignée sur mobile-upload-pwa pour rester cohérent quand l'utilisateur
 # uploade directement depuis mydevices (POST /api/my-upload).
 app.config["MAX_CONTENT_LENGTH"] = UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOW_SHORT_QR_TTL_SECONDS_TEST = os.getenv("ALLOW_SHORT_QR_TTL_SECONDS_TEST", "").lower() in {"1", "true", "yes"}
@@ -108,7 +108,7 @@ def make_qr_image(url: str) -> BytesIO:
     return buf
 
 
-def get_upload_portal_base_url() -> str:
+def get_mobile_upload_pwa_base_url() -> str:
     """
     Resolve upload portal URL for QR generation.
     Priority:
@@ -194,8 +194,8 @@ def request_token_from_internal(
     auto_transcribe: bool = True,
 ) -> dict:
     """
-    Appelle le token-issuer en zone INTERNE pour obtenir un (simple_code, qr_token).
-    Le code-generator ne génère plus jamais de token lui-même.
+    Appelle le device-token-authority en zone INTERNE pour obtenir un (simple_code, qr_token).
+    Le mydevices-web ne génère plus jamais de token lui-même.
     """
     payload = {
         "user_sub": user["sub"],
@@ -221,14 +221,14 @@ def request_token_from_internal(
     return resp.json()
 
 
-def request_file_puller_api(path: str, *, json_body=None, params=None, method: str = "POST", timeout: int = 10) -> dict | None:
-    """Call file-puller's internal API. Returns the parsed JSON or None on 404.
+def request_internal_ingester_api(path: str, *, json_body=None, params=None, method: str = "POST", timeout: int = 10) -> dict | None:
+    """Call internal-ingester's internal API. Returns the parsed JSON or None on 404.
 
     Used by the user-facing transcript download endpoints to fetch the
     user_audio_files row that lives in postgres-internal. Auth =
-    INTERNAL_API_TOKEN (same bearer file-puller uses for /api/v1/pull).
+    INTERNAL_API_TOKEN (same bearer internal-ingester uses for /api/v1/pull).
     """
-    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://file-puller:8090").rstrip("/")
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://internal-ingester:8090").rstrip("/")
     resp = req.request(
         method,
         f"{base}{path}",
@@ -243,13 +243,13 @@ def request_file_puller_api(path: str, *, json_body=None, params=None, method: s
     if resp.status_code == 404:
         return None
     if resp.status_code >= 400:
-        raise req.HTTPError(f"file-puller {path} → {resp.status_code}: {resp.text[:200]}",
+        raise req.HTTPError(f"internal-ingester {path} → {resp.status_code}: {resp.text[:200]}",
                             response=resp)
     return resp.json()
 
 
 def request_internal_device_api(method: str, path: str, *, json_body=None, timeout: int = 10, params=None) -> dict:
-    base = os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://token-issuer:8091").rstrip("/")
+    base = os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://device-token-authority:8091").rstrip("/")
     resp = req.request(
         method,
         f"{base}{path}",
@@ -306,7 +306,7 @@ def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
     "vidage automatique" promis dans l'UI sans dépendre d'un cron externe.
     Retourne (sessions_purged, files_purged, s3_objects_deleted).
 
-    Préparations + meetings (zone interne) : on relaie vers token-issuer
+    Préparations + meetings (zone interne) : on relaie vers device-token-authority
     /api/v1/preparations/purge et /api/v1/meetings/purge avec le même
     seuil. Best-effort — un échec réseau ne casse pas le balayage fichiers.
     """
@@ -496,7 +496,7 @@ def _resolve_transferred_storage(db, file_obj: UploadedFile):
 
 
 def _lookup_audio_outputs(db, file_obj: UploadedFile) -> dict | None:
-    """Fetch the kevent / mcr / stub outputs for a file from file-puller.
+    """Fetch the kevent / mcr / stub outputs for a file from internal-ingester.
 
     Returns the parsed JSON (transcription_text, speaker_tagged_text,
     glossary_corrected_text, meeting_analysis_json, etc.) or None if the
@@ -511,7 +511,7 @@ def _lookup_audio_outputs(db, file_obj: UploadedFile) -> dict | None:
     if not session_obj:
         return None
     try:
-        return request_file_puller_api(
+        return request_internal_ingester_api(
             "/api/v1/audio/lookup",
             json_body={
                 "user_sub": session_obj.user_sub,
@@ -520,7 +520,7 @@ def _lookup_audio_outputs(db, file_obj: UploadedFile) -> dict | None:
             },
         )
     except req.RequestException:
-        logger.exception("file-puller lookup failed for file_id=%s", file_obj.id)
+        logger.exception("internal-ingester lookup failed for file_id=%s", file_obj.id)
         return None
 
 
@@ -555,7 +555,7 @@ def _run_loudnorm_measure(input_path: str, target_i: float = -16.0, target_tp: f
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "ok", "service": "code-generator"}), 200
+    return jsonify({"status": "ok", "service": "mydevices-web"}), 200
 
 
 @app.route("/")
@@ -713,7 +713,7 @@ def logout():
 @require_auth
 def api_generate_code():
     """
-    Demande un token au token-issuer (zone interne), puis stocke
+    Demande un token au device-token-authority (zone interne), puis stocke
     une copie locale en base externe pour le suivi des uploads.
     """
     user = get_current_user()
@@ -742,7 +742,7 @@ def api_generate_code():
     )
     auto_transcribe = bool(data.get("auto_transcribe", True))
 
-    # ── Appel au token-issuer INTERNE ──
+    # ── Appel au device-token-authority INTERNE ──
     try:
         token_data = request_token_from_internal(
             user,
@@ -788,7 +788,7 @@ def api_generate_code():
     finally:
         db.close()
 
-    upload_url = f"{get_upload_portal_base_url()}/upload/{qr_token}"
+    upload_url = f"{get_mobile_upload_pwa_base_url()}/upload/{qr_token}"
 
     return jsonify({
         "session_id": str(upload_session.id),
@@ -806,7 +806,7 @@ def api_generate_code():
 @app.route("/api/qr-image/<qr_token>")
 @require_auth
 def api_qr_image(qr_token):
-    upload_url = f"{get_upload_portal_base_url()}/upload/{qr_token}"
+    upload_url = f"{get_mobile_upload_pwa_base_url()}/upload/{qr_token}"
     buf = make_qr_image(upload_url)
     return buf.getvalue(), 200, {"Content-Type": "image/png"}
 
@@ -832,11 +832,11 @@ def api_my_sessions():
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
         # Bulk-fetch des overrides "date de réunion" (zone interne). Un seul
-        # appel → file-puller renvoie uniquement les rows non-NULL. Map indexée
+        # appel → internal-ingester renvoie uniquement les rows non-NULL. Map indexée
         # par (simple_code, original_filename) pour l'enrichissement par fichier.
         meeting_dt_overrides: dict[tuple[str, str], str] = {}
         try:
-            bulk = request_file_puller_api(
+            bulk = request_internal_ingester_api(
                 "/api/v1/audio/meeting-datetimes",
                 method="GET",
                 params={"user_sub": user["sub"]},
@@ -852,7 +852,7 @@ def api_my_sessions():
             logger.debug("meeting-datetimes bulk fetch failed (non-fatal)", exc_info=True)
 
         # On récupère la liste des devices encore actifs pour cet utilisateur
-        # (token-issuer GET /api/v1/devices). Permet à _compute_lifecycle_state
+        # (device-token-authority GET /api/v1/devices). Permet à _compute_lifecycle_state
         # de décider "enrolled" même quand session.expires_at est dans le passé,
         # tant qu'un device est encore valide en rétention.
         active_qr_tokens: set[str] = set()
@@ -882,7 +882,7 @@ def api_my_sessions():
                 if qr:
                     active_qr_tokens.add(qr)
         except Exception:
-            # Best-effort : si token-issuer ne répond pas, on retombe sur le
+            # Best-effort : si device-token-authority ne répond pas, on retombe sur le
             # calcul historique (basé uniquement sur session.expires_at).
             logger.debug("Could not fetch devices for lifecycle enrichment", exc_info=True)
 
@@ -1573,7 +1573,7 @@ def _audio_or_404(db, user_sub: str, file_id: str):
 
 
 # ─── Transcription / CR downloads (Feature 3) ───────────────────────────────
-# Each route serves one output format. file-puller is queried once per call —
+# Each route serves one output format. internal-ingester is queried once per call —
 # acceptable since the user only clicks one download at a time.
 # TODO follow-up: route `/api/file/transcript-to-drive/<file_id>` to drop the
 # generated document into the user's personal Drive folder (Google Drive or
@@ -1598,7 +1598,7 @@ def api_file_transcript_download(kind, ext, file_id):
               | ``transcript-cleaned`` | ``transcript-reformulated``
     ``ext``  ∈ ``txt`` | ``md`` | ``docx`` | ``odt``
 
-    Returns 404 if the file isn't owned by the user, 503 if file-puller is
+    Returns 404 if the file isn't owned by the user, 503 if internal-ingester is
     unreachable, 410 if the requested output is empty (the corresponding
     sub-toggle was off or the LLM step failed).
     """
@@ -1764,11 +1764,11 @@ def api_file_stream_transferred(file_id):
 
 @app.route("/api/queue-status", methods=["GET"])
 def api_queue_status():
-    """Proxy live vers file-puller /api/v1/queue-status (qui parle au gateway).
+    """Proxy live vers internal-ingester /api/v1/queue-status (qui parle au gateway).
 
     Accepte 2 modes d'auth :
       - session OIDC (utilisateur connecté à mydevices)
-      - bearer INTERNAL_API_TOKEN (cross-cluster depuis upload-portal)
+      - bearer INTERNAL_API_TOKEN (cross-cluster depuis mobile-upload-pwa)
 
     Query: ``job_id`` (optionnel) pour position+ETA spécifique.
     Réponse: ``QueueSummary`` JSON (cf libs/shared/app/queue_eta.py).
@@ -1785,7 +1785,7 @@ def api_queue_status():
         return jsonify({"error": "Unauthorized"}), 401
     job_id = (request.args.get("job_id") or "").strip()
     service_type = (request.args.get("service_type") or "audio").strip()
-    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://file-puller:8090").rstrip("/")
+    base = os.getenv("FILE_PULLER_INTERNAL_BASE_URL", "http://internal-ingester:8090").rstrip("/")
     params = {"service_type": service_type}
     if job_id:
         params["job_id"] = job_id
@@ -1798,7 +1798,7 @@ def api_queue_status():
         )
         return jsonify(resp.json()), resp.status_code
     except Exception:
-        logger.warning("queue-status proxy to file-puller failed", exc_info=True)
+        logger.warning("queue-status proxy to internal-ingester failed", exc_info=True)
         from datetime import datetime, timezone as _tz
         return jsonify({
             "pending_total": None, "processing_total": None,
@@ -1813,7 +1813,7 @@ def api_queue_status():
 def api_rename_file(file_id):
     """Renomme le titre affiché (suggested_filename) d'un fichier.
 
-    Body: ``{"title": "..."}``. Persiste via token-issuer
+    Body: ``{"title": "..."}``. Persiste via device-token-authority
     ``POST /api/v1/files/by-session/rename`` (matche sur user_sub +
     simple_code + original_filename puisque les UUID externes/internes
     sont indépendants — cf. delete_file_by_session).
@@ -1922,7 +1922,7 @@ def api_my_upload():
     (AV → transcode → transfer → kevent) via une virtual-session marquée
     ``L-XXXXXXXX``. Côté UI le device sera affiché comme "Upload local".
 
-    Body multipart: ``file=<binary>``. Réponse identique à l'upload-portal :
+    Body multipart: ``file=<binary>``. Réponse identique à l'mobile-upload-pwa :
     ``{file_id, filename, status, remaining}``.
     """
     user = get_current_user()
@@ -2001,7 +2001,7 @@ def api_my_upload():
 def api_set_meeting_datetime(file_id):
     """Surcharge la date/heure de réunion (zone interne).
 
-    Body: ``{"meeting_datetime": "ISO 8601" | null}``. Persiste via token-issuer
+    Body: ``{"meeting_datetime": "ISO 8601" | null}``. Persiste via device-token-authority
     ``POST /api/v1/files/by-session/meeting-datetime`` (matching identique au
     rename : user_sub + simple_code + original_filename). ``null`` efface
     l'override.
@@ -2115,7 +2115,7 @@ def api_my_trash():
         } for s in sessions_q]
 
         # Préparations + meetings en corbeille — relayés depuis
-        # token-issuer (zone interne). Best-effort : un échec ne casse pas
+        # device-token-authority (zone interne). Best-effort : un échec ne casse pas
         # le rendu des fichiers/sessions.
         def _enrich_with_days_left(items, title_keys):
             out = []
@@ -2349,7 +2349,7 @@ def api_delete_session(simple_code):
 
     Positionne `trashed_at` sur la session : elle disparaît de la liste
     et ses fichiers ne sont plus accessibles (download/transcript). La
-    purge définitive (DB + S3 + cleanup interne via token-issuer) est faite
+    purge définitive (DB + S3 + cleanup interne via device-token-authority) est faite
     par `_purge_expired_trash` après TRASH_RETENTION_DAYS.
     """
     user = get_current_user()
@@ -2439,7 +2439,7 @@ def api_file_normalization_impact(file_id):
         if not file_obj.transcoded_filename:
             return jsonify({"error": "Fichier pas encore transcodé"}), 400
 
-        # Chemin rapide : si transcode-worker a déjà persisté les mesures
+        # Chemin rapide : si audio-normalizer a déjà persisté les mesures
         # (source + output), on les lit directement, plus de redownload S3.
         if (file_obj.normalization_source_i is not None
                 and file_obj.normalization_output_i is not None):
@@ -2526,7 +2526,7 @@ def api_file_normalization_impact(file_id):
 
 # Imported lazily-at-module-load (sibling file in this app package). The
 # module pulls drive_client / doc_extractor / llm_client from
-# services/file-mover/app/ via importlib — see meeting_prep.py for the
+# services/dmz-to-internal-bridge/app/ via importlib — see meeting_prep.py for the
 # rationale (shared runtime image, no module duplication).
 from app import meeting_prep as _meeting_prep  # noqa: E402
 
@@ -2788,7 +2788,7 @@ def api_meeting_prep():
         meta["meeting_type"] = meeting_type
         brief["_meta"] = meta
 
-    # Persiste la préparation avant de répondre — passe par token-issuer
+    # Persiste la préparation avant de répondre — passe par device-token-authority
     # car la table `preparations` vit en zone interne (cf. rename_file_by_session
     # pour le pattern de relais cross-cluster).
     preparation_id = None
@@ -2819,7 +2819,7 @@ def api_meeting_prep():
             _spec = _iu.spec_from_file_location(
                 "_gfb",
                 os.path.join(os.path.dirname(__file__), "..", "..",
-                             "file-mover", "app", "glossary_from_brief.py"),
+                             "dmz-to-internal-bridge", "app", "glossary_from_brief.py"),
             )
             _gfb = _iu.module_from_spec(_spec)
             _spec.loader.exec_module(_gfb)
@@ -2939,7 +2939,7 @@ def api_test_drive_access():
     #   - 2xx → Drive joignable ET token accepté → drive_reachable=true
     #   - 401/403 → Drive joignable mais token refusé → drive_reachable=false
     #     avec un message explicite ; ce cas signale typiquement un mismatch
-    #     de realm Keycloak entre code-generator et mesfichiers
+    #     de realm Keycloak entre mydevices-web et mesfichiers
     #   - 5xx ou exception → drive_reachable=false, "Drive injoignable"
     try:
         import requests as _req
@@ -3103,7 +3103,7 @@ def api_test_drive_access():
     return jsonify(result), 200
 
 
-# ─── Meeting-prep CRUD (relais vers token-issuer interne) ───
+# ─── Meeting-prep CRUD (relais vers device-token-authority interne) ───
 
 @app.route("/api/meeting-prep", methods=["GET"])
 @require_auth
@@ -3280,21 +3280,21 @@ def api_hard_delete_meeting_brief(brief_id: str):
 # ─── Meeting-prep v2 : relais (zone DMZ) ────────────────────
 #
 # Cf §3 du plan ok-on-continue-sur-eager-hickey.md. Tous les endpoints
-# ci-dessous se contentent de relayer vers token-issuer en injectant le
+# ci-dessous se contentent de relayer vers device-token-authority en injectant le
 # user_sub depuis la session OIDC — isolation garantie côté code.
 
 @app.route("/api/file/<file_id>/link-brief", methods=["POST"])
 @require_auth
 def api_link_file_to_brief(file_id: str):
     """Lie/délie un audio à une préparation via son meeting (création
-    transparente du meeting si absent — cf token-issuer
+    transparente du meeting si absent — cf device-token-authority
     /api/v1/files/by-id/link-preparation).
 
     Body : `{meeting_brief_id|preparation_id|null}` — alias legacy
     `meeting_brief_id` accepté ; valeur null = détache.
 
     Si le lien change effectivement (prev ≠ new), déclenche en best-effort
-    un POST /api/v1/audio/<id>/reprocess côté file-puller pour relancer la
+    un POST /api/v1/audio/<id>/reprocess côté internal-ingester pour relancer la
     chaîne glossary_correction → reformulation → meeting_analysis avec le
     glossaire fusionné. Cf §5 du plan.
     """
@@ -3334,9 +3334,9 @@ def api_link_file_to_brief(file_id: str):
 
 
 def _trigger_audio_reprocess(user_sub: str, file_id: str, preparation_id):
-    """Appel best-effort vers file-puller pour relancer la chaîne LLM.
+    """Appel best-effort vers internal-ingester pour relancer la chaîne LLM.
 
-    L'URL file-puller est configurable via FILE_PULLER_INTERNAL_BASE_URL.
+    L'URL internal-ingester est configurable via FILE_PULLER_INTERNAL_BASE_URL.
     Si non configurée → log warning et retour silencieux (déploiement
     transitoire qui n'a pas encore activé l'endpoint reprocess).
     """
@@ -3351,7 +3351,7 @@ def _trigger_audio_reprocess(user_sub: str, file_id: str, preparation_id):
             json={
                 "user_sub": user_sub,
                 # On envoie les deux clefs (preparation_id + legacy
-                # glossary_from_brief_id) ; file-puller sera adapté en PR2d.
+                # glossary_from_brief_id) ; internal-ingester sera adapté en PR2d.
                 "glossary_from_preparation_id": preparation_id,
                 "glossary_from_brief_id": preparation_id,
             },
@@ -3359,7 +3359,7 @@ def _trigger_audio_reprocess(user_sub: str, file_id: str, preparation_id):
             timeout=5,
         )
     except Exception:
-        logger.exception("reprocess: file-puller call failed url=%s", url)
+        logger.exception("reprocess: internal-ingester call failed url=%s", url)
 
 
 @app.route("/api/meeting-prep/<brief_id>/audio-files", methods=["GET"])
@@ -3399,7 +3399,7 @@ def api_brief_series(brief_id: str):
 def api_meeting_prep_link_suggestion():
     """Suggestion (top-3 candidats avec scoring détaillé) pour un audio.
 
-    Endpoint diagnostic — l'auto-link réel se fait côté file-puller AVANT
+    Endpoint diagnostic — l'auto-link réel se fait côté internal-ingester AVANT
     transcription (cf §4 du plan). Ici, on récupère les briefs actifs et
     on calcule le scoring multi-signaux pour transparence UI / debug.
     """
@@ -3434,7 +3434,7 @@ def api_meeting_prep_link_suggestion():
     import importlib.util as _iu
     spec = _iu.spec_from_file_location(
         "_auto_link", os.path.join(
-            os.path.dirname(__file__), "..", "..", "file-mover", "app", "glossary_from_brief.py",
+            os.path.dirname(__file__), "..", "..", "dmz-to-internal-bridge", "app", "glossary_from_brief.py",
         ),
     )
     # Le scoring vit dans puller.py ; ici on fait un mini-scoring inline
@@ -3464,7 +3464,7 @@ def api_meeting_prep_link_suggestion():
 def _score_brief_candidate(brief: dict, audio_filename: str, audio_upload_at):
     """Mini-scoring multi-signaux côté DMZ pour l'endpoint diagnostic.
 
-    Reproduit la logique de file-mover/app/puller.auto_link_audio_to_brief
+    Reproduit la logique de dmz-to-internal-bridge/app/puller.auto_link_audio_to_brief
     mais sur les seuls champs exposés par l'API briefs. Cf §4 du plan.
     """
     from datetime import datetime, timezone as _tz
@@ -3544,10 +3544,10 @@ def _score_brief_candidate(brief: dict, audio_filename: str, audio_upload_at):
 @app.route("/api/file/<file_id>/reprocess", methods=["POST"])
 @require_auth
 def api_file_reprocess(file_id: str):
-    """Relais vers file-puller /api/v1/audio/<id>/reprocess.
+    """Relais vers internal-ingester /api/v1/audio/<id>/reprocess.
 
     Body: ``{glossary_from_brief_id?: <uuid>, force?: bool}``. Idempotent
-    côté file-puller. Cf §5.2 du plan.
+    côté internal-ingester. Cf §5.2 du plan.
     """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
@@ -3570,8 +3570,8 @@ def api_file_reprocess(file_id: str):
             timeout=10,
         )
     except Exception as exc:
-        logger.exception("reprocess: file-puller unreachable: %s", exc)
-        return jsonify({"error": "file_puller_unreachable"}), 502
+        logger.exception("reprocess: internal-ingester unreachable: %s", exc)
+        return jsonify({"error": "internal_ingester_unreachable"}), 502
     if resp.status_code >= 400:
         try:
             return jsonify(resp.json()), resp.status_code

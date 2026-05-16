@@ -12,7 +12,7 @@ le drift par construction : ces deux conteneurs encodent les samples
 bit-pour-bit avec la durée du header.
 
 Module séparé (vs. inline dans puller.py) pour pouvoir le tester sans
-charger la stack file-mover entière (kevent_client + DB + Flask).
+charger la stack dmz-to-internal-bridge entière (kevent_client + DB + Flask).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def to_diarization_format(
 
     Args:
         audio_bytes: contenu du fichier source (typiquement MP4/AAC du
-            transcode-worker).
+            audio-normalizer).
         src_filename: nom de fichier source — utilisé pour dériver le stem
             du nouveau nom et pour les logs.
         target: ``"flac"``, ``"wav"``, ou ``"mp4"`` (no-op kill-switch).

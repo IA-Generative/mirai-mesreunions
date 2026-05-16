@@ -170,7 +170,7 @@ def load_user_glossary(user_sub: str, db) -> set:
     termes les plus utilisés.
 
     ``db`` est une SQLAlchemy session déjà ouverte par le caller (typiquement
-    file-puller). Best-effort : si la table n'existe pas (migration non
+    internal-ingester). Best-effort : si la table n'existe pas (migration non
     appliquée), retourne un set vide en logguant un warning.
     """
     try:

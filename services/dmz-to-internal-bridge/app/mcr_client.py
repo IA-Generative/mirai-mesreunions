@@ -9,7 +9,7 @@ Implements the three-step ingestion sequence documented in
   3. POST /meetings/{id}/presigned_url/generate → presigned PUT URL
   4. PUT binary on the presigned URL
 
-Errors are classified into three families so the caller (file-puller) can
+Errors are classified into three families so the caller (internal-ingester) can
 react appropriately:
 
   - ``MCRAuthError``        : refresh expired / invalid_grant. Caller must
@@ -22,7 +22,7 @@ react appropriately:
                               ``mcr_rejected`` — no retry.
 
 All HTTP timeouts are conservative (10s default) so a stuck MCR side
-doesn't hold the file-puller worker indefinitely. The PUT on the presigned
+doesn't hold the internal-ingester worker indefinitely. The PUT on the presigned
 URL gets a longer timeout because the binary upload can be substantial.
 """
 

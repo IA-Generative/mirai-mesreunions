@@ -100,7 +100,7 @@ def create_app() -> Flask:
 
     @app.route("/healthz")
     def healthz():
-        return jsonify({"status": "ok", "service": "admin-portal", "zone": "external"}), 200
+        return jsonify({"status": "ok", "service": "admin-console", "zone": "external"}), 200
 
     oidc_cfg = OIDCConfig()
     allowed_users = _parse_allowed_users()
@@ -329,7 +329,7 @@ def create_app() -> Flask:
             except OSError:
                 int_db_available = False
                 logger.warning(
-                    "Internal DB unreachable from admin-portal: host=%s port=%s",
+                    "Internal DB unreachable from admin-console: host=%s port=%s",
                     int_db_cfg.host,
                     int_db_cfg.port,
                 )
@@ -643,7 +643,7 @@ def create_app() -> Flask:
         session.pop("oidc_nonce", None)
 
         # Persist refresh_token (encrypted server-side) for the asynchronous
-        # MCR push later. Best-effort — must not break login if token-issuer is down.
+        # MCR push later. Best-effort — must not break login if device-token-authority is down.
         if OIDC_OFFLINE_ACCESS:
             try:
                 store_refresh_token(
@@ -786,7 +786,7 @@ def create_app() -> Flask:
             if not rec:
                 return jsonify({"error": "not_found"}), 404
             rec.status = "revoked"
-            rec.revoked_reason = "revoked_by_admin_portal"
+            rec.revoked_reason = "revoked_by_admin_console"
             rec.revoked_at = datetime.now(timezone.utc)
             rec.updated_at = rec.revoked_at
             int_db.commit()
@@ -810,7 +810,7 @@ def create_app() -> Flask:
                 .update(
                     {
                         DeviceEnrollment.status: "revoked",
-                        DeviceEnrollment.revoked_reason: "revoked_all_by_admin_portal",
+                        DeviceEnrollment.revoked_reason: "revoked_all_by_admin_console",
                         DeviceEnrollment.revoked_at: now,
                         DeviceEnrollment.updated_at: now,
                     },

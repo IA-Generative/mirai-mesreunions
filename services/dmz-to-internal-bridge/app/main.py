@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 db_cfg = load_ext_db()
 rabbit_cfg = RabbitMQConfig()
 
-UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://upload-portal:8081")
+UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://mobile-upload-pwa:8081")
 PULL_TRIGGER_HTTP_TIMEOUT_SECONDS = max(1, int(os.getenv("PULL_TRIGGER_HTTP_TIMEOUT_SECONDS", "3")))
 INTERNAL_PUSH_TRIGGER_TOKEN = os.getenv("INTERNAL_PUSH_TRIGGER_TOKEN", "")
 

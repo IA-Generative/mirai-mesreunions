@@ -33,7 +33,7 @@ rabbit_cfg = RabbitMQConfig()
 
 CLAMAV_HOST = os.getenv("CLAMAV_HOST", "clamav")
 CLAMAV_PORT = int(os.getenv("CLAMAV_PORT", 3310))
-UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://upload-portal:8081")
+UPLOAD_PORTAL_URL = os.getenv("UPLOAD_PORTAL_INTERNAL_URL", "http://mobile-upload-pwa:8081")
 
 
 def notify_portal(session_obj, file_obj, status_msg):

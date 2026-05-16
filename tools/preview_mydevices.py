@@ -1,7 +1,7 @@
 """Local preview server for the mydevices page.
 
 Boots a tiny Flask app on http://127.0.0.1:5555 that renders the mydevices
-template from `services/code-generator/app/templates/index.html` with mock
+template from `services/mydevices-web/app/templates/index.html` with mock
 data, and stubs the half-dozen API endpoints the page hits. Auth/DB/S3/
 Keycloak are bypassed.
 
@@ -13,7 +13,7 @@ Run:
     python tools/preview_mydevices.py
     open http://127.0.0.1:5555
 
-Edit `services/code-generator/app/templates/index.html`, reload the
+Edit `services/mydevices-web/app/templates/index.html`, reload the
 browser, see the change. Tweak `MOCK_SESSIONS` below to exercise edge cases
 (many files, failed transcription, partial outputs, etc.).
 """
@@ -29,7 +29,7 @@ from flask import Flask, jsonify, render_template_string, request, abort
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INDEX_TEMPLATE_PATH = (
-    REPO_ROOT / "services" / "code-generator" / "app" / "templates" / "index.html"
+    REPO_ROOT / "services" / "mydevices-web" / "app" / "templates" / "index.html"
 )
 
 
@@ -191,7 +191,7 @@ MOCK_TRANSCRIPTS = {
 
 app = Flask(
     __name__,
-    static_folder=str(REPO_ROOT / "services" / "code-generator" / "app" / "static"),
+    static_folder=str(REPO_ROOT / "services" / "mydevices-web" / "app" / "static"),
     static_url_path="/static",
 )
 
@@ -303,5 +303,5 @@ def logout():
 if __name__ == "__main__":
     print(f"📄 Reading template from: {INDEX_TEMPLATE_PATH}")
     print("🚀 Preview server → http://127.0.0.1:5555")
-    print("✏️  Edit services/code-generator/app/main.py and reload the browser.")
+    print("✏️  Edit services/mydevices-web/app/main.py and reload the browser.")
     app.run(host="127.0.0.1", port=5555, debug=True)
