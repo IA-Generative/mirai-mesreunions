@@ -342,6 +342,34 @@ class UserAudioFile(InternalBase):
     reprocess_history = Column(_JSON_TYPE, nullable=False, default=list)
     suggested_meeting_dismissed_id = Column(_UUID_TYPE, nullable=True)
 
+    # ─── Alias legacy (temporaire — PR2d retirera ces propriétés) ────
+    # file-mover/puller.py référence encore meeting_brief_id ; on expose
+    # un alias lecture/écriture qui pointe vers la nouvelle colonne pour
+    # éviter la cascade de breakage en attendant PR2d.
+    @property
+    def meeting_brief_id(self):
+        return self.meeting_id
+
+    @meeting_brief_id.setter
+    def meeting_brief_id(self, value):
+        self.meeting_id = value
+
+    @property
+    def reprocessed_with_brief_id(self):
+        return self.reprocessed_with_meeting_id
+
+    @reprocessed_with_brief_id.setter
+    def reprocessed_with_brief_id(self, value):
+        self.reprocessed_with_meeting_id = value
+
+    @property
+    def suggested_brief_dismissed_id(self):
+        return self.suggested_meeting_dismissed_id
+
+    @suggested_brief_dismissed_id.setter
+    def suggested_brief_dismissed_id(self, value):
+        self.suggested_meeting_dismissed_id = value
+
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
@@ -523,6 +551,34 @@ class UserGlossaryTerm(InternalBase):
     curated_by_user = Column(Boolean, nullable=False, default=False)
     # Termes rejetés explicitement, ne plus re-proposer ni utiliser.
     blacklisted = Column(Boolean, nullable=False, default=False)
+
+    # Alias legacy temporaire.
+    @property
+    def last_source_brief_id(self):
+        return self.last_source_meeting_id
+
+    @last_source_brief_id.setter
+    def last_source_brief_id(self, value):
+        self.last_source_meeting_id = value
+
+
+# ─── Alias legacy temporaire (PR2c → retiré en PR2d) ────────
+#
+# file-mover/puller.py importe encore `MeetingBrief` à plusieurs endroits
+# (auto-link audio↔brief, lecture brief pour glossary_correction, suggestion
+# candidat). Pour ne pas casser le pipeline tant que PR2d n'est pas livrée,
+# on expose `MeetingBrief` comme alias de `Preparation`. Les attributs
+# diffèrent en nommage (`brief_json` → `content`) ; un alias property est
+# défini ci-dessous.
+MeetingBrief = Preparation
+# Alias d'attribut pour rester compatible avec les lectures legacy
+# `brief.brief_json` qui sont remplacées par `brief.content` côté Preparation.
+if not hasattr(Preparation, "brief_json"):
+    def _brief_json_get(self):
+        return self.content
+    def _brief_json_set(self, value):
+        self.content = value
+    Preparation.brief_json = property(_brief_json_get, _brief_json_set)
 
 
 class TranscriptionEvent(InternalBase):

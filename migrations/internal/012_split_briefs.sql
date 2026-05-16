@@ -197,7 +197,16 @@ CREATE INDEX IF NOT EXISTS ix_uaf_meeting
 -- "perdre le tracking de l'origine" — acceptable, le glossaire utilisateur
 -- reste valable, seule la traçabilité par brief disparaît).
 
-UPDATE user_glossary_terms SET last_source_brief_id = NULL
- WHERE last_source_brief_id IS NOT NULL;
-ALTER TABLE user_glossary_terms
-  RENAME COLUMN last_source_brief_id TO last_source_meeting_id;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_name = 'user_glossary_terms'
+       AND column_name = 'last_source_brief_id'
+  ) THEN
+    UPDATE user_glossary_terms SET last_source_brief_id = NULL
+     WHERE last_source_brief_id IS NOT NULL;
+    ALTER TABLE user_glossary_terms
+      RENAME COLUMN last_source_brief_id TO last_source_meeting_id;
+  END IF;
+END $$;

@@ -306,23 +306,38 @@ def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
     "vidage automatique" promis dans l'UI sans dépendre d'un cron externe.
     Retourne (sessions_purged, files_purged, s3_objects_deleted).
 
-    Briefs (zone interne) : on relaie vers token-issuer
-    /api/v1/briefs/purge avec le même seuil. Best-effort — un échec réseau
-    ne casse pas le balayage des fichiers.
+    Préparations + meetings (zone interne) : on relaie vers token-issuer
+    /api/v1/preparations/purge et /api/v1/meetings/purge avec le même
+    seuil. Best-effort — un échec réseau ne casse pas le balayage fichiers.
     """
     threshold = datetime.now(timezone.utc) - timedelta(days=TRASH_RETENTION_DAYS)
     sessions_purged = 0
     files_purged = 0
     objects_deleted = 0
-    briefs_purged = 0
+    preparations_purged = 0
+    meetings_purged = 0
     try:
         result = request_internal_device_api(
-            "POST", "/api/v1/briefs/purge",
+            "POST", "/api/v1/preparations/purge",
             json_body={"user_sub": user_sub, "older_than_days": TRASH_RETENTION_DAYS},
         )
-        briefs_purged = int(result.get("purged") or 0)
+        preparations_purged = int(result.get("purged") or 0)
     except Exception:
-        logger.debug("trash purge: brief purge relay failed for user=%s", user_sub, exc_info=True)
+        logger.debug(
+            "trash purge: preparation purge relay failed for user=%s",
+            user_sub, exc_info=True,
+        )
+    try:
+        result = request_internal_device_api(
+            "POST", "/api/v1/meetings/purge",
+            json_body={"user_sub": user_sub, "older_than_days": TRASH_RETENTION_DAYS},
+        )
+        meetings_purged = int(result.get("purged") or 0)
+    except Exception:
+        logger.debug(
+            "trash purge: meeting purge relay failed for user=%s",
+            user_sub, exc_info=True,
+        )
 
     # 1) Fichiers individuels en corbeille — leur session peut être active.
     trashed_files = (
@@ -388,10 +403,11 @@ def _purge_expired_trash(db, user_sub: str) -> tuple[int, int, int]:
 
     if sessions_purged or files_purged:
         db.commit()
-    if sessions_purged or files_purged or briefs_purged:
+    if sessions_purged or files_purged or preparations_purged or meetings_purged:
         logger.info(
-            "trash purge: user=%s sessions=%s files=%s s3_objects=%s briefs=%s",
-            user_sub, sessions_purged, files_purged, objects_deleted, briefs_purged,
+            "trash purge: user=%s sessions=%s files=%s s3_objects=%s preparations=%s meetings=%s",
+            user_sub, sessions_purged, files_purged, objects_deleted,
+            preparations_purged, meetings_purged,
         )
     return sessions_purged, files_purged, objects_deleted
 
@@ -2098,16 +2114,13 @@ def api_my_trash():
             "files_count": len(s.uploads),
         } for s in sessions_q]
 
-        # Briefs en corbeille — relayés depuis token-issuer (zone interne).
-        # Best-effort : un échec ne casse pas le rendu des fichiers/sessions.
-        briefs_list = []
-        try:
-            data = request_internal_device_api(
-                "GET", "/api/v1/briefs",
-                params={"user_sub": user["sub"], "trashed": "true", "limit": 200},
-            )
-            for b in data.get("briefs", []):
-                trashed_iso = b.get("trashed_at")
+        # Préparations + meetings en corbeille — relayés depuis
+        # token-issuer (zone interne). Best-effort : un échec ne casse pas
+        # le rendu des fichiers/sessions.
+        def _enrich_with_days_left(items, title_keys):
+            out = []
+            for it in items:
+                trashed_iso = it.get("trashed_at")
                 days_left = None
                 if trashed_iso:
                     try:
@@ -2118,19 +2131,48 @@ def api_my_trash():
                         )
                     except Exception:
                         days_left = None
-                briefs_list.append({
-                    "id": b.get("id"),
-                    "title": b.get("title") or b.get("subject") or "(sans titre)",
+                title = None
+                for k in title_keys:
+                    title = it.get(k)
+                    if title:
+                        break
+                out.append({
+                    "id": it.get("id"),
+                    "title": title or "(sans titre)",
                     "trashed_at": trashed_iso,
                     "days_left": days_left,
                 })
+            return out
+
+        preparations_list = []
+        try:
+            data = request_internal_device_api(
+                "GET", "/api/v1/preparations",
+                params={"user_sub": user["sub"], "trashed": "true", "limit": 200},
+            )
+            preparations_list = _enrich_with_days_left(
+                data.get("preparations", []), ("title", "subject"),
+            )
         except Exception:
-            logger.debug("trash listing: brief relay failed", exc_info=True)
+            logger.debug("trash listing: preparation relay failed", exc_info=True)
+
+        meetings_list = []
+        try:
+            data = request_internal_device_api(
+                "GET", "/api/v1/meetings",
+                params={"user_sub": user["sub"], "trashed": "true", "limit": 200},
+            )
+            meetings_list = _enrich_with_days_left(
+                data.get("meetings", []), ("title", "summary"),
+            )
+        except Exception:
+            logger.debug("trash listing: meeting relay failed", exc_info=True)
 
         return jsonify({
             "files": files_list,
             "sessions": sessions_list,
-            "briefs": briefs_list,
+            "preparations": preparations_list,
+            "meetings": meetings_list,
             "retention_days": TRASH_RETENTION_DAYS,
         })
     finally:
@@ -2681,13 +2723,13 @@ def api_meeting_prep():
         return jsonify({"error": "Modèle de prompt indisponible."}), 500
 
     # Meeting-prep v2 : si série, récupérer les key_points du dernier audio
-    # lié au brief parent pour les injecter dans {PRIOR_KEY_POINTS}.
+    # lié à la préparation parente pour les injecter dans {PRIOR_KEY_POINTS}.
     prior_key_points_text = ""
     if series_parent_id:
         try:
             audios_resp = request_internal_device_api(
                 "GET",
-                f"/api/v1/briefs/{series_parent_id}/audio-files",
+                f"/api/v1/preparations/{series_parent_id}/audio-files",
                 params={"user_sub": user_sub},
             )
             audio_rows = (audios_resp or {}).get("audio_files") or []
@@ -2737,7 +2779,7 @@ def api_meeting_prep():
     # Annoter le brief avec le type de réunion choisi par l'utilisateur.
     # On le glisse dans un sous-objet "_meta" pour éviter toute collision
     # avec les clés produites par le LLM (objective_reformulated, agenda…).
-    # Aucune migration de schema nécessaire : brief_json est déjà un jsonb
+    # Aucune migration de schema nécessaire : content est déjà un jsonb
     # arbitraire côté postgres-internal.
     if isinstance(brief, dict):
         meta = brief.get("_meta")
@@ -2746,14 +2788,14 @@ def api_meeting_prep():
         meta["meeting_type"] = meeting_type
         brief["_meta"] = meta
 
-    # Persiste le brief avant de répondre — passe par token-issuer car la
-    # table meeting_briefs vit en zone interne (cf. rename_file_by_session
+    # Persiste la préparation avant de répondre — passe par token-issuer
+    # car la table `preparations` vit en zone interne (cf. rename_file_by_session
     # pour le pattern de relais cross-cluster).
-    brief_id = None
+    preparation_id = None
     try:
         created = request_internal_device_api(
             "POST",
-            "/api/v1/briefs",
+            "/api/v1/preparations",
             json_body={
                 "user_sub": user_sub,
                 "subject": subject,
@@ -2762,14 +2804,14 @@ def api_meeting_prep():
                 "expectation": expectation,
                 "focus": focus_areas,
                 "duration_minutes": duration_minutes,
-                "brief_json": brief,
+                "content": brief,
                 "documents": used,
                 "title": subject,
                 "series_parent_id": series_parent_id,
                 "target_meeting_date": target_meeting_date,
             },
         )
-        brief_id = (created.get("brief") or {}).get("id")
+        preparation_id = (created.get("preparation") or {}).get("id")
         # Meeting-prep v2 §5c : upsert les termes du brief dans le glossaire
         # utilisateur global. Best-effort, non bloquant.
         try:
@@ -2782,13 +2824,13 @@ def api_meeting_prep():
             _gfb = _iu.module_from_spec(_spec)
             _spec.loader.exec_module(_gfb)
             _terms = list(_gfb.extract_full_glossary_terms_from_brief(brief, used))
-            if _terms and brief_id:
+            if _terms and preparation_id:
                 request_internal_device_api(
                     "POST", "/api/v1/user-glossary/upsert-batch",
                     json_body={
                         "user_sub": user_sub,
                         "terms": _terms,
-                        "source_brief_id": brief_id,
+                        "source_preparation_id": preparation_id,
                     },
                 )
         except Exception:
@@ -2798,12 +2840,12 @@ def api_meeting_prep():
             )
     except Exception:
         # On ne casse pas l'UX si la persistance échoue — l'utilisateur
-        # reçoit son brief, mais sans brief_id (pas de listing/rename
+        # reçoit son brief, mais sans preparation_id (pas de listing/rename
         # ultérieur). Tracé pour investigation.
-        logger.exception("meeting_prep: failed to persist brief for sub=%s", user_sub)
+        logger.exception("meeting_prep: failed to persist preparation for sub=%s", user_sub)
 
     # Meeting-prep v2 §9bis : versement Drive en arrière-plan (best-effort).
-    if brief_id:
+    if preparation_id:
         try:
             from .drive_brief_sync import schedule_drive_brief_sync
         except Exception:
@@ -2821,7 +2863,7 @@ def api_meeting_prep():
         if schedule_drive_brief_sync is not None:
             try:
                 schedule_drive_brief_sync(
-                    user_sub, brief_id, brief, used, prompt,
+                    user_sub, preparation_id, brief, used, prompt,
                     drive_folder_id=folder_id,
                 )
             except Exception:
@@ -2830,7 +2872,9 @@ def api_meeting_prep():
     return jsonify({
         "brief": brief,
         "documents": used,
-        "brief_id": brief_id,
+        "preparation_id": preparation_id,
+        # Alias temporaire pour le front qui n'a pas encore migré.
+        "brief_id": preparation_id,
         "meeting_type": meeting_type,
     })
 
@@ -3064,12 +3108,14 @@ def api_test_drive_access():
 @app.route("/api/meeting-prep", methods=["GET"])
 @require_auth
 def api_list_meeting_briefs():
-    """Liste les briefs actifs (non corbeille) de l'utilisateur, 50 derniers.
+    """Liste les préparations actives (non corbeille) de l'utilisateur, 50 derniers.
 
-    Si ``?with_counts=true``, relais vers /api/v1/briefs/list-with-counts qui
-    enrichit chaque brief avec ``linked_audio_count`` et expose
+    Si ``?with_counts=true``, relais vers /api/v1/preparations/list-with-counts
+    qui enrichit chaque préparation avec ``linked_audio_count`` et expose
     ``older_than_90d_unlinked_count`` au niveau racine (sert au banner purge
     §7 du plan meeting-prep v2).
+
+    Réponse : `briefs` (alias legacy) + `preparations` (clé canonique).
     """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
@@ -3077,34 +3123,43 @@ def api_list_meeting_briefs():
     try:
         if with_counts:
             data = request_internal_device_api(
-                "GET", "/api/v1/briefs/list-with-counts",
+                "GET", "/api/v1/preparations/list-with-counts",
                 params={"user_sub": user_sub, "limit": 50},
             )
+            preps = data.get("preparations", [])
             return jsonify({
-                "briefs": data.get("briefs", []),
+                "preparations": preps,
+                "briefs": preps,
                 "older_than_90d_unlinked_count": int(
                     data.get("older_than_90d_unlinked_count") or 0
                 ),
             })
         data = request_internal_device_api(
-            "GET", "/api/v1/briefs",
+            "GET", "/api/v1/preparations",
             params={"user_sub": user_sub, "limit": 50, "trashed": "false"},
         )
     except req.HTTPError as err:
         status = err.response.status_code if err.response is not None else 502
         return jsonify({"error": "list_failed"}), status
-    return jsonify({"briefs": data.get("briefs", [])})
+    preps = data.get("preparations", [])
+    return jsonify({"preparations": preps, "briefs": preps})
 
 
 @app.route("/api/meeting-prep/<brief_id>", methods=["GET"])
 @require_auth
 def api_get_meeting_brief(brief_id: str):
-    """Lit un brief (404 si trashed ou autre user_sub)."""
+    """Lit une préparation (404 si trashed ou autre user_sub).
+
+    L'ID est nommé `brief_id` dans l'URL par compat avec le front mais
+    pointe désormais vers `preparations.id`. Réponse exposée à la fois sous
+    `brief` (legacy) et `preparation` (canonique). Le payload de `brief`
+    aliase `content` en `brief_json` pour ne pas casser le rendu détail.
+    """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     try:
         data = request_internal_device_api(
-            "GET", f"/api/v1/briefs/{brief_id}",
+            "GET", f"/api/v1/preparations/{brief_id}",
             params={"user_sub": user_sub},
         )
     except req.HTTPError as err:
@@ -3114,7 +3169,11 @@ def api_get_meeting_brief(brief_id: str):
         except Exception:
             body = {}
         return jsonify({"error": body.get("error", "get_failed")}), status
-    return jsonify(data)
+    prep = data.get("preparation") or {}
+    brief_legacy = dict(prep)
+    if "content" in brief_legacy and "brief_json" not in brief_legacy:
+        brief_legacy["brief_json"] = brief_legacy["content"]
+    return jsonify({"preparation": prep, "brief": brief_legacy})
 
 
 @app.route("/api/meeting-prep/<brief_id>/rename", methods=["POST"])
@@ -3131,7 +3190,7 @@ def api_rename_meeting_brief(brief_id: str):
         return jsonify({"error": "title too long"}), 400
     try:
         data = request_internal_device_api(
-            "POST", f"/api/v1/briefs/{brief_id}/rename",
+            "POST", f"/api/v1/preparations/{brief_id}/rename",
             json_body={"user_sub": user_sub, "title": new_title},
         )
     except req.HTTPError as err:
@@ -3143,17 +3202,23 @@ def api_rename_meeting_brief(brief_id: str):
 @app.route("/api/meeting-prep/<brief_id>/amend", methods=["POST"])
 @require_auth
 def api_amend_meeting_brief(brief_id: str):
-    """Édition manuelle des champs ``brief_json`` (option a, pas de ré-appel LLM)."""
+    """Édition manuelle du contenu d'une préparation (pas de ré-appel LLM).
+
+    Body : accepte `brief_json` (legacy) OU `content` (canonique). Relais
+    vers /api/v1/preparations/<id>/amend.
+    """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     payload = request.get_json(silent=True) or {}
-    new_brief_json = payload.get("brief_json")
-    if not isinstance(new_brief_json, dict):
-        return jsonify({"error": "brief_json must be an object"}), 400
+    new_content = payload.get("content")
+    if new_content is None:
+        new_content = payload.get("brief_json")
+    if not isinstance(new_content, dict):
+        return jsonify({"error": "content (or brief_json) must be an object"}), 400
     try:
         data = request_internal_device_api(
-            "POST", f"/api/v1/briefs/{brief_id}/amend",
-            json_body={"user_sub": user_sub, "brief_json": new_brief_json},
+            "POST", f"/api/v1/preparations/{brief_id}/amend",
+            json_body={"user_sub": user_sub, "content": new_content},
         )
     except req.HTTPError as err:
         status = err.response.status_code if err.response is not None else 502
@@ -3169,7 +3234,7 @@ def api_trash_meeting_brief(brief_id: str):
     user_sub = (user or {}).get("sub") or ""
     try:
         request_internal_device_api(
-            "DELETE", f"/api/v1/briefs/{brief_id}",
+            "DELETE", f"/api/v1/preparations/{brief_id}",
             json_body={"user_sub": user_sub},
         )
     except req.HTTPError as err:
@@ -3186,7 +3251,7 @@ def api_restore_meeting_brief(brief_id: str):
     user_sub = (user or {}).get("sub") or ""
     try:
         request_internal_device_api(
-            "POST", f"/api/v1/briefs/{brief_id}/restore",
+            "POST", f"/api/v1/preparations/{brief_id}/restore",
             json_body={"user_sub": user_sub},
         )
     except req.HTTPError as err:
@@ -3203,7 +3268,7 @@ def api_hard_delete_meeting_brief(brief_id: str):
     user_sub = (user or {}).get("sub") or ""
     try:
         request_internal_device_api(
-            "DELETE", f"/api/v1/briefs/{brief_id}/permanently",
+            "DELETE", f"/api/v1/preparations/{brief_id}/permanently",
             json_body={"user_sub": user_sub},
         )
     except req.HTTPError as err:
@@ -3221,7 +3286,12 @@ def api_hard_delete_meeting_brief(brief_id: str):
 @app.route("/api/file/<file_id>/link-brief", methods=["POST"])
 @require_auth
 def api_link_file_to_brief(file_id: str):
-    """Lie/délie un audio à un brief. Body: ``{meeting_brief_id|null}``.
+    """Lie/délie un audio à une préparation via son meeting (création
+    transparente du meeting si absent — cf token-issuer
+    /api/v1/files/by-id/link-preparation).
+
+    Body : `{meeting_brief_id|preparation_id|null}` — alias legacy
+    `meeting_brief_id` accepté ; valeur null = détache.
 
     Si le lien change effectivement (prev ≠ new), déclenche en best-effort
     un POST /api/v1/audio/<id>/reprocess côté file-puller pour relancer la
@@ -3231,16 +3301,18 @@ def api_link_file_to_brief(file_id: str):
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     payload = request.get_json(silent=True) or {}
-    new_brief = payload.get("meeting_brief_id")
-    if isinstance(new_brief, str):
-        new_brief = new_brief.strip() or None
+    new_prep = payload.get("preparation_id")
+    if new_prep is None:
+        new_prep = payload.get("meeting_brief_id")  # legacy alias
+    if isinstance(new_prep, str):
+        new_prep = new_prep.strip() or None
     try:
         result = request_internal_device_api(
-            "POST", "/api/v1/files/by-id/link-brief",
+            "POST", "/api/v1/files/by-id/link-preparation",
             json_body={
                 "user_sub": user_sub,
                 "file_id": file_id,
-                "meeting_brief_id": new_brief,
+                "preparation_id": new_prep,
             },
         )
     except req.HTTPError as err:
@@ -3248,20 +3320,20 @@ def api_link_file_to_brief(file_id: str):
         return jsonify({"error": "link_failed"}), status
 
     # Re-trigger reprocess server-side si le lien a effectivement changé.
-    prev = result.get("previous_brief_id")
-    if prev != new_brief:
+    prev = result.get("previous_preparation_id")
+    if prev != new_prep:
         try:
-            _trigger_audio_reprocess(user_sub, file_id, new_brief)
+            _trigger_audio_reprocess(user_sub, file_id, new_prep)
         except Exception:
             # Best-effort : l'UX n'attend pas le reprocess.
             logger.exception(
-                "meeting_prep: failed to trigger reprocess for file=%s brief=%s",
-                file_id, new_brief,
+                "meeting_prep: failed to trigger reprocess for file=%s prep=%s",
+                file_id, new_prep,
             )
     return jsonify(result)
 
 
-def _trigger_audio_reprocess(user_sub: str, file_id: str, brief_id):
+def _trigger_audio_reprocess(user_sub: str, file_id: str, preparation_id):
     """Appel best-effort vers file-puller pour relancer la chaîne LLM.
 
     L'URL file-puller est configurable via FILE_PULLER_INTERNAL_BASE_URL.
@@ -3276,7 +3348,13 @@ def _trigger_audio_reprocess(user_sub: str, file_id: str, brief_id):
     try:
         req.post(
             url,
-            json={"user_sub": user_sub, "glossary_from_brief_id": brief_id},
+            json={
+                "user_sub": user_sub,
+                # On envoie les deux clefs (preparation_id + legacy
+                # glossary_from_brief_id) ; file-puller sera adapté en PR2d.
+                "glossary_from_preparation_id": preparation_id,
+                "glossary_from_brief_id": preparation_id,
+            },
             headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
             timeout=5,
         )
@@ -3287,12 +3365,12 @@ def _trigger_audio_reprocess(user_sub: str, file_id: str, brief_id):
 @app.route("/api/meeting-prep/<brief_id>/audio-files", methods=["GET"])
 @require_auth
 def api_brief_audio_files(brief_id: str):
-    """Relais vers /api/v1/briefs/<id>/audio-files."""
+    """Relais vers /api/v1/preparations/<id>/audio-files."""
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     try:
         return jsonify(request_internal_device_api(
-            "GET", f"/api/v1/briefs/{brief_id}/audio-files",
+            "GET", f"/api/v1/preparations/{brief_id}/audio-files",
             params={"user_sub": user_sub},
         ))
     except req.HTTPError as err:
@@ -3303,12 +3381,12 @@ def api_brief_audio_files(brief_id: str):
 @app.route("/api/meeting-prep/<brief_id>/series", methods=["GET"])
 @require_auth
 def api_brief_series(brief_id: str):
-    """Relais vers /api/v1/briefs/<id>/series."""
+    """Relais vers /api/v1/preparations/<id>/series."""
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     try:
         return jsonify(request_internal_device_api(
-            "GET", f"/api/v1/briefs/{brief_id}/series",
+            "GET", f"/api/v1/preparations/{brief_id}/series",
             params={"user_sub": user_sub},
         ))
     except req.HTTPError as err:
@@ -3344,10 +3422,10 @@ def api_meeting_prep_link_suggestion():
         audio = None
     try:
         briefs_resp = request_internal_device_api(
-            "GET", "/api/v1/briefs",
+            "GET", "/api/v1/preparations",
             params={"user_sub": user_sub, "limit": 50},
         )
-        briefs = briefs_resp.get("briefs") or []
+        briefs = briefs_resp.get("preparations") or []
     except Exception:
         briefs = []
 
@@ -3397,8 +3475,11 @@ def _score_brief_candidate(brief: dict, audio_filename: str, audio_upload_at):
             return set()
         return {t for t in _re.findall(r"[a-z0-9éèêàâïôûç]{3,}", s.lower()) if t}
 
+    # Migration 012 : `content` remplace `brief_json` côté préparations ;
+    # on lit les deux pour tolérance temporaire.
+    bcontent = brief.get("content") or brief.get("brief_json") or {}
     bsubj = (brief.get("subject") or brief.get("title") or "") + " " + (
-        (brief.get("brief_json") or {}).get("objective_reformulated") or ""
+        (bcontent or {}).get("objective_reformulated") or ""
     )
     a_tokens = _tokens(audio_filename)
     b_tokens = _tokens(bsubj)
