@@ -29,6 +29,7 @@ import './tabs/devices.js';
 import './legacy.js';
 import * as meetingsTab from './tabs/meetings.js';
 import './tabs/preparations.js';
+import './tabs/wizard.js';  // modale fullscreen "Nouvelle préparation"
 import './tabs/useful-data.js';
 import * as adminTab from './tabs/admin.js';
 import { initTabManager } from './lib/tab-manager.js';

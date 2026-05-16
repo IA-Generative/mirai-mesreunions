@@ -24,12 +24,12 @@ import logging
 import os
 import sys
 
-from flask import Flask, redirect, render_template, render_template_string
+from flask import Flask, redirect, render_template
 from authlib.integrations.flask_client import OAuth
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
-    ALLOWED_AUDIO_EXTENSIONS, DEVICE_TOKEN_RETENTION_HOURS, DRIVE_BASE_URL,
+    ALLOWED_AUDIO_EXTENSIONS, DEVICE_TOKEN_RETENTION_HOURS,
     OIDCConfig, OIDC_OFFLINE_ACCESS, RabbitMQConfig, SECRET_KEY,
     UPLOAD_MAX_FILE_SIZE_MB, load_ext_db, load_s3_internal, load_s3_processed,
     load_s3_upload,
@@ -118,19 +118,15 @@ def meeting_prep_page():
 @app.route("/meeting-prep/new")
 @require_auth
 def meeting_prep_new_page():
-    """Page wizard plein écran — création d'une nouvelle préparation."""
-    user = get_current_user()
-    return render_template_string(
-        _PREP_BRIEF_TEMPLATE, user=user, drive_base_url=(DRIVE_BASE_URL or "")
-    )
+    """Deep-link historique vers le wizard — désormais ouvert inline dans
+    l'app (modale fullscreen). Cf. frontend/tabs/wizard.js qui détecte
+    le query param ?action=new au boot pour l'auto-ouverture.
+    """
+    return redirect("/?tab=brief&action=new", code=302)
 
 
-# Import lazy : le wizard standalone (template ci-dessous) peut encore appeler
-# des helpers de ``meeting_prep`` si besoin.
+# Import lazy : helpers meeting_prep (utilisés par les blueprints).
 from app import meeting_prep as _meeting_prep  # noqa: E402,F401
-
-# Template wizard standalone — préservé tel quel pour compat.
-from app._wizard_template import PREP_BRIEF_TEMPLATE as _PREP_BRIEF_TEMPLATE  # noqa: E402
 
 
 # ─── Init & Run ─────────────────────────────────────────────────────────

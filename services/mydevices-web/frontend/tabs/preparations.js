@@ -61,7 +61,7 @@ async function loadBriefs() {
     if (briefs.length === 0) {
       container.innerHTML = `<p style="color:#94a3b8;">
         Aucun brief pour le moment.
-        <a href="/meeting-prep/new" class="fr-link">Préparation de réunion ?</a>
+        <a href="#" class="fr-link" data-action="open-wizard">Préparation de réunion ?</a>
       </p>`;
       return;
     }
@@ -222,7 +222,17 @@ function _applyBriefPayload(briefId, d) {
   try {
     const btn = document.getElementById('brief-detail-prepare-next');
     if (btn) {
+      // Compat deep-link conservée comme fallback href, mais le click
+      // ouvre la modale wizard inline avec series_parent_id pré-rempli.
       btn.href = `/meeting-prep/new?series_parent_id=${encodeURIComponent(briefId)}`;
+      btn.onclick = (ev) => {
+        ev.preventDefault();
+        try {
+          if (typeof window.openWizard === 'function') {
+            window.openWizard({ seriesParentId: briefId });
+          }
+        } catch (e) { /* fallback href reste */ }
+      };
       btn.style.display = '';
     }
     const linkBtn = document.getElementById('brief-detail-link-audio-btn');
@@ -830,6 +840,11 @@ function _onPanelClick(ev) {
   if (!_panelEl().contains(actionEl)) return;
   const action = actionEl.getAttribute('data-action');
   switch (action) {
+    case 'open-wizard': {
+      ev.preventDefault();
+      try { if (typeof window.openWizard === 'function') window.openWizard(); } catch (e) {}
+      return;
+    }
     case 'open-brief': {
       ev.preventDefault();
       const id = actionEl.getAttribute('data-brief-id');

@@ -1594,7 +1594,12 @@
         <div id="brief-list-view">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Préparation de réunion</h1>
-                <a href="/meeting-prep/new" class="fr-btn fr-btn--sm fr-icon-add-line fr-btn--icon-left">Nouvelle préparation</a>
+                <button type="button"
+                        class="fr-btn fr-btn--sm fr-icon-add-line fr-btn--icon-left"
+                        data-action="open-wizard"
+                        onclick="window.openWizard && window.openWizard()">
+                    Nouvelle préparation
+                </button>
             </div>
             <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
                 Préparez un brief avant chaque réunion : il sera automatiquement
@@ -2094,6 +2099,167 @@
     </div>
     </div> {# /fr-tabs #}
 </div>
+
+{# ── Wizard "Nouvelle préparation" — modale fullscreen (UX-Refonte-3 #3).
+   Pilotée par frontend/tabs/wizard.js : openWizard() / closeWizard().
+   Le menu principal reste visible derrière la backdrop semi-transparente.
+   Stepper 5 étapes : Identité / Contexte / Documents / Focus / Récap. #}
+<div id="wizard-modal-backdrop" class="wizard-modal-backdrop"
+     role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title">
+    <div class="wizard-modal" role="document">
+        <button type="button" class="wizard-modal-close" id="wizard-close-btn"
+                aria-label="Fermer le wizard">×</button>
+        <h1 id="wizard-modal-title" style="font-size:1.2rem;margin:0 0 0.4rem;">
+            Préparer un brief de réunion
+        </h1>
+        <p class="subtitle" style="margin:0 0 0.8rem;">
+            L'IA lit vos documents de prép (Drive si renseigné) et produit un
+            brief personnalisé + un glossaire qui enrichira la transcription
+            de l'audio de la réunion.
+        </p>
+        <div id="wizard-stepper" class="wizard-stepper" aria-label="Étapes"></div>
+
+        {# Banner "Suite de : ..." si series_parent_id présent #}
+        <div id="wizard-series-banner" style="display:none;
+             background:#eef3fb;border:1px solid #c0d2f5;
+             border-radius:0.4rem;padding:0.4rem 0.7rem;margin-bottom:0.6rem;
+             font-size:0.85rem;color:#1a2640;">
+            Suite de : <strong id="wizard-series-banner-title">…</strong>
+        </div>
+
+        <form id="wizard-form" autocomplete="off">
+            <input type="hidden" id="wizard-series-parent" value="">
+
+            {# ── Step 1 : Identité ── #}
+            <div id="wizard-step-identite" class="wizard-step is-active">
+                <h2>1. Identité de la réunion</h2>
+                <div class="wizard-question">
+                    <label for="wizard-meeting-type">Type de réunion *</label>
+                    <div class="hint">Le brief sera structuré selon ce type.</div>
+                    <select id="wizard-meeting-type" required>
+                        <option value="general">Général</option>
+                        <option value="one_on_one">Entretien 1:1</option>
+                        <option value="project_update">Point projet / équipe</option>
+                        <option value="steering_committee">Comité de pilotage (COPIL)</option>
+                        <option value="brainstorm">Atelier / brainstorm</option>
+                    </select>
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-subject">Sujet de la réunion *</label>
+                    <div class="hint">En une phrase, le thème ou la décision principale.</div>
+                    <input type="text" id="wizard-subject" required maxlength="500"
+                           placeholder="Ex : Arbitrer la trajectoire budgétaire 2027 du programme X">
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-duration">Durée prévue *</label>
+                    <input type="text" id="wizard-duration" required
+                           placeholder="Ex : 1 heure">
+                    <div class="wizard-chips" data-target="wizard-duration">
+                        <span class="wizard-chip" data-minutes="15">15 minutes</span>
+                        <span class="wizard-chip" data-minutes="30">30 minutes</span>
+                        <span class="wizard-chip" data-minutes="60">1 heure</span>
+                        <span class="wizard-chip" data-minutes="120">2 heures</span>
+                        <span class="wizard-chip" data-minutes="240">Demi-journée</span>
+                        <span class="wizard-chip" data-minutes="480">Journée complète</span>
+                    </div>
+                </div>
+            </div>
+
+            {# ── Step 2 : Contexte ── #}
+            <div id="wizard-step-contexte" class="wizard-step">
+                <h2>2. Votre rôle &amp; vos attentes</h2>
+                <div class="wizard-question">
+                    <label for="wizard-role">Quel est votre rôle dans cette réunion ? *</label>
+                    <input type="text" id="wizard-role" maxlength="300"
+                           placeholder="J'anime la réunion, je participe, je dois décider…">
+                    <div class="wizard-chips" data-target="wizard-role">
+                        <span class="wizard-chip">J'anime la réunion</span>
+                        <span class="wizard-chip">J'y participe</span>
+                        <span class="wizard-chip">Je dois décider</span>
+                        <span class="wizard-chip">Je découvre l'équipe</span>
+                        <span class="wizard-chip">J'observe</span>
+                    </div>
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-expectation">Qu'attendez-vous principalement de ce brief ? *</label>
+                    <input type="text" id="wizard-expectation" maxlength="300"
+                           placeholder="Comprendre le contexte, anticiper les objections…">
+                    <div class="wizard-chips" data-target="wizard-expectation">
+                        <span class="wizard-chip">Comprendre le contexte</span>
+                        <span class="wizard-chip">Préparer ma prise de parole</span>
+                        <span class="wizard-chip">Anticiper les objections</span>
+                        <span class="wizard-chip">Valider une décision</span>
+                        <span class="wizard-chip">Apprendre le vocabulaire</span>
+                    </div>
+                </div>
+            </div>
+
+            {# ── Step 3 : Documents ── #}
+            <div id="wizard-step-documents" class="wizard-step">
+                <h2>3. Documents source (optionnel)</h2>
+                <div class="wizard-question">
+                    <label for="wizard-drive-folder">Dossier Drive</label>
+                    <div class="hint">
+                        Optionnel — si renseigné, les documents seront lus pour enrichir le brief.
+                        Collez l'URL du dossier <em>mesfichiers</em> (ou l'identifiant brut).
+                    </div>
+                    <input type="text" id="wizard-drive-folder"
+                           placeholder="https://mesfichiers.…/explorer/items/xxxxxxxx">
+                </div>
+            </div>
+
+            {# ── Step 4 : Focus ── #}
+            <div id="wizard-step-focus" class="wizard-step">
+                <h2>4. Sur quoi concentrer l'analyse ?</h2>
+                <div class="wizard-question">
+                    <div class="hint">Cochez les axes pertinents (plusieurs choix possibles).</div>
+                    <div class="wizard-focus-grid">
+                        <label><input type="checkbox" name="wizard-focus" value="Aspects budgétaires"> Aspects budgétaires</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Risques et points de vigilance"> Risques et points de vigilance</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Décisions à prendre"> Décisions à prendre</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Historique des échanges"> Historique des échanges</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Acronymes et jargon"> Acronymes et jargon</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Parties prenantes"> Parties prenantes</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Calendrier et jalons"> Calendrier et jalons</label>
+                    </div>
+                </div>
+            </div>
+
+            {# ── Step 5 : Récap ── #}
+            <div id="wizard-step-recap" class="wizard-step">
+                <h2>5. Récapitulatif</h2>
+                <p class="hint" style="margin-bottom:0.5rem;">
+                    Vérifiez les informations puis cliquez « Générer le brief ».
+                    La génération peut prendre quelques secondes selon la taille
+                    des documents Drive associés.
+                </p>
+                <div class="wizard-recap" id="wizard-recap-content"></div>
+            </div>
+
+            <div id="wizard-status" class="wizard-status"></div>
+
+            <div class="wizard-actions">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                        id="wizard-cancel-btn">Annuler</button>
+                <div class="wizard-actions-right">
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                            id="wizard-prev-btn" style="visibility:hidden;">
+                        ← Précédent
+                    </button>
+                    <button type="button" class="fr-btn fr-btn--sm"
+                            id="wizard-next-btn">
+                        Suivant →
+                    </button>
+                    <button type="submit" class="fr-btn fr-btn--sm"
+                            id="wizard-submit-btn" style="display:none;">
+                        Générer le brief
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
 </main>
 
 {# Footer DSFR minimal : conforme aux exigences du Système de Design de
