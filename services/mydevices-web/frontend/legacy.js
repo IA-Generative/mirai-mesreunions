@@ -996,6 +996,9 @@ function _userIsInteracting() {
 // flicker l'UI toutes les 15s).
 let _lastSessionsSnapshot = '';
 
+// Exposé pour tabs/devices.js (generateCode / renewTokenByQr déclenchent
+// un refresh de la liste réunions après une opération device).
+window.loadSessions = function(opts) { return loadSessions(opts); };
 async function loadSessions(opts) {
     opts = opts || {};
     // Skip le refresh si l'utilisateur est en train de sélectionner un
@@ -2294,6 +2297,10 @@ async function deleteFilePermanently(fileId, filenameRaw) {
         loadTrash();
     } catch (e) { showToast('Suppression définitive échouée.', 'error'); }
 }
+// Exposé pour tabs/devices.js (loadDevices y appelle window.pickDefaultTab
+// au 1er chargement pour choisir entre "transfers" et "generate" selon
+// la présence d'un device enrôlé).
+window.pickDefaultTab = function(hasActiveDevice) { return pickDefaultTab(hasActiveDevice); };
 function pickDefaultTab(hasActiveDevice) {
     if (_tabsInitialised) return;
     _tabsInitialised = true;
