@@ -292,6 +292,70 @@ def test_frontend_legacy_parses_via_node():
     )
 
 
+# ─── 3bis. Garde-fou : fonctions onclick="" publiées sur window ──────────
+
+# legacy.js est chargé via shell.js en `<script type="module">` (Vite). Les
+# fonctions déclarées dans un module ES NE SONT PAS accessibles depuis les
+# attributs `onclick="..."` du template (évalués dans le scope global). Sans
+# publication explicite `window.<fn> = <fn>`, chaque clic déclenche
+# « ReferenceError: <fn> is not defined » silencieusement (bugs UX :
+# titre liste, mode avancé, chevron détails, purge corbeille).
+# Ce test prévient toute régression en vérifiant que chaque nom apparaissant
+# en `onclick="<name>("` (template Jinja + HTML innerHTML dans legacy.js) est
+# soit publié sur window dans legacy.js, soit dans un autre module (preparations.js).
+
+_LEGACY_PATH = os.path.join(
+    ROOT, "services", "mydevices-web", "frontend", "legacy.js"
+)
+_PREPS_PATH = os.path.join(
+    ROOT, "services", "mydevices-web", "frontend", "tabs", "preparations.js"
+)
+
+_BUILTIN_INLINE_GLOBALS = {"document", "event", "window", "console"}
+
+
+def _collect_inline_handler_names():
+    names = set()
+    pattern = re.compile(r'on(?:click|change|input|submit)="([a-zA-Z_][a-zA-Z0-9_]*)\(')
+    for path in (INDEX_TEMPLATE_PATH, _LEGACY_PATH):
+        try:
+            content = open(path, "r", encoding="utf-8").read()
+        except FileNotFoundError:
+            continue
+        for m in pattern.finditer(content):
+            n = m.group(1)
+            if n not in _BUILTIN_INLINE_GLOBALS:
+                names.add(n)
+    return names
+
+
+def _collect_window_published(path):
+    src = open(path, "r", encoding="utf-8").read()
+    names = set()
+    for m in re.finditer(r"\bwindow\.([a-zA-Z_][a-zA-Z0-9_]*)\s*=", src):
+        names.add(m.group(1))
+    block = re.search(r"_WINDOW_EXPORTS\s*=\s*\{([^}]+)\}", src, re.DOTALL)
+    if block:
+        for line in block.group(1).splitlines():
+            t = line.strip().rstrip(",").split(":")[0].strip()
+            if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", t):
+                names.add(t)
+    return names
+
+
+def test_inline_handlers_are_published_on_window():
+    referenced = _collect_inline_handler_names()
+    published = _collect_window_published(_LEGACY_PATH) | _collect_window_published(_PREPS_PATH)
+    missing = referenced - published
+    assert not missing, (
+        "Ces fonctions sont appelées via onclick/onchange dans le template "
+        "ou dans le HTML généré par legacy.js, mais ne sont publiées sur "
+        "`window` par aucun module ES — les clics échoueront silencieusement "
+        "(ReferenceError) :\n"
+        + "\n".join("  - " + n for n in sorted(missing))
+    )
+
+
 # ─── 4. tools/preview_mydevices.py charge bien le template ────────────────
 
 def test_preview_tool_loads_template():
