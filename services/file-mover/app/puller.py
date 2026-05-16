@@ -620,35 +620,41 @@ def _run_llm_chain_for_audio(
     return updates, status_delta
 
 
-def _fetch_brief_glossary_terms(brief_id, db) -> tuple[list[str], Optional[str]]:
-    """Charge le brief par id et retourne ``(glossary_terms, initial_prompt)``.
+def _fetch_preparation_glossary_terms(preparation_id, db) -> tuple[list[str], Optional[str]]:
+    """Charge la Preparation par id et retourne ``(glossary_terms, initial_prompt)``.
 
     ``glossary_terms`` est la liste extraite via
-    ``extract_full_glossary_terms_from_brief()`` (cap 200).
+    ``extract_full_glossary_terms_from_brief()`` (cap 200, le helper consomme
+    le dict ``content`` ex-``brief_json``).
     ``initial_prompt`` est la phrase Whisper via
     ``extract_whisper_initial_prompt()`` (cap 50 termes / 200 tokens).
 
     Best-effort : tout échec → ``([], None)`` + warning loggé.
     """
-    if not brief_id:
+    if not preparation_id:
         return [], None
     try:
-        from libs.shared.app.models import MeetingBrief
         from app.glossary_from_brief import (
             extract_full_glossary_terms_from_brief,
             extract_whisper_initial_prompt,
         )
-        brief = db.query(MeetingBrief).filter(MeetingBrief.id == brief_id).first()
-        if brief is None:
+        prep = db.query(Preparation).filter(Preparation.id == preparation_id).first()
+        if prep is None:
             return [], None
-        bjson = brief.brief_json or {}
-        documents = brief.documents or []
-        terms = sorted(extract_full_glossary_terms_from_brief(bjson, documents))
-        initial = extract_whisper_initial_prompt(bjson, documents) or None
+        # Migration 012 : Preparation.content remplace MeetingBrief.brief_json.
+        content = prep.content or {}
+        documents = prep.documents or []
+        terms = sorted(extract_full_glossary_terms_from_brief(content, documents))
+        initial = extract_whisper_initial_prompt(content, documents) or None
         return terms, initial
     except Exception:
-        logger.exception("fetch_brief_glossary_terms failed for brief=%s", brief_id)
+        logger.exception("fetch_preparation_glossary_terms failed for prep=%s", preparation_id)
         return [], None
+
+
+# Alias rétrocompat interne : conserve l'ancien nom pour ne pas casser
+# d'éventuels imports tiers ; pointe vers la nouvelle fonction.
+_fetch_brief_glossary_terms = _fetch_preparation_glossary_terms
 
 
 def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
@@ -720,34 +726,39 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             logger.exception("Failed to persist kevent_job_id=%s for %s",
                              job_id, audio_file_id)
 
-    # meeting-prep v2 §5.1bis : si l'audio est déjà auto-lié à un brief
-    # (auto_link_audio_to_brief() a tourné en amont dans _perform_pull),
-    # on extrait un mini-glossaire ciblé (≤50 termes ≈ 200 tokens) et on
-    # le passe en ``initial_prompt`` Whisper. Best-effort : si la lookup
-    # ou l'extraction échoue, on tombe en transcription nominale.
+    # meeting-prep v2 §5.1bis (PR2d) : si une Meeting liée à cet audio porte
+    # une preparation_id (auto-link en amont dans _perform_pull), on extrait
+    # un mini-glossaire ciblé (≤50 termes ≈ 200 tokens) depuis la Preparation
+    # et on le passe en ``initial_prompt`` Whisper. Best-effort : si la
+    # lookup ou l'extraction échoue, on tombe en transcription nominale.
     initial_prompt_for_whisper: Optional[str] = None
     brief_glossary_terms_for_llm: list[str] = []
     try:
         if SessionLocal is not None:
             _db_probe = SessionLocal()
             try:
-                rec = _db_probe.query(UserAudioFile).filter(
-                    UserAudioFile.id == audio_file_id
-                ).first()
-                brief_id = getattr(rec, "meeting_brief_id", None) if rec else None
-                if brief_id:
-                    terms, prompt = _fetch_brief_glossary_terms(brief_id, _db_probe)
+                m = (
+                    _db_probe.query(Meeting)
+                    .filter(
+                        Meeting.user_audio_file_id == audio_file_id,
+                        Meeting.trashed_at.is_(None),
+                    )
+                    .first()
+                )
+                preparation_id = m.preparation_id if (m and m.preparation_id) else None
+                if preparation_id:
+                    terms, prompt = _fetch_preparation_glossary_terms(preparation_id, _db_probe)
                     brief_glossary_terms_for_llm = terms
                     initial_prompt_for_whisper = prompt
                     if prompt:
                         logger.info(
-                            "kevent: initial_prompt=%d chars for brief=%s (audio=%s)",
-                            len(prompt), brief_id, audio_file_id,
+                            "kevent: initial_prompt=%d chars for preparation=%s (audio=%s)",
+                            len(prompt), preparation_id, audio_file_id,
                         )
             finally:
                 _db_probe.close()
     except Exception:
-        logger.exception("kevent: failed to load brief glossary for audio=%s", audio_file_id)
+        logger.exception("kevent: failed to load preparation glossary for audio=%s", audio_file_id)
 
     def _kevent_transcribe():
         if KEVENT_ASYNC_MODE:
