@@ -1490,6 +1490,72 @@
             align-items: center;
             gap: 1rem;
         }
+        /* Lot 7 — Timeline horizontale série (Time machine) */
+        .mp-series-timeline {
+            margin: 0.8rem 0;
+            padding: 0.7rem 0.8rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.5rem;
+            background: #f8fafc;
+        }
+        .mp-series-timeline-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin: 0 0 0.6rem 0;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .mp-tl-list {
+            list-style: none;
+            margin: 0; padding: 0;
+            display: flex;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            gap: 0;
+            align-items: stretch;
+        }
+        .mp-tl-item {
+            display: flex;
+            align-items: center;
+            flex: 0 0 auto;
+        }
+        .mp-tl-item:not(:last-child)::after {
+            content: '';
+            display: inline-block;
+            width: 1.2rem; height: 2px;
+            background: #cbd5e1;
+            margin: 0 0.2rem;
+        }
+        .mp-tl-node {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 999px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #475569;
+            font-size: 0.82rem;
+            text-decoration: none;
+            white-space: nowrap;
+            transition: background 0.12s, border-color 0.12s, color 0.12s;
+        }
+        a.mp-tl-node:hover { background: #e0f2fe; border-color: #0ea5e9; color: #0c4a6e; }
+        .mp-tl-node--done { color: #166534; border-color: #86efac; background: #f0fdf4; }
+        .mp-tl-node--current {
+            color: #fff; background: #000091; border-color: #000091;
+            font-weight: 600;
+        }
+        .mp-tl-node--pending { color: #475569; background: #fff; }
+        .mp-tl-node--add {
+            color: #000091; border-style: dashed; border-color: #6b7ed4;
+        }
+        a.mp-tl-node--add:hover { background: #eef0fb; }
+        .mp-tl-icon { font-size: 0.95rem; line-height: 1; }
+        .mp-readonly-banner { margin-bottom: 0.6rem; }
+        .mp-readonly-disabled { cursor: not-allowed !important; }
     </style>
 </head>
 <body>
@@ -1805,7 +1871,11 @@
             <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
                  référence pour le test test_mydevices_web_template (landmark
                  « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
-            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;display:none;"></div>
+            <!-- Lot 7 — Timeline horizontale de la série (Time machine).
+                 Remplace progressivement #brief-detail-series-chain ; rempli
+                 par loadBriefSeries() depuis preparations.js + lib/series-timeline.js. -->
+            <div id="brief-detail-series-timeline" style="margin:0.6rem 0;"></div>
             <div id="brief-detail-body" class="brief-rendered"></div>
             <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
                 <p style="font-size:0.8rem;color:#64748b;">

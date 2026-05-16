@@ -37,6 +37,16 @@ import {
   summarizeRule as _summarizeRule,
   formatNextOccurrence as _formatNextOccurrence,
 } from '../lib/rrule-builder.js';
+import {
+  renderTimeline as _renderSeriesTimeline,
+  renderReadonlyBanner as _renderReadonlyBanner,
+  pickActiveOccurrenceId as _pickActiveOccurrenceId,
+  shouldShowTimeline as _shouldShowTimeline,
+  isReadonlyPreview as _isReadonlyPreview,
+  setReadonlyPreview as _setReadonlyPreview,
+  applyReadonlyToDetail as _applyReadonlyToDetail,
+  clearReadonlyFromDetail as _clearReadonlyFromDetail,
+} from '../lib/series-timeline.js';
 
 const PANEL_ID = 'panel-brief';
 
@@ -132,6 +142,8 @@ async function loadBriefs() {
 
 function showBriefList() {
   _briefDetailId = null;
+  // Toute sortie du détail purge le mode readonly preview (Lot 7).
+  try { _setReadonlyPreview(false); } catch (_e) { /* ignore */ }
   const list = document.getElementById('brief-list-view');
   const detail = document.getElementById('brief-detail-view');
   if (list) list.style.display = '';
@@ -248,6 +260,9 @@ function _applyBriefPayload(briefId, d) {
     _renderGlossaryCount(b);
     _renderParticipantsEditor(b);
     _renderRecurrenceBlock(b);
+    // Lot 7 — applique le mode readonly preview dès le rendu de base si
+    // le flag URL/mémoire est posé (avant même le résultat /series).
+    try { _refreshReadonlyChrome(briefId); } catch (_e) { /* ignore */ }
   } catch (e) {}
 }
 
@@ -552,24 +567,58 @@ async function loadBriefAudioFiles(briefId) {
   }
 }
 
+// Cache du dernier payload /series pour pouvoir résoudre la navigation
+// "revenir à la prep active" sans refetch.
+let _lastSeriesPayload = null;
+
 async function loadBriefSeries(briefId) {
-  const box = document.getElementById('brief-detail-series-chain');
+  const box = document.getElementById('brief-detail-series-timeline')
+    || document.getElementById('brief-detail-series-chain');
   if (!box) return;
   box.innerHTML = '';
   try {
     const r = await fetch(`/api/preparations/${briefId}/series`);
     if (!r.ok) return;
     const d = await r.json();
-    const chain = (d && d.series) || [];
-    if (chain.length < 2) return;
-    box.innerHTML = '<strong>Cette série :</strong><ol style="margin:0.3rem 0 0 1.2rem;">' +
-      chain.map(b => {
-        const t = _esc(b.title || b.subject || '(sans titre)');
-        const isCurrent = String(b.id) === String(briefId);
-        if (isCurrent) return `<li><strong>${t}</strong> (brief courant)</li>`;
-        return `<li><a href="#" class="fr-link" data-action="open-brief" data-brief-id="${_esc(b.id)}">${t}</a></li>`;
-      }).join('') + '</ol>';
+    _lastSeriesPayload = d || null;
+    if (!_shouldShowTimeline(d, briefId)) return;
+    const readonly = _isReadonlyPreview();
+    const html = _renderSeriesTimeline(d, briefId, { readonly });
+    box.innerHTML = html;
+    // Bandeau readonly + désactivation des contrôles d'édition.
+    _refreshReadonlyChrome(briefId);
   } catch (e) { /* silencieux */ }
+}
+
+// Pose / retire le bandeau "Vous consultez l'historique" et désactive
+// (ou réactive) les contrôles d'édition selon le flag readonly courant.
+function _refreshReadonlyChrome(briefId) {
+  const detailView = document.getElementById('brief-detail-view');
+  if (!detailView) return;
+  const readonly = _isReadonlyPreview();
+  // 1) Bandeau (placé en tête du panel detail)
+  let banner = document.getElementById('brief-detail-readonly-banner');
+  if (readonly) {
+    const activeId = _lastSeriesPayload
+      ? _pickActiveOccurrenceId(_lastSeriesPayload.series || [])
+      : null;
+    const html = _renderReadonlyBanner(
+      activeId && String(activeId) !== String(briefId) ? activeId : null
+    );
+    if (!banner) {
+      const wrap = document.createElement('div');
+      wrap.id = 'brief-detail-readonly-banner';
+      wrap.style.margin = '0 0 0.6rem 0';
+      wrap.innerHTML = html;
+      detailView.insertBefore(wrap, detailView.firstChild);
+    } else {
+      banner.innerHTML = html;
+    }
+    _applyReadonlyToDetail(detailView);
+  } else {
+    if (banner && banner.parentNode) banner.parentNode.removeChild(banner);
+    _clearReadonlyFromDetail(detailView);
+  }
 }
 
 async function detachAudioFromBrief(audioId) {
@@ -1416,11 +1465,48 @@ async function _saveGlossaryModal() {
 // ─── Bouton 4 (Prepare-next) — date picker ────────────────────────────────
 function _openPrepareNextModal() {
   if (!_briefDetailId) return;
-  // Date par défaut : maintenant + 7 jours (heure ronde).
-  const d = new Date();
-  d.setDate(d.getDate() + 7);
-  d.setMinutes(0, 0, 0);
+  // Date par défaut : Lot 7 — si la prep courante (ou son parent dans la
+  // série) définit une recurrence_rule + target_meeting_date, on calcule
+  // target + interval (en jours, semaine, mois) ; sinon fallback J+7.
   const pad = (n) => String(n).padStart(2, '0');
+  let d = null;
+  try {
+    // 1) Source de la date de référence : prep courante OU parent racine
+    //    de la série (cas où la récurrence est portée par le parent).
+    let refOcc = _currentBrief || null;
+    if (_lastSeriesPayload && Array.isArray(_lastSeriesPayload.series)) {
+      const rootId = _lastSeriesPayload.root_id;
+      const root = _lastSeriesPayload.series.find((o) => String(o.id) === String(rootId));
+      // On préfère la dernière occurrence avec une target_meeting_date
+      // (la "tête de série") pour le calcul d'incrément.
+      const withDates = _lastSeriesPayload.series.filter((o) => o.target_meeting_date);
+      const tail = withDates.length ? withDates[withDates.length - 1] : null;
+      refOcc = tail || root || refOcc;
+    }
+    const rule = (_currentBrief && _currentBrief.recurrence_rule)
+      || (refOcc && refOcc.recurrence_rule)
+      || null;
+    const baseIso = (refOcc && refOcc.target_meeting_date)
+      || (_currentBrief && _currentBrief.target_meeting_date)
+      || null;
+    if (rule && baseIso) {
+      const base = new Date(baseIso);
+      if (!Number.isNaN(base.getTime())) {
+        const interval = Math.max(1, parseInt(rule.interval, 10) || 1);
+        const freq = (rule.freq || '').toUpperCase();
+        if (freq === 'DAILY') base.setDate(base.getDate() + interval);
+        else if (freq === 'WEEKLY') base.setDate(base.getDate() + 7 * interval);
+        else if (freq === 'MONTHLY') base.setMonth(base.getMonth() + interval);
+        else base.setDate(base.getDate() + 7); // fallback
+        d = base;
+      }
+    }
+  } catch (_e) { /* fallback ci-dessous */ }
+  if (!d) {
+    d = new Date();
+    d.setDate(d.getDate() + 7);
+    d.setMinutes(0, 0, 0);
+  }
   const defaultVal = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
   const body = document.createElement('div');
@@ -1478,6 +1564,8 @@ function _onPanelClick(ev) {
     case 'open-brief': {
       ev.preventDefault();
       const id = actionEl.getAttribute('data-brief-id');
+      // Navigation depuis la liste : on quitte tout mode readonly.
+      try { _setReadonlyPreview(false); } catch (_e) { /* ignore */ }
       if (id) showBriefDetail(id);
       return;
     }
@@ -1521,6 +1609,27 @@ function _onPanelClick(ev) {
       ev.preventDefault(); _openGlossaryModal(); return;
     case 'open-prepare-next-modal':
       ev.preventDefault(); _openPrepareNextModal(); return;
+    case 'open-series-occurrence': {
+      ev.preventDefault();
+      const occId = actionEl.getAttribute('data-occurrence-id');
+      const leaveReadonly = actionEl.getAttribute('data-leave-readonly') === '1';
+      if (!occId) return;
+      // Détermine si on entre en readonly preview ou si on retourne à la
+      // prep active. Heuristique : si l'occurrence cible est l'active de
+      // la série OU si data-leave-readonly=1 → on quitte le readonly.
+      let goReadonly = true;
+      try {
+        const activeId = _lastSeriesPayload
+          ? _pickActiveOccurrenceId(_lastSeriesPayload.series || [])
+          : null;
+        if (leaveReadonly || (activeId && String(activeId) === String(occId))) {
+          goReadonly = false;
+        }
+      } catch (_e) { /* ignore */ }
+      _setReadonlyPreview(goReadonly);
+      showBriefDetail(occId);
+      return;
+    }
     case 'add-detail-participant':
       ev.preventDefault(); _addDetailParticipant(); return;
     case 'save-detail-participants':
