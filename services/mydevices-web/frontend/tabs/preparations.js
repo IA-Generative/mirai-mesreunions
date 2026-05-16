@@ -38,6 +38,12 @@ import {
   formatNextOccurrence as _formatNextOccurrence,
 } from '../lib/rrule-builder.js';
 import {
+  mountThemesChips as _mountThemesChips,
+  serializeThemesChips as _serializeThemesChips,
+  loadThemesSuggestions as _loadThemesSuggestions,
+} from '../lib/themes-chips.js';
+import { buildMailtoForPreparation as _buildMailto } from '../lib/mailto-builder.js';
+import {
   renderTimeline as _renderSeriesTimeline,
   renderReadonlyBanner as _renderReadonlyBanner,
   pickActiveOccurrenceId as _pickActiveOccurrenceId,
@@ -260,6 +266,8 @@ function _applyBriefPayload(briefId, d) {
     _renderGlossaryCount(b);
     _renderParticipantsEditor(b);
     _renderRecurrenceBlock(b);
+    _renderThemesBlock(b);
+    _renderEmailsBlock(b);
     // Lot 7 — applique le mode readonly preview dès le rendu de base si
     // le flag URL/mémoire est posé (avant même le résultat /series).
     try { _refreshReadonlyChrome(briefId); } catch (_e) { /* ignore */ }
@@ -337,6 +345,100 @@ async function _saveDetailRecurrence() {
     _toast('Échec enregistrement récurrence.', 'error');
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Lot 9 — Thématiques : rendu chips + save ─────────────────────────────
+function _renderThemesBlock(brief) {
+  const root = document.getElementById('brief-detail-themes-container');
+  if (!root) return;
+  const themes = Array.isArray(brief && brief.themes) ? brief.themes : [];
+  _mountThemesChips(root, { initial: themes, suggestions: [] });
+  // Auto-complétion : charge les suggestions en arrière-plan (best-effort).
+  _loadThemesSuggestions().then((items) => {
+    if (root._themesChipsSetSuggestions) root._themesChipsSetSuggestions(items);
+  }).catch(() => {});
+  const status = document.getElementById('brief-detail-themes-status');
+  if (status) status.textContent = '';
+}
+
+async function _saveDetailThemes() {
+  if (!_briefDetailId) return;
+  const root = document.getElementById('brief-detail-themes-container');
+  const status = document.getElementById('brief-detail-themes-status');
+  const btn = document.getElementById('brief-detail-themes-save-btn');
+  if (!root) return;
+  const themes = _serializeThemesChips(root);
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Enregistrement…';
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ themes }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) throw new Error(d.error || 'save_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    if (d.preparation) _currentBrief = d.preparation;
+    if (status) status.textContent = 'Thématiques enregistrées (' + themes.length + ').';
+    _toast('Thématiques enregistrées.', 'success');
+  } catch (e) {
+    if (status) status.textContent = 'Échec : ' + (e.message || e);
+    _toast('Échec enregistrement thématiques.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// ─── Lot 8 — Emails : mailto + toggle send_cr_email ───────────────────────
+function _renderEmailsBlock(brief) {
+  const link = document.getElementById('brief-detail-mailto-link');
+  const toggle = document.getElementById('brief-detail-send-cr-toggle');
+  const status = document.getElementById('brief-detail-emails-status');
+  if (link) {
+    try { link.href = _buildMailto(brief || {}); } catch (e) { link.href = 'mailto:'; }
+    const hasEmail = (brief && Array.isArray(brief.participants) ? brief.participants : [])
+      .some((p) => p && p.email && String(p.email).indexOf('@') >= 0);
+    link.classList.toggle('fr-btn--disabled', !hasEmail);
+    link.setAttribute('aria-disabled', hasEmail ? 'false' : 'true');
+    link.title = hasEmail
+      ? 'Ouvre votre client mail avec un brouillon pré-rempli'
+      : 'Ajoutez au moins un email participant pour activer l\'invitation';
+  }
+  if (toggle) toggle.checked = !!(brief && brief.send_cr_email);
+  if (status) status.textContent = '';
+}
+
+async function _toggleSendCrEmail(ev) {
+  if (!_briefDetailId) return;
+  const toggle = document.getElementById('brief-detail-send-cr-toggle');
+  const status = document.getElementById('brief-detail-emails-status');
+  if (!toggle) return;
+  const newVal = !!toggle.checked;
+  if (status) status.textContent = 'Enregistrement…';
+  toggle.disabled = true;
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ send_cr_email: newVal }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) throw new Error(d.error || 'save_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    if (d.preparation) _currentBrief = d.preparation;
+    if (status) status.textContent = newVal
+      ? 'Envoi CR auto activé.'
+      : 'Envoi CR auto désactivé.';
+    _toast('Préférence email enregistrée.', 'success');
+  } catch (e) {
+    // rollback UI
+    toggle.checked = !newVal;
+    if (status) status.textContent = 'Échec : ' + (e.message || e);
+    _toast('Échec enregistrement préférence email.', 'error');
+  } finally {
+    toggle.disabled = false;
   }
 }
 
@@ -1636,6 +1738,11 @@ function _onPanelClick(ev) {
       ev.preventDefault(); _saveDetailParticipants(); return;
     case 'save-detail-recurrence':
       ev.preventDefault(); _saveDetailRecurrence(); return;
+    case 'save-detail-themes':
+      ev.preventDefault(); _saveDetailThemes(); return;
+    case 'toggle-send-cr':
+      // <input checkbox> ne nécessite pas de preventDefault.
+      _toggleSendCrEmail(ev); return;
     case 'toggle-amend':
       ev.preventDefault(); toggleAmendBrief();
       { const m = document.getElementById('brief-detail-more-menu');

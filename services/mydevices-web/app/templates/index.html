@@ -1864,6 +1864,44 @@
                           style="font-size:0.78rem;color:#64748b;"></span>
                 </div>
             </section>
+            <!-- Lot 9 — Section "Thématiques" éditable inline (chips) -->
+            <section id="brief-detail-themes" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+                    <strong style="font-size:0.92rem;">🏷 Thématiques</strong>
+                    <span id="brief-detail-themes-status" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <div id="brief-detail-themes-container" style="margin-top:0.4rem;"></div>
+                <div style="margin-top:0.4rem;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-themes-save-btn"
+                            data-action="save-detail-themes">Enregistrer thématiques</button>
+                </div>
+            </section>
+            <!-- Lot 8 — Section "Emails" : invitation mailto + toggle CR auto -->
+            <section id="brief-detail-emails" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <strong style="font-size:0.92rem;">📧 Emails</strong>
+                    <span id="brief-detail-emails-status" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+                    <a id="brief-detail-mailto-link" class="fr-btn fr-btn--sm fr-icon-mail-line fr-btn--icon-left"
+                       href="mailto:" target="_blank" rel="noopener">
+                        Inviter par mail
+                    </a>
+                    <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;">
+                        <input type="checkbox" id="brief-detail-send-cr-toggle"
+                               data-action="toggle-send-cr">
+                        <span style="font-size:0.9rem;">Envoyer le CR aux participants à la fin</span>
+                    </label>
+                </div>
+                <div style="margin-top:0.3rem;font-size:0.78rem;color:#64748b;">
+                    Le bouton "Inviter par mail" ouvre votre client mail avec un brouillon pré-rempli
+                    (sujet, agenda, dossier Drive). Le toggle CR auto requiert qu'au moins un participant
+                    ait une adresse email valide et que le serveur SMTP soit configuré.
+                </div>
+            </section>
             <!-- Section "Sources Drive" : rendue par _applyBriefPayload si drive_folder_id présent -->
             <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
