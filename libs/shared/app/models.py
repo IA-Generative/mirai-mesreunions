@@ -452,6 +452,23 @@ class Preparation(InternalBase):
                              comment="{freq, interval, byweekday, byhour, byminute, until}")
     next_occurrence_at = Column(DateTime(timezone=True), nullable=True)
 
+    # ─── Thématiques personnalisables (Lot 9 — migration 014) ───────
+    # Liste libre de chips utilisateur en complément du champ `focus`
+    # (checkboxes pré-définies). Capée 50 côté backend.
+    themes = Column(_JSON_TYPE, nullable=True,
+                    comment="liste libre de thématiques utilisateur (cap 50)")
+
+    # ─── Email CR auto (Lot 8 — migration 014) ──────────────────────
+    # Toggle : envoi auto du CR aux participants[].email à la fin de la
+    # transcription (consommé par le hook côté pipeline ingester via
+    # POST /api/meetings/{id}/send-cr).
+    send_cr_email = Column(Boolean, nullable=True, default=False)
+
+    # ─── Main courante Drive (Lot 8 — migration 014) ────────────────
+    # Pour les réunions récurrentes : doc Drive cumulatif qui regroupe
+    # tous les CR de la série. Créé à la première occurrence avec CR.
+    drive_main_courante_doc_id = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False,
                         default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=True,

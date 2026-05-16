@@ -53,6 +53,9 @@ def amend_preparation(
     is_recurring: bool | None = None,
     recurrence_rule: dict | None | object = _SENTINEL,
     target_meeting_date: str | None | object = _SENTINEL,
+    themes: list | None = None,
+    send_cr_email: bool | None = None,
+    drive_main_courante_doc_id: str | None | object = _SENTINEL,
 ) -> dict:
     """Amend une préparation — `content`, `participants`, `glossary_source`
     et/ou les champs de récurrence (Lot 6).
@@ -74,6 +77,12 @@ def amend_preparation(
         body["recurrence_rule"] = recurrence_rule
     if target_meeting_date is not _SENTINEL:
         body["target_meeting_date"] = target_meeting_date
+    if themes is not None:
+        body["themes"] = themes
+    if send_cr_email is not None:
+        body["send_cr_email"] = bool(send_cr_email)
+    if drive_main_courante_doc_id is not _SENTINEL:
+        body["drive_main_courante_doc_id"] = drive_main_courante_doc_id
     return request_internal_preparation_api(
         "POST", f"/api/v1/preparations/{preparation_id}/amend",
         json_body=body,

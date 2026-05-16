@@ -1257,6 +1257,12 @@ def _preparation_to_dict(p: Preparation, *, with_full: bool = False) -> dict:
             p.next_occurrence_at.isoformat()
             if getattr(p, "next_occurrence_at", None) else None
         ),
+        # Lot 8 — toggle envoi CR auto (utile vue listing pour afficher un
+        # badge "📧" si activé), Lot 8 — main courante Drive (doc id),
+        # Lot 9 — thématiques (utile pour chips dans la liste).
+        "send_cr_email": bool(getattr(p, "send_cr_email", False) or False),
+        "drive_main_courante_doc_id": getattr(p, "drive_main_courante_doc_id", None),
+        "themes": getattr(p, "themes", None) or [],
     }
     if with_full:
         out["content"] = p.content
@@ -1352,6 +1358,26 @@ def create_preparation():
             _compute_next_occurrence_safe(rule_clean, target_meeting_date)
             if is_recurring else None
         )
+        # Lot 9 — thématiques (cap 50, dédup case-insensitive).
+        themes_raw = data.get("themes")
+        themes_clean: list = []
+        if isinstance(themes_raw, list):
+            seen_lc = set()
+            for t in themes_raw:
+                if not isinstance(t, str):
+                    continue
+                s = t.strip()
+                if not s:
+                    continue
+                lc = s.lower()
+                if lc in seen_lc:
+                    continue
+                seen_lc.add(lc)
+                themes_clean.append(s)
+                if len(themes_clean) >= 50:
+                    break
+        # Lot 8 — toggle CR (défaut False).
+        send_cr_email = bool(data.get("send_cr_email"))
         p = Preparation(
             user_sub=user_sub,
             subject=(data.get("subject") or None),
@@ -1371,6 +1397,8 @@ def create_preparation():
             is_recurring=is_recurring,
             recurrence_rule=rule_clean if is_recurring else None,
             next_occurrence_at=next_occ,
+            themes=themes_clean,
+            send_cr_email=send_cr_email,
         )
         db.add(p)
         db.commit()
@@ -1597,9 +1625,14 @@ def amend_preparation(preparation_id: str):
     has_recurring = "is_recurring" in data
     has_rule = "recurrence_rule" in data
     has_target = "target_meeting_date" in data
+    # Lot 8 + Lot 9 — extensions amend.
+    has_themes = "themes" in data
+    has_send_cr = "send_cr_email" in data
+    has_main_courante = "drive_main_courante_doc_id" in data
     if not (has_content or has_participants or has_glossary
-            or has_recurring or has_rule or has_target):
-        return jsonify({"error": "content, participants, glossary_source or recurrence required"}), 400
+            or has_recurring or has_rule or has_target
+            or has_themes or has_send_cr or has_main_courante):
+        return jsonify({"error": "content, participants, glossary_source, recurrence, themes or send_cr_email required"}), 400
     new_content = data.get("content") if has_content else None
     if has_content and not isinstance(new_content, dict):
         return jsonify({"error": "content must be an object"}), 400
@@ -1609,6 +1642,34 @@ def amend_preparation(preparation_id: str):
     new_glossary = data.get("glossary_source") if has_glossary else None
     if has_glossary and not isinstance(new_glossary, list):
         return jsonify({"error": "glossary_source must be a list"}), 400
+    # Lot 9 — normalisation thématiques : strings non vides, dédoublonnées
+    # (case-insensitive, garde la 1re casse vue), cap 50.
+    new_themes = data.get("themes") if has_themes else None
+    if has_themes:
+        if not isinstance(new_themes, list):
+            return jsonify({"error": "themes must be a list"}), 400
+        cleaned = []
+        seen_lc = set()
+        for t in new_themes:
+            if not isinstance(t, str):
+                continue
+            s = t.strip()
+            if not s:
+                continue
+            lc = s.lower()
+            if lc in seen_lc:
+                continue
+            seen_lc.add(lc)
+            cleaned.append(s)
+            if len(cleaned) >= 50:
+                break
+        new_themes = cleaned
+    # Lot 8 — toggle CR.
+    new_send_cr = bool(data.get("send_cr_email")) if has_send_cr else None
+    # Lot 8 — main courante (string ou None pour effacer).
+    new_main_courante = data.get("drive_main_courante_doc_id") if has_main_courante else None
+    if has_main_courante and new_main_courante is not None and not isinstance(new_main_courante, str):
+        return jsonify({"error": "drive_main_courante_doc_id must be a string or null"}), 400
 
     db = SessionLocal()
     try:
@@ -1651,9 +1712,72 @@ def amend_preparation(preparation_id: str):
                 _compute_next_occurrence_safe(rule_clean, p.target_meeting_date)
                 if effective else None
             )
+        # Lot 8 + 9 — appliquer les nouveaux champs.
+        if has_themes:
+            p.themes = new_themes
+        if has_send_cr:
+            p.send_cr_email = new_send_cr
+        if has_main_courante:
+            p.drive_main_courante_doc_id = new_main_courante
         db.commit()
         db.refresh(p)
         return jsonify({"ok": True, "preparation": _preparation_to_dict(p, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/themes-suggestions", methods=["GET"])
+def list_themes_suggestions():
+    """Lot 9 — Top thématiques utilisées dans les preps du user.
+
+    Retourne les 30 thématiques les plus fréquentes (ordre desc), sur
+    l'ensemble des préparations non-trashed du `user_sub`. Service
+    "best-effort" : tout échec → liste vide.
+
+    Query : ``?user_sub=<sub>``
+    Reply : ``{themes: [{label, count}, ...]}``
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Preparation.themes)
+            .filter(
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .all()
+        )
+        # Agrégation case-insensitive (garde la 1re casse vue).
+        from collections import Counter
+        counter: Counter = Counter()
+        canonical: dict = {}
+        for (themes,) in rows:
+            if not isinstance(themes, list):
+                continue
+            for t in themes:
+                if not isinstance(t, str):
+                    continue
+                s = t.strip()
+                if not s:
+                    continue
+                lc = s.lower()
+                canonical.setdefault(lc, s)
+                counter[lc] += 1
+        top = counter.most_common(30)
+        return jsonify({
+            "themes": [
+                {"label": canonical[lc], "count": cnt}
+                for lc, cnt in top
+            ]
+        })
+    except Exception:
+        logger.exception("themes-suggestions failed for user_sub=%s", user_sub)
+        return jsonify({"themes": []})
     finally:
         db.close()
 

@@ -96,6 +96,28 @@ def list_preparations():
     return jsonify({"preparations": preps})
 
 
+@bp.route("/themes-suggestions", methods=["GET"], strict_slashes=False)
+@require_auth
+def list_themes_suggestions():
+    """Lot 9 — Top thématiques utilisateur (proxy DTA).
+
+    Retour : ``{themes: [{label, count}, ...]}`` (max 30, ordre desc).
+    Tout échec backend → liste vide (ne casse pas l'UI wizard).
+    """
+    from ...shared import request_internal_preparation_api
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        data = request_internal_preparation_api(
+            "GET", "/api/v1/preparations/themes-suggestions",
+            params={"user_sub": user_sub},
+        )
+        return jsonify({"themes": (data or {}).get("themes") or []})
+    except Exception:
+        logger.exception("themes-suggestions proxy failed")
+        return jsonify({"themes": []})
+
+
 @bp.route("", methods=["POST"], strict_slashes=False)
 @require_auth
 def create_preparation():
@@ -172,6 +194,26 @@ def create_preparation():
     recurrence_rule_raw = payload.get("recurrence_rule")
     if not isinstance(recurrence_rule_raw, dict):
         recurrence_rule_raw = None
+    # Lot 9 — thématiques additionnelles wizard (cap 50, dédup côté DTA).
+    themes_raw = payload.get("themes")
+    themes_clean: list[str] = []
+    if isinstance(themes_raw, list):
+        seen_lc: set[str] = set()
+        for t in themes_raw:
+            if not isinstance(t, str):
+                continue
+            s = t.strip()
+            if not s:
+                continue
+            lc = s.lower()
+            if lc in seen_lc:
+                continue
+            seen_lc.add(lc)
+            themes_clean.append(s)
+            if len(themes_clean) >= 50:
+                break
+    # Lot 8 — toggle envoi CR auto post-transcription (défaut False).
+    send_cr_email = bool(payload.get("send_cr_email"))
     # Lot 5 — participants attendus saisis depuis le wizard. Liste d'objets
     # {name?, email?, role?}. Persistés en colonne JSONB côté DTA.
     participants_raw = payload.get("participants")
@@ -217,6 +259,8 @@ def create_preparation():
         # Lot 6 — récurrence (transmise telle quelle au worker puis au DTA)
         "is_recurring": bool(is_recurring_raw) if is_recurring_raw is not None else None,
         "recurrence_rule": recurrence_rule_raw,
+        "themes": themes_clean,
+        "send_cr_email": send_cr_email,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -297,6 +341,8 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
     participants = job.get("participants") or []
     is_recurring = job.get("is_recurring")
     recurrence_rule = job.get("recurrence_rule")
+    themes = job.get("themes") or []
+    send_cr_email = bool(job.get("send_cr_email"))
 
     def _update(**kw):
         if job_id:
@@ -465,6 +511,8 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             "participants": participants,
             "is_recurring": bool(is_recurring) if is_recurring is not None else False,
             "recurrence_rule": recurrence_rule,
+            "themes": themes,
+            "send_cr_email": send_cr_email,
         })
         preparation_id = (created.get("preparation") or {}).get("id")
 
@@ -594,16 +642,45 @@ def _amend_impl(preparation_id: str):
     if has_rule and raw_rule is not None and not isinstance(raw_rule, dict):
         return _err("recurrence_rule must be an object or null", 400)
     raw_target = payload.get("target_meeting_date") if has_target else None
+    # Lot 8 + 9 — nouveaux champs : themes, send_cr_email,
+    # drive_main_courante_doc_id (tous optionnels).
+    has_themes = "themes" in payload
+    has_send_cr = "send_cr_email" in payload
+    has_main_courante = "drive_main_courante_doc_id" in payload
+    new_themes = payload.get("themes") if has_themes else None
+    new_send_cr = bool(payload.get("send_cr_email")) if has_send_cr else None
+    raw_main_courante = payload.get("drive_main_courante_doc_id") if has_main_courante else None
 
     if (new_content is None and new_participants is None and new_glossary is None
-            and not has_recurring and not has_rule and not has_target):
-        return _err("content, participants, glossary_source or recurrence required", 400)
+            and not has_recurring and not has_rule and not has_target
+            and not has_themes and not has_send_cr and not has_main_courante):
+        return _err("content, participants, glossary_source, recurrence, themes or send_cr_email required", 400)
     if new_content is not None and not isinstance(new_content, dict):
         return _err("content must be an object", 400)
     if new_participants is not None and not isinstance(new_participants, list):
         return _err("participants must be a list", 400)
     if new_glossary is not None and not isinstance(new_glossary, list):
         return _err("glossary_source must be a list", 400)
+    if has_themes and not isinstance(new_themes, list):
+        return _err("themes must be a list", 400)
+    if has_themes:
+        # Cap 50 + dédoublonnage côté gateway (DTA refait le ménage aussi).
+        cleaned_themes: list[str] = []
+        seen_lc: set[str] = set()
+        for t in new_themes:
+            if not isinstance(t, str):
+                continue
+            s = t.strip()
+            if not s:
+                continue
+            lc = s.lower()
+            if lc in seen_lc:
+                continue
+            seen_lc.add(lc)
+            cleaned_themes.append(s)
+            if len(cleaned_themes) >= 50:
+                break
+        new_themes = cleaned_themes
 
     try:
         # Sentinels du module service : utiliser leurs valeurs propres pour
@@ -613,10 +690,14 @@ def _amend_impl(preparation_id: str):
             kw_recur["recurrence_rule"] = raw_rule
         if has_target:
             kw_recur["target_meeting_date"] = raw_target
+        if has_main_courante:
+            kw_recur["drive_main_courante_doc_id"] = raw_main_courante
         data = prep_service.amend_preparation(
             user_sub, preparation_id, new_content,
             participants=new_participants, glossary_source=new_glossary,
             is_recurring=new_is_recurring,
+            themes=new_themes if has_themes else None,
+            send_cr_email=new_send_cr,
             **kw_recur,
         )
     except req.HTTPError as err:
