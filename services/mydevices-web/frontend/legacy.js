@@ -115,6 +115,22 @@ function showFileDetail(fileId) {
     // bordure carte pour donner l'illusion d'une vraie page dédiée.
     const pane = document.querySelector('.tab-pane[data-tab="transfers"]');
     if (pane) pane.classList.add('detail-active');
+    // Skeleton immédiat dans #sessions-list — masque la latence du
+    // loadSessions({force:true}) qui ré-appelle /api/my-sessions et
+    // re-render toute la liste avant d'afficher la fiche détail (chantier
+    // UX-Refonte-3 #2). Le skeleton sera remplacé dès que rowsHtml est prêt.
+    const container = document.getElementById('sessions-list');
+    if (container) {
+        container.innerHTML = '<div class="skeleton-fade-in" data-skeleton="1" style="padding:0.5rem 0.4rem;">' +
+            '<div class="skeleton-line skeleton-line--title"></div>' +
+            '<div class="skeleton-line skeleton-line--short"></div>' +
+            '<div class="skeleton-line skeleton-line--mid"></div>' +
+            '<div class="skeleton-line"></div>' +
+            '<div class="skeleton-line skeleton-line--block"></div>' +
+            '</div>';
+    }
+    const header = document.getElementById('sessions-table-header');
+    if (header) header.style.display = 'none';
     loadSessions({ force: true });
     requestAnimationFrame(() => window.scrollTo(0, 0));
 }

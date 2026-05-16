@@ -20,6 +20,9 @@
 //
 // API consommée : /api/preparations/* (cf. tests/regression/test_mydevices_web_modules.py).
 
+import { renderBriefDetailSkeleton } from '../lib/skeleton.js';
+import * as detailCache from '../lib/detail-cache.js';
+
 const PANEL_ID = 'panel-brief';
 
 // ─── État courant ─────────────────────────────────────────────────────────
@@ -203,6 +206,30 @@ function renderBriefBody(brief_json) {
   return parts.join('');
 }
 
+// Applique payload brief sur le DOM. Factored out pour pouvoir l'appeler
+// depuis le cache (synchrone) ET depuis le refetch silencieux (async).
+function _applyBriefPayload(briefId, d) {
+  const titleEl = document.getElementById('brief-detail-title');
+  const metaEl = document.getElementById('brief-detail-meta');
+  const bodyEl = document.getElementById('brief-detail-body');
+  const b = d.preparation || d.brief || {};
+  if (titleEl) titleEl.textContent = b.title || b.subject || '(sans titre)';
+  const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
+  if (metaEl) metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
+  const content = b.content || b.brief_json || {};
+  if (bodyEl) bodyEl.innerHTML = renderBriefBody(content);
+  fillAmendForm(content);
+  try {
+    const btn = document.getElementById('brief-detail-prepare-next');
+    if (btn) {
+      btn.href = `/meeting-prep/new?series_parent_id=${encodeURIComponent(briefId)}`;
+      btn.style.display = '';
+    }
+    const linkBtn = document.getElementById('brief-detail-link-audio-btn');
+    if (linkBtn) linkBtn.style.display = '';
+  } catch (e) {}
+}
+
 async function showBriefDetail(briefId) {
   _briefDetailId = briefId;
   const listView = document.getElementById('brief-list-view');
@@ -214,33 +241,50 @@ async function showBriefDetail(briefId) {
   const bodyEl = document.getElementById('brief-detail-body');
   const amendPane = document.getElementById('brief-amend-pane');
   if (amendPane) amendPane.style.display = 'none';
-  if (titleEl) titleEl.textContent = 'Chargement…';
+
+  // Cache hit ? On affiche tout de suite + refetch silencieux derrière.
+  const cached = detailCache.get('brief', briefId);
+  if (cached) {
+    _applyBriefPayload(briefId, cached);
+    try { loadBriefAudioFiles(briefId); } catch (e) {}
+    try { loadBriefSeries(briefId); } catch (e) {}
+    // Refetch silencieux — diff JSON pour éviter re-render si identique.
+    (async () => {
+      try {
+        const r = await fetch(`/api/preparations/${briefId}`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const prev = JSON.stringify(cached || {});
+        const next = JSON.stringify(d || {});
+        if (prev !== next) {
+          detailCache.put('brief', briefId, d);
+          // Ne réécrit que si l'utilisateur regarde encore CE brief (n'a pas
+          // navigué ailleurs entre-temps).
+          if (_briefDetailId === briefId) _applyBriefPayload(briefId, d);
+        }
+      } catch (e) { /* silencieux */ }
+    })();
+    return;
+  }
+
+  // Cache miss → skeleton immédiat + fetch.
+  if (titleEl) titleEl.textContent = ' ';
   if (metaEl) metaEl.textContent = '';
-  if (bodyEl) bodyEl.innerHTML = '';
+  if (bodyEl) bodyEl.innerHTML = renderBriefDetailSkeleton();
   try {
     const r = await fetch(`/api/preparations/${briefId}`);
     if (!r.ok) throw new Error('fetch failed');
     const d = await r.json();
-    const b = d.preparation || d.brief || {};
-    if (titleEl) titleEl.textContent = b.title || b.subject || '(sans titre)';
-    const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
-    if (metaEl) metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
-    const content = b.content || b.brief_json || {};
-    if (bodyEl) bodyEl.innerHTML = renderBriefBody(content);
-    fillAmendForm(content);
+    detailCache.put('brief', briefId, d);
+    // Garde-fou : si l'utilisateur a déjà cliqué ailleurs entre-temps, on
+    // n'écrase pas la nouvelle vue avec une ancienne réponse en vol.
+    if (_briefDetailId !== briefId) return;
+    _applyBriefPayload(briefId, d);
     try { loadBriefAudioFiles(briefId); } catch (e) {}
     try { loadBriefSeries(briefId); } catch (e) {}
-    try {
-      const btn = document.getElementById('brief-detail-prepare-next');
-      if (btn) {
-        btn.href = `/meeting-prep/new?series_parent_id=${encodeURIComponent(briefId)}`;
-        btn.style.display = '';
-      }
-      const linkBtn = document.getElementById('brief-detail-link-audio-btn');
-      if (linkBtn) linkBtn.style.display = '';
-    } catch (e) {}
   } catch (e) {
     if (titleEl) titleEl.textContent = 'Erreur';
+    if (bodyEl) bodyEl.innerHTML = '<p style="color:#b91c1c;">Erreur de chargement du brief.</p>';
   }
 }
 
@@ -302,6 +346,7 @@ async function detachAudioFromBrief(audioId) {
     });
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || 'detach_failed');
+    if (_briefDetailId) detailCache.invalidate('brief', _briefDetailId);
     _toast('Audio détaché.', 'success');
     if (_briefDetailId) loadBriefAudioFiles(_briefDetailId);
   } catch (e) {
@@ -325,6 +370,7 @@ async function linkAudioToBriefPrompt() {
     });
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || 'link_failed');
+    detailCache.invalidate('brief', _briefDetailId);
     _toast('Audio lié au brief.', 'success');
     loadBriefAudioFiles(_briefDetailId);
   } catch (e) {
@@ -377,6 +423,7 @@ async function renameBriefPrompt() {
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || 'rename_failed');
     if (titleEl) titleEl.textContent = d.title || trimmed;
+    detailCache.invalidate('brief', _briefDetailId);
     _toast('Brief renommé.', 'success');
   } catch (e) { _toast('Renommage échoué.', 'error'); }
 }
@@ -704,6 +751,7 @@ async function saveAmendBrief() {
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || 'amend_failed');
+    detailCache.invalidate('brief', _briefDetailId);
     _toast('Brief amendé.', 'success');
     const pane = document.getElementById('brief-amend-pane');
     if (pane) pane.style.display = 'none';
@@ -745,6 +793,7 @@ async function deleteBrief(briefId, titleRaw) {
     const r = await fetch(`/api/preparations/${briefId}`, { method: 'DELETE' });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || 'delete_failed');
+    detailCache.invalidate('brief', briefId);
     _toast('Brief envoyé à la corbeille.', 'success');
     loadBriefs();
   } catch (e) { _toast('Suppression échouée.', 'error'); }
