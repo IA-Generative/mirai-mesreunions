@@ -33,7 +33,11 @@ from libs.shared.app.config import (
     CODE_TTL_MINUTES, CODE_TTL_MAX_MINUTES, MAX_UPLOADS_PER_SESSION, CODE_LENGTH,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption, OidcRefreshToken, UserAudioFile, TranscriptionEvent, MeetingBrief, UserGlossaryTerm
+from libs.shared.app.models import (
+    InternalBase, IssuedToken, DeviceEnrollment, IssuedTokenOption,
+    OidcRefreshToken, UserAudioFile, TranscriptionEvent,
+    Preparation, Meeting, UserGlossaryTerm,
+)
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
@@ -1186,59 +1190,118 @@ def admin_revoke_all_devices():
         db.close()
 
 
-# ─── MeetingBrief CRUD (zone interne) ───────────────────────
+# ─── Preparation CRUD (zone interne) ────────────────────────
 #
-# La table meeting_briefs vit en zone INTERNE (postgres-internal) — comme
-# user_audio_files. Code-generator (zone externe) ne peut pas l'attaquer
-# directement ; il relaie via les endpoints ci-dessous, exactement comme
+# La table `preparations` vit en zone INTERNE (postgres-internal). Le
+# code-generator (zone externe) relaie via les endpoints ci-dessous, comme
 # il le fait pour rename/delete des fichiers (cf. rename_file_by_session,
-# delete_file_by_session).
+# delete_file_by_session). Migration 012 a éclaté `meeting_briefs` en
+# `preparations` (amont-réunion) et `meetings` (post-réunion).
 #
 # Toutes les routes sont authentifiées par INTERNAL_API_TOKEN bearer.
 # L'isolation utilisateur reste à la charge du serveur : chaque appel
-# transporte explicitement ``user_sub`` et tout lookup le filtre.
+# transporte explicitement `user_sub` et tout lookup le filtre.
 
-def _brief_to_dict(b: MeetingBrief, *, with_full: bool = False) -> dict:
-    """Sérialise un MeetingBrief pour la réponse JSON.
 
-    ``with_full=False`` produit la vue listing (pas de brief_json/documents
-    pour ne pas alourdir le payload). ``with_full=True`` ajoute les champs
-    lourds pour la vue détail.
+def _preparation_to_dict(p: Preparation, *, with_full: bool = False) -> dict:
+    """Sérialise une Preparation pour la réponse JSON.
+
+    `with_full=False` produit la vue listing (pas de content/documents pour
+    ne pas alourdir le payload). `with_full=True` ajoute les champs lourds
+    pour la vue détail.
     """
     out = {
-        "id": str(b.id),
-        "user_sub": b.user_sub,
-        "subject": b.subject,
-        "title": b.title or b.subject,
-        "role": b.role,
-        "expectation": b.expectation,
-        "duration_minutes": b.duration_minutes,
-        "drive_folder_id": b.drive_folder_id,
-        "focus": b.focus,
-        "created_at": b.created_at.isoformat() if b.created_at else None,
-        "updated_at": b.updated_at.isoformat() if b.updated_at else None,
-        "trashed_at": b.trashed_at.isoformat() if b.trashed_at else None,
-        # Meeting-prep v2 (migration 011)
-        "series_parent_id": str(b.series_parent_id) if b.series_parent_id else None,
-        "last_viewed_at": b.last_viewed_at.isoformat() if b.last_viewed_at else None,
-        "target_meeting_date": b.target_meeting_date.isoformat() if b.target_meeting_date else None,
-        "drive_prep_folder_id": b.drive_prep_folder_id,
-        "drive_sync_status": b.drive_sync_status,
-        "drive_synced_at": b.drive_synced_at.isoformat() if b.drive_synced_at else None,
+        "id": str(p.id),
+        "user_sub": p.user_sub,
+        "title": p.title or p.subject,
+        "subject": p.subject,
+        "role": p.role,
+        "expectation": p.expectation,
+        "focus": p.focus,
+        "duration_minutes": p.duration_minutes,
+        "participants": p.participants,
+        "context": p.context,
+        "target_meeting_date": p.target_meeting_date.isoformat() if p.target_meeting_date else None,
+        "series_parent_id": str(p.series_parent_id) if p.series_parent_id else None,
+        "last_viewed_at": p.last_viewed_at.isoformat() if p.last_viewed_at else None,
+        "drive_folder_id": p.drive_folder_id,
+        "drive_prep_folder_id": p.drive_prep_folder_id,
+        "drive_sync_status": p.drive_sync_status,
+        "drive_synced_at": p.drive_synced_at.isoformat() if p.drive_synced_at else None,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "trashed_at": p.trashed_at.isoformat() if p.trashed_at else None,
     }
     if with_full:
-        out["brief_json"] = b.brief_json
-        out["documents"] = b.documents
+        out["content"] = p.content
+        out["documents"] = p.documents
+        out["glossary_source"] = p.glossary_source
     return out
 
 
-@app.route("/api/v1/briefs", methods=["POST"])
-def create_brief():
-    """Persiste un nouveau brief de réunion.
+def _meeting_to_dict(m: Meeting, *, with_full: bool = False) -> dict:
+    """Sérialise un Meeting pour la réponse JSON."""
+    out = {
+        "id": str(m.id),
+        "user_sub": m.user_sub,
+        "title": m.title,
+        "summary": m.summary,
+        "user_audio_file_id": str(m.user_audio_file_id) if m.user_audio_file_id else None,
+        "preparation_id": str(m.preparation_id) if m.preparation_id else None,
+        "drive_folder_id": m.drive_folder_id,
+        "drive_sync_status": m.drive_sync_status,
+        "drive_synced_at": m.drive_synced_at.isoformat() if m.drive_synced_at else None,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+        "trashed_at": m.trashed_at.isoformat() if m.trashed_at else None,
+    }
+    if with_full:
+        out["content"] = m.content
+    return out
 
-    Auth: INTERNAL_API_TOKEN. Body: ``user_sub`` + champs du brief
-    (subject, role, expectation, focus, duration_minutes, drive_folder_id,
-    brief_json, documents, title).
+
+def _audio_file_to_meeting_dict(uaf: UserAudioFile) -> dict:
+    """Sérialise un UserAudioFile pour la vue 'audios liés à la préparation'."""
+    return {
+        "id": str(uaf.id),
+        "original_filename": uaf.original_filename,
+        "suggested_filename": uaf.suggested_filename,
+        "created_at": uaf.created_at.isoformat() if uaf.created_at else None,
+        "meeting_datetime": uaf.meeting_datetime.isoformat() if uaf.meeting_datetime else None,
+        "key_points_summary": uaf.key_points_summary,
+        "transcription_status": uaf.transcription_status,
+        "meeting_id": str(uaf.meeting_id) if uaf.meeting_id else None,
+        "reprocess_version": uaf.reprocess_version or 0,
+        "reprocessed_with_meeting_id": (
+            str(uaf.reprocessed_with_meeting_id)
+            if uaf.reprocessed_with_meeting_id else None
+        ),
+        "last_reprocessed_at": uaf.last_reprocessed_at.isoformat() if uaf.last_reprocessed_at else None,
+    }
+
+
+def _coerce_target_meeting_date(value):
+    """Accepte 'YYYY-MM-DD' ou ISO complet, retourne datetime ou None."""
+    if not value:
+        return None
+    try:
+        if isinstance(value, str):
+            from datetime import date as _date
+            d = _date.fromisoformat(value[:10])
+            return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    except Exception:
+        return None
+    return value
+
+
+@app.route("/api/v1/preparations", methods=["POST"])
+def create_preparation():
+    """Persiste une nouvelle préparation de réunion.
+
+    Auth: INTERNAL_API_TOKEN. Body: `user_sub` + champs de préparation
+    (subject, role, expectation, focus, duration_minutes, participants,
+    context, drive_folder_id, content, documents, glossary_source, title,
+    series_parent_id, target_meeting_date).
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
@@ -1249,18 +1312,7 @@ def create_brief():
 
     db = SessionLocal()
     try:
-        # Meeting-prep v2 : series_parent_id + target_meeting_date (optionnels)
-        series_parent_id = data.get("series_parent_id")
-        target_meeting_date = data.get("target_meeting_date")
-        if target_meeting_date:
-            try:
-                # Accept "YYYY-MM-DD" or full ISO ; coerce to date.
-                from datetime import date as _date
-                if isinstance(target_meeting_date, str):
-                    target_meeting_date = _date.fromisoformat(target_meeting_date[:10])
-            except Exception:
-                target_meeting_date = None
-        b = MeetingBrief(
+        p = Preparation(
             user_sub=user_sub,
             subject=(data.get("subject") or None),
             drive_folder_id=(data.get("drive_folder_id") or None),
@@ -1268,27 +1320,30 @@ def create_brief():
             expectation=(data.get("expectation") or None),
             focus=data.get("focus"),
             duration_minutes=data.get("duration_minutes"),
-            brief_json=data.get("brief_json"),
+            participants=data.get("participants"),
+            context=(data.get("context") or None),
+            content=data.get("content"),
             documents=data.get("documents"),
+            glossary_source=data.get("glossary_source"),
             title=(data.get("title") or data.get("subject") or None),
-            series_parent_id=series_parent_id or None,
-            target_meeting_date=target_meeting_date,
+            series_parent_id=(data.get("series_parent_id") or None),
+            target_meeting_date=_coerce_target_meeting_date(data.get("target_meeting_date")),
         )
-        db.add(b)
+        db.add(p)
         db.commit()
-        db.refresh(b)
-        logger.info("MeetingBrief created: id=%s user_sub=%s", b.id, user_sub)
-        return jsonify({"ok": True, "brief": _brief_to_dict(b, with_full=True)})
+        db.refresh(p)
+        logger.info("Preparation created: id=%s user_sub=%s", p.id, user_sub)
+        return jsonify({"ok": True, "preparation": _preparation_to_dict(p, with_full=True)})
     finally:
         db.close()
 
 
-@app.route("/api/v1/briefs", methods=["GET"])
-def list_briefs():
-    """Liste les briefs actifs ou en corbeille pour ``user_sub``.
+@app.route("/api/v1/preparations", methods=["GET"])
+def list_preparations():
+    """Liste les préparations actives ou en corbeille pour `user_sub`.
 
-    Query: ``user_sub`` (obligatoire), ``trashed`` (``true``|``false``,
-    défaut ``false``), ``limit`` (défaut 50).
+    Query: `user_sub` (obligatoire), `trashed` (`true`|`false`, défaut
+    `false`), `limit` (défaut 50).
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
@@ -1303,395 +1358,22 @@ def list_briefs():
 
     db = SessionLocal()
     try:
-        q = db.query(MeetingBrief).filter(MeetingBrief.user_sub == user_sub)
+        q = db.query(Preparation).filter(Preparation.user_sub == user_sub)
         if trashed_flag:
-            q = q.filter(MeetingBrief.trashed_at.isnot(None)).order_by(MeetingBrief.trashed_at.desc())
+            q = q.filter(Preparation.trashed_at.isnot(None)).order_by(Preparation.trashed_at.desc())
         else:
-            q = q.filter(MeetingBrief.trashed_at.is_(None)).order_by(MeetingBrief.created_at.desc())
+            q = q.filter(Preparation.trashed_at.is_(None)).order_by(Preparation.created_at.desc())
         rows = q.limit(limit).all()
-        return jsonify({"briefs": [_brief_to_dict(b) for b in rows]})
+        return jsonify({"preparations": [_preparation_to_dict(p) for p in rows]})
     finally:
         db.close()
 
 
-@app.route("/api/v1/briefs/<brief_id>", methods=["GET"])
-def get_brief(brief_id: str):
-    """Lecture détaillée d'un brief (404 si trashed ou autre user_sub)."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    user_sub = (request.args.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.is_(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_found"}), 404
-        # Bump last_viewed_at pour le scoring d'engagement (§4 du plan).
-        # Skip si la requête a ``track_view=false`` (utile pour les jobs
-        # internes qui ne doivent pas polluer le signal d'engagement).
-        if (request.args.get("track_view") or "true").lower() not in {"false", "0", "no"}:
-            b.last_viewed_at = datetime.now(timezone.utc)
-            db.commit()
-        return jsonify({"brief": _brief_to_dict(b, with_full=True)})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/rename", methods=["POST"])
-def rename_brief(brief_id: str):
-    """Renomme le titre d'un brief (≤120 car., contrat identique aux fichiers)."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or "").strip()
-    new_title = (data.get("title") or "").strip()
-    if not user_sub or not new_title:
-        return jsonify({"error": "user_sub and title required"}), 400
-    new_title = new_title[:120]
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.is_(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_found"}), 404
-        b.title = new_title
-        db.commit()
-        return jsonify({"ok": True, "title": new_title})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/amend", methods=["POST"])
-def amend_brief(brief_id: str):
-    """Édition manuelle des champs ``brief_json`` (option a — pas de ré-appel LLM).
-
-    Body: ``user_sub`` + ``brief_json`` (dict complet à substituer).
-    """
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-    if "brief_json" not in data:
-        return jsonify({"error": "brief_json required"}), 400
-    new_brief_json = data.get("brief_json")
-    if not isinstance(new_brief_json, dict):
-        return jsonify({"error": "brief_json must be an object"}), 400
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.is_(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_found"}), 404
-        b.brief_json = new_brief_json
-        db.commit()
-        db.refresh(b)
-        return jsonify({"ok": True, "brief": _brief_to_dict(b, with_full=True)})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>", methods=["DELETE"])
-def trash_brief(brief_id: str):
-    """Soft-delete : positionne ``trashed_at = now()``."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.is_(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_found"}), 404
-        b.trashed_at = datetime.now(timezone.utc)
-        db.commit()
-        return jsonify({"ok": True, "trashed": True})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/restore", methods=["POST"])
-def restore_brief(brief_id: str):
-    """Restaure un brief depuis la corbeille (clear ``trashed_at``)."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.isnot(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_in_trash"}), 404
-        b.trashed_at = None
-        db.commit()
-        return jsonify({"ok": True, "restored": True})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/permanently", methods=["DELETE"])
-def hard_delete_brief(brief_id: str):
-    """Hard-delete d'un brief en corbeille (depuis purge ou bouton UI)."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    try:
-        b = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.id == brief_id,
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.isnot(None),
-            )
-            .first()
-        )
-        if not b:
-            return jsonify({"error": "not_in_trash"}), 404
-        db.delete(b)
-        db.commit()
-        return jsonify({"ok": True, "deleted": True})
-    finally:
-        db.close()
-
-
-# ─── Meeting-prep v2 : lien brief↔audio, série, glossaire user ───
-#
-# Endpoints introduits par le plan ok-on-continue-sur-eager-hickey.md.
-# Tous en zone INTERNE, relayés par code-generator (DMZ). Auth bearer
-# INTERNAL_API_TOKEN. Isolation user_sub respectée.
-
-
-def _audio_file_to_brief_dict(uaf: UserAudioFile) -> dict:
-    """Sérialise un UserAudioFile pour la vue 'audio liés au brief'.
-    Subset minimal pour ne pas saigner les colonnes texte volumineuses."""
-    return {
-        "id": str(uaf.id),
-        "original_filename": uaf.original_filename,
-        "suggested_filename": uaf.suggested_filename,
-        "created_at": uaf.created_at.isoformat() if uaf.created_at else None,
-        "meeting_datetime": uaf.meeting_datetime.isoformat() if uaf.meeting_datetime else None,
-        "key_points_summary": uaf.key_points_summary,
-        "transcription_status": uaf.transcription_status,
-        "meeting_brief_id": str(uaf.meeting_brief_id) if uaf.meeting_brief_id else None,
-        "reprocess_version": uaf.reprocess_version or 0,
-        "reprocessed_with_brief_id": str(uaf.reprocessed_with_brief_id) if uaf.reprocessed_with_brief_id else None,
-        "last_reprocessed_at": uaf.last_reprocessed_at.isoformat() if uaf.last_reprocessed_at else None,
-    }
-
-
-@app.route("/api/v1/files/by-id/link-brief", methods=["POST"])
-def link_audio_to_brief():
-    """Met à jour ``UserAudioFile.meeting_brief_id`` avec isolation user_sub.
-
-    Body: ``{user_sub, file_id, meeting_brief_id|null}``. Si
-    ``meeting_brief_id`` est ``null`` → détache l'audio. Renvoie l'état
-    final du fichier (pour que le caller détecte un changement et déclenche
-    un reprocess server-side).
-    """
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or "").strip()
-    file_id = (data.get("file_id") or "").strip()
-    if not user_sub or not file_id:
-        return jsonify({"error": "user_sub and file_id required"}), 400
-    new_brief_id = data.get("meeting_brief_id")  # may be None to detach
-    if isinstance(new_brief_id, str):
-        new_brief_id = new_brief_id.strip() or None
-
-    db = SessionLocal()
-    try:
-        uaf = (
-            db.query(UserAudioFile)
-            .filter(UserAudioFile.id == file_id, UserAudioFile.user_sub == user_sub)
-            .first()
-        )
-        if not uaf:
-            return jsonify({"error": "not_found"}), 404
-        # Valide que le brief cible existe et appartient au user (si non null).
-        if new_brief_id is not None:
-            b = (
-                db.query(MeetingBrief)
-                .filter(MeetingBrief.id == new_brief_id,
-                        MeetingBrief.user_sub == user_sub,
-                        MeetingBrief.trashed_at.is_(None))
-                .first()
-            )
-            if not b:
-                return jsonify({"error": "brief_not_found"}), 404
-        prev = str(uaf.meeting_brief_id) if uaf.meeting_brief_id else None
-        uaf.meeting_brief_id = new_brief_id
-        db.commit()
-        logger.info(
-            "audio link-brief: file=%s user=%s prev=%s new=%s",
-            file_id, user_sub, prev, new_brief_id,
-        )
-        return jsonify({
-            "ok": True,
-            "previous_brief_id": prev,
-            "new_brief_id": new_brief_id,
-            "file": _audio_file_to_brief_dict(uaf),
-        })
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/audio-files", methods=["GET"])
-def list_brief_audio_files(brief_id: str):
-    """Liste les ``UserAudioFile`` liés au brief, isolés par user_sub."""
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    user_sub = (request.args.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(UserAudioFile)
-            .filter(
-                UserAudioFile.user_sub == user_sub,
-                UserAudioFile.meeting_brief_id == brief_id,
-            )
-            .order_by(UserAudioFile.created_at.desc())
-            .all()
-        )
-        return jsonify({"audio_files": [_audio_file_to_brief_dict(r) for r in rows]})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/<brief_id>/series", methods=["GET"])
-def get_brief_series(brief_id: str):
-    """Renvoie la chaîne complète de la série (parent ascendant + enfants).
-
-    Remonte ``series_parent_id`` jusqu'à la racine (capped 10 niveaux), puis
-    redescend via la sous-requête inverse. Réponse ordonnée du plus ancien
-    au plus récent dans la chaîne.
-    """
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    user_sub = (request.args.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-
-    db = SessionLocal()
-    MAX_DEPTH = 10
-    try:
-        # Trouver la racine en remontant.
-        current_id = brief_id
-        visited = set()
-        for _ in range(MAX_DEPTH):
-            if current_id in visited:
-                break  # cycle protection
-            visited.add(current_id)
-            b = (
-                db.query(MeetingBrief)
-                .filter(MeetingBrief.id == current_id,
-                        MeetingBrief.user_sub == user_sub)
-                .first()
-            )
-            if not b:
-                return jsonify({"error": "not_found"}), 404
-            if not b.series_parent_id:
-                root_id = str(b.id)
-                break
-            current_id = str(b.series_parent_id)
-        else:
-            root_id = current_id
-
-        # Redescendre depuis la racine.
-        chain = []
-        cursor_id = root_id
-        seen = set()
-        for _ in range(MAX_DEPTH + 1):
-            if cursor_id in seen:
-                break
-            seen.add(cursor_id)
-            b = (
-                db.query(MeetingBrief)
-                .filter(MeetingBrief.id == cursor_id,
-                        MeetingBrief.user_sub == user_sub)
-                .first()
-            )
-            if not b:
-                break
-            chain.append(_brief_to_dict(b))
-            # Cherche un enfant direct (un seul attendu en pratique).
-            child = (
-                db.query(MeetingBrief)
-                .filter(MeetingBrief.series_parent_id == cursor_id,
-                        MeetingBrief.user_sub == user_sub,
-                        MeetingBrief.trashed_at.is_(None))
-                .order_by(MeetingBrief.created_at.asc())
-                .first()
-            )
-            if not child:
-                break
-            cursor_id = str(child.id)
-        return jsonify({"series": chain, "root_id": root_id})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/list-with-counts", methods=["GET"])
-def list_briefs_with_counts():
-    """Étend ``/api/v1/briefs`` avec ``linked_audio_count`` et
-    ``older_than_90d_unlinked_count`` (banner purge §7 du plan)."""
+@app.route("/api/v1/preparations/list-with-counts", methods=["GET"])
+def list_preparations_with_counts():
+    """Étend `/api/v1/preparations` avec `linked_audio_count` (audios des
+    meetings liés à cette prep) et `older_than_90d_unlinked_count` (banner
+    purge §7 du plan)."""
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
     user_sub = (request.args.get("user_sub") or "").strip()
@@ -1704,38 +1386,896 @@ def list_briefs_with_counts():
 
     db = SessionLocal()
     try:
-        briefs = (
-            db.query(MeetingBrief)
-            .filter(MeetingBrief.user_sub == user_sub,
-                    MeetingBrief.trashed_at.is_(None))
-            .order_by(MeetingBrief.created_at.desc())
+        preps = (
+            db.query(Preparation)
+            .filter(Preparation.user_sub == user_sub,
+                    Preparation.trashed_at.is_(None))
+            .order_by(Preparation.created_at.desc())
             .limit(limit)
             .all()
         )
-        # Précharge en un coup les comptes audio par brief.
         out = []
         ninety_days_ago = datetime.now(timezone.utc) - timedelta(days=90)
         older_unlinked = 0
-        for b in briefs:
+        for p in preps:
+            # Count audios attachés via meeting.preparation_id → meeting.user_audio_file_id.
             n = (
                 db.query(UserAudioFile)
-                .filter(UserAudioFile.user_sub == user_sub,
-                        UserAudioFile.meeting_brief_id == b.id)
+                .join(Meeting, Meeting.user_audio_file_id == UserAudioFile.id)
+                .filter(Meeting.preparation_id == p.id,
+                        Meeting.user_sub == user_sub,
+                        UserAudioFile.user_sub == user_sub)
                 .count()
             )
-            d = _brief_to_dict(b)
+            d = _preparation_to_dict(p)
             d["linked_audio_count"] = int(n)
             out.append(d)
-            if n == 0 and b.created_at:
-                # SQLite renvoie naive ; postgres renvoie aware.
-                bc = b.created_at
+            if n == 0 and p.created_at:
+                bc = p.created_at
                 if bc.tzinfo is None:
                     bc = bc.replace(tzinfo=timezone.utc)
                 if bc < ninety_days_ago:
                     older_unlinked += 1
         return jsonify({
-            "briefs": out,
+            "preparations": out,
             "older_than_90d_unlinked_count": older_unlinked,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/purge", methods=["POST"])
+def purge_preparations():
+    """Hard-delete des préparations en corbeille depuis > N jours pour
+    `user_sub`. Appelé par code-generator (`_purge_expired_trash`).
+    Body: `{"user_sub": "...", "older_than_days": 30}`.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        older_than_days = max(1, int(data.get("older_than_days") or 30))
+    except (TypeError, ValueError):
+        older_than_days = 30
+    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Preparation)
+            .filter(
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.isnot(None),
+                Preparation.trashed_at < threshold,
+            )
+            .all()
+        )
+        n = 0
+        for p in rows:
+            db.delete(p)
+            n += 1
+        if n:
+            db.commit()
+            logger.info("Preparation purge: user=%s purged=%d", user_sub, n)
+        return jsonify({"ok": True, "purged": n})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>", methods=["GET"])
+def get_preparation(preparation_id: str):
+    """Lecture détaillée d'une préparation (404 si trashed ou autre user_sub)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_found"}), 404
+        # Bump last_viewed_at pour le scoring d'engagement (§4 du plan).
+        if (request.args.get("track_view") or "true").lower() not in {"false", "0", "no"}:
+            p.last_viewed_at = datetime.now(timezone.utc)
+            db.commit()
+        return jsonify({"preparation": _preparation_to_dict(p, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/rename", methods=["POST"])
+def rename_preparation(preparation_id: str):
+    """Renomme le titre d'une préparation (≤120 car.)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    new_title = (data.get("title") or "").strip()
+    if not user_sub or not new_title:
+        return jsonify({"error": "user_sub and title required"}), 400
+    new_title = new_title[:120]
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_found"}), 404
+        p.title = new_title
+        db.commit()
+        return jsonify({"ok": True, "title": new_title})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/amend", methods=["POST"])
+def amend_preparation(preparation_id: str):
+    """Édition manuelle du `content` (option a — pas de ré-appel LLM).
+
+    Body: `user_sub` + `content` (dict complet à substituer).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if "content" not in data:
+        return jsonify({"error": "content required"}), 400
+    new_content = data.get("content")
+    if not isinstance(new_content, dict):
+        return jsonify({"error": "content must be an object"}), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_found"}), 404
+        p.content = new_content
+        db.commit()
+        db.refresh(p)
+        return jsonify({"ok": True, "preparation": _preparation_to_dict(p, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>", methods=["DELETE"])
+def trash_preparation(preparation_id: str):
+    """Soft-delete : positionne `trashed_at = now()`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_found"}), 404
+        p.trashed_at = datetime.now(timezone.utc)
+        db.commit()
+        return jsonify({"ok": True, "trashed": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/restore", methods=["POST"])
+def restore_preparation(preparation_id: str):
+    """Restaure une préparation depuis la corbeille (clear `trashed_at`)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_in_trash"}), 404
+        p.trashed_at = None
+        db.commit()
+        return jsonify({"ok": True, "restored": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/permanently", methods=["DELETE"])
+def hard_delete_preparation(preparation_id: str):
+    """Hard-delete d'une préparation en corbeille (depuis purge ou bouton UI)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_in_trash"}), 404
+        db.delete(p)
+        db.commit()
+        return jsonify({"ok": True, "deleted": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/audio-files", methods=["GET"])
+def list_preparation_audio_files(preparation_id: str):
+    """Liste les `UserAudioFile` liés à cette préparation (via les meetings
+    `meeting.preparation_id == X` et `meeting.user_audio_file_id`)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserAudioFile)
+            .join(Meeting, Meeting.user_audio_file_id == UserAudioFile.id)
+            .filter(
+                Meeting.preparation_id == preparation_id,
+                Meeting.user_sub == user_sub,
+                UserAudioFile.user_sub == user_sub,
+            )
+            .order_by(UserAudioFile.created_at.desc())
+            .all()
+        )
+        return jsonify({"audio_files": [_audio_file_to_meeting_dict(r) for r in rows]})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/preparations/<preparation_id>/series", methods=["GET"])
+def get_preparation_series(preparation_id: str):
+    """Renvoie la chaîne complète de la série (parent ascendant + enfants)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    MAX_DEPTH = 10
+    try:
+        current_id = preparation_id
+        visited = set()
+        root_id = current_id
+        for _ in range(MAX_DEPTH):
+            if current_id in visited:
+                break
+            visited.add(current_id)
+            p = (
+                db.query(Preparation)
+                .filter(Preparation.id == current_id,
+                        Preparation.user_sub == user_sub)
+                .first()
+            )
+            if not p:
+                return jsonify({"error": "not_found"}), 404
+            if not p.series_parent_id:
+                root_id = str(p.id)
+                break
+            current_id = str(p.series_parent_id)
+        else:
+            root_id = current_id
+
+        chain = []
+        cursor_id = root_id
+        seen = set()
+        for _ in range(MAX_DEPTH + 1):
+            if cursor_id in seen:
+                break
+            seen.add(cursor_id)
+            p = (
+                db.query(Preparation)
+                .filter(Preparation.id == cursor_id,
+                        Preparation.user_sub == user_sub)
+                .first()
+            )
+            if not p:
+                break
+            chain.append(_preparation_to_dict(p))
+            child = (
+                db.query(Preparation)
+                .filter(Preparation.series_parent_id == cursor_id,
+                        Preparation.user_sub == user_sub,
+                        Preparation.trashed_at.is_(None))
+                .order_by(Preparation.created_at.asc())
+                .first()
+            )
+            if not child:
+                break
+            cursor_id = str(child.id)
+        return jsonify({"series": chain, "root_id": root_id})
+    finally:
+        db.close()
+
+
+# ─── Meeting CRUD (zone interne) ────────────────────────────
+#
+# Cardinalité 0..1 ↔ 0..1 avec preparation et user_audio_file. Un meeting
+# peut être standalone (CR manuel sans audio, sans prep). Migration 012
+# `user_audio_files.meeting_id` (FK → meetings) est la source de vérité du
+# lien audio→meeting.
+
+
+@app.route("/api/v1/meetings", methods=["POST"])
+def create_meeting():
+    """Crée une réunion. Body : `user_sub` + champs optionnels (title,
+    summary, content, user_audio_file_id, preparation_id, drive_folder_id).
+
+    Vérifie l'isolation user_sub des FK passées (audio + prep doivent
+    appartenir au même user_sub). Si `user_audio_file_id` set, met aussi
+    à jour `user_audio_files.meeting_id` pour matérialiser le lien inverse.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    audio_id = data.get("user_audio_file_id") or None
+    prep_id = data.get("preparation_id") or None
+
+    db = SessionLocal()
+    try:
+        if audio_id:
+            uaf = (
+                db.query(UserAudioFile)
+                .filter(UserAudioFile.id == audio_id,
+                        UserAudioFile.user_sub == user_sub)
+                .first()
+            )
+            if not uaf:
+                return jsonify({"error": "audio_not_found"}), 404
+        if prep_id:
+            p = (
+                db.query(Preparation)
+                .filter(Preparation.id == prep_id,
+                        Preparation.user_sub == user_sub,
+                        Preparation.trashed_at.is_(None))
+                .first()
+            )
+            if not p:
+                return jsonify({"error": "preparation_not_found"}), 404
+
+        m = Meeting(
+            user_sub=user_sub,
+            title=(data.get("title") or None),
+            summary=(data.get("summary") or None),
+            content=data.get("content"),
+            user_audio_file_id=audio_id,
+            preparation_id=prep_id,
+            drive_folder_id=(data.get("drive_folder_id") or None),
+        )
+        db.add(m)
+        db.flush()
+        if audio_id:
+            db.query(UserAudioFile).filter(
+                UserAudioFile.id == audio_id,
+                UserAudioFile.user_sub == user_sub,
+            ).update({"meeting_id": m.id}, synchronize_session=False)
+        db.commit()
+        db.refresh(m)
+        logger.info(
+            "Meeting created: id=%s user=%s audio=%s prep=%s",
+            m.id, user_sub, audio_id, prep_id,
+        )
+        return jsonify({"ok": True, "meeting": _meeting_to_dict(m, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings", methods=["GET"])
+def list_meetings():
+    """Liste les meetings actifs ou en corbeille pour `user_sub`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    trashed_flag = (request.args.get("trashed") or "false").lower() in {"1", "true", "yes"}
+    try:
+        limit = max(1, min(200, int(request.args.get("limit") or 50)))
+    except ValueError:
+        limit = 50
+
+    db = SessionLocal()
+    try:
+        q = db.query(Meeting).filter(Meeting.user_sub == user_sub)
+        if trashed_flag:
+            q = q.filter(Meeting.trashed_at.isnot(None)).order_by(Meeting.trashed_at.desc())
+        else:
+            q = q.filter(Meeting.trashed_at.is_(None)).order_by(Meeting.created_at.desc())
+        rows = q.limit(limit).all()
+        return jsonify({"meetings": [_meeting_to_dict(m) for m in rows]})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/purge", methods=["POST"])
+def purge_meetings():
+    """Hard-delete des meetings en corbeille depuis > N jours pour `user_sub`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        older_than_days = max(1, int(data.get("older_than_days") or 30))
+    except (TypeError, ValueError):
+        older_than_days = 30
+    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Meeting)
+            .filter(
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.isnot(None),
+                Meeting.trashed_at < threshold,
+            )
+            .all()
+        )
+        n = 0
+        for m in rows:
+            db.delete(m)
+            n += 1
+        if n:
+            db.commit()
+            logger.info("Meeting purge: user=%s purged=%d", user_sub, n)
+        return jsonify({"ok": True, "purged": n})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>", methods=["GET"])
+def get_meeting(meeting_id: str):
+    """Lecture détaillée d'un meeting (404 si trashed ou autre user_sub)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({"meeting": _meeting_to_dict(m, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/rename", methods=["POST"])
+def rename_meeting(meeting_id: str):
+    """Renomme le titre d'un meeting (≤120 car.)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    new_title = (data.get("title") or "").strip()
+    if not user_sub or not new_title:
+        return jsonify({"error": "user_sub and title required"}), 400
+    new_title = new_title[:120]
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        m.title = new_title
+        db.commit()
+        return jsonify({"ok": True, "title": new_title})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/amend", methods=["POST"])
+def amend_meeting(meeting_id: str):
+    """Édition manuelle des champs `content` et/ou `summary`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    new_content = data.get("content", _SENTINEL := object())
+    new_summary = data.get("summary", _SENTINEL)
+    if new_content is _SENTINEL and new_summary is _SENTINEL:
+        return jsonify({"error": "content or summary required"}), 400
+    if new_content is not _SENTINEL and not isinstance(new_content, (dict, type(None))):
+        return jsonify({"error": "content must be an object or null"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        if new_content is not _SENTINEL:
+            m.content = new_content
+        if new_summary is not _SENTINEL:
+            m.summary = new_summary
+        db.commit()
+        db.refresh(m)
+        return jsonify({"ok": True, "meeting": _meeting_to_dict(m, with_full=True)})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>", methods=["DELETE"])
+def trash_meeting(meeting_id: str):
+    """Soft-delete : `trashed_at = now()`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        m.trashed_at = datetime.now(timezone.utc)
+        db.commit()
+        return jsonify({"ok": True, "trashed": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/restore", methods=["POST"])
+def restore_meeting(meeting_id: str):
+    """Restaure un meeting depuis la corbeille."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_in_trash"}), 404
+        m.trashed_at = None
+        db.commit()
+        return jsonify({"ok": True, "restored": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/permanently", methods=["DELETE"])
+def hard_delete_meeting(meeting_id: str):
+    """Hard-delete d'un meeting en corbeille."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(
+                Meeting.id == meeting_id,
+                Meeting.user_sub == user_sub,
+                Meeting.trashed_at.isnot(None),
+            )
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_in_trash"}), 404
+        db.delete(m)
+        db.commit()
+        return jsonify({"ok": True, "deleted": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/link-preparation", methods=["POST"])
+def link_meeting_to_preparation(meeting_id: str):
+    """Met à jour `meeting.preparation_id`. Body :
+    `{user_sub, preparation_id|null}`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    new_prep_id = data.get("preparation_id")
+    if isinstance(new_prep_id, str):
+        new_prep_id = new_prep_id.strip() or None
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(Meeting.id == meeting_id,
+                    Meeting.user_sub == user_sub,
+                    Meeting.trashed_at.is_(None))
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        if new_prep_id is not None:
+            p = (
+                db.query(Preparation)
+                .filter(Preparation.id == new_prep_id,
+                        Preparation.user_sub == user_sub,
+                        Preparation.trashed_at.is_(None))
+                .first()
+            )
+            if not p:
+                return jsonify({"error": "preparation_not_found"}), 404
+        prev = str(m.preparation_id) if m.preparation_id else None
+        m.preparation_id = new_prep_id
+        db.commit()
+        db.refresh(m)
+        return jsonify({
+            "ok": True,
+            "previous_preparation_id": prev,
+            "new_preparation_id": new_prep_id,
+            "meeting": _meeting_to_dict(m),
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/meetings/<meeting_id>/link-audio", methods=["POST"])
+def link_meeting_to_audio(meeting_id: str):
+    """Met à jour `meeting.user_audio_file_id` ET `user_audio_files.meeting_id`
+    (lien bi-directionnel). Body : `{user_sub, user_audio_file_id|null}`."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    new_audio_id = data.get("user_audio_file_id")
+    if isinstance(new_audio_id, str):
+        new_audio_id = new_audio_id.strip() or None
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(Meeting.id == meeting_id,
+                    Meeting.user_sub == user_sub,
+                    Meeting.trashed_at.is_(None))
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        if new_audio_id is not None:
+            uaf = (
+                db.query(UserAudioFile)
+                .filter(UserAudioFile.id == new_audio_id,
+                        UserAudioFile.user_sub == user_sub)
+                .first()
+            )
+            if not uaf:
+                return jsonify({"error": "audio_not_found"}), 404
+        prev = str(m.user_audio_file_id) if m.user_audio_file_id else None
+        # Décroche l'ancien audio (s'il existait).
+        if prev:
+            db.query(UserAudioFile).filter(
+                UserAudioFile.id == prev,
+                UserAudioFile.user_sub == user_sub,
+                UserAudioFile.meeting_id == m.id,
+            ).update({"meeting_id": None}, synchronize_session=False)
+        m.user_audio_file_id = new_audio_id
+        if new_audio_id:
+            db.query(UserAudioFile).filter(
+                UserAudioFile.id == new_audio_id,
+                UserAudioFile.user_sub == user_sub,
+            ).update({"meeting_id": m.id}, synchronize_session=False)
+        db.commit()
+        db.refresh(m)
+        return jsonify({
+            "ok": True,
+            "previous_user_audio_file_id": prev,
+            "new_user_audio_file_id": new_audio_id,
+            "meeting": _meeting_to_dict(m),
+        })
+    finally:
+        db.close()
+
+
+# ─── Audio → Preparation linking (raccourci pour l'auto-link) ────
+#
+# Le pipeline file-mover crée un Meeting à l'upload d'un audio (PR2d). Le
+# présent endpoint set/clear la `preparation_id` du meeting associé à un
+# audio, en créant le meeting au passage s'il n'existe pas. Compense pour
+# PR2c (file-mover encore monolithique côté link).
+
+
+@app.route("/api/v1/files/by-id/link-preparation", methods=["POST"])
+def link_audio_to_preparation():
+    """Associe un audio à une préparation via son meeting.
+
+    Body : `{user_sub, file_id, preparation_id|null}`.
+
+    Comportement :
+      * trouve le meeting de l'audio (`UserAudioFile.meeting_id`) — en
+        crée un standalone si absent ;
+      * set `meeting.preparation_id = preparation_id` (ou NULL pour détacher) ;
+      * renvoie l'état final du fichier (pour que le caller détecte un
+        changement et déclenche un reprocess server-side).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    file_id = (data.get("file_id") or "").strip()
+    if not user_sub or not file_id:
+        return jsonify({"error": "user_sub and file_id required"}), 400
+    new_prep_id = data.get("preparation_id")
+    if isinstance(new_prep_id, str):
+        new_prep_id = new_prep_id.strip() or None
+
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == file_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        if new_prep_id is not None:
+            p = (
+                db.query(Preparation)
+                .filter(Preparation.id == new_prep_id,
+                        Preparation.user_sub == user_sub,
+                        Preparation.trashed_at.is_(None))
+                .first()
+            )
+            if not p:
+                return jsonify({"error": "preparation_not_found"}), 404
+
+        # Trouve ou crée le meeting de cet audio.
+        m = None
+        if uaf.meeting_id:
+            m = (
+                db.query(Meeting)
+                .filter(Meeting.id == uaf.meeting_id,
+                        Meeting.user_sub == user_sub)
+                .first()
+            )
+        if m is None:
+            m = Meeting(
+                user_sub=user_sub,
+                user_audio_file_id=uaf.id,
+                title=(uaf.suggested_filename or uaf.original_filename or None),
+            )
+            db.add(m)
+            db.flush()
+            uaf.meeting_id = m.id
+
+        prev_prep = str(m.preparation_id) if m.preparation_id else None
+        m.preparation_id = new_prep_id
+        db.commit()
+        db.refresh(uaf)
+        db.refresh(m)
+        logger.info(
+            "audio link-preparation: file=%s user=%s meeting=%s prev_prep=%s new_prep=%s",
+            file_id, user_sub, m.id, prev_prep, new_prep_id,
+        )
+        return jsonify({
+            "ok": True,
+            "previous_preparation_id": prev_prep,
+            "new_preparation_id": new_prep_id,
+            "meeting_id": str(m.id),
+            "file": _audio_file_to_meeting_dict(uaf),
         })
     finally:
         db.close()
@@ -1745,8 +2285,9 @@ def list_briefs_with_counts():
 def mark_audio_reprocessed(audio_id: str):
     """Met à jour les flags de re-traitement après un run file-puller.
 
-    Body: ``{user_sub, brief_id|null, version, glossary_term_count, prev_payload}``.
-    ``prev_payload`` (dict) est appendu à ``reprocess_history`` (cap 5, FIFO).
+    Body: `{user_sub, preparation_id|null, version, glossary_term_count,
+    prev_payload}`. `prev_payload` (dict) est appendu à `reprocess_history`
+    (cap 5, FIFO). Accepte `brief_id` legacy comme alias de `preparation_id`.
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
@@ -1767,8 +2308,14 @@ def mark_audio_reprocessed(audio_id: str):
             return jsonify({"error": "not_found"}), 404
         new_version = int(data.get("version") or (uaf.reprocess_version or 0) + 1)
         uaf.reprocess_version = new_version
-        brief_id_val = data.get("brief_id")
-        uaf.reprocessed_with_brief_id = brief_id_val or None
+        # Migration 012 : prep_id remplace brief_id mais on accepte legacy.
+        prep_id_val = data.get("preparation_id") or data.get("brief_id")
+        # Pour le tracking on persiste l'id côté meeting si possible (FK
+        # propre) — sinon on stocke l'uuid brut pour audit.
+        meeting_id_val = data.get("reprocessed_with_meeting_id") or None
+        if meeting_id_val is None and uaf.meeting_id:
+            meeting_id_val = str(uaf.meeting_id)
+        uaf.reprocessed_with_meeting_id = meeting_id_val or None
         uaf.last_reprocessed_at = datetime.now(timezone.utc)
         history = list(uaf.reprocess_history or [])
         prev_payload = data.get("prev_payload")
@@ -1776,11 +2323,11 @@ def mark_audio_reprocessed(audio_id: str):
             history.append({
                 "version": new_version,
                 "at": datetime.now(timezone.utc).isoformat(),
-                "brief_id": brief_id_val,
+                "preparation_id": prep_id_val,
+                "meeting_id": meeting_id_val,
                 "glossary_term_count": data.get("glossary_term_count"),
                 "prev": prev_payload,
             })
-            # Cap FIFO 5 entrées.
             if len(history) > 5:
                 history = history[-5:]
         uaf.reprocess_history = history
@@ -1806,7 +2353,14 @@ def upsert_user_glossary_batch():
     data = request.get_json(silent=True) or {}
     user_sub = (data.get("user_sub") or "").strip()
     terms = data.get("terms") or []
-    source_brief_id = data.get("source_brief_id") or None
+    # Migration 012 : source_brief_id renommé source_preparation_id.
+    # On accepte les deux clefs en entrée pour tolérance temporaire des
+    # callers ; en sortie c'est last_source_meeting_id qui est tracé.
+    source_preparation_id = (
+        data.get("source_preparation_id")
+        or data.get("source_brief_id")  # legacy alias
+        or None
+    )
     if not user_sub or not isinstance(terms, list):
         return jsonify({"error": "user_sub and terms[] required"}), 400
 
@@ -1832,8 +2386,8 @@ def upsert_user_glossary_batch():
                     continue
                 existing.occurrence_count = (existing.occurrence_count or 1) + 1
                 existing.last_seen_at = now
-                if source_brief_id:
-                    existing.last_source_brief_id = source_brief_id
+                if source_preparation_id:
+                    existing.last_source_meeting_id = source_preparation_id
                 bumped += 1
             else:
                 row = UserGlossaryTerm(
@@ -1842,7 +2396,7 @@ def upsert_user_glossary_batch():
                     first_seen_at=now,
                     last_seen_at=now,
                     occurrence_count=1,
-                    last_source_brief_id=source_brief_id,
+                    last_source_meeting_id=source_preparation_id,
                 )
                 db.add(row)
                 inserted += 1
@@ -1887,7 +2441,7 @@ def list_user_glossary():
                     "term": r.term,
                     "occurrence_count": r.occurrence_count or 1,
                     "last_seen_at": r.last_seen_at.isoformat() if r.last_seen_at else None,
-                    "last_source_brief_id": str(r.last_source_brief_id) if r.last_source_brief_id else None,
+                    "last_source_meeting_id": str(r.last_source_meeting_id) if r.last_source_meeting_id else None,
                     "curated_by_user": bool(r.curated_by_user),
                 }
                 for r in rows
@@ -1951,56 +2505,12 @@ def update_user_glossary_term(term: str):
                     user_sub=user_sub,
                     term=new_term,
                     occurrence_count=row.occurrence_count or 1,
-                    last_source_brief_id=row.last_source_brief_id,
+                    last_source_meeting_id=row.last_source_meeting_id,
                     curated_by_user=True,
                 ))
             row.blacklisted = True
         db.commit()
         return jsonify({"ok": True, "action": action})
-    finally:
-        db.close()
-
-
-@app.route("/api/v1/briefs/purge", methods=["POST"])
-def purge_briefs():
-    """Hard-delete des briefs en corbeille depuis > N jours pour ``user_sub``.
-
-    Appelé par code-generator depuis ``_purge_expired_trash`` pour étendre
-    le balayage opportuniste à la zone interne.
-    Body: ``{"user_sub": "...", "older_than_days": 30}``.
-    Réponse: ``{"ok": True, "purged": <int>}``.
-    """
-    if not verify_token():
-        return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
-    user_sub = (data.get("user_sub") or "").strip()
-    if not user_sub:
-        return jsonify({"error": "user_sub required"}), 400
-    try:
-        older_than_days = max(1, int(data.get("older_than_days") or 30))
-    except (TypeError, ValueError):
-        older_than_days = 30
-    threshold = datetime.now(timezone.utc) - timedelta(days=older_than_days)
-
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(MeetingBrief)
-            .filter(
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.isnot(None),
-                MeetingBrief.trashed_at < threshold,
-            )
-            .all()
-        )
-        n = 0
-        for b in rows:
-            db.delete(b)
-            n += 1
-        if n:
-            db.commit()
-            logger.info("MeetingBrief purge: user=%s purged=%d", user_sub, n)
-        return jsonify({"ok": True, "purged": n})
     finally:
         db.close()
 
