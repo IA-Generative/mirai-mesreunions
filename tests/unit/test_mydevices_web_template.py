@@ -343,6 +343,85 @@ def _collect_window_published(path):
     return names
 
 
+# ─── 4. Meeting-prep v2 — selectors des 9 lots (PR-1 à PR-6) ──────────────
+
+
+def test_meeting_prep_v2_selectors_present(rendered_html):
+    """Sprint meeting-prep v2 (9 lots) : tous les nouveaux selectors UI
+    doivent être présents dans le template rendu. Cette liste sert de
+    spec d'intégration entre les modules ES (preparations.js, wizard.js,
+    lib/*.js) et le template Jinja."""
+    must_have = [
+        # Lot 1+2 — endpoints API exposés côté JS (pas dans le template HTML
+        # rendu : les sélecteurs sont créés dynamiquement par wizard.js).
+        # On se contente ici des ancres HTML stables.
+        # Lot 3a — édition inline du titre
+        "brief-detail-title-input",
+        "brief-detail-title-edit-controls",
+        # Lot 3c — modale glossaire
+        "brief-detail-glossary-btn",
+        "brief-detail-glossary-count",
+        # Lot 3 — bouton link-audio (modale)
+        "brief-detail-link-audio-btn",
+        # Lot 3 — bouton prepare-next avec date picker
+        "brief-detail-prepare-next",
+        # Lot 4 — menu export 4 formats
+        "brief-detail-export-btn",
+        "brief-detail-export-menu",
+        'data-export-format="docx"',
+        'data-export-format="odt"',
+        'data-export-format="txt"',
+        'data-export-format="md"',
+        # Lot 5 — participants éditables
+        "brief-detail-participants",
+        "brief-detail-participants-list",
+        # Lot 6 — bloc récurrence
+        "brief-detail-recurrence",
+        "brief-detail-recurring-toggle",
+        "brief-detail-recurrence-form",
+        "brief-detail-next-occurrence",
+        "wizard-recurrence-form",
+        # Lot 7 — timeline série
+        "brief-detail-series-timeline",
+        # Lot 8 — emails (mailto + toggle CR)
+        "brief-detail-emails",
+        "brief-detail-mailto-link",
+        "brief-detail-send-cr-toggle",
+        # Lot 9 — thématiques
+        "brief-detail-themes",
+        "brief-detail-themes-save-btn",
+        "wizard-themes-container",
+    ]
+    missing = [s for s in must_have if s not in rendered_html]
+    assert not missing, (
+        "Selectors meeting-prep v2 absents du template :\n"
+        + "\n".join("  - " + s for s in missing)
+    )
+
+
+def test_meeting_prep_v2_lib_modules_exist():
+    """Les helpers frontend lib/ exigés par les 9 lots doivent exister."""
+    lib_dir = os.path.join(
+        ROOT, "services", "mydevices-web", "frontend", "lib",
+    )
+    expected = [
+        "rrule-builder.js",        # Lot 6
+        "mailto-builder.js",       # Lot 8
+        "export-formatter.js",     # Lot 4 (TXT/MD côté front)
+        "series-timeline.js",      # Lot 7
+        "themes-chips.js",         # Lot 9
+        "participants.js",         # Lot 5
+        "prep-modal.js",           # Lot 3 (modales link-audio + glossaire)
+    ]
+    missing = [
+        f for f in expected
+        if not os.path.isfile(os.path.join(lib_dir, f))
+    ]
+    assert not missing, (
+        "Modules frontend/lib/ manquants : " + ", ".join(missing)
+    )
+
+
 def test_inline_handlers_are_published_on_window():
     referenced = _collect_inline_handler_names()
     published = _collect_window_published(_LEGACY_PATH) | _collect_window_published(_PREPS_PATH)
