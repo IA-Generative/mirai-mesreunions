@@ -1131,8 +1131,32 @@ def _perform_pull(payload: dict) -> dict:
             transcription_status="pending" if auto_transcribe else "disabled",
         )
         db.add(audio_file)
+        db.flush()  # garantit audio_file.id avant la Meeting
+
+        # PR2d : à chaque upload audio, on matérialise une Meeting (CR
+        # post-réunion en attente). Lien audio↔meeting dès l'arrivée ;
+        # preparation_id reste NULL (l'auto-link plus bas, backend=kevent,
+        # s'en charge si une Preparation matche).
+        default_title = (
+            payload.get("original_filename")
+            or transcoded_filename
+            or f"Réunion du {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+        )
+        meeting_row = Meeting(
+            id=uuid4(),
+            user_sub=user_sub,
+            user_audio_file_id=audio_file.id,
+            preparation_id=None,
+            title=default_title,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(meeting_row)
         db.commit()
         audio_file_id = str(audio_file.id)
+        logger.info(
+            "Created meeting=%s for audio=%s (preparation_id=NULL, auto-link pending)",
+            meeting_row.id, audio_file.id,
+        )
 
         # On émet le "transferred 100%" AVANT la dispatch backend pour que
         # les notifications kevent (kevent_queued / kevent_processing /
