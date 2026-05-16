@@ -353,13 +353,10 @@ def get_preparation(preparation_id: str):
             body = {}
         return _err({"error": body.get("error", "get_failed")}, status)
     prep = data.get("preparation") or {}
-    # Le front lit historiquement `brief.brief_json` et `brief.title` —
-    # on expose `preparation` (canonique) + `brief` (alias avec mirror
-    # `content` → `brief_json`) pour ne pas casser le rendu détail.
-    brief_legacy = dict(prep)
-    if "content" in brief_legacy and "brief_json" not in brief_legacy:
-        brief_legacy["brief_json"] = brief_legacy["content"]
-    return jsonify({"preparation": prep, "brief": brief_legacy})
+    # PR4 : le front consomme `preparation.content` (clé canonique). Les
+    # anciens alias `brief`/`brief_json` ont été retirés — `frontend/legacy.js`
+    # est à jour.
+    return jsonify({"preparation": prep})
 
 
 @bp.route("/<preparation_id>", methods=["PUT"])
