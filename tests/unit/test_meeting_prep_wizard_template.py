@@ -21,11 +21,19 @@ import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MAIN_PY = os.path.join(ROOT, "services", "mydevices-web", "app", "main.py")
+WIZARD_TPL_PY = os.path.join(
+    ROOT, "services", "mydevices-web", "app", "_wizard_template.py"
+)
 
 
 def _extract_prep_brief_template() -> str:
-    """Renvoie la valeur Python-évaluée de la constante PREP_BRIEF_TEMPLATE."""
-    src = open(MAIN_PY, "r", encoding="utf-8").read()
+    """Renvoie la valeur Python-évaluée de la constante PREP_BRIEF_TEMPLATE.
+
+    PR3-v2 : la constante a été extraite vers ``_wizard_template.py``.
+    On essaie d'abord ce fichier, puis on retombe sur main.py (compat).
+    """
+    src_path = WIZARD_TPL_PY if os.path.exists(WIZARD_TPL_PY) else MAIN_PY
+    src = open(src_path, "r", encoding="utf-8").read()
     tree = ast.parse(src)
     for node in tree.body:
         if (
