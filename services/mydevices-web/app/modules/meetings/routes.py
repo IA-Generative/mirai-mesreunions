@@ -283,3 +283,103 @@ def reprocess_meeting(meeting_id: str):
         return jsonify(resp.json())
     except Exception:
         return jsonify({"ok": True})
+
+
+# ─── Email CR (Lot 8 PR-6) ──────────────────────────────────────────
+
+def _verify_internal_bearer() -> bool:
+    """Vérifie un Authorization: Bearer <INTERNAL_API_TOKEN>.
+
+    Utilisé par les endpoints "system-to-system" (hook puller post-
+    transcription) qui n'ont pas de session OIDC.
+    """
+    auth = (request.headers.get("Authorization") or "").strip()
+    if not auth.lower().startswith("bearer "):
+        return False
+    token = auth.split(" ", 1)[1].strip()
+    return bool(INTERNAL_API_TOKEN) and token == INTERNAL_API_TOKEN
+
+
+@bp.route("/<meeting_id>/send-cr", methods=["POST"])
+def send_meeting_cr(meeting_id: str):
+    """Envoie le CR du meeting par email aux participants[].email de la prep.
+
+    Accepte 2 modes d'auth :
+    - OIDC (session navigateur) : le bouton "Envoyer le CR maintenant" UX.
+    - Bearer ``INTERNAL_API_TOKEN`` : appelé par le hook post-transcription
+      côté dmz-to-internal-bridge (puller) après remplissage de meeting.content.
+
+    Body optionnel :
+      - ``user_sub`` : requis si appelé en mode internal (sinon dérivé OIDC)
+      - ``recipients`` : liste d'emails (sinon dérivée de prep.participants)
+      - ``force`` : ignore le toggle ``send_cr_email`` (défaut False)
+    """
+    from ...shared import (
+        request_internal_preparation_api,
+        request_internal_meeting_api,
+    )
+    from app.mailer import is_configured as _smtp_configured
+    from app.mailer import send_meeting_cr_email as _send_cr
+
+    payload = request.get_json(silent=True) or {}
+    internal_auth = _verify_internal_bearer()
+
+    if internal_auth:
+        user_sub = (payload.get("user_sub") or "").strip()
+        if not user_sub:
+            return _err("user_sub required for internal call", 400)
+    else:
+        user = get_current_user()
+        if not user:
+            return _err("Unauthorized", 401)
+        user_sub = (user or {}).get("sub") or ""
+
+    if not _smtp_configured():
+        return _err({"error": "smtp_not_configured"}, 503)
+
+    # Charge le meeting + la prep (si liée).
+    try:
+        m_resp = request_internal_meeting_api(
+            "GET", f"/api/v1/meetings/{meeting_id}",
+            params={"user_sub": user_sub},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return _err({"error": "meeting_not_found"}, status)
+    meeting = (m_resp or {}).get("meeting") or {}
+    prep_id = meeting.get("preparation_id")
+    preparation = None
+    if prep_id:
+        try:
+            p_resp = request_internal_preparation_api(
+                "GET", f"/api/v1/preparations/{prep_id}",
+                params={"user_sub": user_sub},
+            )
+            preparation = (p_resp or {}).get("preparation") or {}
+        except Exception:
+            logger.exception("send-cr: failed to load preparation %s", prep_id)
+            preparation = None
+
+    # Respecte le toggle send_cr_email sauf override explicite (?force=true).
+    force = bool(payload.get("force"))
+    if not force and preparation is not None:
+        if not preparation.get("send_cr_email"):
+            return jsonify({
+                "ok": False, "sent": 0,
+                "skipped_reason": "toggle_disabled",
+            })
+
+    recipients = payload.get("recipients")
+    if recipients is not None and not isinstance(recipients, list):
+        return _err("recipients must be a list of strings", 400)
+
+    public_base = os.getenv("PUBLIC_BASE_URL") or ""
+    result = _send_cr(
+        meeting=meeting,
+        preparation=preparation,
+        recipients=recipients,
+        public_base_url=public_base,
+    )
+    status = 200 if result.get("ok") else 200  # best-effort, on ne casse jamais
+    return jsonify(result), status
+
