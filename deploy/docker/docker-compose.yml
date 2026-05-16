@@ -150,14 +150,14 @@ services:
   # ═══════════════════════════════════════════════════════════════════════
 
   # --- Code Generator (OIDC + QR) ---
-  code-generator:
+  mydevices-web:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -w 2 --timeout 300 -b 0.0.0.0:8080 app.main:application
-    working_dir: /app/services/code-generator
+    working_dir: /app/services/mydevices-web
     volumes:
-      - ../../services/code-generator:/app/services/code-generator
+      - ../../services/mydevices-web:/app/services/mydevices-web
       - ../../libs:/app/libs
     ports:
       - "8080:8080"
@@ -181,7 +181,7 @@ services:
       CODE_TTL_MAX_MINUTES: "10080"
       ALLOW_SHORT_QR_TTL_SECONDS_TEST: "true"
       MAX_UPLOADS_PER_SESSION: "15"
-      TOKEN_ISSUER_API_URL: http://token-issuer:8091/api/v1/issue-token
+      TOKEN_ISSUER_API_URL: http://device-token-authority:8091/api/v1/issue-token
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
       NORMALIZATION_ANALYSIS_MAX_SECONDS: "180"
       S3_INTERNAL_ENDPOINT: http://minio-internal:9000
@@ -193,22 +193,22 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_started
-      token-issuer:
+      device-token-authority:
         condition: service_started
     networks:
       - external-net
-      - dmz-net  # Bridge pour appeler le token-issuer (zone interne)
+      - dmz-net  # Bridge pour appeler le device-token-authority (zone interne)
       - internal-net
 
   # --- Admin Portal (OIDC + Monitoring) ---
-  admin-portal:
+  admin-console:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -w 2 -b 0.0.0.0:8082 app.main:application
-    working_dir: /app/services/admin-portal
+    working_dir: /app/services/admin-console
     volumes:
-      - ../../services/admin-portal:/app/services/admin-portal
+      - ../../services/admin-console:/app/services/admin-console
       - ../../libs:/app/libs
     ports:
       - "8082:8082"
@@ -247,14 +247,14 @@ services:
       - internal-net
 
   # --- Upload Portal (Public) ---
-  upload-portal:
+  mobile-upload-pwa:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -k eventlet -w 1 -b 0.0.0.0:8081 app.main:application
-    working_dir: /app/services/upload-portal
+    working_dir: /app/services/mobile-upload-pwa
     volumes:
-      - ../../services/upload-portal:/app/services/upload-portal
+      - ../../services/mobile-upload-pwa:/app/services/mobile-upload-pwa
       - ../../libs:/app/libs
     ports:
       - "8081:8081"
@@ -298,14 +298,14 @@ services:
       - dmz-net
 
   # --- Antivirus Worker ---
-  antivirus-worker:
+  clamav-scanner:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: python -m app.main
-    working_dir: /app/services/antivirus-worker
+    working_dir: /app/services/clamav-scanner
     volumes:
-      - ../../services/antivirus-worker:/app/services/antivirus-worker
+      - ../../services/clamav-scanner:/app/services/clamav-scanner
       - ../../libs:/app/libs
     environment:
       LOG_LEVEL: INFO
@@ -325,7 +325,7 @@ services:
       RABBITMQ_VHOST: audio_pipeline
       CLAMAV_HOST: clamav
       CLAMAV_PORT: "3310"
-      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+      UPLOAD_PORTAL_INTERNAL_URL: http://mobile-upload-pwa:8081
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
     depends_on:
       postgres-external:
@@ -338,14 +338,14 @@ services:
       - external-net
 
   # --- Transcode Worker ---
-  transcode-worker:
+  audio-normalizer:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: python -m app.main
-    working_dir: /app/services/transcode-worker
+    working_dir: /app/services/audio-normalizer
     volumes:
-      - ../../services/transcode-worker:/app/services/transcode-worker
+      - ../../services/audio-normalizer:/app/services/audio-normalizer
       - ../../libs:/app/libs
     environment:
       LOG_LEVEL: INFO
@@ -367,7 +367,7 @@ services:
       RABBITMQ_USER: audio
       RABBITMQ_PASSWORD: changeme-rabbit
       RABBITMQ_VHOST: audio_pipeline
-      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+      UPLOAD_PORTAL_INTERNAL_URL: http://mobile-upload-pwa:8081
       FFMPEG_AUDIO_FILTER: "highpass=f=80,lowpass=f=7000,loudnorm=I=-16:TP=-1.5:LRA=11"
       POST_LOUDNORM_FILTER_CHAIN: "highpass=f=80,lowpass=f=7000,alimiter=limit=0.95"
       ENABLE_LOUDNORM: "true"
@@ -381,14 +381,14 @@ services:
       - external-net
 
   # --- File Mover (Notificateur Zone Externe) ---
-  file-mover:
+  dmz-to-internal-bridge:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: python -m app.main
-    working_dir: /app/services/file-mover
+    working_dir: /app/services/dmz-to-internal-bridge
     volumes:
-      - ../../services/file-mover:/app/services/file-mover
+      - ../../services/dmz-to-internal-bridge:/app/services/dmz-to-internal-bridge
       - ../../libs:/app/libs
     environment:
       LOG_LEVEL: INFO
@@ -402,9 +402,9 @@ services:
       RABBITMQ_USER: audio
       RABBITMQ_PASSWORD: changeme-rabbit
       RABBITMQ_VHOST: audio_pipeline
-      INTERNAL_API_URL: http://file-puller:8090/api/v1/pull
+      INTERNAL_API_URL: http://internal-ingester:8090/api/v1/pull
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
-      UPLOAD_PORTAL_INTERNAL_URL: http://upload-portal:8081
+      UPLOAD_PORTAL_INTERNAL_URL: http://mobile-upload-pwa:8081
     depends_on:
       postgres-external:
         condition: service_healthy
@@ -419,14 +419,14 @@ services:
   # ═══════════════════════════════════════════════════════════════════════
 
   # --- Token Issuer (Zone Interne - Autorité de génération des tokens) ---
-  token-issuer:
+  device-token-authority:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -w 2 -b 0.0.0.0:8091 app.main:application
-    working_dir: /app/services/token-issuer
+    working_dir: /app/services/device-token-authority
     volumes:
-      - ../../services/token-issuer:/app/services/token-issuer
+      - ../../services/device-token-authority:/app/services/device-token-authority
       - ../../libs:/app/libs
     ports:
       - "8091:8091"
@@ -450,17 +450,17 @@ services:
         condition: service_healthy
     networks:
       - internal-net
-      - dmz-net  # Accessible par code-generator (ext) via dmz
+      - dmz-net  # Accessible par mydevices-web (ext) via dmz
 
   # --- File Puller (Zone Interne - API d'ingestion) ---
-  file-puller:
+  internal-ingester:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -w 2 -b 0.0.0.0:8090 app.puller:application
-    working_dir: /app/services/file-mover
+    working_dir: /app/services/dmz-to-internal-bridge
     volumes:
-      - ../../services/file-mover:/app/services/file-mover
+      - ../../services/dmz-to-internal-bridge:/app/services/dmz-to-internal-bridge
       - ../../libs:/app/libs
       # Mount the live glossary dir read-only so edits in `glossaire/` take
       # effect on the next container restart, no rebuild. This masks the
@@ -490,7 +490,7 @@ services:
       RABBITMQ_PASSWORD: changeme-rabbit
       RABBITMQ_VHOST: audio_pipeline
       INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
-      EXTERNAL_CALLBACK_URL: http://upload-portal:8081/api/notify-status
+      EXTERNAL_CALLBACK_URL: http://mobile-upload-pwa:8081/api/notify-status
       INTERNAL_PURGE_INTERVAL_SECONDS: "86400"
       INTERNAL_PURGE_MAX_AGE_DAYS: "7"
     depends_on:
@@ -503,14 +503,14 @@ services:
       - dmz-net  # Receives notifications + pulls from processed S3
 
   # --- Transcription Stub (Zone Interne) ---
-  transcription-stub:
+  transcription-relay:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: python -m app.main
-    working_dir: /app/services/transcription-stub
+    working_dir: /app/services/transcription-relay
     volumes:
-      - ../../services/transcription-stub:/app/services/transcription-stub
+      - ../../services/transcription-relay:/app/services/transcription-relay
       - ../../libs:/app/libs
     environment:
       LOG_LEVEL: INFO
@@ -547,7 +547,7 @@ networks:
   dmz-net:
     name: audio-dmz
     driver: bridge
-    # Bridge network: only file-mover (ext) and file-puller (int) connect here
+    # Bridge network: only dmz-to-internal-bridge (ext) and internal-ingester (int) connect here
 
 # ═══════════════════════════════════════════════════════════════════════
 # VOLUMES

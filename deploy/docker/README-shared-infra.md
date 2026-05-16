@@ -16,10 +16,10 @@ L'overlay `docker-compose.shared-infra.yml` :
   via `profiles: ["never-start"]` (jamais activé)
 - recâble tous les services applicatifs vers `postgres` et `keycloak` du socle
   via le réseau externe `owui-net`
-- remap `admin-portal` host port 8082 → **8222** (le 8082 est pris par le
+- remap `admin-console` host port 8082 → **8222** (le 8082 est pris par le
   Keycloak owuicore)
-- garde tous les autres ports inchangés (8080 code-generator, 8081 upload-portal,
-  8090 file-puller, 8091 token-issuer, 9000-9005 MinIO, 5672/15672 RabbitMQ,
+- garde tous les autres ports inchangés (8080 mydevices-web, 8081 mobile-upload-pwa,
+  8090 internal-ingester, 8091 device-token-authority, 9000-9005 MinIO, 5672/15672 RabbitMQ,
   3310 ClamAV)
 
 ## Prérequis à appliquer une seule fois
@@ -113,9 +113,9 @@ docker compose \
   up -d \
     rabbitmq clamav \
     minio-upload minio-processed minio-internal \
-    code-generator upload-portal admin-portal \
-    antivirus-worker transcode-worker file-mover \
-    token-issuer file-puller transcription-stub
+    mydevices-web mobile-upload-pwa admin-console \
+    clamav-scanner audio-normalizer dmz-to-internal-bridge \
+    device-token-authority internal-ingester transcription-relay
 ```
 
 Liste explicite des services pour ne pas inclure `postgres-external`,
@@ -125,11 +125,11 @@ Liste explicite des services pour ne pas inclure `postgres-external`,
 
 | Cible          | URL                              |
 |----------------|----------------------------------|
-| code-generator | <http://localhost:8080>          |
-| upload-portal  | <http://localhost:8081>          |
-| admin-portal   | <http://localhost:8222> (remap)  |
-| file-puller    | <http://localhost:8090>          |
-| token-issuer   | <http://localhost:8091>          |
+| mydevices-web | <http://localhost:8080>          |
+| mobile-upload-pwa  | <http://localhost:8081>          |
+| admin-console   | <http://localhost:8222> (remap)  |
+| internal-ingester    | <http://localhost:8090>          |
+| device-token-authority   | <http://localhost:8091>          |
 | MinIO upload   | <http://localhost:9001>          |
 | MinIO processed| <http://localhost:9003>          |
 | MinIO internal | <http://localhost:9005>          |

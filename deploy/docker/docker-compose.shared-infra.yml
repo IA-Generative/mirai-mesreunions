@@ -7,9 +7,9 @@
 #     -f docker-compose.yml -f docker-compose.shared-infra.yml \
 #     up -d rabbitmq clamav \
 #        minio-upload minio-processed minio-internal \
-#        code-generator upload-portal admin-portal \
-#        antivirus-worker transcode-worker file-mover \
-#        token-issuer file-puller transcription-stub
+#        mydevices-web mobile-upload-pwa admin-console \
+#        clamav-scanner audio-normalizer dmz-to-internal-bridge \
+#        device-token-authority internal-ingester transcription-relay
 #
 # Prérequis (à exécuter par l'utilisateur, cf doc) :
 #   1. Client `mes-reunions` présent dans le realm `openwebui` du
@@ -35,7 +35,7 @@ services:
   # ZONE EXTERNE — re-câblage vers owuicore-postgres-1 + owuicore-keycloak-1
   # ═══════════════════════════════════════════════════════════════════════
 
-  code-generator:
+  mydevices-web:
     environment:
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8082/realms/openwebui
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
@@ -48,7 +48,7 @@ services:
       EXT_DB_USER: audio_ext
       EXT_DB_PASSWORD: audio_ext_dev
     depends_on: !reset
-      token-issuer:
+      device-token-authority:
         condition: service_started
     networks:
       - external-net
@@ -56,7 +56,7 @@ services:
       - internal-net
       - owui-net
 
-  admin-portal:
+  admin-console:
     environment:
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8082/realms/openwebui
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
@@ -83,7 +83,7 @@ services:
       - internal-net
       - owui-net
 
-  upload-portal:
+  mobile-upload-pwa:
     environment:
       EXT_DB_HOST: postgres
       EXT_DB_PORT: "5432"
@@ -96,7 +96,7 @@ services:
       - dmz-net
       - owui-net
 
-  antivirus-worker:
+  clamav-scanner:
     environment:
       EXT_DB_HOST: postgres
       EXT_DB_PORT: "5432"
@@ -108,7 +108,7 @@ services:
       - external-net
       - owui-net
 
-  transcode-worker:
+  audio-normalizer:
     environment:
       EXT_DB_HOST: postgres
       EXT_DB_PORT: "5432"
@@ -120,7 +120,7 @@ services:
       - external-net
       - owui-net
 
-  file-mover:
+  dmz-to-internal-bridge:
     environment:
       EXT_DB_HOST: postgres
       EXT_DB_PORT: "5432"
@@ -137,7 +137,7 @@ services:
   # ZONE INTERNE — re-câblage DB
   # ═══════════════════════════════════════════════════════════════════════
 
-  token-issuer:
+  device-token-authority:
     environment:
       INT_DB_HOST: postgres
       INT_DB_PORT: "5432"
@@ -150,7 +150,7 @@ services:
       - dmz-net
       - owui-net
 
-  file-puller:
+  internal-ingester:
     environment:
       INT_DB_HOST: postgres
       INT_DB_PORT: "5432"
@@ -163,7 +163,7 @@ services:
       - dmz-net
       - owui-net
 
-  transcription-stub:
+  transcription-relay:
     environment:
       INT_DB_HOST: postgres
       INT_DB_PORT: "5432"
