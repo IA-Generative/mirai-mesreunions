@@ -22,7 +22,7 @@ import './lib/auth.js';
 import './lib/toast.js';
 import './legacy.js';
 import './tabs/devices.js';
-import './tabs/meetings.js';
+import * as meetingsTab from './tabs/meetings.js';
 import './tabs/preparations.js';
 import './tabs/useful-data.js';
 import * as adminTab from './tabs/admin.js';
@@ -33,6 +33,30 @@ try { adminTab.revealNavIfAdmin && adminTab.revealNavIfAdmin(); } catch (e) {}
 
 // Orchestrateur global des onglets (DSFR ↔ legacy ↔ lazy-load).
 initTabManager();
+
+// Mount de l'onglet meetings : panel-transfers est sélectionné par défaut
+// au boot — on déclenche immédiatement son mount() pour brancher la
+// délégation `data-action="meetings:*"` (nouveau pattern DSFR-friendly,
+// remplace progressivement les onclick="" inline).
+try {
+  const panel = document.getElementById('panel-transfers');
+  if (panel && meetingsTab.mount) meetingsTab.mount(panel);
+} catch (e) { /* ignore */ }
+
+// Délégation tab-manager → meetings.unmount() quand on quitte transfers,
+// meetings.mount() quand on y revient. Le tab-manager n'orchestre que les
+// LAZY_TABS aujourd'hui ; pour transfers (eager-loaded), on écoute le
+// click directement sur la nav DSFR.
+document.addEventListener('click', (ev) => {
+  const btn = ev.target && ev.target.closest && ev.target.closest('.fr-tabs__tab[data-tab]');
+  if (!btn) return;
+  const tabId = btn.getAttribute('data-tab');
+  if (tabId === 'transfers') {
+    try { meetingsTab.mount(document.getElementById('panel-transfers')); } catch (e) {}
+  } else {
+    try { meetingsTab.unmount && meetingsTab.unmount(); } catch (e) {}
+  }
+}, true);
 
 // Sentinelle utile au test e2e (vérifier que le bundle a bien initialisé).
 window.__MYDEVICES_SHELL_READY__ = true;

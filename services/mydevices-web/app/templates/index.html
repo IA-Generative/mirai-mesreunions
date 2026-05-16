@@ -1735,8 +1735,13 @@
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
                 <!-- Tri date + compteur sur la même ligne que le titre, à
                      droite de "Mes réunions (IA)". Tri persisté en
-                     localStorage (mydevices.sort.dir, défaut "desc"). -->
+                     localStorage (mydevices.sort.dir, défaut "desc").
+                     Délégation via data-action="meetings:toggle-sort"
+                     gérée par tabs/meetings.js (l'onclick="" est conservé
+                     en fallback pour les scénarios où le bundle n'est
+                     pas encore initialisé). -->
                 <button type="button" class="sort-toggle" id="sort-toggle-btn"
+                        data-action="meetings:toggle-sort"
                         onclick="toggleSortDir()"
                         title="Inverser l'ordre de tri (date de réunion ; à défaut, date d'upload)">
                     <span class="sort-toggle-label">Plus récent d'abord</span>
@@ -1746,20 +1751,24 @@
                 <!-- Upload local (sans QR). 2 boutons cachant des <input
                      type="file"> + une zone drag&drop sur tout le header.
                      Le pipeline AV→transcode→transfer→kevent prend le
-                     relais comme pour un upload PWA classique. -->
+                     relais comme pour un upload PWA classique.
+                     Délégation `meetings:pick-files` / `meetings:pick-folder`
+                     gérée par tabs/meetings.js. -->
                 <div class="local-upload-zone">
                     <button type="button" class="local-upload-btn"
                             id="local-upload-files-btn"
+                            data-action="meetings:pick-files"
                             onclick="document.getElementById('local-upload-files-input').click()"
                             title="Sélectionner un ou plusieurs fichiers audio">
-                        <span class="local-upload-btn-icon">📁</span>
+                        <span class="local-upload-btn-icon" aria-hidden="true">📁</span>
                         <span>Fichiers</span>
                     </button>
                     <button type="button" class="local-upload-btn"
                             id="local-upload-folder-btn"
+                            data-action="meetings:pick-folder"
                             onclick="document.getElementById('local-upload-folder-input').click()"
                             title="Sélectionner un dossier — tous les fichiers audio à l'intérieur seront uploadés">
-                        <span class="local-upload-btn-icon">📂</span>
+                        <span class="local-upload-btn-icon" aria-hidden="true">📂</span>
                         <span>Dossier</span>
                     </button>
                     <input type="file" id="local-upload-files-input"
@@ -1777,6 +1786,7 @@
                      composée : benne à ordures + 2 silhouettes d'éboueurs +
                      mini-poubelle qui bascule au hover (animation CSS). -->
                 <button type="button" id="purge-btn" class="icon-btn icon-btn-purge advanced-only" disabled
+                        data-action="meetings:purge-all"
                         onclick="purgeSessions()"
                         title="Mettre toute la liste à la corbeille (purgée définitivement après 30 jours)"
                         aria-label="Tout mettre à la corbeille">
