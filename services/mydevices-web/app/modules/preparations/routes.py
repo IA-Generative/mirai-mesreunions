@@ -27,7 +27,7 @@ import threading
 from datetime import datetime, timezone
 
 import requests as req
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from ...shared import (
     get_current_user,
@@ -36,6 +36,7 @@ from ...shared import (
     trigger_audio_reprocess,
 )
 from .. import glossary as glossary_module
+from . import exporters as prep_exporters
 from . import service as prep_service
 from . import generation_jobs
 
@@ -786,6 +787,57 @@ def preparation_audio_files(preparation_id: str):
     except req.HTTPError as err:
         status = err.response.status_code if err.response is not None else 502
         return _err({"error": "fetch_failed"}, status)
+
+
+# ─── Lot 4 — Export DOCX / ODT (TXT + MD générés côté front) ────────
+
+@bp.route("/<preparation_id>/export", methods=["GET"])
+@require_auth
+def export_preparation(preparation_id: str):
+    """Exporte une préparation en ``?format=docx|odt`` (binaire).
+
+    TXT et MD sont générés côté front (cf. ``frontend/lib/export-formatter.js``)
+    via sérialisation directe de ``preparation.content`` — pas de round-trip
+    réseau utile pour ces formats texte. Ici on ne traite que les formats
+    binaires nécessitant python-docx / odfpy.
+    """
+    fmt = (request.args.get("format") or "").lower().strip()
+    if fmt not in ("docx", "odt"):
+        return _err("format must be 'docx' or 'odt'", 400)
+
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    try:
+        data = prep_service.get_preparation(user_sub, preparation_id)
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        try:
+            body = err.response.json() if err.response is not None else {}
+        except Exception:
+            body = {}
+        return _err({"error": body.get("error", "get_failed")}, status)
+
+    prep = data.get("preparation") or {}
+    if not prep:
+        return _err("preparation_not_found", 404)
+
+    try:
+        payload, content_type, filename = prep_exporters.render(prep, fmt)
+    except ValueError as e:
+        return _err(str(e), 400)
+    except Exception:
+        logger.exception("export render failed (prep=%s fmt=%s)", preparation_id, fmt)
+        return _err("export_failed", 500)
+
+    # RFC 5987 : filename* en plus du filename ASCII (slugifié) pour le
+    # support des caractères non-ASCII si on retire le slugify un jour.
+    headers = {
+        "Content-Type": content_type,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Length": str(len(payload)),
+        "Cache-Control": "no-store",
+    }
+    return Response(payload, status=200, headers=headers)
 
 
 @bp.route("/<preparation_id>/series", methods=["GET"])
