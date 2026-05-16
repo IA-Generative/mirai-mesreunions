@@ -1540,11 +1540,24 @@ def amend_preparation(preparation_id: str):
     user_sub = (data.get("user_sub") or "").strip()
     if not user_sub:
         return jsonify({"error": "user_sub required"}), 400
-    if "content" not in data:
-        return jsonify({"error": "content required"}), 400
-    new_content = data.get("content")
-    if not isinstance(new_content, dict):
+    # Lot 3/5 — extension : `content` peut être omis si on ne met à jour
+    # que `participants` (édition wizard/fiche) ou `glossary_source`
+    # (modale glossaire). On vérifie qu'au moins un champ mutant est
+    # fourni.
+    has_content = "content" in data
+    has_participants = "participants" in data
+    has_glossary = "glossary_source" in data
+    if not (has_content or has_participants or has_glossary):
+        return jsonify({"error": "content, participants or glossary_source required"}), 400
+    new_content = data.get("content") if has_content else None
+    if has_content and not isinstance(new_content, dict):
         return jsonify({"error": "content must be an object"}), 400
+    new_participants = data.get("participants") if has_participants else None
+    if has_participants and not isinstance(new_participants, list):
+        return jsonify({"error": "participants must be a list"}), 400
+    new_glossary = data.get("glossary_source") if has_glossary else None
+    if has_glossary and not isinstance(new_glossary, list):
+        return jsonify({"error": "glossary_source must be a list"}), 400
 
     db = SessionLocal()
     try:
@@ -1559,7 +1572,12 @@ def amend_preparation(preparation_id: str):
         )
         if not p:
             return jsonify({"error": "not_found"}), 404
-        p.content = new_content
+        if has_content:
+            p.content = new_content
+        if has_participants:
+            p.participants = new_participants
+        if has_glossary:
+            p.glossary_source = new_glossary
         db.commit()
         db.refresh(p)
         return jsonify({"ok": True, "preparation": _preparation_to_dict(p, with_full=True)})

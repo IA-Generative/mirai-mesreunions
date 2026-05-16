@@ -40,10 +40,29 @@ def create_preparation(payload: dict) -> dict:
     )
 
 
-def amend_preparation(user_sub: str, preparation_id: str, content: dict) -> dict:
+def amend_preparation(
+    user_sub: str,
+    preparation_id: str,
+    content: dict | None = None,
+    *,
+    participants: list | None = None,
+    glossary_source: list | None = None,
+) -> dict:
+    """Amend une préparation — `content`, `participants` et/ou `glossary_source`.
+
+    Au moins un des trois champs doit être fourni. Mappe directement sur
+    l'endpoint étendu côté device-token-authority (cf. Lot 3/5).
+    """
+    body: dict = {"user_sub": user_sub}
+    if content is not None:
+        body["content"] = content
+    if participants is not None:
+        body["participants"] = participants
+    if glossary_source is not None:
+        body["glossary_source"] = glossary_source
     return request_internal_preparation_api(
         "POST", f"/api/v1/preparations/{preparation_id}/amend",
-        json_body={"user_sub": user_sub, "content": content},
+        json_body=body,
     )
 
 

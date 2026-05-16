@@ -531,18 +531,165 @@ def amend_preparation(preparation_id: str):
 
 
 def _amend_impl(preparation_id: str):
+    """Amend ``content`` et/ou ``participants`` et/ou ``glossary_source``.
+
+    Lot 3/5 : on accepte désormais 3 champs optionnels mais au moins l'un
+    d'eux doit être fourni. Compat : un body ``{content: {...}}`` continue
+    de fonctionner comme avant.
+    """
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
     payload = request.get_json(silent=True) or {}
-    new_content = payload.get("content")
-    if not isinstance(new_content, dict):
+    new_content = payload.get("content") if "content" in payload else None
+    new_participants = payload.get("participants") if "participants" in payload else None
+    new_glossary = payload.get("glossary_source") if "glossary_source" in payload else None
+
+    if new_content is None and new_participants is None and new_glossary is None:
+        return _err("content, participants or glossary_source required", 400)
+    if new_content is not None and not isinstance(new_content, dict):
         return _err("content must be an object", 400)
+    if new_participants is not None and not isinstance(new_participants, list):
+        return _err("participants must be a list", 400)
+    if new_glossary is not None and not isinstance(new_glossary, list):
+        return _err("glossary_source must be a list", 400)
+
     try:
-        data = prep_service.amend_preparation(user_sub, preparation_id, new_content)
+        data = prep_service.amend_preparation(
+            user_sub, preparation_id, new_content,
+            participants=new_participants, glossary_source=new_glossary,
+        )
     except req.HTTPError as err:
         status = err.response.status_code if err.response is not None else 502
         return _err({"error": "amend_failed"}, status)
     return jsonify(data)
+
+
+# ─── Lot 3c — Glossaire (lecture/écriture + push global) ─────────────
+
+@bp.route("/<preparation_id>/glossary", methods=["POST"])
+@require_auth
+def update_preparation_glossary(preparation_id: str):
+    """Met à jour le glossaire d'une préparation (Lot 3c).
+
+    Body : ``{terms: [{term, definition?, global?: bool}, ...]}``.
+
+    - Persiste l'intégralité de la liste dans ``preparation.glossary_source``
+      (remplacement, pas d'append) — ordre conservé.
+    - Pour les termes cochés ``global: true``, proxy vers
+      ``/api/v1/user-glossary/upsert-batch`` (best-effort, échecs silencieux).
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    terms_raw = payload.get("terms")
+    if not isinstance(terms_raw, list):
+        return _err("terms must be a list", 400)
+
+    cleaned: list[dict] = []
+    globals_to_push: list[dict] = []
+    for raw in terms_raw:
+        if not isinstance(raw, dict):
+            continue
+        term = (raw.get("term") or "").strip()
+        if not term:
+            continue
+        if len(term) > 200:
+            term = term[:200]
+        definition = (raw.get("definition") or "").strip() or None
+        is_global = bool(raw.get("global") or raw.get("is_global"))
+        entry = {"term": term}
+        if definition:
+            entry["definition"] = definition
+        if is_global:
+            entry["global"] = True
+        cleaned.append(entry)
+        if is_global:
+            push_entry = {"term": term}
+            if definition:
+                push_entry["definition"] = definition
+            globals_to_push.append(push_entry)
+
+    # Cap raisonnable côté serveur : 300 termes max (cf. memo)
+    if len(cleaned) > 300:
+        cleaned = cleaned[:300]
+
+    try:
+        data = prep_service.amend_preparation(
+            user_sub, preparation_id, None, glossary_source=cleaned,
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return _err({"error": "glossary_save_failed"}, status)
+
+    # Best-effort push vers user_glossary_terms.
+    pushed = 0
+    if globals_to_push:
+        try:
+            glossary_module.upsert_terms_for_user(
+                user_sub, globals_to_push, source_preparation_id=preparation_id,
+            )
+            pushed = len(globals_to_push)
+        except Exception:
+            logger.exception(
+                "preparations: failed to push global glossary terms for prep=%s",
+                preparation_id,
+            )
+    return jsonify({
+        "ok": True,
+        "terms_count": len(cleaned),
+        "globals_pushed": pushed,
+        "preparation": (data or {}).get("preparation"),
+    })
+
+
+@bp.route("/<preparation_id>/participants", methods=["POST"])
+@require_auth
+def update_preparation_participants(preparation_id: str):
+    """Met à jour la liste des participants (Lot 5).
+
+    Body : ``{participants: [{name, email?, role?}, ...]}``. Persiste dans
+    la colonne ``participants`` (JSONB) via l'endpoint amend étendu.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    payload = request.get_json(silent=True) or {}
+    participants_raw = payload.get("participants")
+    if not isinstance(participants_raw, list):
+        return _err("participants must be a list", 400)
+
+    cleaned: list[dict] = []
+    for raw in participants_raw:
+        if not isinstance(raw, dict):
+            continue
+        name = (raw.get("name") or "").strip()
+        email = (raw.get("email") or "").strip()
+        role = (raw.get("role") or "").strip()
+        if not (name or email):
+            continue
+        entry: dict = {}
+        if name:
+            entry["name"] = name[:200]
+        if email:
+            entry["email"] = email[:320]
+        if role:
+            entry["role"] = role[:120]
+        cleaned.append(entry)
+
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    try:
+        data = prep_service.amend_preparation(
+            user_sub, preparation_id, None, participants=cleaned,
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return _err({"error": "participants_save_failed"}, status)
+    return jsonify({
+        "ok": True,
+        "participants_count": len(cleaned),
+        "preparation": (data or {}).get("preparation"),
+    })
 
 
 @bp.route("/<preparation_id>/rename", methods=["POST"])
