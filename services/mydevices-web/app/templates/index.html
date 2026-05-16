@@ -1565,12 +1565,6 @@
             </li>
             <li role="presentation">
                 <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="generate" id="tab-btn-generate"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-generate">Enrôler un nouvel appareil</button>
-            </li>
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
                         data-tab="useful-data" id="tab-btn-useful-data"
                         aria-selected="false" tabindex="-1"
                         aria-controls="panel-useful-data">Mes données utiles</button>
@@ -1832,6 +1826,12 @@
     </div>
 
     <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="tab-btn-generate" tabindex="0">
+        <p style="margin:0 0 0.6rem;">
+            <button type="button"
+                    class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                    data-action="back-to-devices"
+                    onclick="window.activateTab && window.activateTab('devices')">Retour à mes appareils</button>
+        </p>
         <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
         <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
 
@@ -1910,6 +1910,12 @@
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
             <ul class="fr-btns-group fr-btns-group--sm fr-btns-group--inline" style="margin:0;gap:0.35rem;">
+                <li>
+                    <button type="button" id="enroll-new-device-btn"
+                            class="fr-btn fr-btn--sm fr-btn--icon-left fr-icon-add-line"
+                            data-action="open-enroll"
+                            onclick="window.activateTab && window.activateTab('generate')">Enrôler un nouvel appareil</button>
+                </li>
                 <li>
                     <button type="button" id="device-filter-btn"
                             class="fr-btn fr-btn--sm fr-btn--secondary device-filter-btn"
