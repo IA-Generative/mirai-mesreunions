@@ -7,11 +7,14 @@
 //   2. lib/* (api, auth, toast) → publient leurs helpers sur window.
 //   3. legacy.js → exécute tout le code historique (setupTabs(),
 //      loadDevices().then(loadSessions) en fin de fichier).
-//   4. tabs/*.js → wrappers documentaires (ré-exports depuis window).
-//
-// PR4 : pas de lazy-load (les onclick="" du template HTML s'attendent à
-// trouver les handlers globalement résolus). PR5 introduira l'event
-// delegation et permettra le lazy-loading par tab via import() dynamique.
+//   4. tabs/*.js → wrappers + nouveaux modules (admin, useful-data,
+//      preparations, meetings, devices). Les onglets "lourds" délèguent
+//      encore à legacy.js pour leur métier ; les onglets nouveaux
+//      (admin, useful-data) ont leur propre mount() lazy-load via
+//      lib/tab-manager.js.
+//   5. lib/tab-manager.js → init() : pose la délégation globale qui
+//      synchronise la nav `fr-tabs` DSFR avec activateTab legacy +
+//      lazy-load les modules tabs/admin et tabs/useful-data.
 
 import './lib/bootstrap.js';
 import './lib/api.js';
@@ -22,7 +25,14 @@ import './tabs/devices.js';
 import './tabs/meetings.js';
 import './tabs/preparations.js';
 import './tabs/useful-data.js';
-import './tabs/admin.js';
+import * as adminTab from './tabs/admin.js';
+import { initTabManager } from './lib/tab-manager.js';
+
+// Affichage conditionnel de l'onglet Admin dans la nav (selon claim OIDC).
+try { adminTab.revealNavIfAdmin && adminTab.revealNavIfAdmin(); } catch (e) {}
+
+// Orchestrateur global des onglets (DSFR ↔ legacy ↔ lazy-load).
+initTabManager();
 
 // Sentinelle utile au test e2e (vérifier que le bundle a bien initialisé).
 window.__MYDEVICES_SHELL_READY__ = true;

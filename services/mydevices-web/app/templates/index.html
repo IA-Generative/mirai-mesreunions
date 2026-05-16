@@ -1099,10 +1099,14 @@
             color: #0f172a; font-weight: 700;
             border-bottom-color: #1d4ed8;
         }
-        /* Par défaut on cache tous les panneaux ; JS active le bon onglet
-           dès que loadDevices a déterminé l'état. */
+        /* Par défaut on cache tous les panneaux ; activation soit par la
+           classe legacy `.is-active` (gérée par activateTab dans legacy.js),
+           soit par la classe DSFR `.fr-tabs__panel--selected` (gérée par
+           le JS DSFR sur les boutons fr-tabs). Les deux mécanismes
+           cohabitent — voir frontend/lib/tab-manager.js pour la synchro. */
         .tab-pane { display: none; }
-        .tab-pane.is-active { display: block; }
+        .tab-pane.is-active,
+        .tab-pane.fr-tabs__panel--selected { display: block; }
         /* Toasts feedback (bas-droite, disparaît après 4s) */
         .toast {
             position: fixed; right: 1rem; bottom: 1rem; z-index: 9999;
@@ -1349,25 +1353,60 @@
          (3) Enrôler un nouvel appareil. L'onglet par défaut est choisi
          par loadDevices : si aucun device enrôlé → "Enrôler", sinon
          "Mes transferts et analyses". -->
-    <nav class="tabs-nav" role="tablist" aria-label="Sections principales">
-        <button type="button" class="tab-btn" role="tab" data-tab="transfers" id="tab-btn-transfers">
-            Mes réunions (IA)
-        </button>
-        <button type="button" class="tab-btn" role="tab" data-tab="brief" id="tab-btn-brief">
-            Préparation de réunion
-        </button>
-        <button type="button" class="tab-btn" role="tab" data-tab="devices" id="tab-btn-devices">
-            Mes appareils
-        </button>
-        <button type="button" class="tab-btn" role="tab" data-tab="generate" id="tab-btn-generate">
-            Enrôler un nouvel appareil
-        </button>
-        <button type="button" class="tab-btn" role="tab" data-tab="trash" id="tab-btn-trash">
-            Corbeille
-        </button>
-    </nav>
+    {# Navigation onglets : DSFR `fr-tabs` natif. Les boutons gardent l'attribut
+       `data-tab` pour compat avec le code legacy.js (activateTab + sélecteurs
+       CSS `.tab-pane[data-tab="..."]`). Les panneaux (plus bas) portent à la fois
+       `fr-tabs__panel` (DSFR) et `card tab-pane` (legacy/CSS hérité), et un id
+       `panel-<tab>` référencé par `aria-controls`. L'orchestrateur
+       frontend/lib/tab-manager.js écoute les changements DSFR pour appeler les
+       hooks legacy (loadBriefs/loadTrash/showFilesList/mount-tab admin/useful-data). #}
+    <div class="fr-tabs">
+        <ul class="fr-tabs__list" role="tablist" aria-label="Sections principales">
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="transfers" id="tab-btn-transfers"
+                        aria-selected="true" tabindex="0"
+                        aria-controls="panel-transfers">Mes réunions (IA)</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="brief" id="tab-btn-brief"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-brief">Préparation de réunion</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="devices" id="tab-btn-devices"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-devices">Mes appareils</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="generate" id="tab-btn-generate"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-generate">Enrôler un nouvel appareil</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="useful-data" id="tab-btn-useful-data"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-useful-data">Mes données utiles</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="trash" id="tab-btn-trash"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-trash">Corbeille</button>
+            </li>
+            <li role="presentation" id="tab-btn-admin-li" style="display:none;">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="admin" id="tab-btn-admin"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-admin">Admin</button>
+            </li>
+        </ul>
 
-    <div class="card tab-pane" data-tab="brief">
+    <div id="panel-brief" class="fr-tabs__panel card tab-pane" data-tab="brief" role="tabpanel" aria-labelledby="tab-btn-brief" tabindex="0">
         <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
         <div id="brief-list-view">
             <div class="dsfr-inline-actions">
@@ -1592,7 +1631,7 @@
         </div>
     </div>
 
-    <div class="card tab-pane" data-tab="trash">
+    <div id="panel-trash" class="fr-tabs__panel card tab-pane" data-tab="trash" role="tabpanel" aria-labelledby="tab-btn-trash" tabindex="0">
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.1rem;">Corbeille</h1>
             <span style="color:#64748b;font-size:0.78rem;">
@@ -1604,7 +1643,7 @@
         </div>
     </div>
 
-    <div class="card tab-pane" data-tab="generate" id="enrollment-card">
+    <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="tab-btn-generate" tabindex="0">
         <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
         <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
 
@@ -1675,7 +1714,7 @@
         </div>
     </div>
 
-    <div class="card tab-pane" data-tab="devices">
+    <div id="panel-devices" class="fr-tabs__panel card tab-pane" data-tab="devices" role="tabpanel" aria-labelledby="tab-btn-devices" tabindex="0">
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
             <div style="display:flex;align-items:center;gap:0.35rem;">
@@ -1690,7 +1729,7 @@
         <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils...</div>
     </div>
 
-    <div class="card tab-pane" data-tab="transfers">
+    <div id="panel-transfers" class="fr-tabs__panel fr-tabs__panel--selected card tab-pane" data-tab="transfers" role="tabpanel" aria-labelledby="tab-btn-transfers" tabindex="0">
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
@@ -1796,6 +1835,28 @@
             </div>
         </div>
     </div>
+
+    {# Onglet « Mes données utiles » — créé par PR-UX-Onglets. Contenu monté
+       dynamiquement par frontend/tabs/useful-data.js au premier affichage. #}
+    <div id="panel-useful-data" class="fr-tabs__panel card tab-pane"
+         data-tab="useful-data" role="tabpanel"
+         aria-labelledby="tab-btn-useful-data" tabindex="0">
+        <div data-useful-data-root>
+            <p style="color:#999;font-size:0.85rem;">Chargement…</p>
+        </div>
+    </div>
+
+    {# Onglet « Admin » — visible uniquement si l'utilisateur a la claim
+       « admin » (cf. lib/auth.js isAdmin()). Le `<li>` parent du bouton est
+       masqué côté template par défaut puis révélé par tabs/admin.js. #}
+    <div id="panel-admin" class="fr-tabs__panel card tab-pane"
+         data-tab="admin" role="tabpanel"
+         aria-labelledby="tab-btn-admin" tabindex="0">
+        <div data-admin-root>
+            <p style="color:#999;font-size:0.85rem;">Chargement…</p>
+        </div>
+    </div>
+    </div> {# /fr-tabs #}
 </div>
 </main>
 
