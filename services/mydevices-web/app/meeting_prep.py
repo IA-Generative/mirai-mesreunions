@@ -161,6 +161,7 @@ def assemble_corpus(
     per_doc_max_chars: int = DEFAULT_PER_DOC_MAX_CHARS,
     total_max_chars: int = DEFAULT_TOTAL_MAX_CHARS,
     per_doc_max_bytes: int = DEFAULT_PER_DOC_MAX_BYTES,
+    progress=None,
 ) -> tuple[str, list[dict]]:
     """List the folder, download + extract each leaf doc, return a concatenated corpus.
 
@@ -171,8 +172,28 @@ def assemble_corpus(
     Drive errors propagate; the caller maps them to HTTP status codes.
     Per-document extraction errors are captured as ``status="error_extract"``
     so a single corrupt PDF does not kill the whole brief.
+
+    ``progress`` (callable optionnel) est invoqué aux étapes clés pour le
+    polling UI (Lot 2 — animation génération brief) :
+      - ``progress(phase="listing_docs")``
+      - ``progress(phase="reading_doc", current_doc=name, docs_processed=N, docs_total=M)``
+    Les erreurs du callback sont ignorées (best-effort).
     """
+    def _emit(**kw):
+        if progress is None:
+            return
+        try:
+            progress(**kw)
+        except Exception:  # pragma: no cover — never let UI break the pipeline
+            logger.exception("meeting_prep: progress callback raised")
+
+    _emit(phase="listing_docs")
     children = drive.list_children(access_token, folder_id)
+
+    # Pré-calcul du nombre total de docs candidats (hors dossiers) pour le stepper.
+    leaf_total = sum(1 for it in (children or []) if not _is_folder(it))
+    docs_total = min(leaf_total, max_docs)
+    _emit(phase="listing_docs", docs_total=docs_total)
 
     used: list[dict] = []
     parts: list[str] = []
@@ -191,6 +212,13 @@ def assemble_corpus(
         if ingested >= max_docs:
             used.append({"name": name, "id": item_id, "status": "skipped_doc_cap"})
             continue
+
+        _emit(
+            phase="reading_doc",
+            current_doc=name,
+            docs_processed=ingested,
+            docs_total=docs_total,
+        )
 
         try:
             body, content_type = drive.download_item(
@@ -226,6 +254,12 @@ def assemble_corpus(
             "status": "ingested",
             "chars": len(text),
         })
+        _emit(
+            phase="reading_doc",
+            current_doc=name,
+            docs_processed=ingested,
+            docs_total=docs_total,
+        )
 
     corpus = "\n\n".join(parts).strip()
     return corpus, used

@@ -191,7 +191,7 @@ def test_post_meeting_prep_without_drive_folder_returns_brief(cg):
                return_value={"preparation": {"id": "b-1"}}), \
          patch("app.modules.preparations.routes.request_internal_device_api",
                return_value={"audio_files": []}):
-        r = client.post("/api/preparations", json={
+        r = client.post("/api/preparations?sync=1", json={
             "subject": "Décider du budget Q3",
             "role": "anime la réunion",
             "expectation": "obtenir un GO",
@@ -222,7 +222,7 @@ def test_post_meeting_prep_with_drive_folder_but_no_refresh_token_returns_401(cg
                return_value=None) as fc_mock, \
          patch("app.modules.preparations.service.request_internal_preparation_api",
                return_value={"preparation": {}}):
-        r = client.post("/api/preparations", json={
+        r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
             "expectation": "GO",
@@ -264,7 +264,7 @@ def test_post_meeting_prep_one_on_one_loads_correct_prompt(cg):
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
                return_value={"preparation": {}}):
-        r = client.post("/api/preparations", json={
+        r = client.post("/api/preparations?sync=1", json={
             "subject": "Point hebdo Alice",
             "role": "manager",
             "expectation": "feedback",
@@ -294,7 +294,7 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
                return_value={"preparation": {}}):
-        r = client.post("/api/preparations", json={
+        r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
             "expectation": "GO",
