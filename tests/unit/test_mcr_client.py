@@ -1,8 +1,8 @@
 """
-Unit tests for services.file-mover.app.mcr_client.
+Unit tests for services.dmz-to-internal-bridge.app.mcr_client.
 
 Mock the underlying ``requests`` calls and assert that each HTTP failure
-mode maps to the right exception class — that's how the file-puller chooses
+mode maps to the right exception class — that's how the internal-ingester chooses
 between "wipe token + mark mcr_auth_failed" (no retry), "mark mcr_rejected"
 (no retry) and "raise so queue retries" (transient).
 """
@@ -59,7 +59,7 @@ def _resp(status_code=200, json_data=None, text=""):
 
 
 # Now load mcr_client
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "mcr_client.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "mcr_client.py")
 SPEC = importlib.util.spec_from_file_location("mcr_client_under_test", MODULE_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

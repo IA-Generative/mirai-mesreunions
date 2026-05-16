@@ -47,7 +47,7 @@ def _resp(status_code=200, json_data=None, text=""):
     return _REQ._Resp(status_code=status_code, json_data=json_data, text=text)
 
 
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "llm_client.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "llm_client.py")
 SPEC = importlib.util.spec_from_file_location("llm_client_under_test", MODULE_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)

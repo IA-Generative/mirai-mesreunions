@@ -1,5 +1,5 @@
 """
-Unit tests for file-mover's publish path: AMQP first, optional HTTP trigger.
+Unit tests for dmz-to-internal-bridge's publish path: AMQP first, optional HTTP trigger.
 
 Validates two contracts:
   - the AMQP publish is the success criterion (HTTP outcome is irrelevant);
@@ -35,7 +35,7 @@ def _install_stubs(trigger_url: str = ""):
     requests_stub.HTTPError = _ReqExc
     sys.modules["requests"] = requests_stub
 
-    # Stub libs.shared.app.* dependencies that file-mover/main.py imports.
+    # Stub libs.shared.app.* dependencies that dmz-to-internal-bridge/main.py imports.
     sys.modules.pop("libs.shared.app.queue_helper", None)
     qh_stub = types.ModuleType("libs.shared.app.queue_helper")
     qh_stub.consume_queue = MagicMock()
@@ -86,10 +86,10 @@ def _install_stubs(trigger_url: str = ""):
 
 
 def _load_main_module():
-    sys.modules.pop("file_mover_main_under_test", None)
+    sys.modules.pop("dmz_to_internal_bridge_main_under_test", None)
     spec = importlib.util.spec_from_file_location(
-        "file_mover_main_under_test",
-        os.path.join(ROOT, "services", "file-mover", "app", "main.py"),
+        "dmz_to_internal_bridge_main_under_test",
+        os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -164,7 +164,7 @@ def test_trigger_http_exception_swallowed():
 
 
 def test_publish_amqp_failure_returns_false():
-    """If AMQP publish raises, the file-mover must report failure so file_ready
+    """If AMQP publish raises, the dmz-to-internal-bridge must report failure so file_ready
     is retried via the existing retry counter on the source queue."""
     _install_stubs(trigger_url="")
     mod = _load_main_module()

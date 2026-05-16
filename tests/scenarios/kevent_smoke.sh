@@ -20,7 +20,7 @@ cat <<'EOF'
 This script assumes you have already :
   1. apply the migration 004
   2. provisioned the kevent-api-key K8s Secret in audio-internal
-  3. set TRANSCRIPTION_BACKEND=kevent on the file-puller deployment
+  3. set TRANSCRIPTION_BACKEND=kevent on the internal-ingester deployment
   4. uploaded a test audio file via the mobile flow
 EOF
 read -p "Press Enter once the file is at status 'transcoded' in the admin dashboard..."
@@ -62,8 +62,8 @@ int_ -n audio-internal exec deploy/postgres-internal -- \
    WHERE user_sub='$USER_SUB' ORDER BY created_at DESC LIMIT 1;"
 
 echo
-echo "=== 3. file-puller logs for this run ==="
-int_ -n audio-internal logs -l app=file-puller --tail=200 \
+echo "=== 3. internal-ingester logs for this run ==="
+int_ -n audio-internal logs -l app=internal-ingester --tail=200 \
   | grep -E "Kevent|speaker_names|oob_cleaning|reformulation|meeting_analysis|kevent_" \
   | tail -20
 

@@ -12,7 +12,7 @@ import pytest
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-PATH = os.path.join(ROOT, "services", "code-generator", "app", "drive_brief_sync.py")
+PATH = os.path.join(ROOT, "services", "mydevices-web", "app", "drive_brief_sync.py")
 
 
 def _load():

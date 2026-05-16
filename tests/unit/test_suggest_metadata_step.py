@@ -25,14 +25,14 @@ _REQ.RequestException = _RE
 _REQ.post = MagicMock()
 sys.modules["requests"] = _REQ
 
-LLM_PATH = os.path.join(ROOT, "services", "file-mover", "app", "llm_client.py")
+LLM_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "llm_client.py")
 _lspec = importlib.util.spec_from_file_location("app.llm_client", LLM_PATH)
 LLM_MOD = importlib.util.module_from_spec(_lspec)
 sys.modules.setdefault("app", types.ModuleType("app"))
 sys.modules["app.llm_client"] = LLM_MOD
 _lspec.loader.exec_module(LLM_MOD)
 
-MI_PATH = os.path.join(ROOT, "services", "file-mover", "app", "meeting_intelligence.py")
+MI_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "meeting_intelligence.py")
 _mspec = importlib.util.spec_from_file_location("meeting_intelligence_under_test", MI_PATH)
 MI = importlib.util.module_from_spec(_mspec)
 _mspec.loader.exec_module(MI)

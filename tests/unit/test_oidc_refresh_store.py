@@ -2,12 +2,12 @@
 Unit tests for libs.shared.app.oidc_refresh_store.
 
 The helper has three responsibilities used at three different points:
-  - ``store_refresh_token``  : encrypt + POST to token-issuer (called by CG/admin)
-  - ``fetch_ciphertext``     : GET ciphertext from token-issuer (called by file-puller)
-  - ``delete_ciphertext``    : DELETE ciphertext (called by file-puller after invalid_grant)
+  - ``store_refresh_token``  : encrypt + POST to device-token-authority (called by CG/admin)
+  - ``fetch_ciphertext``     : GET ciphertext from device-token-authority (called by internal-ingester)
+  - ``delete_ciphertext``    : DELETE ciphertext (called by internal-ingester after invalid_grant)
 
 We mock requests + secrets_crypto so the tests don't need a real Keycloak
-or token-issuer running.
+or device-token-authority running.
 """
 
 import importlib.util
@@ -67,7 +67,7 @@ def _resp(status_code=200, json_data=None):
 @pytest.fixture(autouse=True)
 def _reset_env_and_mocks():
     os.environ["INTERNAL_API_TOKEN"] = "x" * 48
-    os.environ["TOKEN_ISSUER_INTERNAL_BASE_URL"] = "http://token-issuer:8091"
+    os.environ["TOKEN_ISSUER_INTERNAL_BASE_URL"] = "http://device-token-authority:8091"
     _REQ.post.reset_mock(side_effect=True, return_value=True)
     _REQ.get.reset_mock(side_effect=True, return_value=True)
     _REQ.delete.reset_mock(side_effect=True, return_value=True)
@@ -115,7 +115,7 @@ def test_store_encrypts_and_posts_payload():
     assert "Bearer" in kwargs["headers"]["Authorization"]
 
 
-def test_store_returns_false_on_token_issuer_5xx():
+def test_store_returns_false_on_device_token_authority_5xx():
     _REQ.post.return_value = _resp(503)
     assert MOD.store_refresh_token("user-1", "rt-123") is False
 

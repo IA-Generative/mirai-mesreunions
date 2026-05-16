@@ -1,4 +1,4 @@
-"""Unit tests for services.file-mover.app.glossary_from_brief.
+"""Unit tests for services.dmz-to-internal-bridge.app.glossary_from_brief.
 
 Couvre :
   - extraction des sigles (regex \\b[A-Z]{2,}\\d*\\b)
@@ -15,7 +15,7 @@ import sys
 import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-GFB_PATH = os.path.join(ROOT, "services", "file-mover", "app", "glossary_from_brief.py")
+GFB_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "glossary_from_brief.py")
 
 
 def _load():

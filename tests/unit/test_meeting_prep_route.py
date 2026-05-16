@@ -1,6 +1,6 @@
 """
 Unit tests for the Flask routes of the meeting-prep wizard, hosted in
-``services/code-generator/app/main.py`` :
+``services/mydevices-web/app/main.py`` :
 
   - POST /api/meeting-prep                : génération d'un brief
   - GET  /api/meeting-prep/test-drive     : diagnostic 3-étapes du bouton
@@ -11,7 +11,7 @@ Le module ``main.py`` a deux particularités gênantes en test :
   * il appelle ``create_app()`` à l'import (init DB + bucket S3) — on stubbe
     ``init_tables`` / ``create_session_factory`` / ``require_strong_shared_secret``
     avant le ``exec_module``.
-  * il vit dans un package au tiret (``code-generator``), donc on le charge
+  * il vit dans un package au tiret (``mydevices-web``), donc on le charge
     via ``importlib.util.spec_from_file_location`` à la manière de
     test_meeting_prep_persistence.py.
 
@@ -49,8 +49,8 @@ def _purge_libs_shared_stubs():
                 sys.modules.pop(name, None)
 
 
-def _load_code_generator():
-    """Load services/code-generator/app/main.py with DB/S3 init stubbed.
+def _load_mydevices_web():
+    """Load services/mydevices-web/app/main.py with DB/S3 init stubbed.
 
     Returns the loaded module. The caller can ``monkeypatch.setattr`` on the
     module-level constants (DRIVE_BASE_URL, OIDC_TOKEN_ENDPOINT, …) before
@@ -79,8 +79,8 @@ def _load_code_generator():
             sys.modules.pop(_name, None)
 
     # ``main.py`` fait ``from app import meeting_prep`` (le package ``app``
-    # est ``services/code-generator/app/``). On rend ce package importable.
-    cg_dir = os.path.join(ROOT, "services", "code-generator")
+    # est ``services/mydevices-web/app/``). On rend ce package importable.
+    cg_dir = os.path.join(ROOT, "services", "mydevices-web")
     if cg_dir not in sys.path:
         sys.path.insert(0, cg_dir)
     sys.modules.pop("app", None)
@@ -120,10 +120,10 @@ def _load_code_generator():
     sys.modules["libs.shared.app.database"] = db_stub
 
     # Drop any cached version so each call returns a fresh module.
-    sys.modules.pop("code_generator_under_route_test", None)
+    sys.modules.pop("mydevices_web_under_route_test", None)
     spec = importlib.util.spec_from_file_location(
-        "code_generator_under_route_test",
-        os.path.join(ROOT, "services", "code-generator", "app", "main.py"),
+        "mydevices_web_under_route_test",
+        os.path.join(ROOT, "services", "mydevices-web", "app", "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -132,12 +132,12 @@ def _load_code_generator():
 
 @pytest.fixture
 def cg(monkeypatch):
-    """Test client for code-generator, with module-level config knobs set to
+    """Test client for mydevices-web, with module-level config knobs set to
     sane defaults so the meeting-prep routes consider themselves configured.
 
     Each test can further override these via ``monkeypatch.setattr(mod, …)``.
     """
-    mod = _load_code_generator()
+    mod = _load_mydevices_web()
     monkeypatch.setattr(mod, "DRIVE_BASE_URL", "https://drive.test", raising=False)
     monkeypatch.setattr(mod, "OIDC_TOKEN_ENDPOINT", "https://kc.test/token", raising=False)
     monkeypatch.setattr(mod, "OIDC_OFFLINE_ACCESS", True, raising=False)
@@ -173,7 +173,7 @@ def test_post_meeting_prep_without_drive_folder_returns_brief(cg):
     fake_drive_cls = MagicMock()
 
     # request_internal_device_api est noyé dans le handler — on le neutralise
-    # pour éviter tout appel HTTP vers token-issuer.
+    # pour éviter tout appel HTTP vers device-token-authority.
     with patch.object(mod._meeting_prep, "LLMClient", fake_llm_cls), \
          patch.object(mod._meeting_prep, "DriveClient", fake_drive_cls), \
          patch.object(mod, "fetch_ciphertext") as fc_mock, \

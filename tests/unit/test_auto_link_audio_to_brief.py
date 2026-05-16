@@ -1,6 +1,6 @@
 """Unit tests for the auto-link audio→brief scoring (§4 du plan v2).
 
-Le scoring effectif vit dans ``services/file-mover/app/puller.py``. On
+Le scoring effectif vit dans ``services/dmz-to-internal-bridge/app/puller.py``. On
 teste les fonctions pures (``_tokenize_fr``, ``_score_brief_for_audio``)
 ainsi que ``auto_link_audio_to_brief()`` avec une session SQLite minimale.
 """
@@ -31,7 +31,7 @@ def _load_scoring_pure():
     fonctions ciblées dans un namespace minimal.
     """
     import ast
-    src_path = os.path.join(ROOT, "services", "file-mover", "app", "puller.py")
+    src_path = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "puller.py")
     with open(src_path, "r", encoding="utf-8") as fh:
         tree = ast.parse(fh.read(), src_path)
     wanted = {"_tokenize_fr", "_score_brief_for_audio"}

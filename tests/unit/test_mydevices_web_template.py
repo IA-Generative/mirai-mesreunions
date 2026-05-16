@@ -1,6 +1,6 @@
 """
 Garde-fou pour le template mydevices
-(`services/code-generator/app/templates/index.html`).
+(`services/mydevices-web/app/templates/index.html`).
 
 Ce template embarque ~3000 lignes d'HTML + JS rendues par render_template.
 Avant l'extraction du template hors du source Python, le risque principal
@@ -30,7 +30,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 INDEX_TEMPLATE_PATH = os.path.join(
-    ROOT, "services", "code-generator", "app", "templates", "index.html"
+    ROOT, "services", "mydevices-web", "app", "templates", "index.html"
 )
 
 

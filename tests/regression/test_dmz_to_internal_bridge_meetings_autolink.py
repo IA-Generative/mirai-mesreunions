@@ -1,5 +1,5 @@
 """End-to-end tests pour la création de Meeting à l'upload audio (PR2d)
-et l'auto-link audio↔preparation côté file-puller.
+et l'auto-link audio↔preparation côté internal-ingester.
 
 Exécution contre la stack docker compose locale (overlay shared-infra) :
 
@@ -10,10 +10,10 @@ Stratégie :
   - Setup/cleanup via psql ``docker exec`` sur ``owuicore-postgres-1``
     (port 5432 du host est partagé avec un brew postgres ; on évite le
     conflit en passant par le réseau interne docker).
-  - Création de Preparation via HTTP token-issuer
+  - Création de Preparation via HTTP device-token-authority
     (``http://localhost:8091``).
   - Appel de ``auto_link_audio_to_preparation`` via ``docker exec`` dans
-    le conteneur file-puller, avec un script Python qui charge le module
+    le conteneur internal-ingester, avec un script Python qui charge le module
     déjà initialisé et exerce les helpers.
 
 Couvre :
@@ -51,7 +51,7 @@ H = {"Authorization": f"Bearer {TOKEN}"}
 PG_CONTAINER = os.getenv("PG_CONTAINER", "owuicore-postgres-1")
 PG_USER = "audio_int"
 PG_DB = "audio_upload_int"
-PULLER_CONTAINER = os.getenv("PULLER_CONTAINER", "docker-file-puller-1")
+PULLER_CONTAINER = os.getenv("PULLER_CONTAINER", "docker-internal-ingester-1")
 
 
 # ─── Helpers ────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ def _psql(sql: str) -> str:
 
 
 def _exec_in_puller(script: str) -> str:
-    """Exécute un script Python dans le conteneur file-puller (où
+    """Exécute un script Python dans le conteneur internal-ingester (où
     SessionLocal pointe déjà sur la bonne DB via la config compose).
     Retourne stdout."""
     res = subprocess.run(
@@ -98,7 +98,7 @@ def alive():
         r = requests.get(f"{BASE_URL}/health", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"token-issuer not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"device-token-authority not reachable at {BASE_URL}: {exc}")
     # Vérifie aussi que les conteneurs auxiliaires existent.
     for c in (PG_CONTAINER, PULLER_CONTAINER):
         res = subprocess.run(
@@ -289,7 +289,7 @@ def test_auto_link_end_to_end_sets_meeting_preparation_id(alive, user_sub):
             f"'reunion-federation-kickoff.m4a');"
         )
 
-        # 3. Auto-link + persistance dans le conteneur file-puller.
+        # 3. Auto-link + persistance dans le conteneur internal-ingester.
         out = _exec_in_puller(textwrap.dedent(f"""
             import json
             from datetime import datetime, timezone

@@ -68,7 +68,7 @@ Parser le JSON et vérifier :
 
 - [ ] Temps total `kevent_transcribing → kevent_completed` raisonnable
       (~5-30 s pour un fichier court, ~minutes pour un fichier long)
-- [ ] Pas d'erreurs récurrentes dans les logs file-puller pour les LLM
+- [ ] Pas d'erreurs récurrentes dans les logs internal-ingester pour les LLM
       calls (sinon ajuster les prompts ou les modèles)
 - [ ] `transcription_status='kevent_completed'` (pas
       `kevent_partially_completed` à répétition — sinon une étape
@@ -76,10 +76,10 @@ Parser le JSON et vérifier :
 
 ## Si une étape produit du contenu de qualité insuffisante
 
-1. Identifier l'étape (logs file-puller : "speaker_names: …", "oob_cleaning: …", etc.)
+1. Identifier l'étape (logs internal-ingester : "speaker_names: …", "oob_cleaning: …", etc.)
 2. Itérer sur le prompt correspondant dans
-   [`services/file-mover/app/prompts/`](../../services/file-mover/app/prompts/)
-3. Rebuild + push image, rolling restart file-puller
+   [`services/dmz-to-internal-bridge/app/prompts/`](../../services/dmz-to-internal-bridge/app/prompts/)
+3. Rebuild + push image, rolling restart internal-ingester
 4. Re-uploader le même fichier, comparer
 
 ## Décisions à acter après cette revue

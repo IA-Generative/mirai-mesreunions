@@ -18,7 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "glossary_loader.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "glossary_loader.py")
 SPEC = importlib.util.spec_from_file_location("glossary_loader_under_test", MODULE_PATH)
 GL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GL)

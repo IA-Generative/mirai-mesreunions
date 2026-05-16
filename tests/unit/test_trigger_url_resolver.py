@@ -4,7 +4,7 @@ Unit tests for libs.shared.app.trigger_url.resolved_trigger_url.
 The function turns a raw env-var value into either a usable HTTP(S) URL or
 None. Its primary security responsibility is to refuse anything that isn't
 http/https with a real host — that's what stops a typo or sentinel word
-from making file-mover open `file:///etc/passwd` or similar.
+from making dmz-to-internal-bridge open `file:///etc/passwd` or similar.
 """
 
 import importlib.util

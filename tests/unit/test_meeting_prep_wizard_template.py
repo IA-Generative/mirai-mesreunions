@@ -1,6 +1,6 @@
 """
 Garde-fou pour le wizard meeting-prep (PREP_BRIEF_TEMPLATE) dans
-services/code-generator/app/main.py.
+services/mydevices-web/app/main.py.
 
 On vérifie via AST extraction (pas d'import de l'app Flask) :
 
@@ -20,7 +20,7 @@ import pytest
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MAIN_PY = os.path.join(ROOT, "services", "code-generator", "app", "main.py")
+MAIN_PY = os.path.join(ROOT, "services", "mydevices-web", "app", "main.py")
 
 
 def _extract_prep_brief_template() -> str:

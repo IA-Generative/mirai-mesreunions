@@ -17,7 +17,7 @@ fail() { printf "\033[31mFAIL\033[0m  %s\n  → %s\n" "$1" "$2"; }
 
 cat <<'EOF'
 This script simulates an MCR outage by setting MCR_GATEWAY_URL to a
-non-routable IP for file-puller, then watching the retry counter climb
+non-routable IP for internal-ingester, then watching the retry counter climb
 and the message be dropped with mcr_push_failed.
 
 Manual prep:
@@ -25,7 +25,7 @@ Manual prep:
   2. Edit deploy/kubernetes/environments/prod-beta/internal/kustomization.yaml,
      set MCR_GATEWAY_URL to "https://203.0.113.1" (TEST-NET-3, will black-hole).
   3. kubectl apply -k … --load-restrictor=LoadRestrictionsNone
-  4. kubectl rollout restart deploy/file-puller
+  4. kubectl rollout restart deploy/internal-ingester
   5. Run this script.
 EOF
 read -p "Press Enter when ready..."
@@ -54,10 +54,10 @@ done
 
 echo
 echo "3. Verify ERROR log line confirms drop after 5 retries:"
-int_ -n audio-internal logs -l app=file-puller --tail=500 \
+int_ -n audio-internal logs -l app=internal-ingester --tail=500 \
   | grep -E "Dropping message from internal_pull" | tail -2 || \
   fail "no drop log line" "check logs"
 
 echo
-echo "Cleanup: restore MCR_GATEWAY_URL to the real value and rolling-restart file-puller."
+echo "Cleanup: restore MCR_GATEWAY_URL to the real value and rolling-restart internal-ingester."
 echo "Done."

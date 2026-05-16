@@ -1,5 +1,5 @@
 """End-to-end tests pour les endpoints `/api/v1/{preparations,meetings}/*`
-du token-issuer (PR2c).
+du device-token-authority (PR2c).
 
 Exécution contre la stack docker compose locale (overlay shared-infra) :
 
@@ -60,7 +60,7 @@ def alive():
         r = requests.get(f"{BASE_URL}/health", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"token-issuer not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"device-token-authority not reachable at {BASE_URL}: {exc}")
 
 
 @pytest.fixture
@@ -308,8 +308,8 @@ def test_link_audio_to_preparation_creates_meeting(alive, user_sub):
     )
     pid = r.json()["preparation"]["id"]
 
-    # Fabrique un UserAudioFile minimal en DB (token-issuer n'expose pas
-    # de POST UAF dédié — c'est file-mover qui le fait normalement).
+    # Fabrique un UserAudioFile minimal en DB (device-token-authority n'expose pas
+    # de POST UAF dédié — c'est dmz-to-internal-bridge qui le fait normalement).
     audio_id = str(uuid.uuid4())
     _pg_exec(
         f"""

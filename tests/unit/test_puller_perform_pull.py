@@ -89,10 +89,10 @@ def _install_stubs():
 
 
 def _load_puller():
-    sys.modules.pop("file_puller_perform_under_test", None)
+    sys.modules.pop("internal_ingester_perform_under_test", None)
     spec = importlib.util.spec_from_file_location(
-        "file_puller_perform_under_test",
-        os.path.join(ROOT, "services", "file-mover", "app", "puller.py"),
+        "internal_ingester_perform_under_test",
+        os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "puller.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
