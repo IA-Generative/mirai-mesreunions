@@ -1,13 +1,18 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="fr" data-fr-theme>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MIrAI — Enregistrer, transcrire et analyser vos réunions et notes vocales en toute sécurité</title>
+    {# Favicon spécifique PWA app conservé (icônes pwa-icon-* dans static/icons). #}
     <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/pwa-icon-192.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/pwa-icon-180.png">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/utility/icons/icons-system/icons-system.min.css">
+    {# DSFR auto-hébergé (servi par Flask via /static/dsfr/ — copié depuis
+       node_modules/@gouvfr/dsfr/dist par scripts/copy-dsfr-assets.mjs au
+       build npm). Remplace le CDN jsdelivr (CSP-friendly + intégrité +
+       perf : pas de DNS lookup tiers, cache long contrôlé localement). #}
+    <link rel="stylesheet" href="/static/dsfr/dsfr/dsfr.min.css">
+    <link rel="stylesheet" href="/static/dsfr/utility/icons/icons-system/icons-system.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1794,6 +1799,44 @@
 </div>
 </main>
 
+{# Footer DSFR minimal : conforme aux exigences du Système de Design de
+   l'État Français (mention "République Française", liens institutionnels
+   obligatoires, accessibilité partielle déclarée). Sans plus de contenu
+   pour l'instant — la liste de liens institutionnels (mentions légales,
+   accessibilité, données personnelles) sera enrichie quand les pages
+   correspondantes seront publiées côté Flask. #}
+<footer class="fr-footer" role="contentinfo" id="footer">
+    <div class="fr-container">
+        <div class="fr-footer__body">
+            <div class="fr-footer__brand fr-enlarge-link">
+                <p class="fr-logo">
+                    République
+                    <br>Française
+                </p>
+            </div>
+            <div class="fr-footer__content">
+                <p class="fr-footer__content-desc">
+                    Service d'enregistrement et d'analyse de réunions —
+                    transcription IA, comptes-rendus automatisés et
+                    préparation de réunion.
+                </p>
+            </div>
+        </div>
+        <div class="fr-footer__bottom">
+            <ul class="fr-footer__bottom-list">
+                <li class="fr-footer__bottom-item">
+                    <a class="fr-footer__bottom-link" href="https://www.systeme-de-design.gouv.fr/" target="_blank" rel="noopener noreferrer">Système de design de l'État</a>
+                </li>
+            </ul>
+            <div class="fr-footer__bottom-copy">
+                <p>Sauf mention contraire, tous les contenus de ce site sont sous licence
+                    <a href="https://github.com/etalab/licence-ouverte/blob/master/LO.md" target="_blank" rel="noopener noreferrer">etalab-2.0</a>
+                </p>
+            </div>
+        </div>
+    </div>
+</footer>
+
 {# PR4 — bootstrap context pour le bundle Vite. Le JSON est lu par
    frontend/lib/bootstrap.js qui peuple window.ALLOWED_AUDIO_EXTENSIONS,
    window.DEVICE_RETENTION_DAYS et window.__BOOTSTRAP__.user. #}
@@ -1809,7 +1852,10 @@
 }
 </script>
 {% include '_vite_shell_loader.html' %}
-<script type="module" src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js"></script>
-<script nomodule src="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js"></script>
+{# DSFR JS auto-hébergé (cf. <link> en head pour le rationale). Le module
+   est chargé après le bundle Vite pour que les composants DSFR s'auto-
+   attachent aux éléments `data-fr-*` injectés par notre rendu. #}
+<script type="module" src="/static/dsfr/dsfr/dsfr.module.min.js"></script>
+<script nomodule src="/static/dsfr/dsfr/dsfr.nomodule.min.js"></script>
 </body>
 </html>

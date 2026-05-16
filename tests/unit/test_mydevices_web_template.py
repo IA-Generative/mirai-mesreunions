@@ -114,6 +114,38 @@ def test_render_user_name_injected(rendered_html):
     assert "Test User" in rendered_html
 
 
+def test_dsfr_assets_self_hosted(rendered_html):
+    """Le template doit charger DSFR depuis /static/dsfr/... (auto-hébergé
+    via scripts/copy-dsfr-assets.mjs) et plus depuis le CDN jsdelivr.
+
+    Rationale : CSP-friendly (pas de domaine tiers), perf (pas de DNS lookup),
+    intégrité prévisible (version figée par package-lock), licence DSFR
+    respectée (assets servis depuis le service lui-même)."""
+    # Assets locaux présents
+    assert "/static/dsfr/dsfr/dsfr.min.css" in rendered_html
+    assert "/static/dsfr/dsfr/dsfr.module.min.js" in rendered_html
+    # Le CDN jsdelivr ne doit plus être référencé pour DSFR
+    assert "cdn.jsdelivr.net/npm/@gouvfr/dsfr" not in rendered_html, (
+        "DSFR doit être servi depuis /static/dsfr/ (auto-hébergé), pas depuis "
+        "le CDN. Lance `npm run build` ou `npm run build:assets` pour copier "
+        "les fichiers depuis node_modules vers app/static/dsfr/."
+    )
+
+
+def test_dsfr_root_attributes_and_footer(rendered_html):
+    """Le squelette DSFR exige `data-fr-theme` sur <html> (sinon le scheme
+    sombre/clair ne s'applique pas) et un <footer class="fr-footer"> pour
+    la conformité minimale au Système de Design de l'État."""
+    assert "data-fr-theme" in rendered_html, (
+        "L'attribut data-fr-theme doit être présent sur <html> pour activer "
+        "le système de scheme DSFR."
+    )
+    assert 'class="fr-footer"' in rendered_html, (
+        "Le footer DSFR (fr-footer) est requis par le Système de Design "
+        "de l'État."
+    )
+
+
 # ─── 3. Le <script> parse en JS (node --check) ─────────────────────────────
 
 def _have_node():
