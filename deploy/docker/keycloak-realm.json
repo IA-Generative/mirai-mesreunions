@@ -1,5 +1,5 @@
 {
-  "realm": "audio-upload",
+  "realm": "openwebui",
   "enabled": true,
   "displayName": "Audio Upload Sécurisé",
   "sslRequired": "none",
@@ -23,8 +23,8 @@
   },
   "clients": [
     {
-      "clientId": "audio-upload-app",
-      "name": "Audio Upload Application",
+      "clientId": "mes-reunions",
+      "name": "Mes Réunions",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": false,
@@ -33,8 +33,10 @@
         "http://localhost:8080/*",
         "http://localhost:8081/*",
         "http://localhost:8082/*",
+        "http://localhost:8222/*",
         "http://127.0.0.1:8080/*",
         "http://127.0.0.1:8082/*",
+        "http://127.0.0.1:8222/*",
         "http://localhost:8080/*",
         "http://localhost:8082/*"
       ],
@@ -42,8 +44,10 @@
         "http://localhost:8080",
         "http://localhost:8081",
         "http://localhost:8082",
+        "http://localhost:8222",
         "http://127.0.0.1:8080",
         "http://127.0.0.1:8082",
+        "http://127.0.0.1:8222",
         "http://localhost:8080",
         "http://localhost:8082"
       ],
@@ -55,6 +59,9 @@
         "openid",
         "profile",
         "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
       ]
     }
   ],
@@ -73,7 +80,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user"]
+      "realmRoles": ["user", "offline_access"]
     },
     {
       "username": "admin",
@@ -89,7 +96,7 @@
           "temporary": false
         }
       ],
-      "realmRoles": ["user", "admin"]
+      "realmRoles": ["user", "admin", "offline_access"]
     }
   ]
 }

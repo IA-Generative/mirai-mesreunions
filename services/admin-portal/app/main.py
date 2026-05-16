@@ -120,7 +120,7 @@ def create_app() -> Flask:
     IntSessionLocal = create_session_factory(int_db_cfg)
 
     oidc_public_issuer = oidc_cfg.issuer.rstrip("/")
-    oidc_internal_issuer = os.getenv("OIDC_INTERNAL_ISSUER", "http://keycloak:8080/realms/audio-upload").rstrip("/")
+    oidc_internal_issuer = os.getenv("OIDC_INTERNAL_ISSUER", "http://keycloak:8080/realms/openwebui").rstrip("/")
 
     # Keep OAuth object for compatibility, but use explicit OIDC flow below for reliability in Docker networking.
     oauth = OAuth(app)

@@ -498,7 +498,7 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `INTERNAL_API_TOKEN` | — | Bearer token partagé inter-zones |
 | `PUBLIC_HOST` | — | Hôte/IP publique utilisée pour les URLs générées (QR + redirects) |
 | `OIDC_ISSUER` | — | URL Keycloak |
-| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/audio-upload` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
+| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/openwebui` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
 | `FFMPEG_AUDIO_FILTER` | `highpass=f=80,lowpass=f=7000,loudnorm=...` | Filtre FFmpeg voix |
 | `ENABLE_LOUDNORM` | `true` | Active/desactive `loudnorm` dans le worker de transcodage (mode dual-pass `linear=true`). Ignoré si `LOUDNORM_AUTO_DECISION=true`. |
 | `POST_LOUDNORM_FILTER_CHAIN` | `highpass=f=80,lowpass=f=7000,alimiter=limit=0.95` | Filtres appliqués après loudnorm (ordre strict) |
