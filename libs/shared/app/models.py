@@ -443,6 +443,15 @@ class Preparation(InternalBase):
     # Engagement (signal d'auto-link avec un audio).
     last_viewed_at = Column(DateTime(timezone=True), nullable=True)
 
+    # ─── Récurrence (Lot 6 — migration 013) ─────────────────────────
+    # Réunion récurrente : flag de filtre rapide + règle structurée
+    # (RRULE-like) + prochaine occurrence pré-calculée backend (via
+    # python-dateutil) pour permettre le tri/affichage sans recalcul.
+    is_recurring = Column(Boolean, nullable=True, default=False)
+    recurrence_rule = Column(_JSON_TYPE, nullable=True,
+                             comment="{freq, interval, byweekday, byhour, byminute, until}")
+    next_occurrence_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False,
                         default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=True,

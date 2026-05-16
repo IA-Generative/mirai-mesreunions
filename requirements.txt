@@ -21,3 +21,7 @@ odfpy==1.4.1
 # libraries above; we only add the formats not yet covered.
 pypdf==5.1.0
 python-pptx==1.0.2
+# RRULE arithmetic for Preparation.recurrence_rule (Lot 6 — calcule
+# `next_occurrence_at` à partir d'un dict {freq, interval, byweekday,
+# byhour, byminute, until} et d'une date de référence).
+python-dateutil==2.9.0.post0
