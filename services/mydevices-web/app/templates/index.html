@@ -1082,23 +1082,18 @@
             border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.35rem;
             background: #fff;
         }
-        /* Tabs navigation (3-4 onglets en haut de page) */
-        .tabs-nav {
-            display: flex; gap: 0.4rem; margin-bottom: 1rem;
-            border-bottom: 1px solid #cbd5e1; padding-bottom: 0;
-            overflow-x: auto;
-        }
-        .tab-btn {
-            border: 0; background: transparent; cursor: pointer;
-            padding: 0.55rem 0.9rem; font-size: 0.92rem; font-weight: 500;
-            color: #475569; border-bottom: 3px solid transparent;
-            margin-bottom: -1px; white-space: nowrap;
-        }
-        .tab-btn:hover { color: #0f172a; }
-        .tab-btn[aria-selected="true"] {
-            color: #0f172a; font-weight: 700;
-            border-bottom-color: #1d4ed8;
-        }
+        /* Tabs navigation — onglets DSFR (`fr-tabs`).
+           Les overrides legacy `.tab-btn { color: #475569; ... }` ont été
+           retirés : ils forçaient un texte gris foncé sur le fond bleu
+           que le DSFR pose en arrière-plan des tabs NON-sélectionnés
+           (var(--background-action-low-blue-france)), ce qui produisait
+           un contraste illisible (signalé en prod). Sans override, le
+           DSFR gère lui-même la cohérence couleur fond/texte :
+            - tab inactif : fond bleu DSFR + texte gris foncé DSFR ;
+            - tab actif   : fond blanc + texte bleu France + soulignement.
+           La classe `.tab-btn` reste posée sur les boutons pour la compat
+           des sélecteurs JS (data-tab + activateTab), mais elle ne porte
+           plus aucune règle visuelle. */
         /* Par défaut on cache tous les panneaux ; activation soit par la
            classe legacy `.is-active` (gérée par activateTab dans legacy.js),
            soit par la classe DSFR `.fr-tabs__panel--selected` (gérée par
