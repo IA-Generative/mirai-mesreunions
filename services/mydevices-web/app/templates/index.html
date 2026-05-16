@@ -1627,9 +1627,13 @@
                         data-action="show-list">Retour à la liste</button>
             </div>
             <!-- Lot 3a — Titre éditable inline. Click sur le titre → bascule en input + validation. -->
-            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.4rem;">
+            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
                 <h1 id="brief-detail-title" style="font-size:1.1rem;cursor:text;"
                     data-action="start-rename-inline" title="Cliquer pour renommer">Brief</h1>
+                <!-- Lot 6 — badge affiché par _renderRecurrenceBlock() si récurrente -->
+                <span id="brief-detail-recurrence-badge"
+                      class="fr-badge fr-badge--info fr-badge--sm"
+                      style="display:none;">🔁 Récurrente</span>
                 <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;">
                     <input type="text" id="brief-detail-title-input" maxlength="120"
                            style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;min-width:260px;">
@@ -1731,6 +1735,66 @@
                         Enregistrer participants
                     </button>
                     <span id="brief-detail-participants-status"
+                          style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+            </section>
+            <!-- Lot 6 — Section "Récurrence" éditable inline -->
+            <section id="brief-detail-recurrence" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <strong style="font-size:0.92rem;">🔁 Récurrence</strong>
+                    <span id="brief-detail-recurrence-summary" style="font-size:0.85rem;color:#475569;flex:1;"></span>
+                    <span id="brief-detail-next-occurrence" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.4rem;cursor:pointer;">
+                    <input type="checkbox" id="brief-detail-recurring-toggle">
+                    <span>Cette réunion est récurrente</span>
+                </label>
+                <div id="brief-detail-recurrence-form"
+                     style="display:none;margin-top:0.4rem;">
+                    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Fréquence</label>
+                            <select data-rrule-freq class="fr-select" style="min-width:160px;">
+                                <option value="WEEKLY" selected>Hebdomadaire</option>
+                                <option value="DAILY">Quotidienne</option>
+                                <option value="MONTHLY">Mensuelle</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Toutes les …</label>
+                            <input type="number" data-rrule-interval min="1" max="365" value="1"
+                                   style="width:80px;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Heure</label>
+                            <input type="time" data-rrule-time value="14:00"
+                                   style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Fin (optionnel)</label>
+                            <input type="date" data-rrule-until
+                                   style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                    </div>
+                    <div data-rrule-weekly-only style="margin-top:0.4rem;">
+                        <div style="font-size:0.85rem;margin-bottom:0.2rem;">Jours</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+                            <label><input type="checkbox" data-rrule-weekday value="MO"> Lundi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="TU"> Mardi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="WE"> Mercredi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="TH"> Jeudi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="FR"> Vendredi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="SA"> Samedi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="SU"> Dimanche</label>
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-recurrence-save-btn"
+                            data-action="save-detail-recurrence">Enregistrer</button>
+                    <span id="brief-detail-recurrence-status"
                           style="font-size:0.78rem;color:#64748b;"></span>
                 </div>
             </section>
@@ -2280,6 +2344,67 @@
                         <span class="wizard-chip" data-minutes="120">2 heures</span>
                         <span class="wizard-chip" data-minutes="240">Demi-journée</span>
                         <span class="wizard-chip" data-minutes="480">Journée complète</span>
+                    </div>
+                </div>
+                {# Lot 6 — Récurrence (RRULE structuré) #}
+                <div class="wizard-question">
+                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+                        <input type="checkbox" id="wizard-recurring-toggle">
+                        <span>Cette réunion est récurrente</span>
+                    </label>
+                    <div class="hint">
+                        Active la définition d'une règle de récurrence (RRULE) qui
+                        servira à pré-renseigner la prochaine occurrence.
+                    </div>
+                    <div id="wizard-recurrence-form"
+                         style="display:none;margin-top:0.5rem;border:1px solid #e2e8f0;
+                                border-radius:0.4rem;padding:0.6rem 0.8rem;background:#fafbfc;">
+                        <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:flex-end;">
+                            <div>
+                                <label for="wizard-rrule-freq"
+                                       style="display:block;font-size:0.85rem;">Fréquence</label>
+                                <select id="wizard-rrule-freq" data-rrule-freq
+                                        class="fr-select" style="min-width:180px;">
+                                    <option value="WEEKLY" selected>Hebdomadaire</option>
+                                    <option value="DAILY">Quotidienne</option>
+                                    <option value="MONTHLY">Mensuelle</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-interval"
+                                       style="display:block;font-size:0.85rem;">Toutes les …</label>
+                                <input type="number" id="wizard-rrule-interval"
+                                       data-rrule-interval min="1" max="365" value="1"
+                                       style="width:80px;border:1px solid #cbd5e1;
+                                              border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-time"
+                                       style="display:block;font-size:0.85rem;">Heure</label>
+                                <input type="time" id="wizard-rrule-time"
+                                       data-rrule-time value="14:00"
+                                       style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-until"
+                                       style="display:block;font-size:0.85rem;">Date de fin (optionnelle)</label>
+                                <input type="date" id="wizard-rrule-until"
+                                       data-rrule-until
+                                       style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                        </div>
+                        <div data-rrule-weekly-only style="margin-top:0.5rem;">
+                            <div style="font-size:0.85rem;margin-bottom:0.2rem;">Jours de la semaine</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+                                <label><input type="checkbox" data-rrule-weekday value="MO"> Lundi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="TU"> Mardi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="WE"> Mercredi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="TH"> Jeudi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="FR"> Vendredi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="SA"> Samedi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="SU"> Dimanche</label>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>

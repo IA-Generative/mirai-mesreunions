@@ -20,6 +20,11 @@ import {
   serializeParticipantsContainer,
   listInvalidEmails,
 } from '../lib/participants.js';
+import {
+  buildRuleFromForm,
+  refreshFreqVisibility,
+  summarizeRule,
+} from '../lib/rrule-builder.js';
 
 const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
 const STEP_LABELS = [
@@ -139,7 +144,16 @@ function _collectValues() {
   const duration = _parseDurationMinutes((_qs('#wizard-duration') || {}).value);
   const focus = _qsa('input[name="wizard-focus"]:checked').map(el => el.value);
   const participants = serializeParticipantsContainer(_qs('#wizard-participants-list'));
-  return { meetingType, subject, role, expectation, drive, duration, focus, participants };
+  // Lot 6 — récurrence (optionnelle). Le toggle pilote la prise en compte.
+  const recurringToggle = _qs('#wizard-recurring-toggle');
+  const isRecurring = !!(recurringToggle && recurringToggle.checked);
+  const ruleContainer = _qs('#wizard-recurrence-form');
+  const recurrenceRule = (isRecurring && ruleContainer) ? buildRuleFromForm(ruleContainer) : null;
+  return {
+    meetingType, subject, role, expectation, drive, duration, focus, participants,
+    isRecurring: isRecurring && !!recurrenceRule,
+    recurrenceRule: isRecurring ? recurrenceRule : null,
+  };
 }
 
 function _renderRecap() {
@@ -159,6 +173,11 @@ function _renderRecap() {
         v.participants.length
           ? v.participants.map(p => _esc(p.name || p.email)).join(', ')
           : '<em>(aucun)</em>'
+      }</dd>
+      <dt>Récurrence :</dt><dd>${
+        v.isRecurring && v.recurrenceRule
+          ? _esc(summarizeRule(v.recurrenceRule))
+          : '<em>(ponctuelle)</em>'
       }</dd>
     </dl>`;
 }
@@ -310,6 +329,11 @@ async function _submit(ev) {
   if (seriesParent) body.series_parent_id = seriesParent;
   if (targetDate) body.target_meeting_date = targetDate;
   if (v.participants && v.participants.length) body.participants = v.participants;
+  // Lot 6 — récurrence (n'envoie que si toggle on + règle valide).
+  if (v.isRecurring && v.recurrenceRule) {
+    body.is_recurring = true;
+    body.recurrence_rule = v.recurrenceRule;
+  }
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
@@ -450,6 +474,11 @@ export function openWizard(opts) {
   // Lot 5 — reset liste participants à chaque ouverture.
   const partsList = _qs('#wizard-participants-list');
   if (partsList) partsList.innerHTML = '';
+  // Lot 6 — reset récurrence (toggle off + form replié).
+  const recToggle = _qs('#wizard-recurring-toggle');
+  if (recToggle) recToggle.checked = false;
+  const recForm = _qs('#wizard-recurrence-form');
+  if (recForm) recForm.style.display = 'none';
   const banner = _qs('#wizard-series-banner');
   if (banner) banner.style.display = sp ? '' : 'none';
   if (sp) {
@@ -529,6 +558,22 @@ function _bindEvents() {
       const list = _qs('#wizard-participants-list');
       if (list) list.appendChild(createParticipantRow({}));
     });
+  }
+  // Lot 6 — récurrence : toggle ouvre/masque le sous-formulaire, et le
+  // select fréquence raffraichit la visibilité des sous-champs (jours).
+  const recurringToggle = _qs('#wizard-recurring-toggle');
+  const recurrenceForm = _qs('#wizard-recurrence-form');
+  if (recurringToggle && recurrenceForm) {
+    const _toggle = () => {
+      recurrenceForm.style.display = recurringToggle.checked ? '' : 'none';
+      if (recurringToggle.checked) refreshFreqVisibility(recurrenceForm);
+    };
+    recurringToggle.addEventListener('change', _toggle);
+    _toggle();
+  }
+  if (recurrenceForm) {
+    const freqEl = recurrenceForm.querySelector('[data-rrule-freq]');
+    if (freqEl) freqEl.addEventListener('change', () => refreshFreqVisibility(recurrenceForm));
   }
   // Click backdrop (hors carte) → ferme.
   backdrop.addEventListener('click', (ev) => {
