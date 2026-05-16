@@ -45,10 +45,10 @@ L'architecture cible prod-bêta repose sur deux clusters réseau-isolés implém
 pattern Cross Domain Solution (cf.
 [`docs/REVIEW_RESPONSE_PLAN.md`](../../../docs/REVIEW_RESPONSE_PLAN.md)).
 
-- **Cluster externe (DMZ)** : héberge admin-portal, code-generator, upload-portal,
-  antivirus-worker, transcode-worker, file-mover. Doit pouvoir atteindre les services
+- **Cluster externe (DMZ)** : héberge admin-console, mydevices-web, mobile-upload-pwa,
+  clamav-scanner, audio-normalizer, dmz-to-internal-bridge. Doit pouvoir atteindre les services
   d'authentification de la cible (typiquement via tunnel WireGuard).
-- **Cluster interne** : héberge token-issuer, file-puller, transcription. Égress
+- **Cluster interne** : héberge device-token-authority, internal-ingester, transcription. Égress
   restreint, ACL API server limitée à la whitelist ministérielle.
 
 Le mapping concret (qui est externe, qui est interne) ainsi que les détails de

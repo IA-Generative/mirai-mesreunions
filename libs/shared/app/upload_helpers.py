@@ -1,6 +1,6 @@
 """
-Helpers d'upload partagés entre upload-portal (zone externe, flow QR/PWA)
-et code-generator (zone externe, flow upload local OIDC).
+Helpers d'upload partagés entre mobile-upload-pwa (zone externe, flow QR/PWA)
+et mydevices-web (zone externe, flow upload local OIDC).
 
 Concentre la mécanique commune : validation extension, génération du nom S3,
 PUT S3, publication du message AV scan. La logique propre à chaque endpoint
@@ -32,7 +32,7 @@ def build_stored_filename(simple_code: str, original_filename: str) -> str:
     """Construit le nom S3 : ``{simple_code}_{uuid8}_{sanitized}``.
 
     Format historique partagé par tous les workers du pipeline (av-scanner,
-    transcode-worker, file-mover). Le préfixe simple_code permet d'isoler
+    audio-normalizer, dmz-to-internal-bridge). Le préfixe simple_code permet d'isoler
     par session lors des debug ; l'UUID prévient les collisions si le même
     nom est uploadé deux fois ; le sanitize neutralise les chars dangereux
     (slashes, espaces multiples, etc.).

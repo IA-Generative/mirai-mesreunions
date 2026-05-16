@@ -26,16 +26,16 @@ spec:
     - Ingress
   ingress: []
 ---
-# ── Network Policy: Allow file-puller to receive from file-mover ONLY ──
+# ── Network Policy: Allow internal-ingester to receive from dmz-to-internal-bridge ONLY ──
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-file-puller-from-external
+  name: allow-internal-ingester-from-external
   namespace: audio-internal
 spec:
   podSelector:
     matchLabels:
-      app: file-puller
+      app: internal-ingester
   policyTypes:
     - Ingress
   ingress:
@@ -45,21 +45,21 @@ spec:
               zone: external
           podSelector:
             matchLabels:
-              app: file-mover
+              app: dmz-to-internal-bridge
       ports:
         - protocol: TCP
           port: 8090
 ---
-# ── Network Policy: Allow token-issuer to receive from code-generator ONLY ──
+# ── Network Policy: Allow device-token-authority to receive from mydevices-web ONLY ──
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-token-issuer-from-external
+  name: allow-device-token-authority-from-external
   namespace: audio-internal
 spec:
   podSelector:
     matchLabels:
-      app: token-issuer
+      app: device-token-authority
   policyTypes:
     - Ingress
   ingress:
@@ -69,16 +69,16 @@ spec:
               zone: external
           podSelector:
             matchLabels:
-              app: code-generator
+              app: mydevices-web
       ports:
         - protocol: TCP
           port: 8091
 ---
-# ── Network Policy: Allow admin-portal to reach internal Postgres (read-only dashboard needs) ──
+# ── Network Policy: Allow admin-console to reach internal Postgres (read-only dashboard needs) ──
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-admin-portal-to-internal-postgres
+  name: allow-admin-console-to-internal-postgres
   namespace: audio-internal
 spec:
   podSelector:
@@ -93,7 +93,7 @@ spec:
               zone: external
           podSelector:
             matchLabels:
-              app: admin-portal
+              app: admin-console
       ports:
         - protocol: TCP
           port: 5432

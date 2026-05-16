@@ -26,7 +26,7 @@ _REQ.post = MagicMock()
 sys.modules["requests"] = _REQ
 
 # Load llm_client first (gives us the LLMError class hierarchy).
-LLM_CLIENT_PATH = os.path.join(ROOT, "services", "file-mover", "app", "llm_client.py")
+LLM_CLIENT_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "llm_client.py")
 _llm_spec = importlib.util.spec_from_file_location("app.llm_client", LLM_CLIENT_PATH)
 LLM_MOD = importlib.util.module_from_spec(_llm_spec)
 sys.modules.setdefault("app", types.ModuleType("app"))
@@ -35,7 +35,7 @@ _llm_spec.loader.exec_module(LLM_MOD)
 
 # Now load meeting_intelligence — its `from app.llm_client import LLMClient, LLMError`
 # resolves against the stub above.
-MI_PATH = os.path.join(ROOT, "services", "file-mover", "app", "meeting_intelligence.py")
+MI_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "meeting_intelligence.py")
 SPEC = importlib.util.spec_from_file_location("meeting_intelligence_under_test", MI_PATH)
 MI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MI)
@@ -60,7 +60,7 @@ def _llm_raising(exc):
 
 def test_prompts_directory_contains_required_files():
     """The pipeline depends on these prompts being shipped with the image."""
-    prompts_dir = os.path.join(ROOT, "services", "file-mover", "app", "prompts")
+    prompts_dir = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "prompts")
     expected = {
         "speaker_names.txt",
         "oob_cleaning.txt",
@@ -75,7 +75,7 @@ def test_prompts_directory_contains_required_files():
 
 def test_prompts_contain_transcript_placeholder():
     """All prompts must use the {TRANSCRIPT} placeholder so the orchestrator can substitute."""
-    prompts_dir = os.path.join(ROOT, "services", "file-mover", "app", "prompts")
+    prompts_dir = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "prompts")
     for name in (
         "speaker_names.txt",
         "oob_cleaning.txt",

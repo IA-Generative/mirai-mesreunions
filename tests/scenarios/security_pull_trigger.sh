@@ -26,7 +26,7 @@ cat <<'EOF'
    1. kubectl -n audio-internal create secret generic internal-push-trigger-secret \
         --from-literal=token=$(openssl rand -hex 32) --dry-run=client -o yaml | kubectl apply -f -
    2. Same on audio-external.
-   3. kubectl rollout restart deploy/file-puller && deploy/file-mover (both clusters).
+   3. kubectl rollout restart deploy/internal-ingester && deploy/dmz-to-internal-bridge (both clusters).
    4. Old token must now return 401; new token must succeed.
 EOF
 
@@ -85,7 +85,7 @@ EOF
 # --- C6. URL injection (config) -------------------------------------------
 echo
 echo "C6. URL injection via INTERNAL_PUSH_TRIGGER_URL"
-echo "    Set INTERNAL_PUSH_TRIGGER_URL=file:///etc/passwd in the file-mover"
+echo "    Set INTERNAL_PUSH_TRIGGER_URL=file:///etc/passwd in the dmz-to-internal-bridge"
 echo "    deployment, rolling-restart, then check logs for:"
 echo "      'HTTP trigger DISABLED (INTERNAL_PUSH_TRIGGER_URL is empty or not a valid URL)'"
 echo "    No requests.post must be issued. Reset the env var to the proper URL"

@@ -3,7 +3,7 @@
 Ce document décrit le **3e backend de transcription** disponible dans la
 pipeline (en plus de `stub` et `mcr` cf [integrate-with-mcr.md](integrate-with-mcr.md)).
 
-Quand `TRANSCRIPTION_BACKEND=kevent`, le `file-puller` n'utilise plus la
+Quand `TRANSCRIPTION_BACKEND=kevent`, le `internal-ingester` n'utilise plus la
 queue `transcription` locale ni MCR. À la place, il enchaîne :
 
 1. **Transcription** via `POST /v1/audio/transcriptions` du gateway Kevent
@@ -25,7 +25,7 @@ reste accessible.
 
 ```mermaid
 sequenceDiagram
-  participant FP as file-puller
+  participant FP as internal-ingester
   participant K as Kevent gateway
   participant L as LiteLLM Mirai
   participant DB as PostgreSQL interne
@@ -182,7 +182,7 @@ Tous validés depuis la VM build-vm — cf
      --dry-run=client -o yaml | kubectl apply -f -
    ```
 
-3. **Build + push image** avec le nouveau code, rolling restart file-puller
+3. **Build + push image** avec le nouveau code, rolling restart internal-ingester
    (avec `TRANSCRIPTION_BACKEND=stub` toujours — vérifier que rien ne bouge).
 
 4. **Activer le backend Kevent sans sous-toggles** :
@@ -214,7 +214,7 @@ Tous validés depuis la VM build-vm — cf
    suivre [docs/protocole_test_transcription_diarisation.md](protocole_test_transcription_diarisation.md).
 
 7. **Itération sur les prompts** dans
-   [`services/file-mover/app/prompts/`](../services/file-mover/app/prompts/)
+   [`services/dmz-to-internal-bridge/app/prompts/`](../services/dmz-to-internal-bridge/app/prompts/)
    selon les résultats. Rebuild + push image après chaque itération
    (les prompts sont embarqués dans l'image — externalisation en
    ConfigMap est en hors-scope).
@@ -267,7 +267,7 @@ Trois modes au choix :
 |---|---|---|
 | **Image baked-in** (défaut) | rebuild + push image, rolling restart | simple, pas d'infra extra |
 | **ConfigMap K8s** | `kubectl create configmap …` + `rollout restart` | pas de rebuild, ~30 s pour un nouveau glossaire en prod |
-| **Volume Docker** (compose) | éditer `glossaire/`, `docker compose restart file-puller` | dev local, pas de rebuild |
+| **Volume Docker** (compose) | éditer `glossaire/`, `docker compose restart internal-ingester` | dev local, pas de rebuild |
 
 Le `volumeMount` ConfigMap dans
 [`deploy/kubernetes/internal-zone/deployments.yaml`](../deploy/kubernetes/internal-zone/deployments.yaml)
@@ -281,7 +281,7 @@ KUBECONFIG=…/kubeconfig-internal-gw.yaml \
 ```
 
 Le script crée/upserte la ConfigMap depuis `glossaire/` puis
-`rollout restart deploy/file-puller` (le worker recharge au boot).
+`rollout restart deploy/internal-ingester` (le worker recharge au boot).
 
 > **Limite ConfigMap K8s** : 1 MiB par ConfigMap. Notre glossaire actuel
 > fait ~20 KiB → marge confortable. Au-delà, splitter par fichier ou
@@ -379,7 +379,7 @@ pas de migration DB.
 `~/.claude/plans/federated-finding-whisper.md` (Sprint 1).
 
 **Constat actuel** : `_transcribe_via_kevent` est monolithique, bloque
-un thread file-puller 15-30 min, et toute interruption (OOM, rollout,
+un thread internal-ingester 15-30 min, et toute interruption (OOM, rollout,
 HPA scale-down) entraîne une perte irréversible (message RabbitMQ acké
 d'avance, TTL Kevent gateway expiré au resume). Vécu en prod-bêta le
 2026-05-13 sur un fichier de 53 MB.

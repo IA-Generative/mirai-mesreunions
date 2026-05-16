@@ -21,9 +21,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 def _load_kevent_client():
     """Importe kevent_client.py en standalone (sans tirer le reste de
-    file-mover/app/__init__).
+    dmz-to-internal-bridge/app/__init__).
     """
-    path = os.path.join(ROOT, "services", "file-mover", "app", "kevent_client.py")
+    path = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "kevent_client.py")
     spec = importlib.util.spec_from_file_location("kc_under_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

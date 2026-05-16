@@ -11,7 +11,7 @@
 
 ## Principe fondamental
 
-**La zone interne est l'autorité de confiance.** Aucun identifiant de session n'est généré côté externe. Le `token-issuer` (zone interne) est la seule source de vérité pour les codes d'upload. La zone externe ne fait que relayer et consommer ces tokens — elle ne peut en aucun cas en forger.
+**La zone interne est l'autorité de confiance.** Aucun identifiant de session n'est généré côté externe. Le `device-token-authority` (zone interne) est la seule source de vérité pour les codes d'upload. La zone externe ne fait que relayer et consommer ces tokens — elle ne peut en aucun cas en forger.
 
 ## Architecture
 
@@ -80,32 +80,32 @@ sequenceDiagram
   CG-->>U: QR code + code
 ```
 
-Le code-generator **ne contient aucune logique de génération de token**. Il délègue à 100% au token-issuer via API authentifiée (bearer token). La table `issued_tokens` en zone interne fait foi.
+Le mydevices-web **ne contient aucune logique de génération de token**. Il délègue à 100% au device-token-authority via API authentifiée (bearer token). La table `issued_tokens` en zone interne fait foi.
 
 ## Composants
 
 | Service | Zone | Port | Rôle |
 |---------|------|------|------|
-| **code-generator** | Externe | 8080 | Interface OIDC, demande de token au token-issuer interne, affiche QR |
-| **upload-portal** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
-| **antivirus-worker** | Externe | — | Scan ClamAV, quarantaine si virus |
-| **transcode-worker** | Externe | — | FFmpeg : loudnorm dual-pass (linear) **conditionnel** (sondage RMS à +60s/+5min, skip si déjà ≥ -30 dBFS — cf bench [bench/reports/SYNTHESE.md](bench/reports/SYNTHESE.md)), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
-| **file-mover** | Externe | — | Publie une notification *fichier prêt* sur la queue durable `internal_pull` (AMQP) ; trigger HTTP optionnel pour ramener la latence quasi-zéro |
-| **token-issuer** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
-| **file-puller** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
-| **transcription-stub** | Interne | — | Backend par défaut (`TRANSCRIPTION_BACKEND=stub`), simule la STT via la queue locale |
-| **MCR push** | Interne (file-puller) | — | Backend `mcr` : pousse le fichier transcodé vers la plateforme MCR via OIDC refresh token (cf [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md)) |
-| **Kevent / Mirai** | Interne (file-puller) | — | Backend `kevent` : Whisper + pyannote diarisation + intelligence de réunion LLM (speaker naming, **glossary correction**, OOB cleaning, reformulation, analyse 5 sections). Glossaire administratif embarqué image (fallback) ou monté en ConfigMap K8s sans rebuild — cf [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md) |
+| **mydevices-web** | Externe | 8080 | Interface OIDC, demande de token au device-token-authority interne, affiche QR |
+| **mobile-upload-pwa** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
+| **clamav-scanner** | Externe | — | Scan ClamAV, quarantaine si virus |
+| **audio-normalizer** | Externe | — | FFmpeg : loudnorm dual-pass (linear) **conditionnel** (sondage RMS à +60s/+5min, skip si déjà ≥ -30 dBFS — cf bench [bench/reports/SYNTHESE.md](bench/reports/SYNTHESE.md)), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
+| **dmz-to-internal-bridge** | Externe | — | Publie une notification *fichier prêt* sur la queue durable `internal_pull` (AMQP) ; trigger HTTP optionnel pour ramener la latence quasi-zéro |
+| **device-token-authority** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
+| **internal-ingester** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
+| **transcription-relay** | Interne | — | Backend par défaut (`TRANSCRIPTION_BACKEND=stub`), simule la STT via la queue locale |
+| **MCR push** | Interne (internal-ingester) | — | Backend `mcr` : pousse le fichier transcodé vers la plateforme MCR via OIDC refresh token (cf [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md)) |
+| **Kevent / Mirai** | Interne (internal-ingester) | — | Backend `kevent` : Whisper + pyannote diarisation + intelligence de réunion LLM (speaker naming, **glossary correction**, OOB cleaning, reformulation, analyse 5 sections). Glossaire administratif embarqué image (fallback) ou monté en ConfigMap K8s sans rebuild — cf [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md) |
 
 ## Principes de sécurité
 
-1. **Tokens générés côté interne** — Le `token-issuer` est la seule autorité. La zone externe ne peut pas forger de codes de session. En cas de compromission DMZ, aucun token frauduleux ne peut être créé.
+1. **Tokens générés côté interne** — Le `device-token-authority` est la seule autorité. La zone externe ne peut pas forger de codes de session. En cas de compromission DMZ, aucun token frauduleux ne peut être créé.
 
 2. **Pattern PULL strict (notification + données)** — Aucune donnée ni notification n'est *poussée* vers la zone interne. La zone externe publie sur la queue AMQP `internal_pull` ; la zone interne ouvre une socket sortante vers le broker pour la consommer, puis tire le fichier depuis S3. Le wake-up HTTP optionnel est purement une optimisation de latence et fonctionne sous bearer + ACL nginx — sa rotation n'a aucun impact fonctionnel grâce au polling de la queue.
 
 3. **Surface d'entrée contrôlée vers la zone interne** — La zone interne n'expose que deux services :
-   - `token-issuer:8091` ← accessible uniquement par `code-generator` via NetworkPolicy intra-cluster
-   - `file-puller` via Ingress public restreint `pull-trigger.fake-domain.name` : annotation `whitelist-source-range` (IP NAT egress du file-mover + IPs admins), bearer `INTERNAL_PUSH_TRIGGER_TOKEN`, et 4e couche optionnelle d'ACL applicative. Le port 8090 intra-cluster ne sert plus qu'aux probes Kubernetes (`/healthz`).
+   - `device-token-authority:8091` ← accessible uniquement par `mydevices-web` via NetworkPolicy intra-cluster
+   - `internal-ingester` via Ingress public restreint `pull-trigger.fake-domain.name` : annotation `whitelist-source-range` (IP NAT egress du dmz-to-internal-bridge + IPs admins), bearer `INTERNAL_PUSH_TRIGGER_TOKEN`, et 4e couche optionnelle d'ACL applicative. Le port 8090 intra-cluster ne sert plus qu'aux probes Kubernetes (`/healthz`).
 
 4. **3 stockages S3 séparés** — `audio-upload` (bruts, DMZ), `audio-processed` (transcodés, *guichet* DMZ↔interne avec IAM segmenté writer/reader), `audio-internal` (comptes usagers, zone protégée uniquement)
 
@@ -113,7 +113,7 @@ Le code-generator **ne contient aucune logique de génération de token**. Il d�
 
 6. **Analyse antivirale obligatoire** — Tout fichier passe par ClamAV. Fichiers infectés en quarantaine.
 
-7. **Transfert idempotent** — Si une notification `file_ready` est rejouée (retry réseau/queue), le `file-puller` détecte le fichier déjà importé et répond `already_pulled` sans doublonner les données.
+7. **Transfert idempotent** — Si une notification `file_ready` est rejouée (retry réseau/queue), le `internal-ingester` détecte le fichier déjà importé et répond `already_pulled` sans doublonner les données.
 
 8. **Enrôlement persistant device navigateur** — Le portail upload enrôle le navigateur (token device persistant), vérifie sa validité à chaque initialisation et permet la révocation unitaire/globale côté QR interne et admin.
 
@@ -396,10 +396,10 @@ kubectl apply -f deploy/kubernetes/internal-zone/
 ```
 
 Autoscaling Kubernetes configuré:
-- `transcode-worker` via KEDA sur la queue `transcode` (jusqu'à 50 replicas)
-- `file-mover` via KEDA sur la queue `file_ready` (jusqu'à 50 replicas)
-- `transcription-stub` via KEDA sur la queue `transcription` (jusqu'à 20 replicas)
-- `file-puller` via HPA CPU/Mémoire (1 à 20 replicas)
+- `audio-normalizer` via KEDA sur la queue `transcode` (jusqu'à 50 replicas)
+- `dmz-to-internal-bridge` via KEDA sur la queue `file_ready` (jusqu'à 50 replicas)
+- `transcription-relay` via KEDA sur la queue `transcription` (jusqu'à 20 replicas)
+- `internal-ingester` via HPA CPU/Mémoire (1 à 20 replicas)
 
 ### Runbook debug transfert (Kubernetes)
 
@@ -419,17 +419,17 @@ kubectl -n audio-internal get hpa
 kubectl -n audio-external logs deploy/rabbitmq --tail=200
 
 # 4) Chaîne de transfert
-kubectl -n audio-external logs deploy/file-mover --tail=200
-kubectl -n audio-internal logs deploy/file-puller --tail=200
+kubectl -n audio-external logs deploy/dmz-to-internal-bridge --tail=200
+kubectl -n audio-internal logs deploy/internal-ingester --tail=200
 
 # 5) Redémarrage ciblé (si nécessaire)
-kubectl -n audio-external rollout restart deploy/file-mover
-kubectl -n audio-internal rollout restart deploy/file-puller
+kubectl -n audio-external rollout restart deploy/dmz-to-internal-bridge
+kubectl -n audio-internal rollout restart deploy/internal-ingester
 ```
 
 Points à confirmer:
-- `file-mover` publie bien la notification interne (pas d'erreur HTTP vers `file-puller`).
-- `file-puller` répond `already_pulled` en cas de rejeu (idempotence), sans créer de doublon.
+- `dmz-to-internal-bridge` publie bien la notification interne (pas d'erreur HTTP vers `internal-ingester`).
+- `internal-ingester` répond `already_pulled` en cas de rejeu (idempotence), sans créer de doublon.
 - Les secrets S3 sont présents et identiques dans les namespaces `audio-external` et `audio-internal`.
 
 ## Isolation réseau
@@ -438,9 +438,9 @@ Points à confirmer:
 
 | Réseau | Services | Rôle |
 |--------|----------|------|
-| `external-net` | code-generator, upload-portal, admin-portal, workers, ClamAV, MinIO upload/processed, PostgreSQL ext | Zone DMZ |
-| `internal-net` | token-issuer, file-puller, transcription-stub, admin-portal, MinIO internal, PostgreSQL int | Zone interne |
-| `dmz-net` | code-generator ↔ token-issuer, file-mover ↔ file-puller | Bridge contrôlé (2 flux seulement) |
+| `external-net` | mydevices-web, mobile-upload-pwa, admin-console, workers, ClamAV, MinIO upload/processed, PostgreSQL ext | Zone DMZ |
+| `internal-net` | device-token-authority, internal-ingester, transcription-relay, admin-console, MinIO internal, PostgreSQL int | Zone interne |
+| `dmz-net` | mydevices-web ↔ device-token-authority, dmz-to-internal-bridge ↔ internal-ingester | Bridge contrôlé (2 flux seulement) |
 
 ### Kubernetes (NetworkPolicies)
 
@@ -448,10 +448,10 @@ Points à confirmer:
 flowchart LR
   EXTNS["Namespace audio-external"]
   INTNS["Namespace audio-internal (deny-all par défaut)"]
-  CG["code-generator"]
-  FM["file-mover"]
-  TI["token-issuer:8091"]
-  FP["file-puller:8090"]
+  CG["mydevices-web"]
+  FM["dmz-to-internal-bridge"]
+  TI["device-token-authority:8091"]
+  FP["internal-ingester:8090"]
   INTRA["Trafic intra-zone interne autorisé"]
 
   EXTNS --- CG
@@ -479,26 +479,26 @@ Variables d'environnement principales (`configs/.env.example`) :
 | `UPLOAD_EXPIRY_GRACE_SECONDS` | `300` | Fenêtre de grâce pour terminer un upload après expiration du code |
 | `EXTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté upload portal |
 | `EXTERNAL_PURGE_MAX_AGE_HOURS` | `12` | Âge max des fichiers externes avant purge |
-| `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté file-puller |
+| `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté internal-ingester |
 | `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max des fichiers importés côté intranet avant purge |
-| `INTERNAL_PUSH_TRIGGER_URL` | `""` | URL HTTP(S) de wake-up cross-cluster vers `pull-trigger.…/api/v1/pull-trigger`. Toute valeur non-URL (`""`, `deactivate`, `false`, …) désactive le trigger ; le file-puller continue à drainer la queue par polling |
-| `INTERNAL_PUSH_TRIGGER_TOKEN` | — | Bearer pour `/api/v1/pull-trigger` (côté file-mover et file-puller). Distinct de `INTERNAL_API_TOKEN`, rotable indépendamment |
-| `INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST` | `""` | CIDR list applicative redondante côté file-puller (vide = on s'appuie sur l'ACL nginx) |
-| `INTERNAL_PULL_QUEUE_INTERVAL_SECONDS` | `30` | Intervalle de drain périodique de la queue `internal_pull` côté file-puller |
-| `PULL_TRIGGER_HTTP_TIMEOUT_SECONDS` | `3` | Timeout du POST best-effort de file-mover vers le trigger HTTP |
+| `INTERNAL_PUSH_TRIGGER_URL` | `""` | URL HTTP(S) de wake-up cross-cluster vers `pull-trigger.…/api/v1/pull-trigger`. Toute valeur non-URL (`""`, `deactivate`, `false`, …) désactive le trigger ; le internal-ingester continue à drainer la queue par polling |
+| `INTERNAL_PUSH_TRIGGER_TOKEN` | — | Bearer pour `/api/v1/pull-trigger` (côté dmz-to-internal-bridge et internal-ingester). Distinct de `INTERNAL_API_TOKEN`, rotable indépendamment |
+| `INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST` | `""` | CIDR list applicative redondante côté internal-ingester (vide = on s'appuie sur l'ACL nginx) |
+| `INTERNAL_PULL_QUEUE_INTERVAL_SECONDS` | `30` | Intervalle de drain périodique de la queue `internal_pull` côté internal-ingester |
+| `PULL_TRIGGER_HTTP_TIMEOUT_SECONDS` | `3` | Timeout du POST best-effort de dmz-to-internal-bridge vers le trigger HTTP |
 | `QUEUE_MAX_RETRIES` | `5` | Nombre max de retries (via header `x-retry-count`) avant qu'un message empoisonné soit droppé par les workers consommateurs |
 | `DEVICE_TOKEN_RETENTION_HOURS` | `168` | Durée de rétention d'un enrôlement device (zone interne) |
 | `DEVICE_REVALIDATE_INTERVAL_SECONDS` | `14400` | Intervalle de revalidation asynchrone des device tokens côté upload |
 | `DEVICE_REVALIDATE_MAX_FAILURE_SECONDS` | `14400` | Fenêtre max d'échec backend avant refus des requêtes device |
-| `DEVICE_API_PROXY_BASE_URL` | `http://code-generator:8080` | URL du proxy API device utilisé par upload-portal |
+| `DEVICE_API_PROXY_BASE_URL` | `http://mydevices-web:8080` | URL du proxy API device utilisé par mobile-upload-pwa |
 | `NORMALIZATION_CACHE_TTL_SECONDS` | `3600` | Durée du cache des métriques de normalisation côté admin |
 | `NORMALIZATION_MAX_COMPUTE_PER_REFRESH` | `0` | Nombre max d'analyses de normalisation lancées par refresh dashboard (0 = non bloquant) |
 | `NORMALIZATION_ANALYSIS_MAX_SECONDS` | `180` | Durée max de l'échantillon analysé pour l'impact de normalisation (page QR/interne) |
-| `TOKEN_ISSUER_API_URL` | `http://token-issuer:8091/api/v1/issue-token` | URL du token-issuer interne |
+| `TOKEN_ISSUER_API_URL` | `http://device-token-authority:8091/api/v1/issue-token` | URL du device-token-authority interne |
 | `INTERNAL_API_TOKEN` | — | Bearer token partagé inter-zones |
 | `PUBLIC_HOST` | — | Hôte/IP publique utilisée pour les URLs générées (QR + redirects) |
 | `OIDC_ISSUER` | — | URL Keycloak |
-| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/audio-upload` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
+| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/openwebui` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
 | `FFMPEG_AUDIO_FILTER` | `highpass=f=80,lowpass=f=7000,loudnorm=...` | Filtre FFmpeg voix |
 | `ENABLE_LOUDNORM` | `true` | Active/desactive `loudnorm` dans le worker de transcodage (mode dual-pass `linear=true`). Ignoré si `LOUDNORM_AUTO_DECISION=true`. |
 | `POST_LOUDNORM_FILTER_CHAIN` | `highpass=f=80,lowpass=f=7000,alimiter=limit=0.95` | Filtres appliqués après loudnorm (ordre strict) |
@@ -571,7 +571,7 @@ flowchart TD
   DK --> DKI["internal-zone/deployments.yaml"]
   R --> DOC["docs/ARCHITECTURE.md"]
   R --> L["libs/shared/app/ (config, models, DB, S3, queue)"]
-  R --> S["services/ (code-generator, upload-portal, workers, token-issuer, file-puller, transcription-stub)"]
+  R --> S["services/ (mydevices-web, mobile-upload-pwa, workers, device-token-authority, internal-ingester, transcription-relay)"]
   R --> DS["deploy/scripts/setup.sh"]
   R --> DF["deploy/docker/Dockerfile"]
   R --> REQ["requirements.txt"]

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sync the local `glossaire/` directory to the `kevent-glossary` ConfigMap
-# in the audio-internal namespace, then restart file-puller so the worker
+# in the audio-internal namespace, then restart internal-ingester so the worker
 # reloads the glossary at boot.
 #
-# When the ConfigMap is absent, file-puller falls back to the glossary
+# When the ConfigMap is absent, internal-ingester falls back to the glossary
 # baked into the image at /app/glossaire (Dockerfile COPY).
 #
 # Usage:
@@ -33,9 +33,9 @@ kubectl create configmap "${CONFIGMAP_NAME}" \
     --dry-run=client -o yaml \
     | kubectl apply -f -
 
-echo "Rollout restart file-puller so the worker reloads the glossary…"
-kubectl --namespace "${NAMESPACE}" rollout restart deployment/file-puller
-kubectl --namespace "${NAMESPACE}" rollout status deployment/file-puller --timeout=120s
+echo "Rollout restart internal-ingester so the worker reloads the glossary…"
+kubectl --namespace "${NAMESPACE}" rollout restart deployment/internal-ingester
+kubectl --namespace "${NAMESPACE}" rollout status deployment/internal-ingester --timeout=120s
 
 echo "Done. Verify with:"
-echo "  kubectl -n ${NAMESPACE} logs deploy/file-puller | grep -i 'Loaded.*glossary terms'"
+echo "  kubectl -n ${NAMESPACE} logs deploy/internal-ingester | grep -i 'Loaded.*glossary terms'"

@@ -1,5 +1,5 @@
 """
-Unit tests for file-puller's /api/v1/pull-trigger endpoint.
+Unit tests for internal-ingester's /api/v1/pull-trigger endpoint.
 
 Covers:
   - bearer enforcement (401 on missing/wrong token);
@@ -90,10 +90,10 @@ def _install_stubs(trigger_token: str, ip_allowlist: str = ""):
 
 
 def _load_puller():
-    sys.modules.pop("file_puller_under_test", None)
+    sys.modules.pop("internal_ingester_under_test", None)
     spec = importlib.util.spec_from_file_location(
-        "file_puller_under_test",
-        os.path.join(ROOT, "services", "file-mover", "app", "puller.py"),
+        "internal_ingester_under_test",
+        os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "puller.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

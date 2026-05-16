@@ -1,5 +1,5 @@
 """
-Unit tests for services.file-mover.app.doc_extractor.
+Unit tests for services.dmz-to-internal-bridge.app.doc_extractor.
 
 The extractor wraps four third-party libs (pypdf, python-docx, odfpy,
 python-pptx). The tests stub those libs in ``sys.modules`` so we exercise
@@ -30,7 +30,7 @@ if ROOT not in sys.path:
 
 # The module under test imports its four parser libraries lazily (inside
 # the per-format helpers), so we can load it before installing stubs.
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "doc_extractor.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "doc_extractor.py")
 SPEC = importlib.util.spec_from_file_location("doc_extractor_under_test", MODULE_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

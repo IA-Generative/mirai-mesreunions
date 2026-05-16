@@ -124,7 +124,7 @@ sequenceDiagram
 >   `file_ready` → `internal_pull`) — chaque worker est arrêtable
 >   indépendamment, et le retry counter (PR #2) drop les messages
 >   poisons après `QUEUE_MAX_RETRIES=5` au lieu de bloquer la queue.
-> - **WebSocket temps réel** vers l'upload-portal pour que l'utilisateur
+> - **WebSocket temps réel** vers l'mobile-upload-pwa pour que l'utilisateur
 >   voie l'avancement (scan → transcodé → transfert) sans recharger.
 
 ## Pattern PULL Inter-Zones
@@ -153,7 +153,7 @@ sequenceDiagram
   FP->>PGI: INSERT user_audio_files (transcription_status=pending|disabled)
 
   opt auto_transcribe = true
-    Note over FP,STT: La queue n'est pas un simple relai : elle sert de buffer durable<br/>(survit à un crash du stub), de filet retry borné via x-retry-count<br/>(audio corrompu = drop après 5 tentatives), et de signal scaling KEDA<br/>(transcription-stub-scaledobject autoscale sur la profondeur de queue).
+    Note over FP,STT: La queue n'est pas un simple relai : elle sert de buffer durable<br/>(survit à un crash du stub), de filet retry borné via x-retry-count<br/>(audio corrompu = drop après 5 tentatives), et de signal scaling KEDA<br/>(transcription-relay-scaledobject autoscale sur la profondeur de queue).
     FP->>MQ: publish transcription (audio_file_id, stored_filename)
     MQ-->>STT: deliver transcription
     STT->>S3I: GET audio (stored_filename)
@@ -228,7 +228,7 @@ flowchart TD
 
 Le backend `kevent` actuel exécute le pipeline post-pull dans une
 fonction monolithique `_transcribe_via_kevent` qui bloque un thread
-file-puller 15-30 min et perd l'état au moindre rollout / OOM. La
+internal-ingester 15-30 min et perd l'état au moindre rollout / OOM. La
 refonte cible découpe ce monolithe en **9 step functions idempotentes**
 pilotées chacune par sa propre queue RabbitMQ, avec un **fan-out
 parallèle post-whisper** :
@@ -258,11 +258,11 @@ sans locuteurs pendant que pyannote tourne. Détail complet dans
 flowchart LR
   EXTNS["namespace audio-external\n(DMZ + RabbitMQ broker)"]
   INTNS["namespace audio-internal\n(deny-all ingress hors trigger)"]
-  CG["code-generator"]
-  FM["file-mover"]
+  CG["mydevices-web"]
+  FM["dmz-to-internal-bridge"]
   MQ["rabbitmq:5672"]
-  TI["token-issuer:8091"]
-  FP["file-puller:8090"]
+  TI["device-token-authority:8091"]
+  FP["internal-ingester:8090"]
   ING["pull-trigger.fake-domain.name\n(Ingress nginx + ACL whitelist + bearer)"]
 
   EXTNS --- CG
@@ -287,14 +287,14 @@ flowchart LR
 ## Pull-Trigger HTTP optionnel
 
 Pour ramener la latence du flux vers la zone interne en dessous du tick
-de polling (30 s par défaut), le file-mover peut envoyer un wake-up HTTP
-au file-puller via un Ingress public dédié. Le mécanisme est conçu pour
+de polling (30 s par défaut), le dmz-to-internal-bridge peut envoyer un wake-up HTTP
+au internal-ingester via un Ingress public dédié. Le mécanisme est conçu pour
 être **désactivable et inopérant par défaut** :
 
-- côté file-mover, l'env var `INTERNAL_PUSH_TRIGGER_URL` doit parser comme
+- côté dmz-to-internal-bridge, l'env var `INTERNAL_PUSH_TRIGGER_URL` doit parser comme
   URL HTTP(S) valide pour activer le trigger ; toute autre valeur (vide,
   `false`, `deactivate`, `off`, mal formée) le désactive sans erreur ;
-- côté file-puller, l'endpoint `/api/v1/pull-trigger` n'accepte que le
+- côté internal-ingester, l'endpoint `/api/v1/pull-trigger` n'accepte que le
   bearer `INTERNAL_PUSH_TRIGGER_TOKEN` — distinct du `INTERNAL_API_TOKEN`
   pour permettre une rotation indépendante. Si le secret n'est pas
   provisionné, l'endpoint rejette toutes les requêtes en 401 ;
@@ -305,7 +305,7 @@ au file-puller via un Ingress public dédié. Le mécanisme est conçu pour
 
 **Rotation du token** : `openssl rand -hex 32` puis `kubectl apply` du Secret
 `internal-push-trigger-secret` sur les deux clusters (audio-external pour
-file-mover, audio-internal pour file-puller), suivi d'un rolling restart
+dmz-to-internal-bridge, audio-internal pour internal-ingester), suivi d'un rolling restart
 des deux Deployments. Les anciens pods sur l'ancien token reçoivent 401 et
 basculent silencieusement sur le polling AMQP sans perte de message —
 c'est le bon comportement.
@@ -322,7 +322,7 @@ c'est le bon comportement.
 ## Comportement Du Flag auto_transcribe
 
 - Valeur fixee a la creation du token via la checkbox QR.
-- Propagee jusqu'a `file-puller` via metadata NOTIFY.
+- Propagee jusqu'a `internal-ingester` via metadata NOTIFY.
 - Effet:
   - `true`: la transcription est mise en file (stub).
   - `false`: pas de mise en file transcription.

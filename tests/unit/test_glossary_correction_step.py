@@ -28,7 +28,7 @@ sys.modules["requests"] = _REQ
 
 # Load llm_client and meeting_intelligence in the same way the existing
 # meeting_intelligence tests do.
-LLM_PATH = os.path.join(ROOT, "services", "file-mover", "app", "llm_client.py")
+LLM_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "llm_client.py")
 _lspec = importlib.util.spec_from_file_location("app.llm_client", LLM_PATH)
 LLM_MOD = importlib.util.module_from_spec(_lspec)
 sys.modules.setdefault("app", types.ModuleType("app"))
@@ -39,13 +39,13 @@ _lspec.loader.exec_module(LLM_MOD)
 # step). The deferred import inside apply_glossary_correction is `from
 # app.glossary_loader import filter_relevant` — so we must register it under
 # that name in sys.modules.
-GL_PATH = os.path.join(ROOT, "services", "file-mover", "app", "glossary_loader.py")
+GL_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "glossary_loader.py")
 _gspec = importlib.util.spec_from_file_location("app.glossary_loader", GL_PATH)
 GL_MOD = importlib.util.module_from_spec(_gspec)
 sys.modules["app.glossary_loader"] = GL_MOD
 _gspec.loader.exec_module(GL_MOD)
 
-MI_PATH = os.path.join(ROOT, "services", "file-mover", "app", "meeting_intelligence.py")
+MI_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "meeting_intelligence.py")
 _mspec = importlib.util.spec_from_file_location("meeting_intelligence_under_test", MI_PATH)
 MI = importlib.util.module_from_spec(_mspec)
 _mspec.loader.exec_module(MI)

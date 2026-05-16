@@ -80,8 +80,8 @@ _install_stubs()
 
 
 def _import_worker():
-    path = os.path.join(ROOT, "services", "transcode-worker", "app", "main.py")
-    spec = importlib.util.spec_from_file_location("transcode_worker_under_test", path)
+    path = os.path.join(ROOT, "services", "audio-normalizer", "app", "main.py")
+    spec = importlib.util.spec_from_file_location("audio_normalizer_under_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

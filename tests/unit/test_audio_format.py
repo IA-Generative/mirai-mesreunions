@@ -25,7 +25,7 @@ import pytest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
-SERVICE_PATH = os.path.join(ROOT, "services", "file-mover")
+SERVICE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge")
 if SERVICE_PATH not in sys.path:
     sys.path.insert(0, SERVICE_PATH)
 

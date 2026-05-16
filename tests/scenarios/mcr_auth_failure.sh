@@ -26,7 +26,7 @@ echo "2. Now upload an audio file from the mobile flow under this user_sub."
 read -p "Press Enter once the file is at status 'transcoded' on the admin dashboard..."
 
 echo
-echo "3. Waiting up to 90s for the file-puller to mark mcr_auth_failed..."
+echo "3. Waiting up to 90s for the internal-ingester to mark mcr_auth_failed..."
 for i in $(seq 1 18); do
   STATUS=$(int_ -n audio-internal exec deploy/postgres-internal -- \
     psql -U audio_int -d audio_upload_int -tAc \
@@ -40,8 +40,8 @@ done
 [[ "$STATUS" == *mcr_auth_failed* ]] || { fail "timeout — status did not flip" "got $STATUS"; exit 1; }
 
 echo
-echo "4. Verify file-puller logs explicitly mention re-login requirement:"
-int_ -n audio-internal logs -l app=file-puller --tail=200 \
+echo "4. Verify internal-ingester logs explicitly mention re-login requirement:"
+int_ -n audio-internal logs -l app=internal-ingester --tail=200 \
   | grep -E "no refresh token stored|re-login" | tail -3 || \
   fail "no log line about missing refresh token" "check logs manually"
 

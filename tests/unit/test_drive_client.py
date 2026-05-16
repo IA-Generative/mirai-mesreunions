@@ -1,5 +1,5 @@
 """
-Unit tests for services.file-mover.app.drive_client.
+Unit tests for services.dmz-to-internal-bridge.app.drive_client.
 
 Same approach as test_mcr_client: stub the ``requests`` module and assert
 that each HTTP failure mode maps to the right exception class so the
@@ -59,7 +59,7 @@ def _resp(status_code=200, json_data=None, text="", content=b"", headers=None):
     )
 
 
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "drive_client.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "drive_client.py")
 SPEC = importlib.util.spec_from_file_location("drive_client_under_test", MODULE_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

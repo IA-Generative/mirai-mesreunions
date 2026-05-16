@@ -30,8 +30,8 @@
   - bootstrap suivant avec token révoqué → `401` + message explicite (bloqué)
 - Déploiement Kubernetes:
   - image push tag `20260215-142003` (amd64)
-  - rollouts validés: `admin-portal`, `code-generator`, `upload-portal`, `antivirus-worker`,
-    `transcode-worker`, `file-mover`, `token-issuer`, `file-puller`, `transcription-stub`
+  - rollouts validés: `admin-console`, `mydevices-web`, `mobile-upload-pwa`, `clamav-scanner`,
+    `audio-normalizer`, `dmz-to-internal-bridge`, `device-token-authority`, `internal-ingester`, `transcription-relay`
   - état final pods: **Running/Ready** dans `audio-external` et `audio-internal`
 
 ## Anomalies rencontrées et corrigées

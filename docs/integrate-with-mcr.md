@@ -9,7 +9,7 @@ intégrés à une réunion et transcrits.
 
 Le push n'est pas effectué par le téléphone de l'utilisateur ni par sa
 session web : il a lieu **après** que l'utilisateur ait fermé son
-navigateur, depuis le `file-puller` côté zone protégée, dès qu'un fichier
+navigateur, depuis le `internal-ingester` côté zone protégée, dès qu'un fichier
 sort du pipeline interne (download depuis S3 audio-processed → upload S3
 audio-internal → INSERT `user_audio_files`).
 
@@ -22,9 +22,9 @@ token Keycloak frais**. Comme la session web a expiré, on utilise un
 ```mermaid
 sequenceDiagram
   participant U as Utilisateur
-  participant CG as code-generator (mydevices)
+  participant CG as mydevices-web (mydevices)
   participant KC as Keycloak (mysso / sso.mirai)
-  participant TI as token-issuer (interne)
+  participant TI as device-token-authority (interne)
   participant CRY as Fernet (clé K8s Secret)
   participant PGI as PostgreSQL interne
 
@@ -42,17 +42,17 @@ sequenceDiagram
   CG-->>U: redirect /generate (session web ouverte)
 ```
 
-L'admin-portal suit le même flux. Le `refresh_token` plaintext n'est jamais
-journalisé, jamais persisté en clair, et `token-issuer` (qui fait l'écriture
+L'admin-console suit le même flux. Le `refresh_token` plaintext n'est jamais
+journalisé, jamais persisté en clair, et `device-token-authority` (qui fait l'écriture
 DB) n'a pas besoin de la clé Fernet — il stocke et restitue uniquement le
 ciphertext.
 
-## Diagramme 2 — Push MCR (file-puller, asynchrone)
+## Diagramme 2 — Push MCR (internal-ingester, asynchrone)
 
 ```mermaid
 sequenceDiagram
-  participant FP as file-puller (interne)
-  participant TI as token-issuer
+  participant FP as internal-ingester (interne)
+  participant TI as device-token-authority
   participant PGI as PostgreSQL interne
   participant CRY as Fernet
   participant KC as Keycloak
@@ -89,7 +89,7 @@ sequenceDiagram
 ```
 
 Trois familles d'erreurs sont distinguées dans
-[mcr_client.py](../services/file-mover/app/mcr_client.py) :
+[mcr_client.py](../services/dmz-to-internal-bridge/app/mcr_client.py) :
 
 - **`MCRAuthError`** (refresh expiré, 401/403 sur `/meetings`) ⇒ on
   supprime le ciphertext + on marque `mcr_auth_failed`. **Pas de retry**.
@@ -107,10 +107,10 @@ stateDiagram-v2
   [*] --> Absent
   Absent --> Stocke : login OIDC avec scope offline_access
   Stocke --> Stocke : nouveau login (rotation rolling KC)
-  Stocke --> Utilise : file-puller MCR push
+  Stocke --> Utilise : internal-ingester MCR push
   Utilise --> Stocke : success<br/>(refresh inchangé en DB,<br/>access_token jetable)
   Utilise --> Invalide : KC repond invalid_grant
-  Invalide --> Absent : DELETE row via token-issuer
+  Invalide --> Absent : DELETE row via device-token-authority
   Stocke --> Absent : user logout
   Stocke --> Absent : admin revoke devices
 ```
@@ -126,11 +126,11 @@ un refresh token utilisateur sans son consentement explicite.
   et stockée dans le K8s Secret `oidc-refresh-token-encryption` (clé
   `key`). Helper : [`libs/shared/app/secrets_crypto.py`](../libs/shared/app/secrets_crypto.py).
 - Le **plaintext** n'apparaît jamais en logs ni en DB. Seule la fonction
-  `_push_to_mcr` côté file-puller le manipule en mémoire le temps
+  `_push_to_mcr` côté internal-ingester le manipule en mémoire le temps
   d'appeler Keycloak ; l'access_token résultant est utilisé puis jeté.
-- `token-issuer` qui fait l'UPSERT/SELECT/DELETE sur `oidc_refresh_tokens`
+- `device-token-authority` qui fait l'UPSERT/SELECT/DELETE sur `oidc_refresh_tokens`
   est **key-blind** : il ne possède pas la clé Fernet, ne peut pas
-  déchiffrer. Compromission de token-issuer = perte des ciphertexts mais
+  déchiffrer. Compromission de device-token-authority = perte des ciphertexts mais
   pas du contenu.
 - **Rotation de la clé** : génère une nouvelle clé, ré-encrypte
   l'intégralité de `oidc_refresh_tokens` avec la nouvelle clé puis swap
@@ -140,11 +140,11 @@ un refresh token utilisateur sans son consentement explicite.
 
 Le push est gardé derrière deux env vars indépendantes :
 
-- `OIDC_OFFLINE_ACCESS=true` (côté code-generator + admin-portal) — fait
+- `OIDC_OFFLINE_ACCESS=true` (côté mydevices-web + admin-console) — fait
   demander le scope `offline_access` à Keycloak et capturer le refresh.
   Sans ça, aucun refresh n'est stocké et tous les push échoueront en
   `mcr_auth_failed`.
-- `MCR_PUSH_ENABLED=true` (côté file-puller) — bascule le `_perform_pull`
+- `MCR_PUSH_ENABLED=true` (côté internal-ingester) — bascule le `_perform_pull`
   sur le push MCR au lieu de la queue locale `transcription`.
 
 **Ordre de bascule recommandé** :
@@ -159,7 +159,7 @@ Le push est gardé derrière deux env vars indépendantes :
      --from-literal=key="$KEY" --dry-run=client -o yaml | kubectl apply -f -
    ```
 3. Apply la migration `migrations/internal/003_oidc_refresh_tokens.sql`.
-4. Apply les nouvelles versions de code-generator + admin-portal avec
+4. Apply les nouvelles versions de mydevices-web + admin-console avec
    `OIDC_OFFLINE_ACCESS=true`. Les utilisateurs qui se reloggent
    commencent à avoir leur refresh token persisté. Le push reste sur le
    stub.
@@ -169,7 +169,7 @@ Le push est gardé derrière deux env vars indépendantes :
 6. Renseigner `MCR_GATEWAY_URL` (à fournir par l'équipe MCR) et
    `OIDC_TOKEN_ENDPOINT` (URL Keycloak token endpoint, déjà préparée
    dans le patch prod-bêta), flip `MCR_PUSH_ENABLED=true`, rolling
-   restart file-puller.
+   restart internal-ingester.
 7. Monitorer les premiers `transcription_status` qui passent à
    `mcr_pushed` (succès) vs `mcr_auth_failed` (utilisateurs à re-logger).
 
@@ -247,5 +247,5 @@ PUT  <presigned URL>                            → 200 (corps vide)
    transitoire), MCR accepte-t-il deux POST identiques ou faut-il une
    `Idempotency-Key` ?
 6. **Limite de taille audio** : on sort du `.mp4` jusqu'à 256 MB
-   (`UPLOAD_MAX_FILE_SIZE_MB=256` côté upload-portal). MCR accepte-t-il
+   (`UPLOAD_MAX_FILE_SIZE_MB=256` côté mobile-upload-pwa). MCR accepte-t-il
    sans transcoder à nouveau ?

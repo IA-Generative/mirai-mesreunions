@@ -82,7 +82,7 @@ class UploadSession(ExternalBase):
 
     # Corbeille (soft-delete). NULL = visible. NOT NULL = mis à la corbeille
     # le YYYY-MM-DD ; sera définitivement supprimé (DB + S3) après 30 jours
-    # par le balayage opportuniste de code-generator (api_my_sessions).
+    # par le balayage opportuniste de mydevices-web (api_my_sessions).
     trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
     uploads = relationship("UploadedFile", back_populates="session", cascade="all, delete-orphan")
@@ -118,7 +118,7 @@ class UploadedFile(ExternalBase):
     audio_duration_seconds = Column(Float, nullable=True)
     audio_sample_rate = Column(Integer, nullable=True)
 
-    # Normalization impact (mesuré par le transcode-worker en pass-1 et
+    # Normalization impact (mesuré par le audio-normalizer en pass-1 et
     # post-transcode). Persisté en DB pour qu'on n'ait plus besoin de
     # redownloader la source S3 — qui est purgée après transcode — quand
     # l'utilisateur clique l'icône info sur mydevices.
@@ -168,7 +168,7 @@ class UploadTokenOption(ExternalBase):
 class IssuedToken(InternalBase):
     """
     Token de session généré côté INTERNE (autorité de confiance).
-    Le code-generator (ext) demande un token via API, l'interne le génère et le stocke.
+    Le mydevices-web (ext) demande un token via API, l'interne le génère et le stocke.
     C'est la source de vérité pour le matching fichier ↔ utilisateur.
     """
     __tablename__ = "issued_tokens"
@@ -288,7 +288,7 @@ class UserAudioFile(InternalBase):
     # Kevent job_id du WHISPER en cours / dernier soumis. Persisté pour :
     # 1) demander la position d'attente au gateway via /api/queue-status?job_id=…
     # 2) reprendre automatiquement un poll orphelin au boot d'un pod
-    #    file-puller (OOM, scale-down, rollout) sans re-uploader.
+    #    internal-ingester (OOM, scale-down, rollout) sans re-uploader.
     kevent_job_id = Column(String(64), nullable=True, index=True,
                             comment="Kevent gateway job_id (Whisper) — track + resume on pod restart")
 
@@ -328,17 +328,22 @@ class UserAudioFile(InternalBase):
     pulled_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # ─── Liaison brief ↔ audio (migration 011) ─────────────────────
-    # Lien explicite vers le MeetingBrief de préparation. NULL = pas lié.
-    # ON DELETE SET NULL : si le brief est hard-deleted, on conserve l'audio
-    # mais on perd le lien (signal "brief was purged"). FK déclarée en SQL.
-    meeting_brief_id = Column(_UUID_TYPE, nullable=True, index=True)
+    # ─── Liaison meeting ↔ audio (migration 012) ────────────────────
+    # Lien explicite vers la Meeting (post-réunion) dont cet audio est la
+    # source. NULL = audio non encore rattaché à un meeting. ON DELETE SET
+    # NULL : si le meeting est hard-deleted, on conserve l'audio.
+    # Migration 012 : ancien meeting_brief_id renommé en meeting_id (FK vers
+    # meetings au lieu de meeting_briefs).
+    meeting_id = Column(_UUID_TYPE, nullable=True, index=True)
     # Tracking du re-traitement post-link avec glossaire amendé. Cf §5.
     reprocess_version = Column(Integer, nullable=False, default=0)
-    reprocessed_with_brief_id = Column(_UUID_TYPE, nullable=True)
+    reprocessed_with_meeting_id = Column(_UUID_TYPE, nullable=True)
     last_reprocessed_at = Column(DateTime(timezone=True), nullable=True)
     reprocess_history = Column(_JSON_TYPE, nullable=False, default=list)
-    suggested_brief_dismissed_id = Column(_UUID_TYPE, nullable=True)
+    suggested_meeting_dismissed_id = Column(_UUID_TYPE, nullable=True)
+
+    # Alias legacy supprimés en PR2d. Les noms canoniques migration 012 sont
+    # `meeting_id`, `reprocessed_with_meeting_id`, `suggested_meeting_dismissed_id`.
 
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
@@ -350,9 +355,9 @@ class OidcRefreshToken(InternalBase):
     """
     Server-side cache of an OIDC refresh token, keyed by user_sub.
 
-    Captured at login on mydevices (code-generator/admin-portal) when the
+    Captured at login on mydevices (mydevices-web/admin-console) when the
     OIDC scope ``offline_access`` is requested. Used asynchronously by
-    file-puller at MCR push time to mint a fresh access token *on behalf
+    internal-ingester at MCR push time to mint a fresh access token *on behalf
     of* the original user — without that user being interactively
     connected anymore.
 
@@ -362,7 +367,7 @@ class OidcRefreshToken(InternalBase):
     Lifecycle:
       - INSERT/UPSERT at user login (latest token wins; Keycloak rotates
         on use so older tokens become invalid anyway).
-      - SELECT-DECRYPT-EXCHANGE at file-puller MCR push.
+      - SELECT-DECRYPT-EXCHANGE at internal-ingester MCR push.
       - DELETE on KC ``invalid_grant`` (refresh expired or revoked) or on
         explicit logout.
     """
@@ -384,69 +389,113 @@ class OidcRefreshToken(InternalBase):
     )
 
 
-class MeetingBrief(InternalBase):
-    """Brief de pré-réunion produit par /api/meeting-prep.
+class Preparation(InternalBase):
+    """Préparation amont-réunion (migration 012 — ex ``meeting_briefs``).
 
-    Avant la migration 008, le brief était généré par appel LLM puis
-    renvoyé au browser sans persistance — un objet jetable. Cette table
-    le hisse au rang d'objet de première classe :
+    Entité de première classe portant la préparation utilisateur :
+    titre/contexte/participants/contenu LLM/glossaire-source/sync Drive.
+    Le pendant post-réunion est ``Meeting`` (CR). Une préparation peut
+    exister sans meeting (réunion non encore tenue) et un meeting peut
+    exister sans préparation (CR manuel) — cardinalité 0..1 ↔ 0..1.
 
-      * isolation par ``user_sub`` (OIDC sub), comme ``UserAudioFile`` ;
-      * soft-delete via ``trashed_at`` (NULL = visible, NOT NULL = corbeille),
-        même grammaire que ``UploadedFile.trashed_at`` ;
-      * purge auto 30j déclenchée par code-generator (TRASH_RETENTION_DAYS).
+    Isolation par ``user_sub`` (OIDC), soft-delete via ``trashed_at``,
+    purge auto 30j déclenchée par mydevices-web.
 
-    L'écriture/lecture depuis code-generator (zone externe) passe par
-    token-issuer ``/api/v1/briefs/*`` (relais cross-cluster, cf. le pattern
-    de ``rename_file_by_session``). Pas d'accès direct DB cross-cluster.
+    L'écriture/lecture depuis mydevices-web (zone externe) passe par
+    device-token-authority ``/api/v1/preparations/*`` (relais cross-cluster).
     """
-    __tablename__ = "meeting_briefs"
+    __tablename__ = "preparations"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_sub = Column(String(255), nullable=False, index=True,
-                      comment="OIDC subject identifier — owner of the brief")
+                      comment="OIDC subject identifier — owner of the preparation")
 
-    # Champs saisis par l'utilisateur dans le wizard.
+    # Contenu utilisateur (saisie wizard).
+    title = Column(Text, nullable=True)
     subject = Column(Text, nullable=True)
-    drive_folder_id = Column(Text, nullable=True)
     role = Column(Text, nullable=True)
     expectation = Column(Text, nullable=True)
     focus = Column(_JSON_TYPE, nullable=True)
     duration_minutes = Column(Integer, nullable=True)
+    participants = Column(_JSON_TYPE, nullable=True)
+    context = Column(Text, nullable=True)
+    target_meeting_date = Column(DateTime(timezone=True), nullable=True,
+                                 comment="Date prévue de la réunion (saisie wizard)")
 
-    # Sortie du LLM (structuré) + métadonnées des documents ingérés.
-    brief_json = Column(_JSON_TYPE, nullable=True)
+    # Sortie LLM (brief structuré) + métadonnées documents ingérés.
+    content = Column(_JSON_TYPE, nullable=True,
+                     comment="ex brief_json — sortie LLM structurée")
     documents = Column(_JSON_TYPE, nullable=True)
+    glossary_source = Column(_JSON_TYPE, nullable=True,
+                             comment="termes glossaire extraits, source du user_glossary_terms")
 
-    # Titre éditable côté UI (par défaut: subject). Cap 500 car. comme
-    # suggested_filename pour les fichiers audio.
-    title = Column(Text, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), nullable=False,
-                        default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime(timezone=True), nullable=True,
-                        onupdate=lambda: datetime.now(timezone.utc))
-
-    # Corbeille (soft-delete). NULL = visible. Cf. UploadedFile.trashed_at.
-    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
-
-    # ─── Meeting-prep v2 (migration 011) ───────────────────────────
-    # Signal d'engagement pour le scoring d'auto-lien (§4 du plan).
-    last_viewed_at = Column(DateTime(timezone=True), nullable=True)
-    # Chaînage série : pointe vers le brief parent dans la chaîne. NULL = racine.
+    # Chaînage série (préparation parent dans une chaîne de réunions).
     series_parent_id = Column(_UUID_TYPE, nullable=True)
-    # Date prévue de la réunion (saisie wizard, default J+1). Optionnel.
-    target_meeting_date = Column(DateTime(timezone=True), nullable=True)
-    # Versement Drive best-effort (cf §9bis du plan).
+
+    # Sync Drive best-effort (cf §9bis du plan v1).
+    drive_folder_id = Column(Text, nullable=True)
     drive_prep_folder_id = Column(Text, nullable=True)
     drive_prep_root_folder_id = Column(Text, nullable=True)
     drive_sync_status = Column(Text, nullable=True,
                                comment="'pending' | 'synced' | 'failed'")
     drive_synced_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Les index partiels (filter trashed_at IS [NOT] NULL) sont créés par
-    # la migration 010_meeting_briefs.sql. Ils ne sont pas redéclarés ici
-    # pour éviter qu'init_tables() en crée des versions non-partielles.
+    # Engagement (signal d'auto-link avec un audio).
+    last_viewed_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=True,
+                        onupdate=lambda: datetime.now(timezone.utc))
+    # Corbeille (soft-delete). NULL = visible.
+    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # Les index partiels sont créés par migration 012 (non re-déclarés ici
+    # pour éviter qu'init_tables crée des versions non-partielles).
+
+
+class Meeting(InternalBase):
+    """Réunion / CR post-réunion (migration 012 — split de ``meeting_briefs``).
+
+    Entité de première classe portant le rendu utilisateur post-réunion :
+    titre/résumé/CR structuré. Liée optionnellement à un audio (source) et
+    à une préparation (amont). FK NULLABLES : un meeting peut exister
+    standalone (CR manuel sans audio, sans prep préalable).
+
+    Isolation par ``user_sub`` (OIDC), soft-delete via ``trashed_at``.
+    L'écriture/lecture depuis mydevices-web (zone externe) passe par
+    device-token-authority ``/api/v1/meetings/*``.
+    """
+    __tablename__ = "meetings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_sub = Column(String(255), nullable=False, index=True,
+                      comment="OIDC subject identifier — owner of the meeting")
+
+    # Identité côté utilisateur.
+    title = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True,
+                     comment="résumé court (key_points)")
+    content = Column(_JSON_TYPE, nullable=True,
+                     comment="compte-rendu structuré complet")
+
+    # Lien optionnel vers l'audio source (NULL si CR manuel).
+    user_audio_file_id = Column(_UUID_TYPE, nullable=True, index=True)
+    # Lien optionnel vers la préparation amont (NULL si pas de prep).
+    preparation_id = Column(_UUID_TYPE, nullable=True, index=True)
+
+    # Sync Drive best-effort.
+    drive_folder_id = Column(Text, nullable=True)
+    drive_sync_status = Column(Text, nullable=True,
+                               comment="'pending' | 'synced' | 'failed'")
+    drive_synced_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=True,
+                        onupdate=lambda: datetime.now(timezone.utc))
+    # Corbeille (soft-delete).
+    trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class UserGlossaryTerm(InternalBase):
@@ -469,11 +518,22 @@ class UserGlossaryTerm(InternalBase):
     last_seen_at = Column(DateTime(timezone=True), nullable=False,
                           default=lambda: datetime.now(timezone.utc))
     occurrence_count = Column(Integer, nullable=False, default=1)
-    last_source_brief_id = Column(_UUID_TYPE, nullable=True)
+    # Migration 012 : ancien last_source_brief_id renommé en
+    # last_source_meeting_id (la traçabilité par brief a été remplacée par
+    # la traçabilité par meeting/preparation).
+    last_source_meeting_id = Column(_UUID_TYPE, nullable=True)
     # Termes ajoutés/validés manuellement par l'utilisateur (UI curation).
     curated_by_user = Column(Boolean, nullable=False, default=False)
     # Termes rejetés explicitement, ne plus re-proposer ni utiliser.
     blacklisted = Column(Boolean, nullable=False, default=False)
+
+    # Alias legacy `last_source_brief_id` supprimé en PR2d. Utiliser
+    # `last_source_meeting_id` (nom canonique migration 012).
+
+
+# Alias `MeetingBrief = Preparation` et property `Preparation.brief_json`
+# supprimés en PR2d. Importer `Preparation` directement et utiliser
+# `Preparation.content` (renommé en migration 012).
 
 
 class TranscriptionEvent(InternalBase):

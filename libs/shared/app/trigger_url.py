@@ -1,7 +1,7 @@
 """
 URL resolver for the optional cross-cluster pull trigger.
 
-The file-mover (DMZ) tries to wake the file-puller (protected zone) up the
+The dmz-to-internal-bridge (DMZ) tries to wake the internal-ingester (protected zone) up the
 moment a new file is ready, by POSTing to the pull-trigger HTTP endpoint
 exposed via Ingress. The activation of that wake-up path is controlled by
 a single env var, ``INTERNAL_PUSH_TRIGGER_URL``: the variable's value *is*

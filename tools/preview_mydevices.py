@@ -1,26 +1,25 @@
 """Local preview server for the mydevices page.
 
-Boots a tiny Flask app on http://127.0.0.1:5555 that renders the
-`INDEX_TEMPLATE` from `services/code-generator/app/main.py` with mock data,
-and stubs the half-dozen API endpoints the page hits. Auth/DB/S3/Keycloak
-are bypassed.
+Boots a tiny Flask app on http://127.0.0.1:5555 that renders the mydevices
+template from `services/mydevices-web/app/templates/index.html` with mock
+data, and stubs the half-dozen API endpoints the page hits. Auth/DB/S3/
+Keycloak are bypassed.
 
 Why: iterating on UX in the real service requires a Docker image rebuild +
-push + k8s rollout (minutes). Here every edit to `main.py` is picked up on
-browser refresh (template is re-read from disk on each render).
+push + k8s rollout (minutes). Here every edit to the template is picked up
+on browser refresh (file is re-read from disk on each render).
 
 Run:
     python tools/preview_mydevices.py
     open http://127.0.0.1:5555
 
-Edit `services/code-generator/app/main.py` (HTML/CSS/JS in INDEX_TEMPLATE),
-reload the browser, see the change. Tweak `MOCK_SESSIONS` below to exercise
-edge cases (many files, failed transcription, partial outputs, etc.).
+Edit `services/mydevices-web/app/templates/index.html`, reload the
+browser, see the change. Tweak `MOCK_SESSIONS` below to exercise edge cases
+(many files, failed transcription, partial outputs, etc.).
 """
 
 from __future__ import annotations
 
-import ast
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,29 +28,14 @@ from uuid import uuid4
 from flask import Flask, jsonify, render_template_string, request, abort
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MAIN_PY = REPO_ROOT / "services" / "code-generator" / "app" / "main.py"
+INDEX_TEMPLATE_PATH = (
+    REPO_ROOT / "services" / "mydevices-web" / "app" / "templates" / "index.html"
+)
 
-# ─── Template extraction (re-read on every request for hot reload) ─────────
-#
-# On parse main.py via AST plutôt qu'un regex sur le source brut : il faut
-# que les escape sequences (\', \n, \\) soient processed comme Python le
-# ferait à l'import. Sinon `'l\\'analyse'` reste avec deux backslashes dans
-# le HTML rendu et casse le parser JS (Unexpected identifier 'analyse').
 
 def load_template() -> str:
-    src = MAIN_PY.read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    for node in tree.body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "INDEX_TEMPLATE"
-            and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ):
-            return node.value.value
-    raise RuntimeError("INDEX_TEMPLATE = '...' not found at module top-level in main.py")
+    """Re-read the mydevices template from disk on every render (hot reload)."""
+    return INDEX_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
 # ─── Mock data ─────────────────────────────────────────────────────────────
@@ -207,7 +191,7 @@ MOCK_TRANSCRIPTS = {
 
 app = Flask(
     __name__,
-    static_folder=str(REPO_ROOT / "services" / "code-generator" / "app" / "static"),
+    static_folder=str(REPO_ROOT / "services" / "mydevices-web" / "app" / "static"),
     static_url_path="/static",
 )
 
@@ -317,7 +301,7 @@ def logout():
 
 
 if __name__ == "__main__":
-    print(f"📄 Reading template from: {MAIN_PY}")
+    print(f"📄 Reading template from: {INDEX_TEMPLATE_PATH}")
     print("🚀 Preview server → http://127.0.0.1:5555")
-    print("✏️  Edit services/code-generator/app/main.py and reload the browser.")
+    print("✏️  Edit services/mydevices-web/app/main.py and reload the browser.")
     app.run(host="127.0.0.1", port=5555, debug=True)

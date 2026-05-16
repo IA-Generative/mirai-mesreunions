@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-MODULE_PATH = os.path.join(ROOT, "services", "file-mover", "app", "diarization_merger.py")
+MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "diarization_merger.py")
 SPEC = importlib.util.spec_from_file_location("diarization_merger_under_test", MODULE_PATH)
 MOD = importlib.util.module_from_spec(SPEC)
 assert SPEC is not None and SPEC.loader is not None

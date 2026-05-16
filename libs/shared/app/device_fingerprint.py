@@ -1,7 +1,7 @@
 """
 Server-side fingerprint normalization for browser↔PWA fusion.
 
-The upload-portal client sends a 6-field fingerprint string:
+The mobile-upload-pwa client sends a 6-field fingerprint string:
     user_agent | platform | language | screen_width | screen_height | timezone
 
 We hash only the fields that stay stable when the same physical device launches

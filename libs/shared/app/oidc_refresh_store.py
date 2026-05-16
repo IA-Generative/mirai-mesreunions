@@ -1,22 +1,22 @@
 """
-Client-side helper used by services that perform OIDC login (code-generator
-and admin-portal) to persist a refresh token after a successful Authlib /
+Client-side helper used by services that perform OIDC login (mydevices-web
+and admin-console) to persist a refresh token after a successful Authlib /
 manual code-exchange flow.
 
 Pattern : the calling service encrypts the refresh token with the shared
 Fernet key (cf libs.shared.app.secrets_crypto) and POSTs the ciphertext to
-the token-issuer's ``/api/v1/oidc-refresh-store`` endpoint, which performs
-the UPSERT in postgres-internal. token-issuer never sees the plaintext
+the device-token-authority's ``/api/v1/oidc-refresh-store`` endpoint, which performs
+the UPSERT in postgres-internal. device-token-authority never sees the plaintext
 refresh token, so the Fernet key only needs to be present where encryption
-or decryption actually happens (CG/admin write side, file-puller read side).
+or decryption actually happens (CG/admin write side, internal-ingester read side).
 
-Why go through token-issuer instead of a direct DB write ?
+Why go through device-token-authority instead of a direct DB write ?
 
-  - code-generator and admin-portal connect to postgres-external by default
+  - mydevices-web and admin-console connect to postgres-external by default
     (and to admin-int-db-secret in read-only mode for admin). Granting them
     direct write to ``oidc_refresh_tokens`` would expand their DB privileges
     in a way that costs more than this small HTTP indirection.
-  - token-issuer is already the trusted authority writing other tables in
+  - device-token-authority is already the trusted authority writing other tables in
     postgres-internal (issued_tokens, device_enrollments). Adding one more
     write endpoint is consistent.
 
@@ -42,7 +42,7 @@ _DEFAULT_TIMEOUT = 5
 
 
 def _base_url() -> str:
-    return os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://token-issuer:8091").rstrip("/")
+    return os.getenv("TOKEN_ISSUER_INTERNAL_BASE_URL", "http://device-token-authority:8091").rstrip("/")
 
 
 def _store_url() -> str:
@@ -70,7 +70,7 @@ def store_refresh_token(
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> bool:
     """
-    Encrypt and persist a refresh token via token-issuer.
+    Encrypt and persist a refresh token via device-token-authority.
 
     Returns True if the UPSERT succeeded, False otherwise (and logs why).
     Never raises — callers should not fail the login over this.
@@ -85,7 +85,7 @@ def store_refresh_token(
         return False
     bearer = bearer_token or os.getenv("INTERNAL_API_TOKEN", "")
     if not bearer:
-        logger.warning("oidc_refresh_store: INTERNAL_API_TOKEN not set, cannot call token-issuer")
+        logger.warning("oidc_refresh_store: INTERNAL_API_TOKEN not set, cannot call device-token-authority")
         return False
 
     try:
@@ -112,13 +112,13 @@ def store_refresh_token(
         )
         if resp.status_code >= 400:
             logger.warning(
-                "oidc_refresh_store: token-issuer returned %s for user_sub=%s",
+                "oidc_refresh_store: device-token-authority returned %s for user_sub=%s",
                 resp.status_code, user_sub,
             )
             return False
         return True
     except req.RequestException:
-        logger.exception("oidc_refresh_store: HTTP call to token-issuer failed")
+        logger.exception("oidc_refresh_store: HTTP call to device-token-authority failed")
         return False
 
 
@@ -128,7 +128,7 @@ def fetch_ciphertext(user_sub: str, timeout: int = _DEFAULT_TIMEOUT) -> Optional
     ciphertext as a string, or None when the user has no stored token (404)
     or when the call fails.
 
-    Used by file-puller at MCR push time.
+    Used by internal-ingester at MCR push time.
     """
     if not user_sub:
         return None
@@ -143,12 +143,12 @@ def fetch_ciphertext(user_sub: str, timeout: int = _DEFAULT_TIMEOUT) -> Optional
             timeout=timeout,
         )
     except req.RequestException:
-        logger.exception("fetch_ciphertext: HTTP call to token-issuer failed")
+        logger.exception("fetch_ciphertext: HTTP call to device-token-authority failed")
         return None
     if resp.status_code == 404:
         return None
     if resp.status_code >= 400:
-        logger.warning("fetch_ciphertext: token-issuer returned %s for user_sub=%s",
+        logger.warning("fetch_ciphertext: device-token-authority returned %s for user_sub=%s",
                        resp.status_code, user_sub)
         return None
     try:
@@ -178,5 +178,5 @@ def delete_ciphertext(user_sub: str, timeout: int = _DEFAULT_TIMEOUT) -> bool:
         )
         return resp.status_code < 400
     except req.RequestException:
-        logger.exception("delete_ciphertext: HTTP call to token-issuer failed")
+        logger.exception("delete_ciphertext: HTTP call to device-token-authority failed")
         return False

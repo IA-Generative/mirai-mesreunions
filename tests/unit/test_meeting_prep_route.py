@@ -1,9 +1,9 @@
 """
 Unit tests for the Flask routes of the meeting-prep wizard, hosted in
-``services/code-generator/app/main.py`` :
+``services/mydevices-web/app/main.py`` :
 
-  - POST /api/meeting-prep                : génération d'un brief
-  - GET  /api/meeting-prep/test-drive     : diagnostic 3-étapes du bouton
+  - POST /api/preparations                : génération d'un brief
+  - GET  /api/preparations/test-drive     : diagnostic 3-étapes du bouton
                                             « Tester l'accès »
 
 Le module ``main.py`` a deux particularités gênantes en test :
@@ -11,7 +11,7 @@ Le module ``main.py`` a deux particularités gênantes en test :
   * il appelle ``create_app()`` à l'import (init DB + bucket S3) — on stubbe
     ``init_tables`` / ``create_session_factory`` / ``require_strong_shared_secret``
     avant le ``exec_module``.
-  * il vit dans un package au tiret (``code-generator``), donc on le charge
+  * il vit dans un package au tiret (``mydevices-web``), donc on le charge
     via ``importlib.util.spec_from_file_location`` à la manière de
     test_meeting_prep_persistence.py.
 
@@ -49,8 +49,8 @@ def _purge_libs_shared_stubs():
                 sys.modules.pop(name, None)
 
 
-def _load_code_generator():
-    """Load services/code-generator/app/main.py with DB/S3 init stubbed.
+def _load_mydevices_web():
+    """Load services/mydevices-web/app/main.py with DB/S3 init stubbed.
 
     Returns the loaded module. The caller can ``monkeypatch.setattr`` on the
     module-level constants (DRIVE_BASE_URL, OIDC_TOKEN_ENDPOINT, …) before
@@ -79,8 +79,8 @@ def _load_code_generator():
             sys.modules.pop(_name, None)
 
     # ``main.py`` fait ``from app import meeting_prep`` (le package ``app``
-    # est ``services/code-generator/app/``). On rend ce package importable.
-    cg_dir = os.path.join(ROOT, "services", "code-generator")
+    # est ``services/mydevices-web/app/``). On rend ce package importable.
+    cg_dir = os.path.join(ROOT, "services", "mydevices-web")
     if cg_dir not in sys.path:
         sys.path.insert(0, cg_dir)
     sys.modules.pop("app", None)
@@ -120,10 +120,10 @@ def _load_code_generator():
     sys.modules["libs.shared.app.database"] = db_stub
 
     # Drop any cached version so each call returns a fresh module.
-    sys.modules.pop("code_generator_under_route_test", None)
+    sys.modules.pop("mydevices_web_under_route_test", None)
     spec = importlib.util.spec_from_file_location(
-        "code_generator_under_route_test",
-        os.path.join(ROOT, "services", "code-generator", "app", "main.py"),
+        "mydevices_web_under_route_test",
+        os.path.join(ROOT, "services", "mydevices-web", "app", "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -132,19 +132,27 @@ def _load_code_generator():
 
 @pytest.fixture
 def cg(monkeypatch):
-    """Test client for code-generator, with module-level config knobs set to
+    """Test client for mydevices-web, with module-level config knobs set to
     sane defaults so the meeting-prep routes consider themselves configured.
 
     Each test can further override these via ``monkeypatch.setattr(mod, …)``.
     """
-    mod = _load_code_generator()
-    monkeypatch.setattr(mod, "DRIVE_BASE_URL", "https://drive.test", raising=False)
-    monkeypatch.setattr(mod, "OIDC_TOKEN_ENDPOINT", "https://kc.test/token", raising=False)
-    monkeypatch.setattr(mod, "OIDC_OFFLINE_ACCESS", True, raising=False)
-    monkeypatch.setattr(mod, "LITELLM_BASE_URL", "https://litellm.test", raising=False)
-    monkeypatch.setattr(mod, "LITELLM_API_KEY", "sk-test", raising=False)
-    monkeypatch.setattr(mod, "LLM_MODEL_MEDIUM", "claude-medium", raising=False)
-    monkeypatch.setattr(mod, "LLM_HTTP_TIMEOUT_SECONDS", 30, raising=False)
+    mod = _load_mydevices_web()
+    # PR3 : les handlers vivent dans app.modules.preparations.routes et
+    # importent leurs constantes paresseusement depuis libs.shared.app.config —
+    # on patche donc la source pour que les imports lazy voient les valeurs.
+    import libs.shared.app.config as _cfg
+    for key, value in {
+        "DRIVE_BASE_URL": "https://drive.test",
+        "OIDC_TOKEN_ENDPOINT": "https://kc.test/token",
+        "OIDC_OFFLINE_ACCESS": True,
+        "LITELLM_BASE_URL": "https://litellm.test",
+        "LITELLM_API_KEY": "sk-test",
+        "LLM_MODEL_MEDIUM": "claude-medium",
+        "LLM_HTTP_TIMEOUT_SECONDS": 30,
+    }.items():
+        monkeypatch.setattr(mod, key, value, raising=False)
+        monkeypatch.setattr(_cfg, key, value, raising=False)
     mod.app.config["TESTING"] = True
     client = mod.app.test_client()
     return client, mod
@@ -156,7 +164,7 @@ def _login(client, sub="test-user"):
         sess["user"] = {"sub": sub, "email": "user@test", "preferred_username": "user"}
 
 
-# ─── POST /api/meeting-prep ────────────────────────────────────────
+# ─── POST /api/preparations ────────────────────────────────────────
 
 
 def test_post_meeting_prep_without_drive_folder_returns_brief(cg):
@@ -172,13 +180,18 @@ def test_post_meeting_prep_without_drive_folder_returns_brief(cg):
     fake_llm_cls = MagicMock(return_value=fake_llm_instance)
     fake_drive_cls = MagicMock()
 
-    # request_internal_device_api est noyé dans le handler — on le neutralise
-    # pour éviter tout appel HTTP vers token-issuer.
+    # PR3 : le handler vit dans app.modules.preparations.routes. Les
+    # symboles externes (DriveClient/LLMClient, fetch_ciphertext, l'API
+    # device-token-authority) sont importés depuis leurs modules sources —
+    # on patche donc directement les sources.
     with patch.object(mod._meeting_prep, "LLMClient", fake_llm_cls), \
          patch.object(mod._meeting_prep, "DriveClient", fake_drive_cls), \
-         patch.object(mod, "fetch_ciphertext") as fc_mock, \
-         patch.object(mod, "request_internal_device_api", return_value={"brief": {"id": "b-1"}}):
-        r = client.post("/api/meeting-prep", json={
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext") as fc_mock, \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}), \
+         patch("app.modules.preparations.routes.request_internal_device_api",
+               return_value={"audio_files": []}):
+        r = client.post("/api/preparations", json={
             "subject": "Décider du budget Q3",
             "role": "anime la réunion",
             "expectation": "obtenir un GO",
@@ -205,9 +218,11 @@ def test_post_meeting_prep_with_drive_folder_but_no_refresh_token_returns_401(cg
 
     with patch.object(mod._meeting_prep, "LLMClient", MagicMock()), \
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()) as drive_cls, \
-         patch.object(mod, "fetch_ciphertext", return_value=None) as fc_mock, \
-         patch.object(mod, "request_internal_device_api", return_value={"brief": {}}):
-        r = client.post("/api/meeting-prep", json={
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext",
+               return_value=None) as fc_mock, \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {}}):
+        r = client.post("/api/preparations", json={
             "subject": "Sujet",
             "role": "anime",
             "expectation": "GO",
@@ -246,9 +261,10 @@ def test_post_meeting_prep_one_on_one_loads_correct_prompt(cg):
          patch.object(mod._meeting_prep, "load_prompt_template", return_value="{OBJECTIVE} {DURATION_MINUTES} {ROLE_VIEWPOINT} {EXPECTATION} {FOCUS_AREAS} {PREP_DOCS} {PRIOR_MEETINGS}") as load_tpl, \
          patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
-         patch.object(mod, "fetch_ciphertext", return_value=None), \
-         patch.object(mod, "request_internal_device_api", return_value={"brief": {}}):
-        r = client.post("/api/meeting-prep", json={
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {}}):
+        r = client.post("/api/preparations", json={
             "subject": "Point hebdo Alice",
             "role": "manager",
             "expectation": "feedback",
@@ -275,9 +291,10 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
 
     with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
-         patch.object(mod, "fetch_ciphertext", return_value=None), \
-         patch.object(mod, "request_internal_device_api", return_value={"brief": {}}):
-        r = client.post("/api/meeting-prep", json={
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {}}):
+        r = client.post("/api/preparations", json={
             "subject": "Sujet",
             "role": "anime",
             "expectation": "GO",
@@ -292,7 +309,7 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
     assert body["meeting_type"] == "general"
 
 
-# ─── GET /api/meeting-prep/test-drive ──────────────────────────────
+# ─── GET /api/preparations/test-drive ──────────────────────────────
 
 
 def test_test_drive_without_refresh_token_returns_diagnostic(cg):
@@ -300,8 +317,8 @@ def test_test_drive_without_refresh_token_returns_diagnostic(cg):
     client, mod = cg
     _login(client)
 
-    with patch.object(mod, "fetch_ciphertext", return_value=None):
-        r = client.get("/api/meeting-prep/test-drive")
+    with patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None):
+        r = client.get("/api/preparations/test-drive")
 
     assert r.status_code == 200
     body = r.get_json()
@@ -328,11 +345,11 @@ def test_test_drive_full_success_path(cg):
     fake_resp.status_code = 200
     fake_resp.json.return_value = {"id": "stub-user", "email": "stub@local"}
 
-    with patch.object(mod, "fetch_ciphertext", return_value=b"ciphertext"), \
-         patch.object(mod, "decrypt_secret", return_value="refresh-xyz"), \
+    with patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"ciphertext"), \
+         patch("libs.shared.app.secrets_crypto.decrypt", return_value="refresh-xyz"), \
          patch.object(mod._meeting_prep, "DriveClient", MagicMock(return_value=fake_drive)), \
          patch("requests.get", return_value=fake_resp):
-        r = client.get("/api/meeting-prep/test-drive")
+        r = client.get("/api/preparations/test-drive")
 
     assert r.status_code == 200
     body = r.get_json()
@@ -350,10 +367,10 @@ def test_test_drive_exchange_rejected_returns_error(cg):
     fake_drive = MagicMock()
     fake_drive.exchange_refresh.side_effect = mod._meeting_prep.DriveAuthError("refresh rejected")
 
-    with patch.object(mod, "fetch_ciphertext", return_value=b"ciphertext"), \
-         patch.object(mod, "decrypt_secret", return_value="refresh-xyz"), \
+    with patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"ciphertext"), \
+         patch("libs.shared.app.secrets_crypto.decrypt", return_value="refresh-xyz"), \
          patch.object(mod._meeting_prep, "DriveClient", MagicMock(return_value=fake_drive)):
-        r = client.get("/api/meeting-prep/test-drive")
+        r = client.get("/api/preparations/test-drive")
 
     assert r.status_code == 200
     body = r.get_json()
