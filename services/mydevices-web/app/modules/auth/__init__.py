@@ -1,9 +1,12 @@
-"""Module auth — TODO PR3 v2 : extraire OIDC + session + refresh.
+"""Module auth — routes OIDC ``/login``, ``/auth/callback``, ``/logout``.
 
-À ce stade (PR3), le code OIDC reste dans ``app/main.py`` (init Flask, OAuth,
-routes ``/login`` / ``/auth/callback`` / ``/logout``). Voir le rapport
-``docs/refactor-mydevices-report-pr3.md`` pour la justification.
+PR3-v2 : les routes sont extraites ici. L'init ``oauth.register(...)`` reste
+dans ``main.py`` au module-level (exigence flask-oauthlib).
 
-Les helpers transverses (``get_current_user``, ``require_auth``) sont déjà
-exposés dans ``app/shared.py`` et utilisés par les blueprints extraits.
+Les helpers transverses (``get_current_user``, ``require_auth``) sont dans
+``app/shared.py`` et utilisés par tous les blueprints.
 """
+
+from .routes import bp as auth_bp
+
+__all__ = ["auth_bp"]
