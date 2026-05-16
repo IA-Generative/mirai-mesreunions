@@ -30,6 +30,13 @@ import {
   listInvalidEmails,
 } from '../lib/participants.js';
 import { exportPreparation as _exportPreparation } from '../lib/export-formatter.js';
+import {
+  buildRuleFromForm as _buildRuleFromForm,
+  fillFormFromRule as _fillFormFromRule,
+  refreshFreqVisibility as _refreshFreqVisibility,
+  summarizeRule as _summarizeRule,
+  formatNextOccurrence as _formatNextOccurrence,
+} from '../lib/rrule-builder.js';
 
 const PANEL_ID = 'panel-brief';
 
@@ -240,7 +247,82 @@ function _applyBriefPayload(briefId, d) {
     _renderDriveSourcesBlock(b);
     _renderGlossaryCount(b);
     _renderParticipantsEditor(b);
+    _renderRecurrenceBlock(b);
   } catch (e) {}
+}
+
+// ─── Lot 6 — Récurrence : rendu + édition inline ──────────────────────────
+function _renderRecurrenceBlock(brief) {
+  const badge = document.getElementById('brief-detail-recurrence-badge');
+  const toggle = document.getElementById('brief-detail-recurring-toggle');
+  const form = document.getElementById('brief-detail-recurrence-form');
+  const summary = document.getElementById('brief-detail-recurrence-summary');
+  const nextEl = document.getElementById('brief-detail-next-occurrence');
+  const status = document.getElementById('brief-detail-recurrence-status');
+  if (!toggle || !form) return;
+  if (status) status.textContent = '';
+  const isRec = !!(brief && brief.is_recurring);
+  const rule = (brief && brief.recurrence_rule) || null;
+  if (badge) badge.style.display = isRec ? '' : 'none';
+  toggle.checked = isRec;
+  form.style.display = isRec ? '' : 'none';
+  if (rule) _fillFormFromRule(form, rule);
+  _refreshFreqVisibility(form);
+  if (summary) summary.textContent = isRec && rule ? _summarizeRule(rule) : '';
+  if (nextEl) {
+    const nx = brief && brief.next_occurrence_at;
+    nextEl.textContent = nx ? ('Prochaine : ' + _formatNextOccurrence(nx)) : '';
+  }
+}
+
+function _onDetailRecurringToggle() {
+  const toggle = document.getElementById('brief-detail-recurring-toggle');
+  const form = document.getElementById('brief-detail-recurrence-form');
+  if (!toggle || !form) return;
+  form.style.display = toggle.checked ? '' : 'none';
+  if (toggle.checked) _refreshFreqVisibility(form);
+}
+
+async function _saveDetailRecurrence() {
+  if (!_briefDetailId) return;
+  const toggle = document.getElementById('brief-detail-recurring-toggle');
+  const form = document.getElementById('brief-detail-recurrence-form');
+  const status = document.getElementById('brief-detail-recurrence-status');
+  const btn = document.getElementById('brief-detail-recurrence-save-btn');
+  if (!toggle) return;
+  const isRecurring = !!toggle.checked;
+  let recurrenceRule = null;
+  if (isRecurring) {
+    recurrenceRule = _buildRuleFromForm(form);
+    if (!recurrenceRule) {
+      if (status) status.textContent = 'Règle de récurrence incomplète.';
+      return;
+    }
+  }
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Enregistrement…';
+  try {
+    const body = { is_recurring: isRecurring, recurrence_rule: recurrenceRule };
+    const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'save_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    if (d.preparation) {
+      _currentBrief = d.preparation;
+      _renderRecurrenceBlock(d.preparation);
+    }
+    if (status) status.textContent = 'Récurrence enregistrée.';
+    _toast('Récurrence enregistrée.', 'success');
+  } catch (e) {
+    if (status) status.textContent = 'Échec : ' + (e.message || e);
+    _toast('Échec enregistrement récurrence.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ─── Lot 3c — Compteur termes glossaire affiché sur le bouton ──────────────
@@ -1443,6 +1525,8 @@ function _onPanelClick(ev) {
       ev.preventDefault(); _addDetailParticipant(); return;
     case 'save-detail-participants':
       ev.preventDefault(); _saveDetailParticipants(); return;
+    case 'save-detail-recurrence':
+      ev.preventDefault(); _saveDetailRecurrence(); return;
     case 'toggle-amend':
       ev.preventDefault(); toggleAmendBrief();
       { const m = document.getElementById('brief-detail-more-menu');
@@ -1550,6 +1634,16 @@ export function mount(container /*, ctx */) {
       if (ev.key === 'Enter') { ev.preventDefault(); _commitRenameInline(); }
       else if (ev.key === 'Escape') { ev.preventDefault(); _cancelRenameInline(); }
     });
+  }
+
+  // Lot 6 — toggle récurrence + select fréquence (binding direct car
+  // ces inputs sont statiques dans index.html, montés une fois).
+  const recToggle = document.getElementById('brief-detail-recurring-toggle');
+  if (recToggle) recToggle.addEventListener('change', _onDetailRecurringToggle);
+  const recForm = document.getElementById('brief-detail-recurrence-form');
+  if (recForm) {
+    const freqEl = recForm.querySelector('[data-rrule-freq]');
+    if (freqEl) freqEl.addEventListener('change', () => _refreshFreqVisibility(recForm));
   }
 
   const objEl = document.getElementById('amend-objective');
