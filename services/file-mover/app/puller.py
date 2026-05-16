@@ -1161,29 +1161,40 @@ def _perform_pull(payload: dict) -> dict:
                     payload=payload,
                 )
             elif backend == "kevent":
-                # meeting-prep v2 §B : auto-lien amont avant transcription.
-                # Idempotent : si meeting_brief_id déjà set (typiquement
-                # un retry queue), on saute. Pas de raise : tout échec
-                # downgrade silencieusement en "pas de brief lié".
+                # meeting-prep v2 §B (PR2d) : auto-lien amont audio↔preparation
+                # avant transcription. La Meeting créée plus haut dans la même
+                # transaction porte le lien : on set ``meeting.preparation_id``
+                # si auto-link match. Idempotent : si la meeting porte déjà
+                # une preparation (retry queue), on saute. Pas de raise : tout
+                # échec downgrade silencieusement en "pas de preparation liée".
                 try:
-                    if not audio_file.meeting_brief_id:
-                        brief_id, _scored = auto_link_audio_to_brief(
+                    meeting_row = (
+                        db.query(Meeting)
+                        .filter(Meeting.user_audio_file_id == audio_file.id)
+                        .first()
+                    )
+                    if meeting_row is not None and not meeting_row.preparation_id:
+                        prep_id, _scored = auto_link_audio_to_preparation(
                             audio_id=audio_file.id,
                             user_sub=user_sub,
                             audio_filename=payload.get("original_filename") or transcoded_filename,
                             audio_upload_at=audio_file.created_at,
                             db=db,
                         )
-                        if brief_id:
-                            audio_file.meeting_brief_id = brief_id
+                        if prep_id:
+                            meeting_row.preparation_id = prep_id
+                            # Maintient un lien inverse legacy sur UAF pour
+                            # consommateurs pas encore migrés (audio_lookup
+                            # serializer le tolère aussi).
+                            audio_file.meeting_id = meeting_row.id
                             db.commit()
                             logger.info(
-                                "auto-link: audio=%s linked to brief=%s",
-                                audio_file.id, brief_id,
+                                "auto-link: audio=%s meeting=%s → preparation=%s",
+                                audio_file.id, meeting_row.id, prep_id,
                             )
                 except Exception:
                     logger.exception(
-                        "auto-link: failed for audio=%s (non-fatal, continuing without brief link)",
+                        "auto-link: failed for audio=%s (non-fatal, continuing without preparation link)",
                         audio_file.id,
                     )
 
@@ -1644,14 +1655,22 @@ def _tokenize_fr(s: str) -> set:
 def _score_brief_for_audio(brief, audio_filename: str,
                             audio_upload_at: datetime,
                             already_linked_briefs: set) -> tuple:
-    """Calcule le score multi-signaux d'un brief candidat pour un audio.
+    """Calcule le score multi-signaux d'une Preparation candidate pour un audio.
 
     Retourne ``(score, breakdown)``. Cf §4 du plan : poids
     similarity=0.30, temporal=0.40, drive_colocation=0.10,
     engagement=0.10, anti_rebound=0.10.
+
+    Le nom de la fonction conserve "brief" pour ne pas casser les tests
+    unitaires existants (\`tests/unit/test_auto_link_audio_to_brief.py\`) ;
+    sémantiquement on score une Preparation. Le helper lit ``content`` (nom
+    canonique migration 012) avec fallback sur ``brief_json`` pour rester
+    compatible avec les SimpleNamespace de tests legacy.
     """
     bsubj = (getattr(brief, "subject", None) or getattr(brief, "title", None) or "") + " "
-    bj = getattr(brief, "brief_json", None) or {}
+    bj = getattr(brief, "content", None)
+    if bj is None:
+        bj = getattr(brief, "brief_json", None) or {}
     if isinstance(bj, dict):
         bsubj += (bj.get("objective_reformulated") or "")
     a_tokens = _tokenize_fr(audio_filename)
@@ -1705,22 +1724,28 @@ def _score_brief_for_audio(brief, audio_filename: str,
     }
 
 
-def auto_link_audio_to_brief(audio_id, user_sub: str,
-                              audio_filename: str,
-                              audio_upload_at: datetime,
-                              *, db=None,
-                              score_threshold: float = 0.55,
-                              top2_gap: float = 0.15):
-    """Auto-lien déterministe avant transcription (§4 du plan).
+def auto_link_audio_to_preparation(audio_id, user_sub: str,
+                                    audio_filename: str,
+                                    audio_upload_at: datetime,
+                                    *, db=None,
+                                    score_threshold: float = 0.55,
+                                    top2_gap: float = 0.15):
+    """Auto-lien déterministe avant transcription (§4 du plan, PR2d).
 
-    Match strict : top-1 > ``score_threshold`` ET écart ≥ ``top2_gap`` avec
-    le top-2 (sinon ambiguïté). Pas de DB write si pas de match.
+    Cherche une Preparation matching pour le user_sub sur les 30 derniers
+    jours. Match strict : top-1 > ``score_threshold`` ET écart ≥ ``top2_gap``
+    avec le top-2 (sinon ambiguïté). Pas de DB write côté audio/meeting ici :
+    le caller (\`_perform_pull\`) s'occupe de poser ``meeting.preparation_id``
+    sur la Meeting créée à l'upload.
 
-    Retourne ``(brief_id|None, scored_candidates)``. Le caller persiste
-    ``UserAudioFile.meeting_brief_id`` s'il y a match. ``db`` peut être
-    fourni pour tests ; sinon ouvre une SessionLocal locale.
+    Anti-rebond : exclut les preparations déjà référencées par une autre
+    Meeting (\`meetings.preparation_id IS NOT NULL\`) du même user.
+
+    Retourne ``(preparation_id|None, scored_candidates)``. Chaque entry de
+    \`scored_candidates\` porte la clé canonique ``preparation_id`` ainsi que
+    l'alias legacy ``brief_id`` (= même valeur) pour rétrocompat tests.
+    ``db`` peut être fourni pour tests ; sinon ouvre une SessionLocal locale.
     """
-    from libs.shared.app.models import MeetingBrief
     owns_db = db is None
     if owns_db:
         if SessionLocal is None:
@@ -1729,34 +1754,35 @@ def auto_link_audio_to_brief(audio_id, user_sub: str,
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=30)
         candidates = (
-            db.query(MeetingBrief)
+            db.query(Preparation)
             .filter(
-                MeetingBrief.user_sub == user_sub,
-                MeetingBrief.trashed_at.is_(None),
-                MeetingBrief.created_at > cutoff,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+                Preparation.created_at > cutoff,
             )
             .all()
         )
         if not candidates:
             return None, []
 
-        # Récupère l'ensemble des briefs déjà liés à un audio (anti-rebond).
-        from libs.shared.app.models import UserAudioFile as _UAF
-        linked_brief_ids = {
-            str(r.meeting_brief_id)
-            for r in db.query(_UAF)
-            .filter(_UAF.user_sub == user_sub,
-                    _UAF.meeting_brief_id.isnot(None))
+        # Anti-rebond : preparations déjà liées via une Meeting du même user.
+        linked_prep_ids = {
+            str(m.preparation_id)
+            for m in db.query(Meeting)
+            .filter(Meeting.user_sub == user_sub,
+                    Meeting.preparation_id.isnot(None),
+                    Meeting.trashed_at.is_(None))
             .all()
         }
 
         scored = []
         for b in candidates:
             score, breakdown = _score_brief_for_audio(
-                b, audio_filename, audio_upload_at, linked_brief_ids,
+                b, audio_filename, audio_upload_at, linked_prep_ids,
             )
             scored.append({
-                "brief_id": str(b.id),
+                "preparation_id": str(b.id),
+                "brief_id": str(b.id),  # alias legacy (tests + consommateurs)
                 "score": score,
                 "breakdown": breakdown,
             })
@@ -1771,10 +1797,16 @@ def auto_link_audio_to_brief(audio_id, user_sub: str,
             gap = top1["score"] - scored[1]["score"]
             if gap < top2_gap:
                 return None, scored
-        return top1["brief_id"], scored
+        return top1["preparation_id"], scored
     finally:
         if owns_db:
             db.close()
+
+
+# Alias rétrocompat : conserve l'ancien nom de fonction pour les tests
+# unitaires existants et les éventuels imports tiers. Sémantiquement
+# identique — retourne une preparation_id.
+auto_link_audio_to_brief = auto_link_audio_to_preparation
 
 
 # ─── Re-traitement avec glossaire amendé (§5 du plan) ────────────
@@ -1787,7 +1819,7 @@ def reprocess_audio(audio_id: str):
 
     Body: ``{user_sub, glossary_from_brief_id?, force?}``.
 
-    Idempotence : si ``reprocessed_with_brief_id == glossary_from_brief_id``
+    Idempotence : si ``reprocessed_with_meeting_id == glossary_from_brief_id``
     et ``!force`` → 200 avec ``{reprocessed: false, reason: 'idempotent'}``.
     Pose un advisory lock postgres sur audio_id pour éviter concurrence.
 
@@ -1827,8 +1859,8 @@ def reprocess_audio(audio_id: str):
         if not uaf.transcription_text and not uaf.speaker_tagged_text:
             return jsonify({"error": "no_transcription"}), 410
 
-        # Idempotence.
-        prev = str(uaf.reprocessed_with_brief_id) if uaf.reprocessed_with_brief_id else None
+        # Idempotence (lit la colonne canonique migration 012).
+        prev = str(uaf.reprocessed_with_meeting_id) if uaf.reprocessed_with_meeting_id else None
         if not force and prev == (brief_id or None):
             return jsonify({"reprocessed": False, "reason": "idempotent"}), 200
 
@@ -1861,7 +1893,10 @@ def reprocess_audio(audio_id: str):
         seen = set(effective_glossary)
         brief_terms_added = 0
         if brief_id:
-            brief_terms, _ = _fetch_brief_glossary_terms(brief_id, db)
+            # \`brief_id\` ici vient du body \`glossary_from_brief_id\` côté API ;
+            # sémantiquement c'est une preparation_id (migration 012). Le
+            # paramètre garde son nom legacy pour ne pas casser les clients.
+            brief_terms, _ = _fetch_preparation_glossary_terms(brief_id, db)
             for t in brief_terms:
                 if t and t not in seen:
                     effective_glossary.append(t)
@@ -1910,7 +1945,7 @@ def reprocess_audio(audio_id: str):
             if chain_status == "kevent_completed"
             else "kevent_partially_completed"
         )
-        chain_updates["reprocessed_with_brief_id"] = brief_id
+        chain_updates["reprocessed_with_meeting_id"] = brief_id
         chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
         _set_user_audio_status(audio_id, final_status, **chain_updates)
 
