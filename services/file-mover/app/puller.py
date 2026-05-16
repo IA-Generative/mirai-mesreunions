@@ -323,10 +323,10 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "suggested_filename",
         "key_points_summary",
         "kevent_job_id",
-        # meeting-prep v2 — reprocess tracking
-        "meeting_brief_id",
+        # meeting-prep v2 — reprocess tracking (noms canoniques migration 012)
+        "meeting_id",
         "reprocess_version",
-        "reprocessed_with_brief_id",
+        "reprocessed_with_meeting_id",
         "last_reprocessed_at",
         "reprocess_history",
     }
@@ -1534,6 +1534,30 @@ def audio_lookup():
         )
         if row is None:
             return jsonify({"error": "not_found"}), 404
+        # PR2d : résout meeting + preparation liés (via meetings.user_audio_file_id
+        # ou ancien lien direct user_audio_files.meeting_id si encore set).
+        meeting_id = None
+        preparation_id = None
+        try:
+            m = (
+                db.query(Meeting)
+                .filter(
+                    Meeting.user_sub == user_sub,
+                    Meeting.user_audio_file_id == row.id,
+                    Meeting.trashed_at.is_(None),
+                )
+                .first()
+            )
+            if m is not None:
+                meeting_id = str(m.id)
+                preparation_id = str(m.preparation_id) if m.preparation_id else None
+            elif getattr(row, "meeting_id", None):
+                # Cas legacy : UAF.meeting_id pointe encore vers une row meetings
+                # sans réciproque (UAF.meeting_id écrit avant que meeting.user_audio_file_id
+                # ne devienne la source de vérité).
+                meeting_id = str(row.meeting_id)
+        except Exception:
+            logger.exception("audio_lookup: failed to resolve meeting/preparation for %s", row.id)
         return jsonify({
             "id": str(row.id),
             "transcription_status": row.transcription_status,
@@ -1558,6 +1582,12 @@ def audio_lookup():
             "meeting_datetime": (
                 row.meeting_datetime.isoformat() if row.meeting_datetime else None
             ),
+            # PR2d : liens canoniques meeting/preparation. L'alias legacy
+            # ``meeting_brief_id`` est gardé en double pour migration progressive
+            # des consommateurs (à retirer après PR3/PR4).
+            "meeting_id": meeting_id,
+            "preparation_id": preparation_id,
+            "meeting_brief_id": preparation_id,  # alias legacy
         })
     except Exception:
         logger.exception("audio_lookup failed")
