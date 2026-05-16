@@ -25,6 +25,11 @@ import {
   refreshFreqVisibility,
   summarizeRule,
 } from '../lib/rrule-builder.js';
+import {
+  mountThemesChips,
+  serializeThemesChips,
+  loadThemesSuggestions,
+} from '../lib/themes-chips.js';
 
 const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
 const STEP_LABELS = [
@@ -149,10 +154,17 @@ function _collectValues() {
   const isRecurring = !!(recurringToggle && recurringToggle.checked);
   const ruleContainer = _qs('#wizard-recurrence-form');
   const recurrenceRule = (isRecurring && ruleContainer) ? buildRuleFromForm(ruleContainer) : null;
+  // Lot 9 — thématiques additionnelles (chips libres) + Lot 8 — toggle CR.
+  const themesContainer = _qs('#wizard-themes-container');
+  const themes = themesContainer ? serializeThemesChips(themesContainer) : [];
+  const sendCrEl = _qs('#wizard-send-cr-email');
+  const sendCrEmail = !!(sendCrEl && sendCrEl.checked);
   return {
     meetingType, subject, role, expectation, drive, duration, focus, participants,
     isRecurring: isRecurring && !!recurrenceRule,
     recurrenceRule: isRecurring ? recurrenceRule : null,
+    themes,
+    sendCrEmail,
   };
 }
 
@@ -178,6 +190,14 @@ function _renderRecap() {
         v.isRecurring && v.recurrenceRule
           ? _esc(summarizeRule(v.recurrenceRule))
           : '<em>(ponctuelle)</em>'
+      }</dd>
+      <dt>Thématiques :</dt><dd>${
+        v.themes && v.themes.length
+          ? v.themes.map(_esc).join(', ')
+          : '<em>(aucune)</em>'
+      }</dd>
+      <dt>Envoi CR auto :</dt><dd>${
+        v.sendCrEmail ? 'Oui (aux participants avec email)' : '<em>Non</em>'
       }</dd>
     </dl>`;
 }
@@ -334,6 +354,9 @@ async function _submit(ev) {
     body.is_recurring = true;
     body.recurrence_rule = v.recurrenceRule;
   }
+  // Lot 9 — thématiques + Lot 8 — toggle CR auto.
+  if (v.themes && v.themes.length) body.themes = v.themes;
+  if (v.sendCrEmail) body.send_cr_email = true;
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
@@ -479,6 +502,19 @@ export function openWizard(opts) {
   if (recToggle) recToggle.checked = false;
   const recForm = _qs('#wizard-recurrence-form');
   if (recForm) recForm.style.display = 'none';
+  // Lot 9 — monte le composant chips thématiques (avec suggestions async).
+  const themesContainer = _qs('#wizard-themes-container');
+  if (themesContainer) {
+    mountThemesChips(themesContainer, { initial: [], suggestions: [] });
+    loadThemesSuggestions().then((items) => {
+      if (themesContainer._themesChipsSetSuggestions) {
+        themesContainer._themesChipsSetSuggestions(items);
+      }
+    }).catch(() => {});
+  }
+  // Lot 8 — reset toggle CR.
+  const sendCr = _qs('#wizard-send-cr-email');
+  if (sendCr) sendCr.checked = false;
   const banner = _qs('#wizard-series-banner');
   if (banner) banner.style.display = sp ? '' : 'none';
   if (sp) {

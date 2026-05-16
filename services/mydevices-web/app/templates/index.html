@@ -2558,6 +2558,30 @@
                         <label><input type="checkbox" name="wizard-focus" value="Calendrier et jalons"> Calendrier et jalons</label>
                     </div>
                 </div>
+
+                {# Lot 9 — Thématiques additionnelles (chips libres). #}
+                <div class="wizard-question" style="margin-top:1.2rem;">
+                    <h3 style="margin-bottom:0.3rem;">Thématiques additionnelles</h3>
+                    <div class="hint">
+                        Ajoutez des sujets ou mots-clés spécifiques à votre contexte
+                        (ex. « Budget 2026 », « Plan de continuité »). Ces thématiques
+                        seront proposées en auto-complétion lors de vos prochaines
+                        préparations.
+                    </div>
+                    <div id="wizard-themes-container" style="margin-top:0.6rem;"></div>
+                </div>
+
+                {# Lot 8 — Toggle envoi CR auto par email aux participants. #}
+                <div class="wizard-question" style="margin-top:1.2rem;">
+                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+                        <input type="checkbox" id="wizard-send-cr-email">
+                        <span>Envoyer le CR aux participants à la fin de la transcription</span>
+                    </label>
+                    <div class="hint" style="margin-top:0.3rem;">
+                        Requiert qu'au moins un participant ait une adresse email
+                        et que le serveur SMTP soit configuré côté infrastructure.
+                    </div>
+                </div>
             </div>
 
             {# ── Step 5 : Récap ── #}
