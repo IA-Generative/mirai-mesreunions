@@ -52,16 +52,23 @@ def test_index_template_file_exists():
 
 @pytest.fixture
 def rendered_html():
-    """Rend le template avec un contexte minimal et renvoie le HTML."""
+    """Rend le template avec un contexte minimal et renvoie le HTML.
+
+    PR4 : index.html `{% include '_vite_shell_loader.html' %}` — on configure
+    le template_folder pour que le loader Jinja trouve le partial.
+    """
     flask = pytest.importorskip("flask")
-    tpl = _load_template()
-    app = flask.Flask(__name__)
+    template_dir = os.path.join(
+        ROOT, "services", "mydevices-web", "app", "templates"
+    )
+    app = flask.Flask(__name__, template_folder=template_dir)
     with app.test_request_context("/"):
-        html = flask.render_template_string(
-            tpl,
-            user={"name": "Test User", "email": "t@example.com"},
+        html = flask.render_template(
+            "index.html",
+            user={"name": "Test User", "email": "t@example.com", "roles": []},
             short_ttl_enabled=False,
             device_retention_days=15,
+            allowed_audio_extensions="m4a,mp3,wav",
         )
     return html
 
@@ -70,13 +77,11 @@ def test_render_contains_expected_landmarks(rendered_html):
     """Le rendu doit contenir les ancres UX clés du sprint."""
     must_have = [
         "Mes réunions (IA)",        # onglet principal
-        "file-row-dot",             # animation dot
-        "downloads-icon-btn",       # icônes formats
-        "Mode avancé",              # toggle power-user
-        "_buildInfoTooltip",        # checklist du (i)
-        "file-detail-source-filename",  # nom de fichier audio bleuté en détail
+        "file-row-dot",             # animation dot (référencée dans CSS)
+        "downloads-icon-btn",       # icônes formats (référencée dans CSS)
+        "Mode avancé",              # toggle power-user (label visible)
+        "file-detail-source-filename",  # nom de fichier audio bleuté (CSS)
         "Préparation de réunion",   # 5e onglet (piste 1 meeting-prep first-class)
-        "data-trash-kind=\"brief\"", # corbeille unifiée — briefs aux côtés des fichiers
         # Sprint meeting-prep amend UI : éditeur structuré (remplace textarea JSON).
         "data-amend-form",
         "data-add-agenda-item",
@@ -89,14 +94,19 @@ def test_render_contains_expected_landmarks(rendered_html):
     for needle in must_have:
         assert needle in rendered_html, f"Motif attendu absent du rendu : {needle!r}"
 
-    # Assertion négative : l'ancienne textarea JSON brut a bien disparu de la
-    # fonction qui peuple le pane « Amender ». On vérifie que le pattern
-    # exact qui copiait le JSON dans la textarea n'apparaît plus.
-    forbidden = "brief-amend-text').value = JSON.stringify(b.brief_json"
-    assert forbidden not in rendered_html, (
-        "L'ancien comportement (textarea remplie avec JSON.stringify(brief_json)) "
-        "est toujours présent — l'éditeur structuré n'a pas remplacé l'éditeur brut."
-    )
+    # Garantie PR4 : aucune ancienne ancre JS de l'inline ne traîne dans
+    # le rendu HTML (le code a été déplacé vers frontend/legacy.js).
+    forbidden_inline = [
+        "_buildInfoTooltip",   # fonction JS, plus dans le template
+        "function loadSessions",
+        "function loadDevices",
+        "function loadBriefs",
+    ]
+    for needle in forbidden_inline:
+        assert needle not in rendered_html, (
+            f"Trace de JS inline encore présente : {needle!r} — "
+            "doit vivre dans frontend/legacy.js depuis PR4."
+        )
 
 
 def test_render_user_name_injected(rendered_html):
@@ -117,30 +127,87 @@ def _have_node():
         return False
 
 
-@pytest.mark.skipif(not _have_node(), reason="node introuvable (skip JS parse)")
-def test_inline_script_parses_via_node(rendered_html):
-    """Extrait le premier <script> non-src et le valide via node --check."""
-    m = re.search(
-        r'<script(?![^>]*src=)[^>]*>(.*?)</script>',
+def test_no_inline_logic_script_remains(rendered_html):
+    """Depuis PR4, tout le JS applicatif vit dans frontend/ (bundlé par
+    Vite). Le template ne doit plus contenir que des ``<script type="module"
+    src="...">`` (loader Vite + DSFR) et un seul ``<script
+    type="application/json" id="bootstrap-data">`` (contexte Flask)."""
+    inline_blocks = re.findall(
+        r'<script(?![^>]*\bsrc=)(?![^>]*\btype="application/json")[^>]*>(.*?)</script>',
         rendered_html, re.DOTALL,
     )
-    assert m is not None, "Aucun bloc <script> inline trouvé dans le rendu"
-    js = m.group(1)
+    # On tolère un éventuel <script> sans src ET non-json si vide / pur
+    # commentaire (peu probable), mais surtout pas de logique applicative.
+    for blk in inline_blocks:
+        stripped = re.sub(r'/\*.*?\*/', '', blk, flags=re.DOTALL)
+        stripped = re.sub(r'//.*', '', stripped)
+        assert stripped.strip() == "", (
+            "Un <script> inline contient encore du JS applicatif :\n"
+            + blk[:200]
+        )
+
+    # Le bootstrap-data doit être présent avec les clés clés.
+    assert 'id="bootstrap-data"' in rendered_html
+    assert 'allowed_audio_extensions' in rendered_html
+    assert 'device_retention_days' in rendered_html
+    # Le loader Vite doit être inclus.
+    assert 'dist/shell.js' in rendered_html, (
+        "Le bundle Vite (dist/shell.js) n'est pas chargé — vérifier "
+        "l'include {% include '_vite_shell_loader.html' %}."
+    )
+
+
+@pytest.mark.skipif(not _have_node(), reason="node introuvable (skip JS parse)")
+def test_frontend_shell_parses_via_node():
+    """Valide que le bundle source frontend/shell.js parse en JS. Le bundle
+    construit (app/static/dist/shell.js) est testé par le build CI."""
+    shell_path = os.path.join(
+        ROOT, "services", "mydevices-web", "frontend", "shell.js",
+    )
+    assert os.path.isfile(shell_path), f"introuvable : {shell_path}"
+    # node --check sait parser un .mjs avec imports ES sans les résoudre.
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".js", delete=False, encoding="utf-8",
+        mode="w", suffix=".mjs", delete=False, encoding="utf-8",
     ) as fh:
-        fh.write(js)
-        js_path = fh.name
+        fh.write(open(shell_path).read())
+        mjs_path = fh.name
     try:
         result = subprocess.run(
-            ["node", "--check", js_path],
+            ["node", "--check", mjs_path],
             capture_output=True, text=True, timeout=15,
         )
-        assert result.returncode == 0, (
-            "node --check a échoué.\nSTDERR :\n" + (result.stderr or "<vide>")
+    finally:
+        os.unlink(mjs_path)
+    assert result.returncode == 0, (
+        "node --check a échoué sur frontend/shell.js.\nSTDERR :\n"
+        + (result.stderr or "<vide>")
+    )
+
+
+@pytest.mark.skipif(not _have_node(), reason="node introuvable (skip JS parse)")
+def test_frontend_legacy_parses_via_node():
+    """Valide que frontend/legacy.js (~3300 lignes extraites de l'inline)
+    parse correctement après remplacement des interpolations Jinja."""
+    legacy_path = os.path.join(
+        ROOT, "services", "mydevices-web", "frontend", "legacy.js",
+    )
+    assert os.path.isfile(legacy_path), f"introuvable : {legacy_path}"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".mjs", delete=False, encoding="utf-8",
+    ) as fh:
+        fh.write(open(legacy_path).read())
+        mjs_path = fh.name
+    try:
+        result = subprocess.run(
+            ["node", "--check", mjs_path],
+            capture_output=True, text=True, timeout=15,
         )
     finally:
-        os.unlink(js_path)
+        os.unlink(mjs_path)
+    assert result.returncode == 0, (
+        "node --check a échoué sur frontend/legacy.js.\nSTDERR :\n"
+        + (result.stderr or "<vide>")
+    )
 
 
 # ─── 4. tools/preview_mydevices.py charge bien le template ────────────────
