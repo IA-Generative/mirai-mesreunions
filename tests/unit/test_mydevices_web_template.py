@@ -146,6 +146,56 @@ def test_dsfr_root_attributes_and_footer(rendered_html):
     )
 
 
+def test_dsfr_fr_tabs_nav_structure(rendered_html):
+    """Refonte UX onglets : la nav doit utiliser la structure DSFR native
+    `fr-tabs` / `fr-tabs__list` / `fr-tabs__panel` (pas la nav custom
+    historique `.tabs-nav`)."""
+    assert '<div class="fr-tabs">' in rendered_html, (
+        "Le conteneur fr-tabs DSFR doit envelopper la nav d'onglets."
+    )
+    assert 'class="fr-tabs__list"' in rendered_html, (
+        "fr-tabs__list (ul) est requis par la structure DSFR fr-tabs."
+    )
+    # 7 onglets : transfers, brief, devices, generate, useful-data, trash, admin
+    expected_tab_ids = [
+        "tab-btn-transfers",
+        "tab-btn-brief",
+        "tab-btn-devices",
+        "tab-btn-generate",
+        "tab-btn-useful-data",
+        "tab-btn-trash",
+        "tab-btn-admin",
+    ]
+    for tid in expected_tab_ids:
+        assert f'id="{tid}"' in rendered_html, (
+            f"Bouton d'onglet {tid} attendu dans la nav fr-tabs."
+        )
+    # 7 panneaux correspondants
+    expected_panel_ids = [
+        "panel-transfers",
+        "panel-brief",
+        "panel-devices",
+        "panel-generate",
+        "panel-useful-data",
+        "panel-trash",
+        "panel-admin",
+    ]
+    for pid in expected_panel_ids:
+        assert f'id="{pid}"' in rendered_html, (
+            f"Panneau {pid} attendu (référencé par aria-controls)."
+        )
+    # Panel transfers doit être pré-sélectionné par défaut.
+    assert 'fr-tabs__panel--selected card tab-pane" data-tab="transfers"' in rendered_html
+
+
+def test_dsfr_admin_tab_hidden_by_default(rendered_html):
+    """L'onglet Admin est masqué par défaut dans la nav ; tabs/admin.js le
+    révèle au boot si la claim OIDC `admin` est présente. Le test render
+    sans rôle admin → le `<li>` doit avoir display:none."""
+    assert 'id="tab-btn-admin-li"' in rendered_html
+    assert 'id="tab-btn-admin-li" style="display:none;"' in rendered_html
+
+
 # ─── 3. Le <script> parse en JS (node --check) ─────────────────────────────
 
 def _have_node():
