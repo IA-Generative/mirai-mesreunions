@@ -25,6 +25,15 @@ let _sortDir = (() => {
     try { return localStorage.getItem('mydevices.sort.dir') === 'asc' ? 'asc' : 'desc'; }
     catch (e) { return 'desc'; }
 })();
+// Colonne de tri (chantier UX-Refonte-3). 'date' = date de réunion (override
+// utilisateur sinon created_at) — défaut historique. 'title' = original_filename
+// alphabétique. 'duration' = audio_duration_seconds (null → tri en fin).
+let _sortKey = (() => {
+    try {
+        const k = localStorage.getItem('mydevices.sort.key');
+        return (k === 'title' || k === 'duration') ? k : 'date';
+    } catch (e) { return 'date'; }
+})();
 
 function toggleSortDir() {
     _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
@@ -34,18 +43,59 @@ function toggleSortDir() {
     loadSessions({ force: true });
 }
 
+// Setter sort-key + sort-dir combinés appelé par les <th> de l'en-tête
+// fr-table. Cliquer la même colonne toggle la direction ; cliquer une
+// autre colonne réinitialise à 'desc' (cas le plus utile au switch).
+window.setSortColumn = function setSortColumn(key) {
+    if (key !== 'title' && key !== 'date' && key !== 'duration') return;
+    if (_sortKey === key) {
+        _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
+    } else {
+        _sortKey = key;
+        _sortDir = 'desc';
+    }
+    try {
+        localStorage.setItem('mydevices.sort.key', _sortKey);
+        localStorage.setItem('mydevices.sort.dir', _sortDir);
+    } catch (e) {}
+    _refreshSortToggleUi();
+    loadSessions({ force: true });
+};
+
 function _refreshSortToggleUi() {
     const btn = document.getElementById('sort-toggle-btn');
-    if (!btn) return;
-    const label = btn.querySelector('.sort-toggle-label');
-    const arrow = btn.querySelector('.sort-toggle-arrow');
-    if (_sortDir === 'desc') {
-        if (label) label.textContent = 'Plus récent d\'abord';
-        if (arrow) arrow.textContent = '▼';
-    } else {
-        if (label) label.textContent = 'Plus ancien d\'abord';
-        if (arrow) arrow.textContent = '▲';
+    if (btn) {
+        const label = btn.querySelector('.sort-toggle-label');
+        const arrow = btn.querySelector('.sort-toggle-arrow');
+        // Le toggle global agit sur la colonne courante (date par défaut).
+        // Libellé spécialisé selon la clé courante pour rester explicite.
+        const isDesc = (_sortDir === 'desc');
+        if (label) {
+            if (_sortKey === 'title') {
+                label.textContent = isDesc ? 'Z → A (titre)' : 'A → Z (titre)';
+            } else if (_sortKey === 'duration') {
+                label.textContent = isDesc ? 'Plus longue d\'abord' : 'Plus courte d\'abord';
+            } else {
+                label.textContent = isDesc ? 'Plus récent d\'abord' : 'Plus ancien d\'abord';
+            }
+        }
+        if (arrow) arrow.textContent = isDesc ? '▼' : '▲';
     }
+    // Reflète l'état actif sur l'en-tête fr-table (flèche colonne).
+    const headers = document.querySelectorAll('[data-sort-col]');
+    headers.forEach((th) => {
+        const col = th.getAttribute('data-sort-col');
+        const arrowEl = th.querySelector('.sort-arrow');
+        if (col === _sortKey) {
+            th.setAttribute('aria-sort', _sortDir === 'desc' ? 'descending' : 'ascending');
+            th.classList.add('is-active');
+            if (arrowEl) arrowEl.textContent = (_sortDir === 'desc') ? '▼' : '▲';
+        } else {
+            th.removeAttribute('aria-sort');
+            th.classList.remove('is-active');
+            if (arrowEl) arrowEl.textContent = '↕';
+        }
+    });
 }
 // Map qr_token → {device_name, status, retention_expires_at} populée par
 // loadDevices. Sert à enrichir l'en-tête de chaque session dans la liste
@@ -998,6 +1048,64 @@ let _lastSessionsSnapshot = '';
 
 // Exposé pour tabs/devices.js (generateCode / renewTokenByQr déclenchent
 // un refresh de la liste réunions après une opération device).
+// Empty-state DSFR (chantier UX-Refonte-3) — affiché quand 0 fichier audio
+// uploadé. Format fr-callout avec CTA "Comment téléverser ?" qui ouvre un
+// petit modal d'aide. Pas de fr-modal full pour rester léger.
+function _renderMeetingsEmptyState() {
+    return `
+        <div class="fr-callout fr-callout--blue-cumulus" style="margin-top:0.6rem;">
+            <h3 class="fr-callout__title" style="font-size:1rem;">Aucun fichier audio téléversé pour le moment</h3>
+            <p class="fr-callout__text" style="font-size:0.88rem;">
+                Vos enregistrements audio apparaîtront ici dès que vous en aurez
+                téléversé un, depuis cette page (boutons « Fichiers » / « Dossier »)
+                ou depuis l'appli mobile MIrAI (PWA).
+            </p>
+            <button type="button" class="fr-btn fr-btn--sm"
+                    data-action="meetings:show-upload-help">
+                Comment téléverser ?
+            </button>
+        </div>`;
+}
+
+// Petit modal d'aide "Comment téléverser ?" — branché via délégation
+// data-action="meetings:show-upload-help" dans tabs/meetings.js.
+window.showUploadHelp = function showUploadHelp() {
+    const existing = document.getElementById('upload-help-modal');
+    if (existing) { existing.remove(); }
+    const modal = document.createElement('div');
+    modal.id = 'upload-help-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);' +
+        'display:flex;align-items:center;justify-content:center;z-index:10000;';
+    modal.innerHTML = `
+        <div style="background:#fff;border-radius:0.5rem;max-width:520px;width:90%;
+                    padding:1.2rem 1.4rem;box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+            <h2 style="margin:0 0 0.6rem;font-size:1.1rem;">Comment téléverser un audio ?</h2>
+            <p style="font-size:0.88rem;color:#1e293b;">
+                Deux options :
+            </p>
+            <ul style="font-size:0.88rem;color:#1e293b;padding-left:1.1rem;">
+                <li><strong>Depuis ce poste</strong> : bouton « Fichiers » (un ou
+                    plusieurs fichiers) ou « Dossier » (un dossier complet) en haut
+                    à droite de cette page.</li>
+                <li><strong>Depuis l'appli mobile MIrAI (PWA)</strong> : enrôlez
+                    votre téléphone via un QR depuis l'onglet « Appareils »,
+                    puis enregistrez ou choisissez un audio dans l'appli.</li>
+            </ul>
+            <div style="text-align:right;margin-top:0.8rem;">
+                <button type="button" class="fr-btn fr-btn--sm"
+                        onclick="document.getElementById('upload-help-modal').remove()">
+                    Fermer
+                </button>
+            </div>
+        </div>`;
+    modal.addEventListener('click', (ev) => {
+        if (ev.target === modal) modal.remove();
+    });
+    document.body.appendChild(modal);
+};
+
 window.loadSessions = function(opts) { return loadSessions(opts); };
 async function loadSessions(opts) {
     opts = opts || {};
@@ -1176,11 +1284,13 @@ async function loadSessions(opts) {
         }
 
         if (sessions.length === 0) {
-            container.innerHTML = '<p style="color:#999;font-size:0.85rem;">Aucune réunion</p>';
+            container.innerHTML = _renderMeetingsEmptyState();
             const purgeBtn = document.getElementById('purge-btn');
             if (purgeBtn) purgeBtn.disabled = true;
             const countLabel = document.getElementById('file-count');
             if (countLabel) countLabel.textContent = '';
+            const header = document.getElementById('sessions-table-header');
+            if (header) header.style.display = 'none';
             return;
         }
 
@@ -1203,9 +1313,21 @@ async function loadSessions(opts) {
             }
         }
         allFileEntries.sort((a, b) => {
-            const ka = (a.f.meeting_datetime || a.f.created_at || '');
-            const kb = (b.f.meeting_datetime || b.f.created_at || '');
-            const cmp = ka < kb ? -1 : (ka > kb ? 1 : 0);
+            let ka, kb, cmp;
+            if (_sortKey === 'title') {
+                ka = (a.f.original_filename || '').toLowerCase();
+                kb = (b.f.original_filename || '').toLowerCase();
+                cmp = ka < kb ? -1 : (ka > kb ? 1 : 0);
+            } else if (_sortKey === 'duration') {
+                // null/undefined → traités comme -Infinity en asc (fin en desc)
+                ka = (a.f.audio_duration_seconds == null) ? -1 : Number(a.f.audio_duration_seconds);
+                kb = (b.f.audio_duration_seconds == null) ? -1 : Number(b.f.audio_duration_seconds);
+                cmp = ka - kb;
+            } else {
+                ka = (a.f.meeting_datetime || a.f.created_at || '');
+                kb = (b.f.meeting_datetime || b.f.created_at || '');
+                cmp = ka < kb ? -1 : (ka > kb ? 1 : 0);
+            }
             return cmp * (_sortDir === 'desc' ? -1 : 1);
         });
         _refreshSortToggleUi();
@@ -1330,7 +1452,7 @@ async function loadSessions(opts) {
                     //   • date+durée
                     //   • chevron ▶ : déplie inline le résumé sans quitter la liste
                     //   • bouton Supprimer
-                    return `<div class="file-row-compact-wrapper${isVirusBlocked ? ' file-row-virus' : ''}" data-file-row="${f.id}">
+                    return `<div class="file-row-compact-wrapper${isVirusBlocked ? ' file-row-virus' : ''}" data-file-row="${f.id}" data-row-click-target="${f.id}">
                         ${virusBanner}
                         <div class="file-row-compact">
                             <!-- transcript-section caché : sert juste à
@@ -1504,8 +1626,14 @@ async function loadSessions(opts) {
                 </div>`;
             }).join('');
 
-        container.innerHTML = rowsHtml
-            || '<p style="color:#999;font-size:0.85rem;">Aucune réunion</p>';
+        container.innerHTML = rowsHtml || _renderMeetingsEmptyState();
+        // Affiche / masque l'en-tête fr-table (visible uniquement en mode liste
+        // — pas en vue détail, et pas en empty state).
+        const header = document.getElementById('sessions-table-header');
+        if (header) {
+            const showHeader = !!rowsHtml && !_detailFileId;
+            header.style.display = showHeader ? '' : 'none';
+        }
 
         const fileCount = allFileEntries.length;
         const countLabel = document.getElementById('file-count');

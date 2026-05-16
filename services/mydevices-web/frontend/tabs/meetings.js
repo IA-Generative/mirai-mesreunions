@@ -136,6 +136,12 @@ function _onPanelAction(ev) {
       if (input) input.click();
       break;
     }
+    case 'show-upload-help': {
+      ev.preventDefault();
+      const fn = _resolveFn('showUploadHelp');
+      if (fn) fn();
+      break;
+    }
     default:
       // Action meetings:* inconnue — silencieux (un autre listener
       // pourrait l'attraper).
