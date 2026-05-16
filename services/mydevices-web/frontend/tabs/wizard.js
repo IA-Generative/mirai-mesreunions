@@ -15,6 +15,12 @@
 // Deep-link compat : /meeting-prep/new redirige vers /?tab=brief&action=new
 //   → preparations.js détecte ?action=new au boot et appelle openWizard().
 
+import {
+  createParticipantRow,
+  serializeParticipantsContainer,
+  listInvalidEmails,
+} from '../lib/participants.js';
+
 const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
 const STEP_LABELS = [
   'Identité', 'Contexte', 'Documents', 'Focus', 'Récap',
@@ -132,7 +138,8 @@ function _collectValues() {
   const drive = ((_qs('#wizard-drive-folder') || {}).value || '').trim();
   const duration = _parseDurationMinutes((_qs('#wizard-duration') || {}).value);
   const focus = _qsa('input[name="wizard-focus"]:checked').map(el => el.value);
-  return { meetingType, subject, role, expectation, drive, duration, focus };
+  const participants = serializeParticipantsContainer(_qs('#wizard-participants-list'));
+  return { meetingType, subject, role, expectation, drive, duration, focus, participants };
 }
 
 function _renderRecap() {
@@ -148,6 +155,11 @@ function _renderRecap() {
       <dt>Attendu :</dt><dd>${_esc(v.expectation) || '<em>—</em>'}</dd>
       <dt>Dossier Drive :</dt><dd>${_esc(v.drive) || '<em>(aucun)</em>'}</dd>
       <dt>Focus :</dt><dd>${v.focus.length ? v.focus.map(_esc).join(', ') : '<em>(aucun)</em>'}</dd>
+      <dt>Participants :</dt><dd>${
+        v.participants.length
+          ? v.participants.map(p => _esc(p.name || p.email)).join(', ')
+          : '<em>(aucun)</em>'
+      }</dd>
     </dl>`;
 }
 
@@ -276,6 +288,15 @@ async function _submit(ev) {
   // series_parent_id éventuel — lu depuis la query string ou ?series_parent_id
   // posé en hidden input par openWizard().
   const seriesParent = (_qs('#wizard-series-parent') || {}).value || '';
+  const targetDate = (_qs('#wizard-target-date') || {}).value || '';
+
+  // Validation emails participants (Lot 5).
+  const partsContainer = _qs('#wizard-participants-list');
+  const invalidEmails = listInvalidEmails(partsContainer);
+  if (invalidEmails.length) {
+    _setStatus('Email participant invalide : ' + invalidEmails[0], 'err');
+    return;
+  }
 
   const body = {
     subject: v.subject,
@@ -287,6 +308,8 @@ async function _submit(ev) {
     meeting_type: v.meetingType,
   };
   if (seriesParent) body.series_parent_id = seriesParent;
+  if (targetDate) body.target_meeting_date = targetDate;
+  if (v.participants && v.participants.length) body.participants = v.participants;
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
@@ -421,6 +444,12 @@ export function openWizard(opts) {
   const params = new URLSearchParams(window.location.search || '');
   const sp = opts.seriesParentId || params.get('series_parent_id') || '';
   if (seriesEl) seriesEl.value = sp;
+  // Lot 3 — target_meeting_date pré-rempli depuis la modale "Préparer la prochaine".
+  const targetEl = _qs('#wizard-target-date');
+  if (targetEl) targetEl.value = opts.targetMeetingDate || '';
+  // Lot 5 — reset liste participants à chaque ouverture.
+  const partsList = _qs('#wizard-participants-list');
+  if (partsList) partsList.innerHTML = '';
   const banner = _qs('#wizard-series-banner');
   if (banner) banner.style.display = sp ? '' : 'none';
   if (sp) {
@@ -493,6 +522,14 @@ function _bindEvents() {
   if (submitBtn) submitBtn.addEventListener('click', _submit);
   const driveTestBtn = _qs('#wizard-drive-test-btn');
   if (driveTestBtn) driveTestBtn.addEventListener('click', _testDriveAccess);
+  // Lot 5 — ajout participant dans le wizard step 2.
+  const addPartBtn = _qs('#wizard-add-participant-btn');
+  if (addPartBtn) {
+    addPartBtn.addEventListener('click', () => {
+      const list = _qs('#wizard-participants-list');
+      if (list) list.appendChild(createParticipantRow({}));
+    });
+  }
   // Click backdrop (hors carte) → ferme.
   backdrop.addEventListener('click', (ev) => {
     if (ev.target === backdrop) closeWizard();

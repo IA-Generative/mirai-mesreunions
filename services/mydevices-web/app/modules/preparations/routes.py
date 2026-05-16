@@ -164,6 +164,29 @@ def create_preparation():
 
     series_parent_id = (payload.get("series_parent_id") or "").strip() or None
     target_meeting_date = (payload.get("target_meeting_date") or "").strip() or None
+    # Lot 5 — participants attendus saisis depuis le wizard. Liste d'objets
+    # {name?, email?, role?}. Persistés en colonne JSONB côté DTA.
+    participants_raw = payload.get("participants")
+    participants_clean: list[dict] = []
+    if isinstance(participants_raw, list):
+        for raw in participants_raw:
+            if not isinstance(raw, dict):
+                continue
+            name = (raw.get("name") or "").strip()
+            email = (raw.get("email") or "").strip()
+            role_ = (raw.get("role") or "").strip()
+            if not (name or email):
+                continue
+            entry: dict = {}
+            if name:
+                entry["name"] = name[:200]
+            if email:
+                entry["email"] = email[:320]
+            if role_:
+                entry["role"] = role_[:120]
+            participants_clean.append(entry)
+        if len(participants_clean) > 100:
+            participants_clean = participants_clean[:100]
 
     meeting_type = (
         meeting_type_raw
@@ -182,6 +205,7 @@ def create_preparation():
         "meeting_type": meeting_type,
         "series_parent_id": series_parent_id,
         "target_meeting_date": target_meeting_date,
+        "participants": participants_clean,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -259,6 +283,7 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
     meeting_type = job["meeting_type"]
     series_parent_id = job["series_parent_id"]
     target_meeting_date = job["target_meeting_date"]
+    participants = job.get("participants") or []
 
     def _update(**kw):
         if job_id:
@@ -424,6 +449,7 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             "title": subject,
             "series_parent_id": series_parent_id,
             "target_meeting_date": target_meeting_date,
+            "participants": participants,
         })
         preparation_id = (created.get("preparation") or {}).get("id")
 

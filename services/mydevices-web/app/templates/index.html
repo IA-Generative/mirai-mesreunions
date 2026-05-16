@@ -1626,27 +1626,87 @@
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-arrow-left-line fr-btn--icon-left"
                         data-action="show-list">Retour à la liste</button>
             </div>
-            <h1 id="brief-detail-title" style="font-size:1.1rem;">Brief</h1>
+            <!-- Lot 3a — Titre éditable inline. Click sur le titre → bascule en input + validation. -->
+            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.4rem;">
+                <h1 id="brief-detail-title" style="font-size:1.1rem;cursor:text;"
+                    data-action="start-rename-inline" title="Cliquer pour renommer">Brief</h1>
+                <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;">
+                    <input type="text" id="brief-detail-title-input" maxlength="120"
+                           style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;min-width:260px;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line fr-btn--icon-left"
+                            data-action="commit-rename-inline">Valider</button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                            data-action="cancel-rename-inline">Annuler</button>
+                </span>
+            </div>
             <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
+            <!-- Lot 3 — 4 actions refondues : glossaire(N), lier audio, suivante, menu "Plus d'actions" -->
             <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
                  style="margin:0.6rem 0;">
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-edit-line fr-btn--icon-left"
-                        data-action="rename-brief">Renommer</button>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-pencil-line fr-btn--icon-left"
-                        data-action="toggle-amend">Amender (édition manuelle)</button>
-                <!-- Meeting-prep v2 §7 : Lien audio↔brief (réversible) -->
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line fr-btn--icon-left"
+                        id="brief-detail-glossary-btn"
+                        data-action="open-glossary-modal">
+                    Glossaire (<span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span>)
+                </button>
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-link"
                         data-link-brief-btn id="brief-detail-link-audio-btn"
-                        data-action="link-audio" style="display:none;">
+                        data-action="open-link-audio-modal" style="display:none;">
                     Lier un fichier audio
                 </button>
-                <!-- Meeting-prep v2 §7 : Préparer suivante de la série -->
-                <a class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line fr-btn--icon-left"
-                   data-prepare-next-series-btn id="brief-detail-prepare-next"
-                   style="display:none;text-decoration:none;">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line fr-btn--icon-left"
+                        data-prepare-next-series-btn id="brief-detail-prepare-next"
+                        data-action="open-prepare-next-modal" style="display:none;">
                     Préparer la prochaine réunion de cette série
-                </a>
+                </button>
+                <!-- Menu "Plus d'actions" → conserve l'accès à l'édition avancée (amend). -->
+                <div style="position:relative;display:inline-block;" data-more-actions-wrap>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line fr-btn--icon-left"
+                            data-action="toggle-more-actions"
+                            aria-haspopup="true" aria-expanded="false"
+                            id="brief-detail-more-btn">Plus d'actions</button>
+                    <ul id="brief-detail-more-menu"
+                        style="display:none;position:absolute;right:0;top:100%;z-index:10;
+                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
+                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:240px;
+                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
+                        <li>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="toggle-amend"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">
+                                Édition avancée (amend)
+                            </button>
+                        </li>
+                        <li>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="rename-brief"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">
+                                Renommer (boîte de dialogue)
+                            </button>
+                        </li>
+                    </ul>
+                </div>
             </div>
+            <!-- Lot 5 — Participants éditables inline depuis la fiche brief. -->
+            <section id="brief-detail-participants" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <strong style="font-size:0.92rem;">
+                        Participants (<span id="brief-detail-participants-count">0</span>)
+                    </strong>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
+                            data-action="add-detail-participant">+ Ajouter</button>
+                </div>
+                <div id="brief-detail-participants-list" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.4rem;"></div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-participants-save-btn"
+                            data-action="save-detail-participants" style="display:none;">
+                        Enregistrer participants
+                    </button>
+                    <span id="brief-detail-participants-status"
+                          style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+            </section>
             <!-- Section "Sources Drive" : rendue par _applyBriefPayload si drive_folder_id présent -->
             <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
@@ -1811,6 +1871,29 @@
                         </span>
                     </div>
                 </form>
+            </div>
+
+            <!-- ─── Lot 3 — Modales (link-audio, glossaire, prepare-next) ─── -->
+            <div id="prep-modal-backdrop" data-prep-modal-backdrop
+                 style="display:none;position:fixed;inset:0;z-index:1000;
+                        background:rgba(15,23,42,0.45);align-items:flex-start;
+                        justify-content:center;padding:3rem 1rem;">
+                <div id="prep-modal-card" role="dialog" aria-modal="true"
+                     style="background:#fff;border-radius:0.6rem;max-width:780px;width:100%;
+                            max-height:85vh;display:flex;flex-direction:column;
+                            box-shadow:0 12px 32px rgba(0,0,0,0.18);overflow:hidden;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;
+                                padding:0.8rem 1rem;border-bottom:1px solid #e2e8f0;">
+                        <h2 id="prep-modal-title" style="margin:0;font-size:1rem;">Action</h2>
+                        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-close-line"
+                                aria-label="Fermer"
+                                data-action="close-prep-modal">Fermer</button>
+                    </div>
+                    <div id="prep-modal-body" style="padding:1rem;overflow-y:auto;flex:1;"></div>
+                    <div id="prep-modal-footer"
+                         style="padding:0.7rem 1rem;border-top:1px solid #e2e8f0;
+                                display:flex;justify-content:flex-end;gap:0.4rem;background:#f8fafc;"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -2137,6 +2220,7 @@
 
         <form id="wizard-form" autocomplete="off">
             <input type="hidden" id="wizard-series-parent" value="">
+            <input type="hidden" id="wizard-target-date" value="">
 
             {# ── Step 1 : Identité ── #}
             <div id="wizard-step-identite" class="wizard-step is-active">
@@ -2199,6 +2283,19 @@
                         <span class="wizard-chip">Valider une décision</span>
                         <span class="wizard-chip">Apprendre le vocabulaire</span>
                     </div>
+                </div>
+                {# Lot 5 — Participants (optionnels) #}
+                <div class="wizard-question">
+                    <label>Participants attendus (optionnel)</label>
+                    <div class="hint">
+                        Ajoutez les personnes attendues : nom, email (pour invitations / CR), rôle.
+                        Vous pourrez les modifier après création depuis la fiche du brief.
+                    </div>
+                    <div id="wizard-participants-list"
+                         style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.3rem;"></div>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                            id="wizard-add-participant-btn"
+                            style="margin-top:0.3rem;">Ajouter un participant</button>
                 </div>
             </div>
 

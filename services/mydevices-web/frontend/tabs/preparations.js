@@ -22,8 +22,19 @@
 
 import { renderBriefDetailSkeleton } from '../lib/skeleton.js';
 import * as detailCache from '../lib/detail-cache.js';
+import { openPrepModal, closePrepModal, bindPrepModal } from '../lib/prep-modal.js';
+import {
+  createParticipantRow,
+  serializeParticipantsContainer,
+  populateParticipantsContainer,
+  listInvalidEmails,
+} from '../lib/participants.js';
 
 const PANEL_ID = 'panel-brief';
+
+// État courant participants (pour le diff "modifié → bouton sauver visible").
+let _participantsBaseline = '[]';
+let _currentBrief = null;
 
 // ─── État courant ─────────────────────────────────────────────────────────
 let _briefDetailId = null;
@@ -213,6 +224,7 @@ function _applyBriefPayload(briefId, d) {
   const metaEl = document.getElementById('brief-detail-meta');
   const bodyEl = document.getElementById('brief-detail-body');
   const b = d.preparation || d.brief || {};
+  _currentBrief = b;
   if (titleEl) titleEl.textContent = b.title || b.subject || '(sans titre)';
   const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
   if (metaEl) metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
@@ -221,24 +233,103 @@ function _applyBriefPayload(briefId, d) {
   fillAmendForm(content);
   try {
     const btn = document.getElementById('brief-detail-prepare-next');
-    if (btn) {
-      // Compat deep-link conservée comme fallback href, mais le click
-      // ouvre la modale wizard inline avec series_parent_id pré-rempli.
-      btn.href = `/meeting-prep/new?series_parent_id=${encodeURIComponent(briefId)}`;
-      btn.onclick = (ev) => {
-        ev.preventDefault();
-        try {
-          if (typeof window.openWizard === 'function') {
-            window.openWizard({ seriesParentId: briefId });
-          }
-        } catch (e) { /* fallback href reste */ }
-      };
-      btn.style.display = '';
-    }
+    if (btn) btn.style.display = '';
     const linkBtn = document.getElementById('brief-detail-link-audio-btn');
     if (linkBtn) linkBtn.style.display = '';
     _renderDriveSourcesBlock(b);
+    _renderGlossaryCount(b);
+    _renderParticipantsEditor(b);
   } catch (e) {}
+}
+
+// ─── Lot 3c — Compteur termes glossaire affiché sur le bouton ──────────────
+function _glossaryTermsOf(brief) {
+  // Source de vérité = preparation.glossary_source (liste d'objets {term,...}).
+  if (!brief) return [];
+  const gs = brief.glossary_source;
+  if (Array.isArray(gs)) return gs;
+  return [];
+}
+
+function _renderGlossaryCount(brief) {
+  const terms = _glossaryTermsOf(brief);
+  const n = terms.length;
+  const cEl = document.getElementById('brief-detail-glossary-count');
+  const pEl = document.getElementById('brief-detail-glossary-plural');
+  if (cEl) cEl.textContent = String(n);
+  if (pEl) pEl.textContent = (n > 1 ? 's' : '');
+}
+
+// ─── Lot 5 — Editeur participants sur la fiche ──────────────────────────
+function _renderParticipantsEditor(brief) {
+  const list = document.getElementById('brief-detail-participants-list');
+  const countEl = document.getElementById('brief-detail-participants-count');
+  if (!list) return;
+  const participants = Array.isArray(brief.participants) ? brief.participants : [];
+  populateParticipantsContainer(list, participants, _onParticipantsChanged);
+  if (countEl) countEl.textContent = String(participants.length);
+  _participantsBaseline = JSON.stringify(serializeParticipantsContainer(list));
+  const saveBtn = document.getElementById('brief-detail-participants-save-btn');
+  if (saveBtn) saveBtn.style.display = 'none';
+  const status = document.getElementById('brief-detail-participants-status');
+  if (status) status.textContent = '';
+}
+
+function _onParticipantsChanged() {
+  const list = document.getElementById('brief-detail-participants-list');
+  const saveBtn = document.getElementById('brief-detail-participants-save-btn');
+  const countEl = document.getElementById('brief-detail-participants-count');
+  if (!list) return;
+  const current = JSON.stringify(serializeParticipantsContainer(list));
+  if (countEl) {
+    countEl.textContent = String(
+      serializeParticipantsContainer(list).length
+    );
+  }
+  if (saveBtn) saveBtn.style.display = (current !== _participantsBaseline) ? '' : 'none';
+}
+
+function _addDetailParticipant() {
+  const list = document.getElementById('brief-detail-participants-list');
+  if (!list) return;
+  list.appendChild(createParticipantRow({}, _onParticipantsChanged));
+  _onParticipantsChanged();
+}
+
+async function _saveDetailParticipants() {
+  if (!_briefDetailId) return;
+  const list = document.getElementById('brief-detail-participants-list');
+  if (!list) return;
+  const invalid = listInvalidEmails(list);
+  const status = document.getElementById('brief-detail-participants-status');
+  if (invalid.length) {
+    if (status) status.textContent = `Email invalide : ${invalid[0]}`;
+    return;
+  }
+  const participants = serializeParticipantsContainer(list);
+  const btn = document.getElementById('brief-detail-participants-save-btn');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Enregistrement…';
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/participants`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ participants }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'save_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    _participantsBaseline = JSON.stringify(participants);
+    if (btn) btn.style.display = 'none';
+    if (status) status.textContent = 'Participants enregistrés.';
+    if (_currentBrief) _currentBrief.participants = participants;
+    _toast('Participants enregistrés.', 'success');
+  } catch (e) {
+    if (status) status.textContent = 'Échec : ' + (e.message || e);
+    _toast('Échec enregistrement participants.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ─── Sources Drive + test d'accès (Lot 1) ────────────────────────────────
@@ -883,6 +974,372 @@ async function deleteBriefPermanently(briefId, titleRaw) {
   } catch (e) { _toast('Suppression définitive échouée.', 'error'); }
 }
 
+// ─── Lot 3a — Rename inline du titre ─────────────────────────────────────
+function _startRenameInline() {
+  const titleEl = document.getElementById('brief-detail-title');
+  const ctrl = document.getElementById('brief-detail-title-edit-controls');
+  const input = document.getElementById('brief-detail-title-input');
+  if (!titleEl || !ctrl || !input) return;
+  input.value = titleEl.textContent || '';
+  titleEl.style.display = 'none';
+  ctrl.style.display = 'inline-flex';
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+}
+
+function _cancelRenameInline() {
+  const titleEl = document.getElementById('brief-detail-title');
+  const ctrl = document.getElementById('brief-detail-title-edit-controls');
+  if (titleEl) titleEl.style.display = '';
+  if (ctrl) ctrl.style.display = 'none';
+}
+
+async function _commitRenameInline() {
+  if (!_briefDetailId) return;
+  const input = document.getElementById('brief-detail-title-input');
+  const titleEl = document.getElementById('brief-detail-title');
+  if (!input || !titleEl) return;
+  const next = (input.value || '').trim();
+  if (!next) { _cancelRenameInline(); return; }
+  if (next === titleEl.textContent) { _cancelRenameInline(); return; }
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: next }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'rename_failed');
+    titleEl.textContent = d.title || next;
+    detailCache.invalidate('brief', _briefDetailId);
+    _toast('Titre mis à jour.', 'success');
+  } catch (e) {
+    _toast('Renommage échoué.', 'error');
+  } finally {
+    _cancelRenameInline();
+  }
+}
+
+// ─── Lot 3 — Menu "Plus d'actions" ───────────────────────────────────────
+function _toggleMoreActions() {
+  const menu = document.getElementById('brief-detail-more-menu');
+  const btn = document.getElementById('brief-detail-more-btn');
+  if (!menu) return;
+  const opening = menu.style.display === 'none' || !menu.style.display;
+  menu.style.display = opening ? 'block' : 'none';
+  if (btn) btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+}
+
+function _closeMoreActionsOnOutside(ev) {
+  const wrap = document.querySelector('[data-more-actions-wrap]');
+  if (!wrap) return;
+  if (wrap.contains(ev.target)) return;
+  const menu = document.getElementById('brief-detail-more-menu');
+  const btn = document.getElementById('brief-detail-more-btn');
+  if (menu) menu.style.display = 'none';
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+// ─── Lot 3b — Modale "Lier un audio" ─────────────────────────────────────
+async function _openLinkAudioModal() {
+  if (!_briefDetailId) return;
+  const body = document.createElement('div');
+  body.innerHTML = '<p style="color:#64748b;">Chargement des réunions audio…</p>';
+  const footer = document.createElement('div');
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'fr-btn fr-btn--sm fr-btn--secondary';
+  cancel.textContent = 'Fermer';
+  cancel.addEventListener('click', closePrepModal);
+  footer.appendChild(cancel);
+  openPrepModal({ title: 'Lier une réunion (audio)', bodyEl: body, footerEl: footer });
+
+  try {
+    const r = await fetch('/api/meetings');
+    const d = await r.json();
+    const meetings = (d && d.meetings) || [];
+    if (!meetings.length) {
+      body.innerHTML = '<div class="fr-alert fr-alert--info fr-alert--sm">'
+        + '<p>Aucune réunion audio disponible. Uploadez d\'abord un fichier depuis l\'onglet « Mes réunions ».</p></div>';
+      return;
+    }
+    body.innerHTML = '<p style="font-size:0.85rem;color:#64748b;">'
+      + 'Sélectionnez la réunion à lier au brief courant.</p>';
+    const ul = document.createElement('ul');
+    ul.className = 'fr-raw-list';
+    ul.style.cssText = 'list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:0.4rem;';
+    meetings.forEach((m) => {
+      const li = document.createElement('li');
+      li.style.cssText = 'border:1px solid #e2e8f0;border-radius:0.4rem;'
+        + 'padding:0.4rem 0.6rem;display:flex;align-items:center;justify-content:space-between;gap:0.6rem;';
+      const linkedHere = String(m.preparation_id || '') === String(_briefDetailId);
+      const linkedElsewhere = m.preparation_id && !linkedHere;
+      const title = m.title || m.summary || ('Réunion ' + (m.id || '').slice(0, 8));
+      const date = (m.created_at || '').slice(0, 16).replace('T', ' ');
+      const left = document.createElement('div');
+      left.innerHTML = `<div style="font-weight:600;font-size:0.9rem;">${_esc(title)}</div>`
+        + `<div style="font-size:0.78rem;color:#64748b;">${_esc(date)}</div>`;
+      if (linkedHere) {
+        left.innerHTML += ` <span class="fr-badge fr-badge--sm fr-badge--info" style="margin-top:0.2rem;">Déjà liée à ce brief</span>`;
+      } else if (linkedElsewhere) {
+        left.innerHTML += ` <span class="fr-badge fr-badge--sm fr-badge--warning" style="margin-top:0.2rem;">Liée à une autre prep</span>`;
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fr-btn fr-btn--sm';
+      if (linkedHere) {
+        btn.className += ' fr-btn--secondary';
+        btn.textContent = 'Déjà liée';
+        btn.disabled = true;
+      } else {
+        btn.textContent = linkedElsewhere ? 'Remplacer…' : 'Lier';
+        btn.addEventListener('click', () => _confirmLinkMeeting(m, linkedElsewhere));
+      }
+      li.appendChild(left);
+      li.appendChild(btn);
+      ul.appendChild(li);
+    });
+    body.appendChild(ul);
+  } catch (e) {
+    body.innerHTML = '<div class="fr-alert fr-alert--error fr-alert--sm"><p>'
+      + 'Erreur chargement des réunions.</p></div>';
+  }
+}
+
+function _confirmLinkMeeting(meeting, linkedElsewhere) {
+  const fileId = meeting.user_audio_file_id;
+  if (!fileId) {
+    _toast("Cette réunion n'a pas de fichier audio associé.", 'error');
+    return;
+  }
+  if (!linkedElsewhere) {
+    _doLinkAudio(fileId, false);
+    return;
+  }
+  // Demande confirmation + offre reprocess
+  const body = document.createElement('div');
+  body.innerHTML =
+    `<p>La réunion « <strong>${_esc(meeting.title || meeting.id)}</strong> » est déjà liée à une autre préparation.</p>`
+    + '<p>En continuant, vous remplacerez ce lien par le brief courant.</p>'
+    + '<label style="display:flex;gap:0.5rem;align-items:center;margin-top:0.6rem;">'
+    + '<input type="checkbox" id="confirm-link-reprocess" checked>'
+    + ' Relancer la génération du CR avec le glossaire du nouveau brief'
+    + '</label>';
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:0.4rem;';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'fr-btn fr-btn--sm fr-btn--secondary';
+  cancel.textContent = 'Annuler';
+  cancel.addEventListener('click', () => _openLinkAudioModal());
+  const ok = document.createElement('button');
+  ok.type = 'button'; ok.className = 'fr-btn fr-btn--sm';
+  ok.textContent = 'Remplacer';
+  ok.addEventListener('click', () => {
+    const cb = document.getElementById('confirm-link-reprocess');
+    _doLinkAudio(fileId, !!(cb && cb.checked), meeting.id);
+  });
+  foot.appendChild(cancel);
+  foot.appendChild(ok);
+  openPrepModal({ title: 'Remplacer le lien existant ?', bodyEl: body, footerEl: foot });
+}
+
+async function _doLinkAudio(fileId, reprocess, meetingId) {
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/link-audio`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_id: fileId }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) throw new Error(d.error || 'link_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    if (reprocess && meetingId) {
+      try {
+        await fetch(`/api/meetings/${meetingId}/reprocess`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ glossary_from_preparation_id: _briefDetailId }),
+        });
+      } catch (e) { /* best-effort */ }
+    }
+    closePrepModal();
+    _toast('Audio lié au brief.' + (reprocess ? ' Reprocess relancé.' : ''), 'success');
+    if (_briefDetailId) loadBriefAudioFiles(_briefDetailId);
+  } catch (e) {
+    _toast('Lien échoué : ' + (e.message || e), 'error');
+  }
+}
+
+// ─── Lot 3c — Modale glossaire ───────────────────────────────────────────
+function _openGlossaryModal() {
+  if (!_briefDetailId || !_currentBrief) return;
+  const terms = _glossaryTermsOf(_currentBrief).map((t) => ({
+    term: (t && (t.term || t.name)) || '',
+    definition: (t && t.definition) || '',
+    global: !!(t && (t.global || t.is_global)),
+  }));
+
+  const body = document.createElement('div');
+  body.innerHTML =
+    '<div class="fr-callout fr-callout--blue-ecume" style="margin-bottom:0.7rem;">'
+    + '<p class="fr-callout__text" style="font-size:0.85rem;">'
+    + '⚠ Le glossaire ne doit contenir que du vocabulaire métier ou spécifique au contexte '
+    + 'que la transcription ne reconnaîtrait pas naturellement (acronymes, noms propres, jargon).'
+    + '</p></div>'
+    + '<div id="glossary-modal-list" style="display:flex;flex-direction:column;gap:0.4rem;"></div>'
+    + '<button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left" '
+    + 'id="glossary-modal-add-btn" style="margin-top:0.6rem;">Ajouter un terme</button>';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:0.4rem;';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'fr-btn fr-btn--sm fr-btn--secondary';
+  cancel.textContent = 'Annuler';
+  cancel.addEventListener('click', closePrepModal);
+  const save = document.createElement('button');
+  save.type = 'button'; save.className = 'fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left';
+  save.textContent = 'Enregistrer';
+  save.addEventListener('click', _saveGlossaryModal);
+  foot.appendChild(cancel);
+  foot.appendChild(save);
+
+  openPrepModal({ title: 'Glossaire de la préparation', bodyEl: body, footerEl: foot });
+
+  const list = document.getElementById('glossary-modal-list');
+  terms.forEach((t) => list.appendChild(_glossaryRow(t)));
+  document.getElementById('glossary-modal-add-btn').addEventListener('click', () => {
+    list.appendChild(_glossaryRow({ term: '', definition: '', global: false }));
+  });
+  if (!terms.length) list.appendChild(_glossaryRow({ term: '', definition: '', global: false }));
+}
+
+function _glossaryRow(t) {
+  const row = document.createElement('div');
+  row.className = 'gloss-row';
+  row.style.cssText = 'display:grid;grid-template-columns:1fr 1.4fr auto auto;'
+    + 'gap:0.4rem;align-items:center;border:1px solid #e2e8f0;'
+    + 'border-radius:0.4rem;padding:0.4rem;background:#fafbfc;';
+
+  const termI = document.createElement('input');
+  termI.type = 'text'; termI.className = 'gloss-term';
+  termI.value = t.term || '';
+  termI.placeholder = 'Terme';
+  termI.style.cssText = 'border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;font-size:0.85rem;';
+
+  const defI = document.createElement('input');
+  defI.type = 'text'; defI.className = 'gloss-def';
+  defI.value = t.definition || '';
+  defI.placeholder = 'Définition (optionnelle)';
+  defI.style.cssText = termI.style.cssText;
+
+  const globLabel = document.createElement('label');
+  globLabel.style.cssText = 'display:flex;align-items:center;gap:0.3rem;font-size:0.78rem;color:#475569;';
+  const globCb = document.createElement('input');
+  globCb.type = 'checkbox'; globCb.className = 'gloss-global';
+  globCb.checked = !!t.global;
+  globLabel.appendChild(globCb);
+  const lblText = document.createElement('span');
+  lblText.textContent = 'Global';
+  lblText.title = 'Ajouter ce terme au glossaire global de votre compte';
+  globLabel.appendChild(lblText);
+
+  const rm = document.createElement('button');
+  rm.type = 'button'; rm.className = 'fr-btn fr-btn--sm fr-btn--tertiary-no-outline';
+  rm.setAttribute('aria-label', 'Retirer ce terme');
+  rm.textContent = '🗑';
+  rm.addEventListener('click', () => row.remove());
+
+  row.appendChild(termI);
+  row.appendChild(defI);
+  row.appendChild(globLabel);
+  row.appendChild(rm);
+  return row;
+}
+
+async function _saveGlossaryModal() {
+  if (!_briefDetailId) return;
+  const rows = Array.from(document.querySelectorAll('#glossary-modal-list .gloss-row'));
+  const terms = [];
+  rows.forEach((r) => {
+    const term = ((r.querySelector('.gloss-term') || {}).value || '').trim();
+    if (!term) return;
+    const definition = ((r.querySelector('.gloss-def') || {}).value || '').trim();
+    const global = !!((r.querySelector('.gloss-global') || {}).checked);
+    const entry = { term };
+    if (definition) entry.definition = definition;
+    if (global) entry.global = true;
+    terms.push(entry);
+  });
+  try {
+    const r = await fetch(`/api/preparations/${_briefDetailId}/glossary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ terms }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.error || 'glossary_save_failed');
+    detailCache.invalidate('brief', _briefDetailId);
+    if (_currentBrief) _currentBrief.glossary_source = terms;
+    _renderGlossaryCount(_currentBrief);
+    closePrepModal();
+    const pushed = d.globals_pushed || 0;
+    _toast(
+      `Glossaire enregistré (${terms.length} terme${terms.length > 1 ? 's' : ''}` +
+        (pushed ? `, ${pushed} ajouté${pushed > 1 ? 's' : ''} au global` : '') + ').',
+      'success'
+    );
+  } catch (e) {
+    _toast('Échec : ' + (e.message || e), 'error');
+  }
+}
+
+// ─── Bouton 4 (Prepare-next) — date picker ────────────────────────────────
+function _openPrepareNextModal() {
+  if (!_briefDetailId) return;
+  // Date par défaut : maintenant + 7 jours (heure ronde).
+  const d = new Date();
+  d.setDate(d.getDate() + 7);
+  d.setMinutes(0, 0, 0);
+  const pad = (n) => String(n).padStart(2, '0');
+  const defaultVal = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+  const body = document.createElement('div');
+  body.innerHTML =
+    '<p style="font-size:0.85rem;color:#475569;">'
+    + 'Programmez la prochaine réunion de cette série. Le brief sera créé en chaînage '
+    + '(le glossaire et le contexte parent seront repris automatiquement).'
+    + '</p>'
+    + '<label class="fr-label" for="prepare-next-datetime" style="font-size:0.85rem;">'
+    + 'Date &amp; heure prévues</label>'
+    + `<input type="datetime-local" id="prepare-next-datetime" value="${defaultVal}" `
+    + 'style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.4rem 0.5rem;font-size:0.9rem;width:100%;max-width:280px;">';
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'display:flex;gap:0.4rem;';
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'fr-btn fr-btn--sm fr-btn--secondary';
+  cancel.textContent = 'Annuler';
+  cancel.addEventListener('click', closePrepModal);
+  const go = document.createElement('button');
+  go.type = 'button'; go.className = 'fr-btn fr-btn--sm fr-icon-arrow-right-line fr-btn--icon-right';
+  go.textContent = 'Préparer';
+  go.addEventListener('click', () => {
+    const inp = document.getElementById('prepare-next-datetime');
+    const val = (inp && inp.value) || '';
+    closePrepModal();
+    try {
+      if (typeof window.openWizard === 'function') {
+        window.openWizard({
+          seriesParentId: _briefDetailId,
+          targetMeetingDate: val || null,
+        });
+      }
+    } catch (e) { _toast('Impossible d\'ouvrir le wizard.', 'error'); }
+  });
+  foot.appendChild(cancel);
+  foot.appendChild(go);
+  openPrepModal({ title: 'Préparer la prochaine réunion', bodyEl: body, footerEl: foot });
+}
+
 // ─── Délégation d'événements DSFR + click handler unique ─────────────────
 function _onPanelClick(ev) {
   const target = ev.target;
@@ -916,11 +1373,37 @@ function _onPanelClick(ev) {
       return;
     }
     case 'rename-brief':
-      ev.preventDefault(); renameBriefPrompt(); return;
+      ev.preventDefault(); renameBriefPrompt();
+      // si appelé depuis le menu "Plus d'actions", referme le menu
+      { const m = document.getElementById('brief-detail-more-menu');
+        if (m) m.style.display = 'none'; }
+      return;
+    case 'start-rename-inline':
+      ev.preventDefault(); _startRenameInline(); return;
+    case 'commit-rename-inline':
+      ev.preventDefault(); _commitRenameInline(); return;
+    case 'cancel-rename-inline':
+      ev.preventDefault(); _cancelRenameInline(); return;
+    case 'toggle-more-actions':
+      ev.preventDefault(); _toggleMoreActions(); return;
+    case 'open-link-audio-modal':
+      ev.preventDefault(); _openLinkAudioModal(); return;
+    case 'open-glossary-modal':
+      ev.preventDefault(); _openGlossaryModal(); return;
+    case 'open-prepare-next-modal':
+      ev.preventDefault(); _openPrepareNextModal(); return;
+    case 'add-detail-participant':
+      ev.preventDefault(); _addDetailParticipant(); return;
+    case 'save-detail-participants':
+      ev.preventDefault(); _saveDetailParticipants(); return;
     case 'toggle-amend':
-      ev.preventDefault(); toggleAmendBrief(); return;
+      ev.preventDefault(); toggleAmendBrief();
+      { const m = document.getElementById('brief-detail-more-menu');
+        if (m) m.style.display = 'none'; }
+      return;
     case 'link-audio':
-      ev.preventDefault(); linkAudioToBriefPrompt(); return;
+      // legacy fallback — désormais on passe par open-link-audio-modal
+      ev.preventDefault(); _openLinkAudioModal(); return;
     case 'test-drive-detail':
       ev.preventDefault(); testDriveAccessFromDetail(); return;
     case 'detach-audio': {
@@ -1008,6 +1491,17 @@ export function mount(container /*, ctx */) {
   }
   panel.addEventListener('click', _onPanelClick);
   panel.addEventListener('click', _onAmendSectionHeaderClick);
+  // Lot 3 — modale générique + outside-click pour le menu "Plus d'actions".
+  try { bindPrepModal(); } catch (e) {}
+  document.addEventListener('click', _closeMoreActionsOnOutside);
+  // Lot 3a — Enter dans l'input de rename = valider, Esc = annuler.
+  const renameInp = document.getElementById('brief-detail-title-input');
+  if (renameInp) {
+    renameInp.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); _commitRenameInline(); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); _cancelRenameInline(); }
+    });
+  }
 
   const objEl = document.getElementById('amend-objective');
   if (objEl) objEl.addEventListener('input', _onAmendObjectiveInput);
