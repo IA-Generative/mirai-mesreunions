@@ -29,8 +29,15 @@ import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 _DTA_PATH = os.path.join(_REPO_ROOT, "services", "device-token-authority")
-if _DTA_PATH not in sys.path:
-    sys.path.insert(0, _DTA_PATH)
+
+# Collision possible avec d'autres tests qui ont bindé ``app`` à un autre
+# service (mydevices-web). On purge le cache d'imports avant de réimporter.
+for _mod in list(sys.modules):
+    if _mod == "app" or _mod.startswith("app."):
+        del sys.modules[_mod]
+if _DTA_PATH in sys.path:
+    sys.path.remove(_DTA_PATH)
+sys.path.insert(0, _DTA_PATH)
 
 try:
     from app.recurrence import (  # type: ignore
