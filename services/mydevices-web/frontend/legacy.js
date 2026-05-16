@@ -2327,6 +2327,64 @@ function pickDefaultTab(hasActiveDevice) {
     if (target === 'trash') { try { loadTrash(); } catch (e) {} }
 }
 
+// ─── Publication globale des handlers legacy ──────────────────────────────
+// legacy.js est chargé via shell.js en `<script type="module">` (Vite). Les
+// fonctions déclarées ici vivent dans le scope du module et ne sont PAS
+// accessibles depuis les attributs `onclick="..."` du template (qui sont
+// évalués dans le scope global). Sans publication explicite, chaque clic
+// sur un bouton « Mode avancé », un titre de liste, le chevron « détails »,
+// le bouton corbeille, etc. déclenche `ReferenceError: <fn> is not defined`
+// et le navigateur ignore silencieusement l'action — d'où les 4 bugs UX
+// rapportés (titre non cliquable, mode avancé inopérant, chevron inerte,
+// purge inaccessible). On republie ici, en bloc, toutes les fonctions
+// référencées par un attribut inline dans index.html OU dans le HTML
+// généré par innerHTML (file row, file detail, trash item).
+// Note : `tabs/meetings.js` lit ces mêmes globals via `window.<fn>` au
+// moment de son import — l'ordre dans shell.js fait que legacy.js est
+// évalué AVANT meetings.js, donc ces affectations sont en place quand
+// les ré-exports `export const ... = window.<fn>` sont résolus.
+const _WINDOW_EXPORTS = {
+    // Mode avancé (header)
+    toggleAdvancedDl,
+    // Liste / détail / chevron / corbeille (sessions + fichiers)
+    showFileDetail,
+    showFilesList,
+    toggleRowExpand,
+    deleteFile,
+    deleteSession,
+    deleteFilePermanently,
+    restoreFile,
+    restoreSession,
+    purgeSessions,
+    renewSession,
+    renameDetailTitle,
+    // Modale infos techniques + impact normalisation
+    openFileInfoModal,
+    loadNormalizationImpact,
+    // Tri date + upload local
+    toggleSortDir,
+    handleLocalUploadInput,
+    uploadLocalFiles,
+    // Date de réunion éditable (vue détail)
+    saveMeetingDatetime,
+    resetMeetingDatetime,
+    // Corbeille
+    loadTrash,
+    // Téléchargements (status + dropdowns "Autres")
+    loadTranscriptStatus,
+    updateOtherDownload,
+    updateDownloadButtons,
+    // Nav + cycle de vie (consommés par d'autres modules ES)
+    activateTab,
+    stopQueueHintDetail,
+    loadDevices,
+};
+for (const [name, fn] of Object.entries(_WINDOW_EXPORTS)) {
+    if (typeof fn === 'function' && typeof window[name] === 'undefined') {
+        window[name] = fn;
+    }
+}
+
 setupTabs();
 updateDeviceFilterButton();
 updateAdvancedToggleUi();
