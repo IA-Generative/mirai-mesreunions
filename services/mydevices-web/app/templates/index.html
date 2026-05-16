@@ -1647,6 +1647,8 @@
                     Préparer la prochaine réunion de cette série
                 </a>
             </div>
+            <!-- Section "Sources Drive" : rendue par _applyBriefPayload si drive_folder_id présent -->
+            <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
             <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
             <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
@@ -2211,6 +2213,14 @@
                     </div>
                     <input type="text" id="wizard-drive-folder"
                            placeholder="https://mesfichiers.…/explorer/items/xxxxxxxx">
+                    <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-search-line fr-btn--icon-left"
+                                id="wizard-drive-test-btn">Vérifier l'accès</button>
+                        <span id="wizard-drive-test-spinner" style="display:none;color:#64748b;font-size:0.85rem;">
+                            Vérification en cours…
+                        </span>
+                    </div>
+                    <div id="wizard-drive-test-result" style="margin-top:0.5rem;"></div>
                 </div>
             </div>
 
@@ -2243,6 +2253,7 @@
             </div>
 
             <div id="wizard-status" class="wizard-status"></div>
+            <div id="wizard-generation-progress" style="display:none;margin-top:0.6rem;"></div>
 
             <div class="wizard-actions">
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"

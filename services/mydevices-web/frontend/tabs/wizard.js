@@ -151,10 +151,123 @@ function _renderRecap() {
     </dl>`;
 }
 
+// ── Stepper animé pendant la génération (Lot 2) ──────────────────────────
+// Phases techniques mappées vers libellés UX. L'ordre détermine l'animation
+// (chaque phase passée s'affiche ✓, la phase courante ⏳, les suivantes ○).
+const _GEN_PHASES = [
+  { key: 'test_drive',          label: 'Connexion au Drive' },
+  { key: 'listing_docs',        label: 'Listing des documents' },
+  { key: 'reading_doc',         label: 'Lecture des documents' },
+  { key: 'generating_llm',      label: 'Génération du brief par l\'IA' },
+  { key: 'persisting',          label: 'Sauvegarde du brief' },
+  { key: 'extracting_glossary', label: 'Extraction du glossaire' },
+  { key: 'done',                label: 'Terminé' },
+];
+const _PHASES_NO_DRIVE = new Set(['test_drive', 'listing_docs', 'reading_doc']);
+
+function _phaseIndex(phase) {
+  for (let i = 0; i < _GEN_PHASES.length; i++) {
+    if (_GEN_PHASES[i].key === phase) return i;
+  }
+  // 'init' / 'queued' = avant la première phase visible
+  if (phase === 'init' || phase === 'queued') return -1;
+  return -1;
+}
+
+function _renderGenerationStepper(state, opts) {
+  const root = _qs('#wizard-generation-progress');
+  if (!root) return;
+  root.style.display = '';
+  const hasDrive = !!(opts && opts.hasDrive);
+  const phase = (state && state.phase) || 'queued';
+  const idx = _phaseIndex(phase);
+  const isFailed = phase === 'failed';
+  const phases = _GEN_PHASES.filter(p => hasDrive || !_PHASES_NO_DRIVE.has(p.key));
+
+  let html = '<ol class="wizard-gen-stepper" style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:0.4rem;">';
+  phases.forEach((p) => {
+    const phaseGlobalIdx = _phaseIndex(p.key);
+    let icon = '○';
+    let cls = 'todo';
+    let style = 'color:#94a3b8;';
+    if (isFailed && phaseGlobalIdx === idx) {
+      icon = '✕'; cls = 'failed'; style = 'color:#b91c1c;font-weight:600;';
+    } else if (phaseGlobalIdx < idx) {
+      icon = '✓'; cls = 'done'; style = 'color:#10b981;';
+    } else if (phaseGlobalIdx === idx) {
+      icon = '⏳'; cls = 'current'; style = 'color:#0066cc;font-weight:600;';
+    }
+    let extra = '';
+    if (p.key === 'reading_doc' && phaseGlobalIdx === idx) {
+      const proc = state.docs_processed || 0;
+      const tot = state.docs_total || 0;
+      const cur = state.current_doc ? ' — ' + _esc(state.current_doc) : '';
+      extra = tot
+        ? ` <span style="color:#64748b;font-size:0.85em;">(${proc}/${tot}${_esc(cur)})</span>`
+        : '';
+    }
+    html += `<li class="wizard-gen-step is-${cls}" style="${style}">${icon} ${_esc(p.label)}${extra}</li>`;
+  });
+  html += '</ol>';
+  if (isFailed && state.error) {
+    html += `<div class="fr-alert fr-alert--error fr-alert--sm" style="margin-top:0.5rem;">
+      <p>${_esc(state.error)}</p></div>`;
+  }
+  root.innerHTML = html;
+}
+
+function _hideGenerationStepper() {
+  const root = _qs('#wizard-generation-progress');
+  if (root) { root.style.display = 'none'; root.innerHTML = ''; }
+}
+
+let _pollTimer = null;
+function _stopPolling() {
+  if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
+}
+
+async function _pollJob(jobId, opts) {
+  try {
+    const r = await fetch(`/api/preparations/jobs/${encodeURIComponent(jobId)}`);
+    if (r.status === 404) {
+      _setStatus('Job de génération introuvable (expiré ?).', 'err');
+      _stopPolling();
+      return;
+    }
+    const d = await r.json().catch(() => ({}));
+    _renderGenerationStepper(d, opts);
+    if (d.phase === 'done') {
+      _stopPolling();
+      _setStatus('Brief généré.', 'info');
+      const newId = d.preparation_id;
+      closeWizard();
+      try {
+        if (typeof window.loadBriefs === 'function') window.loadBriefs();
+        if (newId && typeof window.showBriefDetail === 'function') {
+          setTimeout(() => window.showBriefDetail(newId), 100);
+        }
+      } catch (e) { /* non-fatal */ }
+      return;
+    }
+    if (d.phase === 'failed') {
+      _stopPolling();
+      _setStatus(d.error || 'La génération a échoué.', 'err');
+      const submitBtn = _qs('#wizard-submit-btn');
+      if (submitBtn) submitBtn.disabled = false;
+      return;
+    }
+    _pollTimer = setTimeout(() => _pollJob(jobId, opts), 1500);
+  } catch (err) {
+    // Erreur réseau ponctuelle — on retente plus tard, sans interrompre.
+    _pollTimer = setTimeout(() => _pollJob(jobId, opts), 3000);
+  }
+}
+
 // ── Submit POST /api/preparations ───────────────────────────────────────
 async function _submit(ev) {
   if (ev) ev.preventDefault();
   _clearStatus();
+  _hideGenerationStepper();
   // Validation finale : on rejoue les checks des steps 0+1 (les autres ne
   // sont pas obligatoires).
   if (!_validateStepIdx(0) || !_validateStepIdx(1)) return;
@@ -180,6 +293,8 @@ async function _submit(ev) {
   _setStatus(v.drive
     ? 'Lecture du Drive et génération du brief en cours…'
     : 'Génération du brief en cours…', 'info');
+  // Affiche tout de suite le stepper en état initial pour feedback immédiat.
+  _renderGenerationStepper({ phase: 'init' }, { hasDrive: !!v.drive });
 
   try {
     const r = await fetch('/api/preparations', {
@@ -190,23 +305,73 @@ async function _submit(ev) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) {
       _setStatus(d.error || ('Erreur ' + r.status), 'err');
+      _hideGenerationStepper();
+      if (submitBtn) submitBtn.disabled = false;
       return;
     }
+    // Mode async (Lot 2) : back renvoie {job_id} en 202.
+    if (d.job_id) {
+      _pollJob(d.job_id, { hasDrive: !!v.drive });
+      return;
+    }
+    // Fallback : ancienne réponse sync (compat).
     _setStatus('Brief généré.', 'info');
     closeWizard();
-    // Refresh la liste briefs et ouvre la fiche du brief créé si l'API
-    // renvoie son id (le service le fait — cf modules/preparations).
     try {
       if (typeof window.loadBriefs === 'function') window.loadBriefs();
-      const newId = (d && (d.id || (d.preparation && d.preparation.id))) || null;
+      const newId = (d && (d.id || d.preparation_id || (d.preparation && d.preparation.id))) || null;
       if (newId && typeof window.showBriefDetail === 'function') {
         setTimeout(() => window.showBriefDetail(newId), 100);
       }
     } catch (e) { /* non-fatal */ }
+    if (submitBtn) submitBtn.disabled = false;
   } catch (err) {
     _setStatus('Erreur réseau : ' + (err && err.message ? err.message : err), 'err');
-  } finally {
+    _hideGenerationStepper();
     if (submitBtn) submitBtn.disabled = false;
+  }
+}
+
+// ── Test d'accès Drive (Lot 1) ───────────────────────────────────────────
+async function _testDriveAccess() {
+  const input = _qs('#wizard-drive-folder');
+  const result = _qs('#wizard-drive-test-result');
+  const spinner = _qs('#wizard-drive-test-spinner');
+  const btn = _qs('#wizard-drive-test-btn');
+  if (!input || !result) return;
+  const raw = (input.value || '').trim();
+  if (!raw) {
+    result.innerHTML = '<div class="fr-alert fr-alert--info fr-alert--sm"><p>Aucun dossier renseigné — le test est inutile.</p></div>';
+    return;
+  }
+  result.innerHTML = '';
+  if (spinner) spinner.style.display = '';
+  if (btn) btn.disabled = true;
+  try {
+    const url = '/api/preparations/test-drive?folder_id=' + encodeURIComponent(raw);
+    const r = await fetch(url);
+    const d = await r.json().catch(() => ({}));
+    if (d && d.ok) {
+      const n = d.docs_count || 0;
+      const docs = (d.docs || []).filter(x => !x.is_folder).slice(0, 10);
+      let list = '';
+      if (docs.length) {
+        list = '<ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85rem;">'
+          + docs.map(x => `<li>${_esc(x.name)}</li>`).join('')
+          + (n > docs.length ? `<li><em>…et ${n - docs.length} autre(s)</em></li>` : '')
+          + '</ul>';
+      }
+      result.innerHTML = `<div class="fr-alert fr-alert--success fr-alert--sm">
+        <p><strong>${n} document(s) trouvé(s)</strong> dans ce dossier.</p>${list}</div>`;
+    } else {
+      const msg = (d && d.error) ? d.error : 'Accès au Drive impossible.';
+      result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>${_esc(msg)}</p></div>`;
+    }
+  } catch (err) {
+    result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>Erreur réseau : ${_esc(err && err.message ? err.message : err)}</p></div>`;
+  } finally {
+    if (spinner) spinner.style.display = 'none';
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -296,6 +461,10 @@ export function closeWizard() {
   if (!backdrop) return;
   backdrop.classList.remove('is-open');
   document.body.style.overflow = '';
+  _stopPolling();
+  _hideGenerationStepper();
+  const driveTestResult = _qs('#wizard-drive-test-result');
+  if (driveTestResult) driveTestResult.innerHTML = '';
   // Nettoie ?action=new de l'URL pour éviter de réouvrir si reload.
   try {
     const url = new URL(window.location.href);
@@ -322,6 +491,8 @@ function _bindEvents() {
   if (nextBtn) nextBtn.addEventListener('click', _next);
   if (form) form.addEventListener('submit', _submit);
   if (submitBtn) submitBtn.addEventListener('click', _submit);
+  const driveTestBtn = _qs('#wizard-drive-test-btn');
+  if (driveTestBtn) driveTestBtn.addEventListener('click', _testDriveAccess);
   // Click backdrop (hors carte) → ferme.
   backdrop.addEventListener('click', (ev) => {
     if (ev.target === backdrop) closeWizard();

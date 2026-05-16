@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 
 import requests as req
@@ -36,6 +37,7 @@ from ...shared import (
 )
 from .. import glossary as glossary_module
 from . import service as prep_service
+from . import generation_jobs
 
 logger = logging.getLogger("mydevices_web.preparations.routes")
 
@@ -96,15 +98,21 @@ def list_preparations():
 @bp.route("", methods=["POST"], strict_slashes=False)
 @require_auth
 def create_preparation():
-    """Wizard : génère le brief (LLM ± Drive) puis le persiste."""
+    """Wizard : génère le brief (LLM ± Drive) en mode **async** (Lot 2).
+
+    Validation + spawn d'un worker daemon, retour HTTP 202 immédiat avec
+    ``{job_id}``. Le front poll ensuite ``GET /api/preparations/jobs/<job_id>``
+    pour récupérer la progression (phases ``listing_docs`` → ``reading_doc`` →
+    ``generating_llm`` → ``persisting`` → ``done``).
+
+    Compat : conserve les anciens consommateurs synchrones via le query
+    string ``?sync=1`` (utilisé par les tests de régression).
+    """
     # Import lazy pour ne pas durcir la dépendance à la racine.
     from libs.shared.app.config import (
-        DRIVE_BASE_URL, LITELLM_API_KEY, LITELLM_BASE_URL, LLM_HTTP_TIMEOUT_SECONDS,
-        LLM_MODEL_MEDIUM, OIDC_OFFLINE_ACCESS, OIDC_TOKEN_ENDPOINT,
+        DRIVE_BASE_URL, LITELLM_API_KEY, LITELLM_BASE_URL, OIDC_OFFLINE_ACCESS,
+        OIDC_TOKEN_ENDPOINT,
     )
-    from libs.shared.app.oidc_refresh_store import fetch_ciphertext
-    from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
-    from app.main import oidc_cfg
 
     _mp = _meeting_prep_module()
 
@@ -163,12 +171,117 @@ def create_preparation():
         else _mp.DEFAULT_MEETING_TYPE
     )
 
+    job_payload = {
+        "user_sub": user_sub,
+        "subject": subject,
+        "folder_id": folder_id,
+        "role_viewpoint": role_viewpoint,
+        "expectation": expectation,
+        "duration_minutes": duration_minutes,
+        "focus_areas": focus_areas,
+        "meeting_type": meeting_type,
+        "series_parent_id": series_parent_id,
+        "target_meeting_date": target_meeting_date,
+    }
+
+    # Mode async (par défaut, Lot 2).
+    sync_mode = (request.args.get("sync") or "").lower() in ("1", "true", "yes")
+    if not sync_mode:
+        job_id = generation_jobs.create_job(user_sub)
+        worker = threading.Thread(
+            target=_run_generation_worker,
+            args=(job_id, job_payload),
+            name=f"prep-gen-{job_id[:8]}",
+            daemon=True,
+        )
+        worker.start()
+        return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+    # Mode sync (tests de régression).
+    return _run_generation_inline(job_payload)
+
+
+def _run_generation_worker(job_id: str, job: dict) -> None:
+    """Worker daemon — exécute la génération + persiste l'état via generation_jobs."""
+    try:
+        result = _execute_generation(job, job_id=job_id)
+        generation_jobs.mark_done(job_id, result.get("preparation_id"))
+    except Exception as exc:
+        logger.exception("preparations: generation worker failed (job=%s)", job_id)
+        generation_jobs.mark_failed(job_id, str(exc))
+
+
+def _run_generation_inline(job: dict):
+    """Mode synchrone (compat tests) — exécute en bloc et retourne la réponse."""
+    try:
+        result = _execute_generation(job, job_id=None)
+    except _SyncGenerationError as exc:
+        return _err(exc.payload, exc.status)
+    return jsonify({
+        "brief": result["brief"],
+        "documents": result["documents"],
+        "preparation_id": result["preparation_id"],
+        "meeting_type": result["meeting_type"],
+    })
+
+
+class _SyncGenerationError(Exception):
+    def __init__(self, payload, status):
+        super().__init__(str(payload))
+        self.payload = payload
+        self.status = status
+
+
+def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
+    """Cœur métier — partagé entre worker async (Lot 2) et mode sync (tests).
+
+    En mode async, met à jour ``generation_jobs`` à chaque étape. En mode
+    sync, lève ``_SyncGenerationError(payload, status)`` sur échec attendu
+    (validation Drive/LLM) pour que le caller renvoie l'erreur HTTP.
+    """
+    from libs.shared.app.config import (
+        DRIVE_BASE_URL, LITELLM_API_KEY, LITELLM_BASE_URL, LLM_HTTP_TIMEOUT_SECONDS,
+        LLM_MODEL_MEDIUM, OIDC_TOKEN_ENDPOINT,
+    )
+    from libs.shared.app.oidc_refresh_store import fetch_ciphertext
+    from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
+    from app.main import oidc_cfg
+
+    _mp = _meeting_prep_module()
+
+    user_sub = job["user_sub"]
+    subject = job["subject"]
+    folder_id = job["folder_id"]
+    role_viewpoint = job["role_viewpoint"]
+    expectation = job["expectation"]
+    duration_minutes = job["duration_minutes"]
+    focus_areas = job["focus_areas"]
+    meeting_type = job["meeting_type"]
+    series_parent_id = job["series_parent_id"]
+    target_meeting_date = job["target_meeting_date"]
+
+    def _update(**kw):
+        if job_id:
+            generation_jobs.update_job(job_id, **kw)
+
+    def _fail(payload, status):
+        if job_id:
+            err_msg = payload if isinstance(payload, str) else (
+                (payload or {}).get("error") or "generation_failed"
+            )
+            generation_jobs.update_job(job_id, error=err_msg)
+            raise RuntimeError(err_msg)
+        raise _SyncGenerationError(payload, status)
+
+    _update(phase="init")
+
     corpus_text = ""
     used: list = []
     if folder_id:
+        _update(phase="test_drive")
         ciphertext = fetch_ciphertext(user_sub)
         if not ciphertext:
-            return _err({
+            _fail({
                 "error": "Aucun token Drive enregistré. Déconnectez-vous puis reconnectez-vous pour réautoriser l'accès au Drive.",
                 "code": "no_refresh_token",
             }, 401)
@@ -176,7 +289,7 @@ def create_preparation():
             refresh_token = decrypt_secret(ciphertext)
         except Exception:
             logger.exception("preparations: failed to decrypt refresh token for sub=%s", user_sub)
-            return _err("Token Drive illisible côté serveur.", 500)
+            _fail("Token Drive illisible côté serveur.", 500)
 
         drive = _mp.DriveClient(
             base_url=DRIVE_BASE_URL,
@@ -184,21 +297,25 @@ def create_preparation():
             oidc_client_id=oidc_cfg.client_id,
             oidc_client_secret=oidc_cfg.client_secret,
         )
-
         try:
             access_token = drive.exchange_refresh(refresh_token)
         except _mp.DriveAuthError:
             logger.warning("preparations: refresh rejected by Keycloak for sub=%s", user_sub)
-            return _err({
+            _fail({
                 "error": "Le jeton Drive a expiré. Déconnectez-vous puis reconnectez-vous.",
                 "code": "refresh_rejected",
             }, 401)
         except _mp.DriveTransientError as exc:
             logger.warning("preparations: Keycloak transient on token exchange: %s", exc)
-            return _err("Le service d'identité est temporairement indisponible.", 502)
+            _fail("Le service d'identité est temporairement indisponible.", 502)
+
+        def _progress(**kw):
+            _update(**kw)
 
         try:
-            corpus_text, used = _mp.assemble_corpus(drive, access_token, folder_id)
+            corpus_text, used = _mp.assemble_corpus(
+                drive, access_token, folder_id, progress=_progress,
+            )
         except _mp.DriveAuthError as exc:
             status_code = getattr(exc, "status_code", None)
             logger.warning(
@@ -206,23 +323,23 @@ def create_preparation():
                 folder_id, status_code, exc,
             )
             if status_code == 403:
-                return _err({
+                _fail({
                     "error": "Vous n'avez pas accès à ce dossier sur le Drive. Vérifiez l'URL collée ou demandez l'accès au propriétaire.",
                     "code": "drive_forbidden",
                 }, 403)
-            return _err({
+            _fail({
                 "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
                 "code": "drive_auth",
             }, 401)
         except _mp.DriveApplicativeError as exc:
             logger.info("preparations: Drive applicative error on folder %s: %s", folder_id, exc)
-            return _err({
+            _fail({
                 "error": "Dossier Drive introuvable. Vérifiez l'URL ou l'identifiant collé.",
                 "code": "drive_not_found",
             }, 404)
         except _mp.DriveTransientError as exc:
             logger.warning("preparations: Drive transient error on folder %s: %s", folder_id, exc)
-            return _err("Le Drive est temporairement indisponible.", 502)
+            _fail("Le Drive est temporairement indisponible.", 502)
 
     try:
         template_text = _mp.load_prompt_template(
@@ -230,7 +347,7 @@ def create_preparation():
         )
     except Exception:
         logger.exception("preparations: failed to load prompt template (type=%s)", meeting_type)
-        return _err("Modèle de prompt indisponible.", 500)
+        _fail("Modèle de prompt indisponible.", 500)
 
     # Chaînage série : key_points du dernier audio lié au parent.
     prior_key_points_text = ""
@@ -263,6 +380,7 @@ def create_preparation():
         prior_key_points_text=prior_key_points_text,
     )
 
+    _update(phase="generating_llm")
     llm = _mp.LLMClient(
         base_url=LITELLM_BASE_URL,
         api_key=LITELLM_API_KEY,
@@ -275,13 +393,13 @@ def create_preparation():
         )
     except _mp.LLMAuthError:
         logger.exception("preparations: LiteLLM auth failed")
-        return _err("Le service LLM a refusé la requête (clé invalide).", 502)
+        _fail("Le service LLM a refusé la requête (clé invalide).", 502)
     except _mp.LLMTransientError as exc:
         logger.warning("preparations: LiteLLM transient: %s", exc)
-        return _err("Le service LLM est temporairement indisponible.", 502)
+        _fail("Le service LLM est temporairement indisponible.", 502)
     except _mp.LLMApplicativeError as exc:
         logger.warning("preparations: LiteLLM applicative error: %s", exc)
-        return _err("Le LLM n'a pas pu produire un brief exploitable.", 502)
+        _fail("Le LLM n'a pas pu produire un brief exploitable.", 502)
 
     if isinstance(brief, dict):
         meta = brief.get("_meta")
@@ -290,6 +408,7 @@ def create_preparation():
         meta["meeting_type"] = meeting_type
         brief["_meta"] = meta
 
+    _update(phase="persisting")
     preparation_id = None
     try:
         created = prep_service.create_preparation({
@@ -310,6 +429,7 @@ def create_preparation():
 
         # Glossaire utilisateur global (best-effort).
         if preparation_id:
+            _update(phase="extracting_glossary", preparation_id=preparation_id)
             terms = glossary_module.extract_terms_from_brief(brief, used)
             glossary_module.upsert_terms_for_user(
                 user_sub, terms, source_preparation_id=preparation_id,
@@ -328,11 +448,49 @@ def create_preparation():
         except Exception:
             logger.exception("preparations: schedule_drive_brief_sync raised")
 
-    return jsonify({
+    return {
         "brief": brief,
         "documents": used,
         "preparation_id": preparation_id,
         "meeting_type": meeting_type,
+    }
+
+
+# ─── Job status endpoint (Lot 2 — polling animation génération) ──────
+
+@bp.route("/jobs/<job_id>", methods=["GET"])
+@require_auth
+def generation_job_status(job_id: str):
+    """Retourne l'état de progression d'un job de génération de brief."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    job = generation_jobs.get_job(job_id, user_sub)
+    if not job:
+        return jsonify({"phase": "unknown", "error": "Job introuvable ou expiré."}), 404
+    return jsonify({
+        "job_id": job["id"],
+        "phase": job["phase"],
+        "current_doc": job.get("current_doc"),
+        "docs_processed": job.get("docs_processed") or 0,
+        "docs_total": job.get("docs_total") or 0,
+        "preparation_id": job.get("preparation_id"),
+        "error": job.get("error"),
+    })
+
+
+@bp.route("/<preparation_id>/generation-status", methods=["GET"])
+@require_auth
+def preparation_generation_status_by_id(preparation_id: str):
+    """Alias — quand le front a déjà l'id final (post mark_done) : 200 ``done``.
+
+    Sert de fallback si le client a perdu le ``job_id`` (refresh, etc.).
+    """
+    return jsonify({
+        "phase": "done",
+        "preparation_id": preparation_id,
+        "current_doc": None,
+        "docs_processed": 0,
+        "docs_total": 0,
     })
 
 
@@ -537,7 +695,12 @@ def _set_link(user_sub: str, file_id: str, preparation_id):
 @bp.route("/test-drive", methods=["GET"])
 @require_auth
 def test_drive_access():
-    """Diagnostic Drive (token / exchange / ping). Remplace /api/meeting-prep/test-drive."""
+    """Diagnostic Drive (token / exchange / ping). Remplace /api/meeting-prep/test-drive.
+
+    Extension Lot 1 : si ``?folder_id=...`` (ou une URL Drive) est fourni,
+    on liste le contenu du dossier et on renvoie ``{ok, docs_count, docs}``
+    pour permettre à l'UI d'afficher "N documents trouvés".
+    """
     from libs.shared.app.config import DRIVE_BASE_URL, OIDC_TOKEN_ENDPOINT
     from libs.shared.app.oidc_refresh_store import fetch_ciphertext
     from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
@@ -548,6 +711,9 @@ def test_drive_access():
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
 
+    folder_raw = (request.args.get("folder_id") or request.args.get("folder") or "").strip()
+    folder_id = _mp.extract_folder_id(folder_raw) if folder_raw else None
+
     result = {
         "token_stored": False,
         "exchange_ok": False,
@@ -555,6 +721,14 @@ def test_drive_access():
         "drive_base_url": DRIVE_BASE_URL or None,
         "error": None,
     }
+    if folder_raw:
+        result["folder_id"] = folder_id
+        result["ok"] = False
+        result["docs_count"] = 0
+        result["docs"] = []
+        if not folder_id:
+            result["error"] = "Identifiant ou URL de dossier Drive invalide."
+            return jsonify(result), 200
 
     ciphertext = fetch_ciphertext(user_sub)
     if not ciphertext:
@@ -587,6 +761,55 @@ def test_drive_access():
         return jsonify(result), 200
     except _mp.DriveTransientError as exc:
         result["error"] = f"Keycloak temporairement indisponible : {exc}"
+        return jsonify(result), 200
+
+    # Si folder_id fourni → on tente directement le listing du dossier.
+    if folder_id:
+        try:
+            children = drive.list_children(access_token, folder_id)
+        except _mp.DriveAuthError as exc:
+            status_code = getattr(exc, "status_code", None)
+            if status_code == 403:
+                result["error"] = (
+                    "Vous n'avez pas accès à ce dossier. Vérifiez l'URL "
+                    "collée ou demandez l'accès au propriétaire."
+                )
+            else:
+                result["error"] = "Drive a refusé le jeton. Reconnectez-vous."
+            return jsonify(result), 200
+        except _mp.DriveApplicativeError:
+            result["error"] = (
+                "Dossier introuvable. Vérifiez l'URL ou l'identifiant collé."
+            )
+            return jsonify(result), 200
+        except _mp.DriveTransientError as exc:
+            result["error"] = f"Drive temporairement indisponible : {exc}"
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.warning("test-drive: list_children failed: %s", exc)
+            result["error"] = f"Erreur listing Drive : {exc}"
+            return jsonify(result), 200
+
+        docs = []
+        for item in (children or []):
+            kind = (item.get("type") or item.get("kind") or "").lower()
+            is_folder = kind in {"folder", "directory"} or bool(item.get("is_folder"))
+            name = (
+                item.get("title") or item.get("name") or item.get("filename")
+                or item.get("id") or "(sans nom)"
+            )
+            docs.append({
+                "name": name,
+                "id": item.get("id") or "",
+                "is_folder": is_folder,
+                "mime_type": item.get("mime_type") or item.get("mimetype") or None,
+                "size": item.get("size"),
+            })
+        leaf_docs = [d for d in docs if not d["is_folder"]]
+        result["drive_reachable"] = True
+        result["ok"] = True
+        result["docs_count"] = len(leaf_docs)
+        result["docs"] = docs
         return jsonify(result), 200
 
     try:

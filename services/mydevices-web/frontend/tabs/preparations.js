@@ -237,7 +237,59 @@ function _applyBriefPayload(briefId, d) {
     }
     const linkBtn = document.getElementById('brief-detail-link-audio-btn');
     if (linkBtn) linkBtn.style.display = '';
+    _renderDriveSourcesBlock(b);
   } catch (e) {}
+}
+
+// ─── Sources Drive + test d'accès (Lot 1) ────────────────────────────────
+function _renderDriveSourcesBlock(brief) {
+  const box = document.getElementById('brief-detail-drive-sources');
+  if (!box) return;
+  const folderId = brief && (brief.drive_folder_id || (brief.drive && brief.drive.folder_id));
+  if (!folderId) { box.innerHTML = ''; return; }
+  box.innerHTML =
+    '<strong>Sources Drive :</strong> ' +
+    `<code style="font-size:0.85em;">${_esc(folderId)}</code> ` +
+    '<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary fr-icon-search-line fr-btn--icon-left"' +
+    ' data-action="test-drive-detail">Vérifier l\'accès</button>' +
+    '<div id="brief-detail-drive-test-result" style="margin-top:0.4rem;"></div>';
+}
+
+async function testDriveAccessFromDetail() {
+  const titleEl = document.getElementById('brief-detail-title');
+  const out = document.getElementById('brief-detail-drive-test-result');
+  if (!out || !_briefDetailId) return;
+  // Récupère le folder_id depuis le brief courant via cache.
+  const cached = detailCache.get('brief', _briefDetailId);
+  const b = cached ? (cached.preparation || cached.brief || {}) : {};
+  const folderId = b.drive_folder_id || (b.drive && b.drive.folder_id);
+  if (!folderId) {
+    out.innerHTML = '<div class="fr-alert fr-alert--info fr-alert--sm"><p>Aucun dossier Drive associé.</p></div>';
+    return;
+  }
+  out.innerHTML = '<em style="color:#64748b;">Vérification…</em>';
+  try {
+    const r = await fetch('/api/preparations/test-drive?folder_id=' + encodeURIComponent(folderId));
+    const d = await r.json().catch(() => ({}));
+    if (d && d.ok) {
+      const n = d.docs_count || 0;
+      const docs = (d.docs || []).filter(x => !x.is_folder).slice(0, 10);
+      const list = docs.length
+        ? ('<ul style="margin:0.3rem 0 0 1.2rem;">' +
+            docs.map(x => `<li>${_esc(x.name)}</li>`).join('') +
+            (n > docs.length ? `<li><em>…et ${n - docs.length} autre(s)</em></li>` : '') +
+            '</ul>')
+        : '';
+      out.innerHTML = `<div class="fr-alert fr-alert--success fr-alert--sm">
+        <p><strong>${n} document(s) trouvé(s).</strong></p>${list}</div>`;
+    } else {
+      out.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm">
+        <p>${_esc((d && d.error) || 'Accès refusé.')}</p></div>`;
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm">
+      <p>Erreur réseau : ${_esc(e.message || e)}</p></div>`;
+  }
 }
 
 async function showBriefDetail(briefId) {
@@ -869,6 +921,8 @@ function _onPanelClick(ev) {
       ev.preventDefault(); toggleAmendBrief(); return;
     case 'link-audio':
       ev.preventDefault(); linkAudioToBriefPrompt(); return;
+    case 'test-drive-detail':
+      ev.preventDefault(); testDriveAccessFromDetail(); return;
     case 'detach-audio': {
       ev.preventDefault();
       const id = actionEl.getAttribute('data-audio-id');
