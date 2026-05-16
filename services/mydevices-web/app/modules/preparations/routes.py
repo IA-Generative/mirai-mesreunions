@@ -320,7 +320,7 @@ def create_preparation():
     # Versement Drive en arrière-plan (best-effort).
     if preparation_id:
         try:
-            from ...drive_brief_sync import schedule_drive_brief_sync
+            from ..drive_sync import schedule_drive_brief_sync
             schedule_drive_brief_sync(
                 user_sub, preparation_id, brief, used, prompt,
                 drive_folder_id=folder_id,
