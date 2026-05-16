@@ -81,7 +81,7 @@ def test_open_drive_button_present(tpl):
 
 def test_test_drive_button_present(tpl):
     assert 'id="test-drive-btn"' in tpl
-    assert "/api/meeting-prep/test-drive" in tpl
+    assert "/api/preparations/test-drive" in tpl
 
 
 def test_js_submits_meeting_type(tpl):
