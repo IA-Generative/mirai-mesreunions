@@ -64,7 +64,7 @@ from libs.shared.app.config import (
     LITELLM_BASE_URL, LITELLM_API_KEY, LLM_HTTP_TIMEOUT_SECONDS,
     LLM_MODEL_SMALL, LLM_MODEL_MEDIUM, LLM_MODEL_LARGE,
 )
-from libs.shared.app.models import InternalBase, UserAudioFile
+from libs.shared.app.models import InternalBase, UserAudioFile, Preparation, Meeting
 from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.s3_helper import download_fileobj, upload_fileobj, ensure_bucket, delete_object
 from libs.shared.app.queue_helper import (
