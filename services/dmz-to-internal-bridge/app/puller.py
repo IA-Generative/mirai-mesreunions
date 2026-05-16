@@ -657,6 +657,94 @@ def _fetch_preparation_glossary_terms(preparation_id, db) -> tuple[list[str], Op
 _fetch_brief_glossary_terms = _fetch_preparation_glossary_terms
 
 
+def _maybe_trigger_cr_email_for_audio(audio_file_id, payload: dict) -> None:
+    """Lot 8 — Hook post-transcription : trigger envoi CR par email.
+
+    Logique :
+      1. Charge le Meeting lié à cet ``audio_file_id`` (via UAF.meeting_id ou
+         Meeting.user_audio_file_id).
+      2. Charge la Preparation liée au Meeting (si présente).
+      3. Vérifie ``preparation.send_cr_email == True`` et au moins un
+         participant avec un email.
+      4. POST ``MYDEVICES_WEB_INTERNAL_BASE_URL/api/meetings/<id>/send-cr``
+         avec ``Authorization: Bearer INTERNAL_API_TOKEN`` + body
+         ``{user_sub}``. mydevices-web s'occupe du SMTP.
+
+    Best-effort : tout échec → log + return (jamais d'exception remontée).
+    Désactivable via env ``MEETING_CR_EMAIL_HOOK_ENABLED=false``.
+    """
+    if os.getenv("MEETING_CR_EMAIL_HOOK_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
+        return
+    base = (os.getenv("MYDEVICES_WEB_INTERNAL_BASE_URL") or "").rstrip("/")
+    if not base:
+        logger.debug("send-cr hook: MYDEVICES_WEB_INTERNAL_BASE_URL not set, skipping")
+        return
+    if SessionLocal is None:
+        return
+    db = SessionLocal()
+    try:
+        # Recherche du meeting lié.
+        meeting = (
+            db.query(Meeting)
+            .filter(Meeting.user_audio_file_id == audio_file_id, Meeting.trashed_at.is_(None))
+            .first()
+        )
+        if meeting is None:
+            uaf = (
+                db.query(UserAudioFile)
+                .filter(UserAudioFile.id == audio_file_id)
+                .first()
+            )
+            if uaf and getattr(uaf, "meeting_id", None):
+                meeting = (
+                    db.query(Meeting)
+                    .filter(Meeting.id == uaf.meeting_id, Meeting.trashed_at.is_(None))
+                    .first()
+                )
+        if meeting is None:
+            return
+        if not meeting.preparation_id:
+            return
+        prep = (
+            db.query(Preparation)
+            .filter(Preparation.id == meeting.preparation_id, Preparation.trashed_at.is_(None))
+            .first()
+        )
+        if prep is None or not bool(getattr(prep, "send_cr_email", False)):
+            return
+        participants = prep.participants or []
+        emails = [
+            (p.get("email") or "").strip()
+            for p in participants
+            if isinstance(p, dict) and p.get("email") and "@" in (p.get("email") or "")
+        ]
+        if not emails:
+            logger.info(
+                "send-cr hook: prep=%s opted-in but no participant email — skip",
+                prep.id,
+            )
+            return
+        user_sub = (payload or {}).get("user_sub") or meeting.user_sub
+        url = f"{base}/api/meetings/{meeting.id}/send-cr"
+        try:
+            resp = req.post(
+                url,
+                json={"user_sub": user_sub},
+                headers={"Authorization": f"Bearer {INTERNAL_API_TOKEN}"},
+                timeout=15,
+            )
+            logger.info(
+                "send-cr hook: meeting=%s prep=%s status=%s",
+                meeting.id, prep.id, resp.status_code,
+            )
+        except Exception:
+            logger.exception(
+                "send-cr hook: HTTP call failed meeting=%s", meeting.id,
+            )
+    finally:
+        db.close()
+
+
 def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                             file_data, payload: dict) -> None:
     """
@@ -969,6 +1057,15 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         "Kevent pipeline finished for %s: status=%s, %d outputs",
         audio_file_id, final_status, sum(1 for k in updates if k != "transcription_engine"),
     )
+    # ─── Lot 8 — Hook envoi CR par email aux participants ───────────
+    # Best-effort, totalement isolé du pipeline transcription (try/except
+    # global). Si la prep liée a ``send_cr_email=True`` et que des
+    # participants[].email existent, on appelle l'endpoint
+    # ``mydevices-web /api/meetings/<id>/send-cr`` qui s'occupe du SMTP.
+    try:
+        _maybe_trigger_cr_email_for_audio(audio_file_id, payload or {})
+    except Exception:
+        logger.exception("send-cr hook failed for audio=%s (ignored)", audio_file_id)
     # Final notification au PWA mobile (le badge bascule du spinner animé
     # vers l'état terminal — completed / partially_completed).
     external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
