@@ -29,6 +29,7 @@ import {
   populateParticipantsContainer,
   listInvalidEmails,
 } from '../lib/participants.js';
+import { exportPreparation as _exportPreparation } from '../lib/export-formatter.js';
 
 const PANEL_ID = 'panel-brief';
 
@@ -1039,6 +1040,44 @@ function _closeMoreActionsOnOutside(ev) {
   if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 
+// ─── Lot 4 — Menu "Télécharger" (TXT/MD/DOCX/ODT) ────────────────────────
+function _toggleExportMenu() {
+  const menu = document.getElementById('brief-detail-export-menu');
+  const btn = document.getElementById('brief-detail-export-btn');
+  if (!menu) return;
+  const opening = menu.style.display === 'none' || !menu.style.display;
+  menu.style.display = opening ? 'block' : 'none';
+  if (btn) btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+}
+
+function _closeExportMenu() {
+  const menu = document.getElementById('brief-detail-export-menu');
+  const btn = document.getElementById('brief-detail-export-btn');
+  if (menu) menu.style.display = 'none';
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+function _closeExportMenuOnOutside(ev) {
+  const wrap = document.querySelector('[data-export-wrap]');
+  if (!wrap) return;
+  if (wrap.contains(ev.target)) return;
+  _closeExportMenu();
+}
+
+async function _exportBrief(fmt) {
+  _closeExportMenu();
+  if (!_currentBrief || !_briefDetailId) {
+    _toast('Brief non chargé.', 'error');
+    return;
+  }
+  try {
+    await _exportPreparation(_currentBrief, fmt, { prepId: _briefDetailId });
+    _toast(`Export ${fmt.toUpperCase()} prêt.`, 'success');
+  } catch (e) {
+    _toast(`Échec export ${fmt.toUpperCase()} : ${(e && e.message) || e}`, 'error');
+  }
+}
+
 // ─── Lot 3b — Modale "Lier un audio" ─────────────────────────────────────
 async function _openLinkAudioModal() {
   if (!_briefDetailId) return;
@@ -1386,6 +1425,14 @@ function _onPanelClick(ev) {
       ev.preventDefault(); _cancelRenameInline(); return;
     case 'toggle-more-actions':
       ev.preventDefault(); _toggleMoreActions(); return;
+    case 'toggle-export-menu':
+      ev.preventDefault(); _toggleExportMenu(); return;
+    case 'export-brief': {
+      ev.preventDefault();
+      const fmt = actionEl.getAttribute('data-export-format') || '';
+      if (fmt) _exportBrief(fmt);
+      return;
+    }
     case 'open-link-audio-modal':
       ev.preventDefault(); _openLinkAudioModal(); return;
     case 'open-glossary-modal':
@@ -1494,6 +1541,8 @@ export function mount(container /*, ctx */) {
   // Lot 3 — modale générique + outside-click pour le menu "Plus d'actions".
   try { bindPrepModal(); } catch (e) {}
   document.addEventListener('click', _closeMoreActionsOnOutside);
+  // Lot 4 — outside-click pour le menu "Télécharger".
+  document.addEventListener('click', _closeExportMenuOnOutside);
   // Lot 3a — Enter dans l'input de rename = valider, Esc = annuler.
   const renameInp = document.getElementById('brief-detail-title-input');
   if (renameInp) {

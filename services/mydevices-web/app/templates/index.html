@@ -1658,6 +1658,33 @@
                         data-action="open-prepare-next-modal" style="display:none;">
                     Préparer la prochaine réunion de cette série
                 </button>
+                <!-- Lot 4 — Menu "Télécharger" → TXT / MD / DOCX / ODT.
+                     TXT et MD générés côté front via lib/export-formatter.js,
+                     DOCX et ODT via GET /api/preparations/{id}/export?format=. -->
+                <div style="position:relative;display:inline-block;" data-export-wrap>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-download-line fr-btn--icon-left"
+                            data-action="toggle-export-menu"
+                            aria-haspopup="true" aria-expanded="false"
+                            id="brief-detail-export-btn">Télécharger</button>
+                    <ul id="brief-detail-export-menu"
+                        style="display:none;position:absolute;right:0;top:100%;z-index:10;
+                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
+                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:200px;
+                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="txt"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Texte brut (.txt)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="md"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Markdown (.md)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="docx"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Word (.docx)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="odt"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">LibreOffice (.odt)</button></li>
+                    </ul>
+                </div>
                 <!-- Menu "Plus d'actions" → conserve l'accès à l'édition avancée (amend). -->
                 <div style="position:relative;display:inline-block;" data-more-actions-wrap>
                     <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line fr-btn--icon-left"
