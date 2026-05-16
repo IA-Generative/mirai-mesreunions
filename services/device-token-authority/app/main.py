@@ -1778,7 +1778,16 @@ def list_preparation_audio_files(preparation_id: str):
 
 @app.route("/api/v1/preparations/<preparation_id>/series", methods=["GET"])
 def get_preparation_series(preparation_id: str):
-    """Renvoie la chaîne complète de la série (parent ascendant + enfants)."""
+    """Renvoie la chaîne complète de la série (parent ascendant + enfants),
+    enrichie pour la timeline du Lot 7 :
+
+    - ``series_parent_id`` : racine de la série (string ou None si racine seule)
+    - ``series`` : liste ordonnée par ``target_meeting_date`` ASC
+      (les sans-date à la fin, par ``created_at`` ASC)
+    - Chaque occurrence inclut : ``is_current`` (l'id de la requête),
+      ``has_meeting`` (au moins un Meeting non-trashed lié), ``meeting_id``
+      (le plus récent si plusieurs).
+    """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
     user_sub = (request.args.get("user_sub") or "").strip()
@@ -1788,6 +1797,7 @@ def get_preparation_series(preparation_id: str):
     db = SessionLocal()
     MAX_DEPTH = 10
     try:
+        # 1) Remonter au parent racine.
         current_id = preparation_id
         visited = set()
         root_id = current_id
@@ -1810,6 +1820,7 @@ def get_preparation_series(preparation_id: str):
         else:
             root_id = current_id
 
+        # 2) Construire la chaîne (parent → enfant via series_parent_id).
         chain = []
         cursor_id = root_id
         seen = set()
@@ -1825,7 +1836,7 @@ def get_preparation_series(preparation_id: str):
             )
             if not p:
                 break
-            chain.append(_preparation_to_dict(p))
+            chain.append(p)
             child = (
                 db.query(Preparation)
                 .filter(Preparation.series_parent_id == cursor_id,
@@ -1837,7 +1848,57 @@ def get_preparation_series(preparation_id: str):
             if not child:
                 break
             cursor_id = str(child.id)
-        return jsonify({"series": chain, "root_id": root_id})
+
+        # 3) Enrichir + ordonner par target_meeting_date ASC.
+        prep_ids = [str(p.id) for p in chain]
+        meetings_by_prep: dict = {}
+        if prep_ids:
+            rows = (
+                db.query(Meeting)
+                .filter(Meeting.preparation_id.in_(prep_ids),
+                        Meeting.user_sub == user_sub,
+                        Meeting.trashed_at.is_(None))
+                .order_by(Meeting.created_at.desc())
+                .all()
+            )
+            for m in rows:
+                key = str(m.preparation_id)
+                # On garde le plus récent (premier vu grâce au desc()).
+                if key not in meetings_by_prep:
+                    meetings_by_prep[key] = m
+
+        enriched = []
+        for p in chain:
+            base = _preparation_to_dict(p)
+            pid = str(p.id)
+            m = meetings_by_prep.get(pid)
+            base["is_current"] = (pid == preparation_id)
+            base["has_meeting"] = m is not None
+            base["meeting_id"] = str(m.id) if m else None
+            base["status"] = (
+                "trashed" if p.trashed_at else
+                ("done" if m is not None else "pending")
+            )
+            enriched.append(base)
+
+        # Tri : target_meeting_date ASC ; None à la fin ; tie-break created_at ASC.
+        def _sort_key(item):
+            tmd = item.get("target_meeting_date")
+            created = item.get("created_at") or ""
+            return (0 if tmd else 1, tmd or "", created)
+
+        enriched.sort(key=_sort_key)
+
+        # series_parent_id du retour = racine si != id courant, sinon None
+        # (la racine n'a pas de parent ; cohérent avec l'usage UI).
+        parent_root = root_id if root_id != preparation_id else None
+
+        return jsonify({
+            "series": enriched,
+            "root_id": root_id,
+            "series_parent_id": parent_root,
+            "count": len(enriched),
+        })
     finally:
         db.close()
 
