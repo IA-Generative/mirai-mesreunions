@@ -20,8 +20,12 @@ import './lib/bootstrap.js';
 import './lib/api.js';
 import './lib/auth.js';
 import './lib/toast.js';
-import './legacy.js';
+// tabs/devices.js (PR6) doit être importé AVANT legacy.js : legacy.js
+// termine par `loadDevices().then(loadSessions)` via un trampoline qui
+// résout sur `window.loadDevices`. Sans cet ordre, le 1er fetch
+// /api/my-devices au boot ne part jamais.
 import './tabs/devices.js';
+import './legacy.js';
 import * as meetingsTab from './tabs/meetings.js';
 import './tabs/preparations.js';
 import './tabs/useful-data.js';
