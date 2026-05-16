@@ -1686,7 +1686,7 @@ def _score_brief_for_audio(brief, audio_filename: str,
     engagement=0.10, anti_rebound=0.10.
 
     Le nom de la fonction conserve "brief" pour ne pas casser les tests
-    unitaires existants (\`tests/unit/test_auto_link_audio_to_brief.py\`) ;
+    unitaires existants (`tests/unit/test_auto_link_audio_to_brief.py`) ;
     sémantiquement on score une Preparation. Le helper lit ``content`` (nom
     canonique migration 012) avec fallback sur ``brief_json`` pour rester
     compatible avec les SimpleNamespace de tests legacy.
@@ -1759,14 +1759,14 @@ def auto_link_audio_to_preparation(audio_id, user_sub: str,
     Cherche une Preparation matching pour le user_sub sur les 30 derniers
     jours. Match strict : top-1 > ``score_threshold`` ET écart ≥ ``top2_gap``
     avec le top-2 (sinon ambiguïté). Pas de DB write côté audio/meeting ici :
-    le caller (\`_perform_pull\`) s'occupe de poser ``meeting.preparation_id``
+    le caller (`_perform_pull`) s'occupe de poser ``meeting.preparation_id``
     sur la Meeting créée à l'upload.
 
     Anti-rebond : exclut les preparations déjà référencées par une autre
-    Meeting (\`meetings.preparation_id IS NOT NULL\`) du même user.
+    Meeting (`meetings.preparation_id IS NOT NULL`) du même user.
 
     Retourne ``(preparation_id|None, scored_candidates)``. Chaque entry de
-    \`scored_candidates\` porte la clé canonique ``preparation_id`` ainsi que
+    `scored_candidates` porte la clé canonique ``preparation_id`` ainsi que
     l'alias legacy ``brief_id`` (= même valeur) pour rétrocompat tests.
     ``db`` peut être fourni pour tests ; sinon ouvre une SessionLocal locale.
     """
@@ -1917,7 +1917,7 @@ def reprocess_audio(audio_id: str):
         seen = set(effective_glossary)
         brief_terms_added = 0
         if brief_id:
-            # \`brief_id\` ici vient du body \`glossary_from_brief_id\` côté API ;
+            # `brief_id` ici vient du body `glossary_from_brief_id` côté API ;
             # sémantiquement c'est une preparation_id (migration 012). Le
             # paramètre garde son nom legacy pour ne pas casser les clients.
             brief_terms, _ = _fetch_preparation_glossary_terms(brief_id, db)

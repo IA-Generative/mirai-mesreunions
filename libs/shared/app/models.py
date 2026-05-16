@@ -343,7 +343,7 @@ class UserAudioFile(InternalBase):
     suggested_meeting_dismissed_id = Column(_UUID_TYPE, nullable=True)
 
     # Alias legacy supprimés en PR2d. Les noms canoniques migration 012 sont
-    # \`meeting_id\`, \`reprocessed_with_meeting_id\`, \`suggested_meeting_dismissed_id\`.
+    # `meeting_id`, `reprocessed_with_meeting_id`, `suggested_meeting_dismissed_id`.
 
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
@@ -527,13 +527,13 @@ class UserGlossaryTerm(InternalBase):
     # Termes rejetés explicitement, ne plus re-proposer ni utiliser.
     blacklisted = Column(Boolean, nullable=False, default=False)
 
-    # Alias legacy \`last_source_brief_id\` supprimé en PR2d. Utiliser
-    # \`last_source_meeting_id\` (nom canonique migration 012).
+    # Alias legacy `last_source_brief_id` supprimé en PR2d. Utiliser
+    # `last_source_meeting_id` (nom canonique migration 012).
 
 
-# Alias \`MeetingBrief = Preparation\` et property \`Preparation.brief_json\`
-# supprimés en PR2d. Importer \`Preparation\` directement et utiliser
-# \`Preparation.content\` (renommé en migration 012).
+# Alias `MeetingBrief = Preparation` et property `Preparation.brief_json`
+# supprimés en PR2d. Importer `Preparation` directement et utiliser
+# `Preparation.content` (renommé en migration 012).
 
 
 class TranscriptionEvent(InternalBase):
