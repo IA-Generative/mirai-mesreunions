@@ -40,6 +40,9 @@ def create_preparation(payload: dict) -> dict:
     )
 
 
+_SENTINEL = object()
+
+
 def amend_preparation(
     user_sub: str,
     preparation_id: str,
@@ -47,11 +50,16 @@ def amend_preparation(
     *,
     participants: list | None = None,
     glossary_source: list | None = None,
+    is_recurring: bool | None = None,
+    recurrence_rule: dict | None | object = _SENTINEL,
+    target_meeting_date: str | None | object = _SENTINEL,
 ) -> dict:
-    """Amend une préparation — `content`, `participants` et/ou `glossary_source`.
+    """Amend une préparation — `content`, `participants`, `glossary_source`
+    et/ou les champs de récurrence (Lot 6).
 
-    Au moins un des trois champs doit être fourni. Mappe directement sur
-    l'endpoint étendu côté device-token-authority (cf. Lot 3/5).
+    Au moins un champ doit être fourni. ``recurrence_rule`` accepte
+    explicitement ``None`` (désactivation) ; on utilise un sentinel pour
+    différencier "non fourni" de "fourni à None".
     """
     body: dict = {"user_sub": user_sub}
     if content is not None:
@@ -60,6 +68,12 @@ def amend_preparation(
         body["participants"] = participants
     if glossary_source is not None:
         body["glossary_source"] = glossary_source
+    if is_recurring is not None:
+        body["is_recurring"] = bool(is_recurring)
+    if recurrence_rule is not _SENTINEL:
+        body["recurrence_rule"] = recurrence_rule
+    if target_meeting_date is not _SENTINEL:
+        body["target_meeting_date"] = target_meeting_date
     return request_internal_preparation_api(
         "POST", f"/api/v1/preparations/{preparation_id}/amend",
         json_body=body,

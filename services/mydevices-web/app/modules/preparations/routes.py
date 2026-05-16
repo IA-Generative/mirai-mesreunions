@@ -165,6 +165,13 @@ def create_preparation():
 
     series_parent_id = (payload.get("series_parent_id") or "").strip() or None
     target_meeting_date = (payload.get("target_meeting_date") or "").strip() or None
+    # Lot 6 — récurrence éventuelle. On laisse la normalisation côté DTA
+    # (recurrence.py) : ici on transmet brut (dict ou None) — le serveur
+    # interne rejette/ignore si invalide.
+    is_recurring_raw = payload.get("is_recurring")
+    recurrence_rule_raw = payload.get("recurrence_rule")
+    if not isinstance(recurrence_rule_raw, dict):
+        recurrence_rule_raw = None
     # Lot 5 — participants attendus saisis depuis le wizard. Liste d'objets
     # {name?, email?, role?}. Persistés en colonne JSONB côté DTA.
     participants_raw = payload.get("participants")
@@ -207,6 +214,9 @@ def create_preparation():
         "series_parent_id": series_parent_id,
         "target_meeting_date": target_meeting_date,
         "participants": participants_clean,
+        # Lot 6 — récurrence (transmise telle quelle au worker puis au DTA)
+        "is_recurring": bool(is_recurring_raw) if is_recurring_raw is not None else None,
+        "recurrence_rule": recurrence_rule_raw,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -285,6 +295,8 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
     series_parent_id = job["series_parent_id"]
     target_meeting_date = job["target_meeting_date"]
     participants = job.get("participants") or []
+    is_recurring = job.get("is_recurring")
+    recurrence_rule = job.get("recurrence_rule")
 
     def _update(**kw):
         if job_id:
@@ -451,6 +463,8 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             "series_parent_id": series_parent_id,
             "target_meeting_date": target_meeting_date,
             "participants": participants,
+            "is_recurring": bool(is_recurring) if is_recurring is not None else False,
+            "recurrence_rule": recurrence_rule,
         })
         preparation_id = (created.get("preparation") or {}).get("id")
 
@@ -570,9 +584,20 @@ def _amend_impl(preparation_id: str):
     new_content = payload.get("content") if "content" in payload else None
     new_participants = payload.get("participants") if "participants" in payload else None
     new_glossary = payload.get("glossary_source") if "glossary_source" in payload else None
+    # Lot 6 — récurrence (3 champs liés). On utilise ``in payload`` pour
+    # distinguer "absent" (pas de mutation) de présent à None (effacement).
+    has_recurring = "is_recurring" in payload
+    has_rule = "recurrence_rule" in payload
+    has_target = "target_meeting_date" in payload
+    new_is_recurring = bool(payload.get("is_recurring")) if has_recurring else None
+    raw_rule = payload.get("recurrence_rule") if has_rule else None
+    if has_rule and raw_rule is not None and not isinstance(raw_rule, dict):
+        return _err("recurrence_rule must be an object or null", 400)
+    raw_target = payload.get("target_meeting_date") if has_target else None
 
-    if new_content is None and new_participants is None and new_glossary is None:
-        return _err("content, participants or glossary_source required", 400)
+    if (new_content is None and new_participants is None and new_glossary is None
+            and not has_recurring and not has_rule and not has_target):
+        return _err("content, participants, glossary_source or recurrence required", 400)
     if new_content is not None and not isinstance(new_content, dict):
         return _err("content must be an object", 400)
     if new_participants is not None and not isinstance(new_participants, list):
@@ -581,9 +606,18 @@ def _amend_impl(preparation_id: str):
         return _err("glossary_source must be a list", 400)
 
     try:
+        # Sentinels du module service : utiliser leurs valeurs propres pour
+        # signaler "non fourni" (object identity-based discrimination).
+        kw_recur: dict = {}
+        if has_rule:
+            kw_recur["recurrence_rule"] = raw_rule
+        if has_target:
+            kw_recur["target_meeting_date"] = raw_target
         data = prep_service.amend_preparation(
             user_sub, preparation_id, new_content,
             participants=new_participants, glossary_source=new_glossary,
+            is_recurring=new_is_recurring,
+            **kw_recur,
         )
     except req.HTTPError as err:
         status = err.response.status_code if err.response is not None else 502

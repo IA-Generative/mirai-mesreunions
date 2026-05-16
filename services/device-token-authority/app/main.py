@@ -1203,6 +1203,24 @@ def admin_revoke_all_devices():
 # transporte explicitement `user_sub` et tout lookup le filtre.
 
 
+def _compute_next_occurrence_safe(rule, reference):
+    """Wrapper best-effort autour de ``recurrence.compute_next_occurrence``.
+
+    On évite que tout import/erreur côté ``python-dateutil`` n'empêche la
+    persistance de la préparation : Lot 6 traite ``next_occurrence_at``
+    comme un cache calculé, pas comme une donnée critique.
+    """
+    try:
+        from app.recurrence import compute_next_occurrence
+        return compute_next_occurrence(rule, reference)
+    except Exception:
+        try:
+            logger.exception("recurrence: compute_next_occurrence failed")
+        except Exception:
+            pass
+        return None
+
+
 def _preparation_to_dict(p: Preparation, *, with_full: bool = False) -> dict:
     """Sérialise une Preparation pour la réponse JSON.
 
@@ -1231,6 +1249,14 @@ def _preparation_to_dict(p: Preparation, *, with_full: bool = False) -> dict:
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "trashed_at": p.trashed_at.isoformat() if p.trashed_at else None,
+        # Lot 6 — récurrence (toujours exposée, même en vue listing, pour
+        # afficher le badge "🔁 Récurrente" sans charger le détail).
+        "is_recurring": bool(getattr(p, "is_recurring", False) or False),
+        "recurrence_rule": getattr(p, "recurrence_rule", None),
+        "next_occurrence_at": (
+            p.next_occurrence_at.isoformat()
+            if getattr(p, "next_occurrence_at", None) else None
+        ),
     }
     if with_full:
         out["content"] = p.content
@@ -1312,6 +1338,20 @@ def create_preparation():
 
     db = SessionLocal()
     try:
+        target_meeting_date = _coerce_target_meeting_date(data.get("target_meeting_date"))
+        # Lot 6 — récurrence (optionnelle). On normalise + on calcule la
+        # prochaine occurrence via dateutil ; tout est best-effort (le brief
+        # se crée même si la règle est invalide — on retombe juste sur
+        # is_recurring=False côté DB).
+        from app.recurrence import normalize_rule
+        rule_raw = data.get("recurrence_rule")
+        rule_clean = normalize_rule(rule_raw) if rule_raw is not None else None
+        is_recurring_raw = data.get("is_recurring")
+        is_recurring = bool(is_recurring_raw) and rule_clean is not None
+        next_occ = (
+            _compute_next_occurrence_safe(rule_clean, target_meeting_date)
+            if is_recurring else None
+        )
         p = Preparation(
             user_sub=user_sub,
             subject=(data.get("subject") or None),
@@ -1327,7 +1367,10 @@ def create_preparation():
             glossary_source=data.get("glossary_source"),
             title=(data.get("title") or data.get("subject") or None),
             series_parent_id=(data.get("series_parent_id") or None),
-            target_meeting_date=_coerce_target_meeting_date(data.get("target_meeting_date")),
+            target_meeting_date=target_meeting_date,
+            is_recurring=is_recurring,
+            recurrence_rule=rule_clean if is_recurring else None,
+            next_occurrence_at=next_occ,
         )
         db.add(p)
         db.commit()
@@ -1547,8 +1590,16 @@ def amend_preparation(preparation_id: str):
     has_content = "content" in data
     has_participants = "participants" in data
     has_glossary = "glossary_source" in data
-    if not (has_content or has_participants or has_glossary):
-        return jsonify({"error": "content, participants or glossary_source required"}), 400
+    # Lot 6 — récurrence : peut être amendée seule. Les deux champs sont
+    # liés (toggle off = effacement). On accepte aussi un re-calcul si
+    # `target_meeting_date` est fourni en même temps (rare, mais utile
+    # quand l'utilisateur déplace la 1re occurrence d'une série).
+    has_recurring = "is_recurring" in data
+    has_rule = "recurrence_rule" in data
+    has_target = "target_meeting_date" in data
+    if not (has_content or has_participants or has_glossary
+            or has_recurring or has_rule or has_target):
+        return jsonify({"error": "content, participants, glossary_source or recurrence required"}), 400
     new_content = data.get("content") if has_content else None
     if has_content and not isinstance(new_content, dict):
         return jsonify({"error": "content must be an object"}), 400
@@ -1578,6 +1629,28 @@ def amend_preparation(preparation_id: str):
             p.participants = new_participants
         if has_glossary:
             p.glossary_source = new_glossary
+        # Lot 6 — récurrence amendée. On normalise, on stocke et on
+        # re-calcule next_occurrence_at à chaque mutation. Toggle off ou
+        # règle invalide ⇒ on remet à zéro.
+        if has_recurring or has_rule or has_target:
+            from app.recurrence import normalize_rule
+            if has_target:
+                p.target_meeting_date = _coerce_target_meeting_date(
+                    data.get("target_meeting_date")
+                )
+            rule_raw = data.get("recurrence_rule") if has_rule else p.recurrence_rule
+            rule_clean = normalize_rule(rule_raw) if rule_raw is not None else None
+            if has_recurring:
+                want_recurring = bool(data.get("is_recurring"))
+            else:
+                want_recurring = bool(p.is_recurring)
+            effective = want_recurring and rule_clean is not None
+            p.is_recurring = effective
+            p.recurrence_rule = rule_clean if effective else None
+            p.next_occurrence_at = (
+                _compute_next_occurrence_safe(rule_clean, p.target_meeting_date)
+                if effective else None
+            )
         db.commit()
         db.refresh(p)
         return jsonify({"ok": True, "preparation": _preparation_to_dict(p, with_full=True)})
