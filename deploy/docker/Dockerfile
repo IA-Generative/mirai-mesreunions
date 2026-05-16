@@ -5,10 +5,15 @@
 # produit n'est utile qu'à mydevices-web. L'overhead est minime grâce au
 # cache BuildKit (~10s npm install au premier build, <1s ensuite si les
 # sources frontend n'ont pas changé).
+#
+# Le `npm run build` enchaîne `vite build` (bundle JS → app/static/dist/) et
+# `scripts/copy-dsfr-assets.mjs` (copie les assets DSFR auto-hébergés depuis
+# node_modules vers app/static/dsfr/).
 # ─────────────────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS node-builder
 WORKDIR /build
-COPY services/mydevices-web/package.json services/mydevices-web/vite.config.js ./
+COPY services/mydevices-web/package.json services/mydevices-web/package-lock.json* services/mydevices-web/vite.config.js ./
+COPY services/mydevices-web/scripts/ ./scripts/
 COPY services/mydevices-web/frontend/ ./frontend/
 RUN npm install --no-fund --no-audit \
  && npm run build
@@ -41,6 +46,9 @@ COPY glossaire /app/glossaire
 # Inject bundle Vite (utile uniquement pour mydevices-web ; inerte pour les
 # autres services qui n'incluent pas le partial _vite_shell_loader.html).
 COPY --from=node-builder /build/app/static/dist /app/services/mydevices-web/app/static/dist
+# Inject assets DSFR auto-hébergés (CSS/JS DSFR + fonts Marianne + icônes).
+# Servis par Flask via /static/dsfr/... — référencés par index.html.
+COPY --from=node-builder /build/app/static/dsfr /app/services/mydevices-web/app/static/dsfr
 
 # Default: overridden per service
 CMD ["python", "-m", "app.main"]
