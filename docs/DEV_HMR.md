@@ -12,7 +12,7 @@ cd services/mydevices-web
 npm install   # une fois
 npm run dev
 
-# Ouvrir http://localhost:8080 (Flask), pas :5173.
+# Ouvrir http://localhost:8094 (Flask), pas :5173.
 # Toute modif dans frontend/**/*.{js,css,html} → HMR <100ms, état conservé.
 ```
 

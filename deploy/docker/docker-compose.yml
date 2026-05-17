@@ -160,7 +160,7 @@ services:
       - ../../services/mydevices-web:/app/services/mydevices-web
       - ../../libs:/app/libs
     ports:
-      - "8080:8080"
+      - "${MYDEVICES_WEB_PORT:-8094}:8080"
     environment:
       ENVIRONMENT: development
       LOG_LEVEL: DEBUG
@@ -171,7 +171,7 @@ services:
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
       OIDC_CLIENT_ID: mes-reunions
       OIDC_CLIENT_SECRET: dev-client-secret
-      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:8080/auth/callback
+      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:${MYDEVICES_WEB_PORT:-8094}/auth/callback
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       EXT_DB_HOST: postgres-external
       EXT_DB_PORT: "5432"
