@@ -669,18 +669,18 @@ def _maybe_trigger_cr_email_for_audio(audio_file_id, payload: dict) -> None:
       2. Charge la Preparation liée au Meeting (si présente).
       3. Vérifie ``preparation.send_cr_email == True`` et au moins un
          participant avec un email.
-      4. POST ``MYDEVICES_WEB_INTERNAL_BASE_URL/api/meetings/<id>/send-cr``
+      4. POST ``MESREUNIONS_WEB_INTERNAL_BASE_URL/api/meetings/<id>/send-cr``
          avec ``Authorization: Bearer INTERNAL_API_TOKEN`` + body
-         ``{user_sub}``. mydevices-web s'occupe du SMTP.
+         ``{user_sub}``. mesreunions-web s'occupe du SMTP.
 
     Best-effort : tout échec → log + return (jamais d'exception remontée).
     Désactivable via env ``MEETING_CR_EMAIL_HOOK_ENABLED=false``.
     """
     if os.getenv("MEETING_CR_EMAIL_HOOK_ENABLED", "true").lower() not in {"1", "true", "yes", "on"}:
         return
-    base = (os.getenv("MYDEVICES_WEB_INTERNAL_BASE_URL") or "").rstrip("/")
+    base = (os.getenv("MESREUNIONS_WEB_INTERNAL_BASE_URL") or "").rstrip("/")
     if not base:
-        logger.debug("send-cr hook: MYDEVICES_WEB_INTERNAL_BASE_URL not set, skipping")
+        logger.debug("send-cr hook: MESREUNIONS_WEB_INTERNAL_BASE_URL not set, skipping")
         return
     if SessionLocal is None:
         return
@@ -1064,7 +1064,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     # Best-effort, totalement isolé du pipeline transcription (try/except
     # global). Si la prep liée a ``send_cr_email=True`` et que des
     # participants[].email existent, on appelle l'endpoint
-    # ``mydevices-web /api/meetings/<id>/send-cr`` qui s'occupe du SMTP.
+    # ``mesreunions-web /api/meetings/<id>/send-cr`` qui s'occupe du SMTP.
     try:
         _maybe_trigger_cr_email_for_audio(audio_file_id, payload or {})
     except Exception:
@@ -1556,7 +1556,7 @@ def pull_file():
 def queue_status():
     """File d'attente Kevent — proxy lite vers gateway list_jobs.
 
-    Permet à mobile-upload-pwa / mydevices-web de surfacer une info brève
+    Permet à mobile-upload-pwa / mesreunions-web de surfacer une info brève
     "Position X/Y dans la file" sans exposer la clé API.
 
     Query: ``service_type`` (défaut audio), ``job_id`` (optional → calcule
@@ -1595,7 +1595,7 @@ def audio_meeting_datetimes():
     """Bulk map (simple_code, original_filename) → meeting_datetime override.
 
     Renvoie uniquement les rows ayant un override non-NULL — sert au
-    mydevices-web pour enrichir la liste mydevices d'un seul aller-retour
+    mesreunions-web pour enrichir la liste mydevices d'un seul aller-retour
     (au lieu de N appels lookup individuels). Format compact :
     ``{"items": [{"simple_code","original_filename","meeting_datetime"}]}``.
     Auth = INTERNAL_API_TOKEN bearer.
@@ -1642,7 +1642,7 @@ def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.
 
     Identified by ``(user_sub, original_session_code, stored_filename)``.
-    Used by mydevices-web to back the user-facing download endpoints
+    Used by mesreunions-web to back the user-facing download endpoints
     (transcript .txt/.md/.docx/.odt, meeting-cr .json/.md/.docx/.odt).
     Auth = INTERNAL_API_TOKEN bearer (same as ``/api/v1/pull``) — only
     callable from the internal zone.
@@ -1659,7 +1659,7 @@ def audio_lookup():
         return jsonify({"error": "db_not_ready"}), 503
     db = SessionLocal()
     try:
-        # ``filename`` côté mydevices-web c'est uploaded_files.transcoded_filename
+        # ``filename`` côté mesreunions-web c'est uploaded_files.transcoded_filename
         # (basename, ex: YJENNB_xxx_foo.mp4). Côté user_audio_files,
         # stored_filename est la clé S3 interne complète préfixée par
         # ``<user_sub>/<simple_code>/`` (cf. _perform_pull). On matche
@@ -2095,7 +2095,7 @@ def reprocess_audio(audio_id: str):
 #   GET    /api/v1/feedback/mine?user_sub=…          → list propre à un user
 #   GET    /api/v1/feedback/all?status=…             → list admin (tout user)
 #   PATCH  /api/v1/feedback/<id>                     → update (status, comment)
-# Tous Bearer-protégés par INTERNAL_API_TOKEN — mydevices-web ajoute
+# Tous Bearer-protégés par INTERNAL_API_TOKEN — mesreunions-web ajoute
 # côté wrapper une couche d'autorisation utilisateur (admin claim
 # requis pour /all et PATCH).
 

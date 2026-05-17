@@ -1,4 +1,4 @@
-// Unit tests pour services/mydevices-web/frontend/utils/format.js (TKT-103).
+// Unit tests pour services/mesreunions-web/frontend/utils/format.js (TKT-103).
 //
 // Exécutable directement :  node tests/unit/test_format_utils.js
 // Aussi déclenché par      :  pytest tests/unit/test_format_utils.py
@@ -20,7 +20,7 @@ const MODULE_PATH = path.resolve(
   '..',
   '..',
   'services',
-  'mydevices-web',
+  'mesreunions-web',
   'frontend',
   'utils',
   'format.js',

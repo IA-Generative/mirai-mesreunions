@@ -1,5 +1,5 @@
 """
-Unit tests for the transcript format converters used by the mydevices-web
+Unit tests for the transcript format converters used by the mesreunions-web
 download endpoints (.txt / .md / .docx / .odt). Skips DOCX/ODT tests when
 python-docx / odfpy are not installed locally.
 """
@@ -18,7 +18,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
-MOD_PATH = os.path.join(ROOT, "services", "mydevices-web", "app", "transcript_formats.py")
+MOD_PATH = os.path.join(ROOT, "services", "mesreunions-web", "app", "transcript_formats.py")
 SPEC = importlib.util.spec_from_file_location("transcript_formats_under_test", MOD_PATH)
 TF = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(TF)

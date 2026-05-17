@@ -6,7 +6,7 @@ Couvre deux axes :
    (importable sans Postgres / sans Flask app) : normalisation des règles +
    calcul ``compute_next_occurrence`` via ``python-dateutil``.
 
-2. **HTTP smoke** sur les nouveaux endpoints exposés par ``mydevices-web``
+2. **HTTP smoke** sur les nouveaux endpoints exposés par ``mesreunions-web``
    (``POST /api/preparations``, ``POST /api/preparations/<id>/amend`` —
    accepte désormais ``recurrence_rule`` / ``is_recurring`` / ``themes``).
    Sans cookie OIDC → 302/401, jamais 404 (preuve que le routeur connaît
@@ -14,7 +14,7 @@ Couvre deux axes :
 
 Skip propre :
 - ``dateutil`` manquant → skip module
-- Service ``mydevices-web`` injoignable → skip section HTTP
+- Service ``mesreunions-web`` injoignable → skip section HTTP
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 _DTA_PATH = os.path.join(_REPO_ROOT, "services", "device-token-authority")
 
 # Collision possible avec d'autres tests qui ont bindé ``app`` à un autre
-# service (mydevices-web). On purge le cache d'imports avant de réimporter.
+# service (mesreunions-web). On purge le cache d'imports avant de réimporter.
 for _mod in list(sys.modules):
     if _mod == "app" or _mod.startswith("app."):
         del sys.modules[_mod]
@@ -154,7 +154,7 @@ def _alive():
         r = requests.get(f"{BASE_URL}/healthz", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"mydevices-web not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"mesreunions-web not reachable at {BASE_URL}: {exc}")
 
 
 def test_amend_endpoint_accepts_recurrence_payload_route_registered(_alive):

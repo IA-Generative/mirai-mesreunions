@@ -2,7 +2,7 @@
 Symmetric Fernet encryption for at-rest secrets persisted in the database.
 
 Today's only consumer is the OIDC refresh token cache (``oidc_refresh_tokens``
-table populated at user login by mydevices-web/admin-console and read by
+table populated at user login by mesreunions-web/admin-console and read by
 internal-ingester at MCR push time). Other future at-rest secrets — e.g. webhook
 signing keys, third-party service tokens — should reuse this helper rather
 than reinvent a Fernet wrapper.

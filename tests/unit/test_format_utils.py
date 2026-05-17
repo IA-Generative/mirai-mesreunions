@@ -2,7 +2,7 @@
 
 On délègue à ``node --test`` (Node 18+). Si Node n'est pas dispo dans le
 PATH (CI minimaliste), on skip — au même titre que les autres tests JS
-de la suite (cf. test_mydevices_web_template.py).
+de la suite (cf. test_mesreunions_web_template.py).
 """
 
 from __future__ import annotations

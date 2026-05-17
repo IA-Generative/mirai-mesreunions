@@ -150,17 +150,17 @@ services:
   # ═══════════════════════════════════════════════════════════════════════
 
   # --- Code Generator (OIDC + QR) ---
-  mydevices-web:
+  mesreunions-web:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     command: gunicorn -w 2 --timeout 300 -b 0.0.0.0:8080 app.main:application
-    working_dir: /app/services/mydevices-web
+    working_dir: /app/services/mesreunions-web
     volumes:
-      - ../../services/mydevices-web:/app/services/mydevices-web
+      - ../../services/mesreunions-web:/app/services/mesreunions-web
       - ../../libs:/app/libs
     ports:
-      - "${MYDEVICES_WEB_PORT:-8094}:8080"
+      - "${MESREUNIONS_WEB_PORT:-8094}:8080"
     environment:
       ENVIRONMENT: development
       LOG_LEVEL: DEBUG
@@ -171,7 +171,7 @@ services:
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
       OIDC_CLIENT_ID: mes-reunions
       OIDC_CLIENT_SECRET: dev-client-secret
-      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:${MYDEVICES_WEB_PORT:-8094}/auth/callback
+      OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:${MESREUNIONS_WEB_PORT:-8094}/auth/callback
       PUBLIC_HOST: ${PUBLIC_HOST:-}
       EXT_DB_HOST: postgres-external
       EXT_DB_PORT: "5432"
@@ -452,7 +452,7 @@ services:
         condition: service_healthy
     networks:
       - internal-net
-      - dmz-net  # Accessible par mydevices-web (ext) via dmz
+      - dmz-net  # Accessible par mesreunions-web (ext) via dmz
 
   # --- File Puller (Zone Interne - API d'ingestion) ---
   internal-ingester:

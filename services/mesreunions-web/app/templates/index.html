@@ -1,0 +1,3391 @@
+<!DOCTYPE html>
+<html lang="fr" data-fr-theme>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIrAI — Enregistrer, transcrire et analyser vos réunions et notes vocales en toute sécurité</title>
+    {# Favicon spécifique PWA app conservé (icônes pwa-icon-* dans static/icons). #}
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/pwa-icon-192.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/pwa-icon-180.png">
+    {# DSFR auto-hébergé (servi par Flask via /static/dsfr/ — copié depuis
+       node_modules/@gouvfr/dsfr/dist par scripts/copy-dsfr-assets.mjs au
+       build npm). Remplace le CDN jsdelivr (CSP-friendly + intégrité +
+       perf : pas de DNS lookup tiers, cache long contrôlé localement). #}
+    <link rel="stylesheet" href="/static/dsfr/dsfr/dsfr.min.css">
+    <link rel="stylesheet" href="/static/dsfr/utility/icons/icons-system/icons-system.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #f6f6f6; color: #161616; min-height: 100vh;
+        }
+        .page-shell { padding: 1.5rem 0 2rem; }
+        .container { max-width: 760px; width: 100%; }
+        .card {
+            background: #fff; border-radius: 0.5rem; padding: 1.5rem;
+            border: 1px solid #e5e5e5; margin-bottom: 1rem;
+        }
+        h1 { font-size: 1.3rem; margin-bottom: 0.5rem; color: #1a1a2e; }
+        .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }
+        .header-user {
+            margin-left: auto;
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.15rem;
+        }
+        .header-user-name {
+            font-size: 0.86rem;
+            font-weight: 600;
+            color: #161616;
+            line-height: 1.2;
+            max-width: 17rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .header-user .fr-link {
+            font-size: 0.8rem;
+            line-height: 1.2;
+        }
+        /* Toggle "Mode avancé" sous le bouton Déconnexion. Pill compacte
+           qui change d'état visuel quand actif. Astuce power-user :
+           maintenir Alt fait peek temporairement vers le mode avancé
+           sans changer le toggle (état restauré au relâchement). */
+        .header-user .advanced-toggle {
+            margin-top: 0.15rem;
+            font-size: 0.7rem; line-height: 1;
+            padding: 0.18rem 0.5rem;
+            background: transparent; color: #64748b;
+            border: 1px solid #cbd5e1; border-radius: 999px;
+            cursor: pointer; user-select: none;
+            transition: all 0.12s ease;
+        }
+        .header-user .advanced-toggle:hover {
+            background: #f1f5f9; color: #0f172a; border-color: #94a3b8;
+        }
+        .header-user .advanced-toggle.is-on {
+            background: #1e293b; color: #fff; border-color: #1e293b;
+        }
+        /* Pendant le peek Alt : on souligne le toggle pour indiquer que
+           c'est temporaire (n'a pas changé l'état persistant). */
+        .header-user .advanced-toggle.is-peek {
+            box-shadow: 0 0 0 2px #fde68a;
+        }
+        .form-group { margin-bottom: 1rem; }
+        label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #444; }
+        select, input[type=number] {
+            width: 100%; padding: 0.6rem; border: 1px solid #ddd; border-radius: 8px;
+            font-size: 0.95rem; background: white;
+        }
+        .btn-primary {
+            width: auto;
+            padding: 0.45rem 0.75rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.86rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+        .btn-danger-mini {
+            width: auto;
+            min-height: 1.1rem;
+            padding: 0.06rem 0.32rem;
+            background: #b86464 !important;
+            color: #ffffff !important;
+            border: 1px solid #a95959 !important;
+            font-size: 0.62rem;
+            line-height: 1;
+            border-radius: 6px;
+        }
+        .btn-danger-mini:hover,
+        .btn-danger-mini.fr-btn:hover,
+        .btn-danger-mini.fr-btn:active,
+        .btn-danger-mini.fr-btn:focus {
+            background: #ab5c5c !important;
+            border-color: #9d5050 !important;
+            color: #ffffff !important;
+            box-shadow: none;
+        }
+        .btn-danger-mini:disabled { background: #cbd5e1; color: #64748b; cursor: not-allowed; }
+        .btn-renew-mini {
+            min-height: 1.38rem !important;
+            padding: 0.08rem 0.42rem !important;
+            font-size: 0.62rem !important;
+            line-height: 1 !important;
+            border-radius: 6px !important;
+            margin-left: 0.35rem;
+        }
+        .btn-renew-alert {
+            animation: renewPulse 1.15s ease-in-out infinite;
+            box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45);
+        }
+        @keyframes renewPulse {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.45); }
+            70% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+        }
+        .btn-rename-mini {
+            min-height: 0.8rem !important;
+            padding: 0.04rem 0.24rem !important;
+            font-size: 0.62rem !important;
+            line-height: 1 !important;
+            border-radius: 6px !important;
+        }
+        .device-filter-btn {
+            font-size: 0.64rem !important;
+            min-height: 1.05rem !important;
+            padding: 0.04rem 0.34rem !important;
+            line-height: 1 !important;
+            border-radius: 5px !important;
+        }
+        .device-row-revoked {
+            background: #f1f5f9;
+            border-color: #cbd5e1 !important;
+            opacity: 0.92;
+        }
+        .device-row-revoked .device-name {
+            color: #475569 !important;
+        }
+        .device-row-revoked .device-meta {
+            color: #64748b !important;
+        }
+        .result { display: none; text-align: center; }
+        .result.active { display: block; }
+        .simple-code {
+            font-size: 2.5rem; font-weight: 800; letter-spacing: 0.3em;
+            color: #2563eb; margin: 1rem 0; font-family: 'Courier New', monospace;
+        }
+        .qr-container { margin: 1rem auto; }
+        .qr-container img { border-radius: 8px; }
+        .expires { color: #888; font-size: 0.85rem; margin-top: 0.5rem; }
+        /* Header dynamique : libellé de l'onglet actif après "MIrAI". */
+        .header-tab-label { color: #525a87; font-weight: 500; }
+        /* Rendu structuré du détail brief (remplace l'ancien <pre> JSON). */
+        .brief-rendered { margin-top: 0.8rem; display: flex; flex-direction: column; gap: 0.9rem; }
+        .brief-rendered .brief-section {
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 0.5rem;
+            padding: 0.85rem 1rem;
+        }
+        .brief-rendered .brief-section-title {
+            font-size: 0.92rem; font-weight: 700; color: #1a1a2e;
+            margin: 0 0 0.55rem; display: flex; align-items: center; gap: 0.5rem;
+        }
+        .brief-rendered .brief-section-icon {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.8rem; height: 1.8rem; border-radius: 0.4rem;
+            background: #eef2ff; color: #4338ca; font-size: 1rem;
+        }
+        .brief-rendered .brief-objective { font-size: 1rem; color: #161616; line-height: 1.5; }
+        .brief-rendered .brief-context { color: #334155; font-size: 0.9rem; line-height: 1.5; white-space: pre-wrap; }
+        .brief-rendered .brief-agenda { list-style: none; padding: 0; margin: 0; counter-reset: agenda; }
+        .brief-rendered .brief-agenda-item {
+            position: relative; padding: 0.55rem 0.75rem 0.55rem 2.4rem;
+            border-left: 3px solid #4338ca; background: #f8fafc;
+            border-radius: 0 0.35rem 0.35rem 0; margin-bottom: 0.5rem;
+            counter-increment: agenda;
+        }
+        .brief-rendered .brief-agenda-item::before {
+            content: counter(agenda); position: absolute; left: 0.55rem; top: 0.55rem;
+            width: 1.3rem; height: 1.3rem; border-radius: 50%;
+            background: #4338ca; color: #fff; font-size: 0.75rem; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .brief-rendered .brief-agenda-title { font-weight: 600; color: #1a1a2e; font-size: 0.93rem; }
+        .brief-rendered .brief-agenda-duration {
+            display: inline-block; margin-left: 0.45rem; padding: 0.1rem 0.45rem;
+            background: #e0e7ff; color: #3730a3; font-size: 0.72rem; border-radius: 999px;
+            font-weight: 600;
+        }
+        .brief-rendered .brief-agenda-objective { color: #475569; font-size: 0.85rem; margin-top: 0.25rem; }
+        .brief-rendered .brief-agenda-questions {
+            list-style: disc; padding-left: 1.3rem; margin: 0.35rem 0 0;
+            color: #334155; font-size: 0.85rem;
+        }
+        .brief-rendered .brief-participants { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem; }
+        .brief-rendered .brief-participant {
+            background: #fafafa; border: 1px solid #e5e7eb; border-radius: 0.4rem; padding: 0.55rem 0.7rem;
+        }
+        .brief-rendered .brief-participant-name { font-weight: 600; color: #1a1a2e; font-size: 0.88rem; margin-bottom: 0.2rem; }
+        .brief-rendered .brief-participant-note { color: #475569; font-size: 0.82rem; line-height: 1.4; }
+        .brief-rendered .brief-list { list-style: none; padding: 0; margin: 0; }
+        .brief-rendered .brief-list li {
+            padding: 0.4rem 0.55rem 0.4rem 1.9rem; position: relative;
+            border-bottom: 1px solid #f1f5f9; font-size: 0.88rem; color: #1a1a2e;
+        }
+        .brief-rendered .brief-list li:last-child { border-bottom: none; }
+        .brief-rendered .brief-list-questions li::before {
+            content: '?'; position: absolute; left: 0.6rem; top: 0.4rem;
+            color: #4338ca; font-weight: 700;
+        }
+        .brief-rendered .brief-list-risks li::before {
+            content: '⚠'; position: absolute; left: 0.55rem; top: 0.4rem;
+            color: #b45309; font-weight: 700;
+        }
+        .brief-rendered .brief-list-checklist li::before {
+            content: '☐'; position: absolute; left: 0.6rem; top: 0.4rem;
+            color: #16a34a; font-weight: 700; font-size: 1rem;
+        }
+        .brief-rendered .brief-list-threads li {
+            padding-left: 0.8rem; border-left: 3px solid #94a3b8; background: #f8fafc;
+            margin-bottom: 0.35rem; border-radius: 0 0.35rem 0.35rem 0;
+            padding-top: 0.45rem; padding-bottom: 0.45rem;
+        }
+        .brief-rendered .brief-thread-source {
+            display: block; color: #64748b; font-size: 0.78rem; font-style: italic; margin-top: 0.15rem;
+        }
+        .brief-rendered .brief-empty { color: #94a3b8; font-style: italic; font-size: 0.85rem; }
+        .sessions-list { margin-top: 1rem; }
+        /* Onglet "Mes réunions" en mode liste : la carte occupe la hauteur
+           restante du viewport, et la liste interne scrolle. min-height
+           plutôt que height : sur les rares écrans très courts, on garde
+           un repli naturel sans clipping. */
+        .tab-pane[data-tab="transfers"] {
+            display: flex; flex-direction: column;
+            min-height: calc(100vh - 180px);
+        }
+        #recent-activities-panel {
+            display: flex; flex-direction: column;
+            flex: 1 1 auto; min-height: 0;
+        }
+        /* La zone réunions prend toute la hauteur restante du panneau.
+           flex-grow + min-height:0 est l'incantation indispensable pour
+           qu'un enfant scrollable se comporte bien dans un parent flex
+           column. */
+        .sessions-list {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            padding-right: 0.25rem;
+        }
+        /* En vue détail (page-mode), on supprime le scroll interne : la
+           fiche occupe toute la hauteur naturelle, le scroll vit au niveau
+           de la page (plus naturel sur mobile et desktop). */
+        .tab-pane[data-tab="transfers"].detail-active .sessions-list {
+            flex: 0 0 auto; min-height: 0; overflow: visible; padding-right: 0;
+        }
+        /* Tri date + compteur intégrés sur la même ligne que le titre
+           "Mes réunions (IA)" (à sa droite). Pas de wrapper toolbar. */
+        .dsfr-inline-actions .sort-toggle {
+            font-size: 0.78rem; padding: 0.2rem 0.55rem;
+            background: #fff; color: #1e293b;
+            border: 1px solid #cbd5e1; border-radius: 999px;
+            cursor: pointer; user-select: none;
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            transition: background 0.12s ease, border-color 0.12s ease;
+            white-space: nowrap;
+        }
+        .dsfr-inline-actions .sort-toggle:hover {
+            background: #f1f5f9; border-color: #94a3b8;
+        }
+        .dsfr-inline-actions .sort-toggle-arrow {
+            font-size: 0.7rem; line-height: 1; color: #475569;
+        }
+        .dsfr-inline-actions .file-count {
+            font-size: 0.78rem; color: #64748b;
+            white-space: nowrap;
+        }
+        /* ── UX-Refonte-3 : en-tête fr-table triable au-dessus de la liste flex.
+           On garde la liste en flex pour préserver les comportements existants
+           (expand inline, virus banner, polling queue-hint) mais on lui pose
+           un bandeau de colonnes cliquables au-dessus. */
+        .sessions-table-header {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.4rem 0.55rem;
+            background: #f1f5f9; border: 1px solid #e2e8f0;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            font-size: 0.78rem; color: #475569;
+            font-weight: 600;
+            position: sticky; top: 0; z-index: 5;
+        }
+        .sessions-table-header .sth-cell {
+            background: transparent; border: none; padding: 0.1rem 0.2rem;
+            font: inherit; color: inherit; cursor: default;
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            white-space: nowrap;
+        }
+        .sessions-table-header button.sth-cell {
+            cursor: pointer; border-radius: 4px;
+            transition: background 0.12s ease, color 0.12s ease;
+        }
+        .sessions-table-header button.sth-cell:hover {
+            background: #e2e8f0; color: #0f172a;
+        }
+        .sessions-table-header button.sth-cell.is-active {
+            color: #000091;
+        }
+        .sessions-table-header .sort-arrow {
+            font-size: 0.7rem; line-height: 1; color: #94a3b8;
+        }
+        .sessions-table-header button.sth-cell.is-active .sort-arrow {
+            color: #000091;
+        }
+        .sessions-table-header .sth-cell-dot { width: 1.2rem; justify-content: center; color: #94a3b8; }
+        .sessions-table-header .sth-cell-title { flex: 1 1 auto; min-width: 0; }
+        .sessions-table-header .sth-cell-source { width: 7rem; }
+        .sessions-table-header .sth-cell-duration { width: 4.5rem; justify-content: flex-end; }
+        .sessions-table-header .sth-cell-date { width: 7rem; justify-content: flex-end; }
+        .sessions-table-header .sth-cell-actions { width: 2rem; }
+
+        /* Hover sur une ligne réunion : highlight discret + curseur pointer
+           sur le titre (le titre reste la cible cliquable explicite — le
+           reste de la row n'est pas un lien pour ne pas casser le focus
+           ring du chevron, du select downloads, etc.). */
+        .file-row-compact-wrapper:not(.file-row-virus):hover {
+            background: #f8fafc;
+        }
+        /* Trash visible uniquement au hover de la ligne (chantier UX-Refonte-3).
+           Garde la place réservée (visibility) pour éviter le reflow. */
+        .file-row-compact .file-row-delete {
+            visibility: hidden;
+        }
+        .file-row-compact-wrapper:hover .file-row-compact .file-row-delete,
+        .file-row-compact .file-row-delete:focus-visible {
+            visibility: visible;
+        }
+
+        /* ── Skeleton DSFR-like (chantier UX-Refonte-3 — chantier 2).
+           Utilisé par lib/skeleton.js pendant le fetch d'une fiche détail.
+           Animation shimmer light qui n'attire pas l'attention. */
+        @keyframes mydevices-skeleton-shimmer {
+            0%   { background-position: -300px 0; }
+            100% { background-position: 300px 0; }
+        }
+        .skeleton-line {
+            display: block;
+            height: 0.9rem;
+            margin: 0.4rem 0;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #eef2f7 0%, #f8fafc 50%, #eef2f7 100%);
+            background-size: 600px 100%;
+            animation: mydevices-skeleton-shimmer 1.4s linear infinite;
+        }
+        .skeleton-line.skeleton-line--title { height: 1.4rem; width: 60%; margin-bottom: 0.8rem; }
+        .skeleton-line.skeleton-line--short { width: 30%; }
+        .skeleton-line.skeleton-line--mid   { width: 75%; }
+        .skeleton-line.skeleton-line--block { height: 4rem; }
+        .skeleton-fade-in {
+            animation: mydevices-skeleton-fadein 200ms ease-out;
+        }
+        @keyframes mydevices-skeleton-fadein {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* ── Wizard modale fullscreen (chantier UX-Refonte-3 — chantier 3).
+           Modale DSFR-ish full screen avec stepper. On utilise un <dialog>
+           natif HTML5 + classes maison pour rester maître du JS (pas
+           d'instance dsfr() runtime requise). */
+        .wizard-modal-backdrop {
+            position: fixed; inset: 0;
+            background: rgba(15, 23, 42, 0.55);
+            display: none;
+            z-index: 9000;
+            overflow-y: auto;
+        }
+        .wizard-modal-backdrop.is-open { display: block; }
+        .wizard-modal {
+            background: #fff;
+            max-width: 820px; width: 92%;
+            margin: 3vh auto 5vh;
+            border-radius: 0.5rem;
+            box-shadow: 0 12px 48px rgba(0,0,0,0.30);
+            padding: 1.4rem 1.8rem 1.8rem;
+            position: relative;
+        }
+        .wizard-modal-close {
+            position: absolute; top: 0.6rem; right: 0.6rem;
+            background: transparent; border: none; font-size: 1.4rem;
+            cursor: pointer; color: #475569; line-height: 1;
+        }
+        .wizard-modal-close:hover { color: #0f172a; }
+        .wizard-stepper {
+            display: flex; gap: 0.4rem; align-items: center;
+            margin-bottom: 1rem; font-size: 0.78rem; color: #64748b;
+            flex-wrap: wrap;
+        }
+        .wizard-stepper-item {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px; background: #f1f5f9; color: #475569;
+        }
+        .wizard-stepper-item.is-current {
+            background: #000091; color: #fff;
+        }
+        .wizard-stepper-item.is-done {
+            background: #e0f2e9; color: #1a4d2b;
+        }
+        .wizard-step { display: none; }
+        .wizard-step.is-active { display: block; }
+        .wizard-step h2 {
+            font-size: 1.05rem; color: #1a1a2e; margin: 0 0 0.6rem;
+        }
+        .wizard-question { margin-bottom: 1rem; }
+        .wizard-question > label {
+            display: block; font-size: 0.88rem; font-weight: 600;
+            color: #1a1a2e; margin-bottom: 0.25rem;
+        }
+        .wizard-question .hint {
+            font-size: 0.76rem; color: #64748b; margin-bottom: 0.35rem;
+        }
+        .wizard-question input[type="text"],
+        .wizard-question input[type="number"],
+        .wizard-question textarea,
+        .wizard-question select {
+            width: 100%; padding: 0.5rem 0.65rem;
+            border: 1px solid #d0d5dd; border-radius: 6px;
+            font-size: 0.9rem; background: #fff; color: #161616;
+            font-family: inherit;
+        }
+        .wizard-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }
+        .wizard-chip {
+            padding: 0.22rem 0.55rem; background: #f1f3f9;
+            border: 1px solid #d8def0; border-radius: 999px;
+            font-size: 0.76rem; color: #33396b; cursor: pointer;
+            user-select: none;
+        }
+        .wizard-chip:hover { background: #e3e8f6; }
+        .wizard-focus-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 0.3rem 1rem;
+            margin-top: 0.2rem;
+        }
+        .wizard-focus-grid label {
+            font-size: 0.85rem; font-weight: 400; color: #1a1a2e;
+            display: flex; align-items: center; gap: 0.4rem; cursor: pointer;
+        }
+        .wizard-actions {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-top: 1rem; gap: 0.5rem;
+        }
+        .wizard-actions-right { display: flex; gap: 0.5rem; }
+        .wizard-status {
+            margin-top: 0.8rem; padding: 0.5rem 0.7rem; border-radius: 6px;
+            font-size: 0.85rem; display: none;
+        }
+        .wizard-status.info { background: #eef3fb; color: #1a2640; display: block; }
+        .wizard-status.err  { background: #fbe5e5; color: #7a1f1f; display: block; }
+        .wizard-recap {
+            background: #f8fafc; border: 1px solid #e2e8f0;
+            border-radius: 6px; padding: 0.7rem 0.9rem;
+            font-size: 0.85rem;
+        }
+        .wizard-recap dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 0.8rem; }
+        .wizard-recap dt { color: #64748b; font-weight: 600; }
+        .wizard-recap dd { margin: 0; color: #1e293b; }
+        /* Cas par défaut : la date n'a pas été surchargée par l'utilisateur,
+           on l'affiche en italique pour signaler "date d'upload" (= valeur
+           héritée). Quand l'utilisateur édite la date de réunion depuis la
+           fiche détaillée, la classe is-overridden retire l'italique. */
+        .file-row-meta-date.is-default { font-style: italic; color: #64748b; }
+        .file-row-meta-date.is-overridden { font-style: normal; color: #1e293b; font-weight: 500; }
+        /* Zone d'upload local : 2 boutons côte à côte + un overlay
+           drag&drop sur l'ensemble du header pour rester accessible
+           tactile (clic) et drag desktop. La progression batch s'affiche
+           juste en dessous, en occupant une ligne complète. */
+        .local-upload-zone {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            margin-left: auto;
+        }
+        .local-upload-btn {
+            font-size: 0.78rem; padding: 0.25rem 0.6rem;
+            background: #fff; color: #1d4ed8;
+            border: 1px solid #93c5fd; border-radius: 6px;
+            cursor: pointer; user-select: none;
+            display: inline-flex; align-items: center; gap: 0.3rem;
+            transition: background 0.12s ease, border-color 0.12s ease;
+            white-space: nowrap;
+        }
+        .local-upload-btn:hover {
+            background: #eff6ff; border-color: #60a5fa;
+        }
+        .local-upload-btn:disabled {
+            opacity: 0.6; cursor: not-allowed;
+        }
+        .local-upload-btn-icon { font-size: 0.95rem; line-height: 1; }
+        .local-upload-progress {
+            display: none;
+            width: 100%; margin-top: 0.25rem;
+            font-size: 0.78rem; color: #1e293b;
+        }
+        .local-upload-progress.is-active { display: block; }
+        .local-upload-progress-bar {
+            height: 4px; background: #e0e7ef; border-radius: 999px;
+            margin-top: 0.18rem; overflow: hidden;
+        }
+        .local-upload-progress-bar-fill {
+            height: 100%; background: #2563eb; width: 0%;
+            transition: width 0.18s ease;
+        }
+        .local-upload-progress-errors {
+            color: #b91c1c; font-size: 0.74rem; margin-top: 0.15rem;
+            white-space: pre-wrap;
+        }
+        /* Surbrillance pendant un drag&drop au-dessus du header. */
+        .recent-activities-panel.is-dragover .dsfr-inline-actions {
+            outline: 2px dashed #93c5fd;
+            outline-offset: 4px;
+            border-radius: 6px;
+        }
+        .session-item {
+            padding: 0.75rem; background: #f8f9fa; border-radius: 8px;
+            margin-bottom: 0.5rem; font-size: 0.85rem;
+        }
+        .session-item .code { font-weight: 700; font-family: monospace; color: #2563eb; }
+        .device-token-code { font-weight: 700; font-family: monospace; color: #2563eb; }
+        .status-badge {
+            display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px;
+            font-size: 0.75rem; font-weight: 600;
+        }
+        .status-active { background: #d1fae5; color: #065f46; }
+        .status-expired { background: #fee2e2; color: #991b1b; }
+        .file-badge-pending { background: #e5e7eb; color: #374151; }
+        .file-badge-scanning { background: #dbeafe; color: #1d4ed8; }
+        .file-badge-scan_clean { background: #dcfce7; color: #166534; }
+        .file-badge-scan_infected { background: #fee2e2; color: #b91c1c; }
+        .file-badge-transcoding { background: #ede9fe; color: #6d28d9; }
+        .file-badge-transcoded { background: #e0f2fe; color: #075985; }
+        .file-badge-ready_for_transfer { background: #fef3c7; color: #92400e; }
+        .file-badge-transferring { background: #ffedd5; color: #9a3412; }
+        .file-badge-transferred { background: #ccfbf1; color: #0f766e; }
+        .file-badge-quarantined { background: #fecaca; color: #991b1b; }
+        .file-badge-transcode_failed { background: #ffe4e6; color: #9f1239; }
+        .file-badge-error { background: #f3f4f6; color: #7f1d1d; }
+        .file-status { margin-top: 0.3rem; padding-left: 1rem; color: #555; }
+        .file-status {
+            margin-top: 0.35rem; padding: 0.55rem 0.65rem;
+            background: #f8f9fa; border-radius: 8px; color: #444;
+        }
+        .file-name {
+            display: inline-block;
+            max-width: 230px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            vertical-align: bottom;
+        }
+        .file-links a { margin-right: 0.6rem; font-size: 0.78rem; }
+        .file-links .link-disabled {
+            margin-right: 0.6rem;
+            font-size: 0.78rem;
+            color: #94a3b8;
+            text-decoration: line-through;
+            cursor: not-allowed;
+        }
+        .transcript-section { margin-top: 0.15rem; padding-top: 0.2rem; border-top: 1px dashed #e2e8f0; }
+        .transcript-status-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.78rem; color: #475569; margin-bottom: 0.35rem; padding: 0.3rem 0.5rem; border-radius: 6px; border: 1px solid transparent; }
+        .transcript-status-line.transcript-status-error {
+            background: #fef2f2; border-color: #fecaca; color: #991b1b;
+            font-weight: 600;
+        }
+        .transcript-status-line.transcript-status-ok {
+            background: #f0fdf4; border-color: #bbf7d0; color: #166534;
+        }
+        .transcript-status-spinner { width: 0.7rem; height: 0.7rem; border-radius: 50%; flex-shrink: 0; }
+        .transcript-status-spinner.on { background: conic-gradient(#3b7dd8 0%, #3b7dd8 25%, transparent 25%, transparent 100%); animation: transcriptSpin 1.1s linear infinite; }
+        .transcript-status-spinner.off { background: #94a3b8; }
+        .transcript-status-spinner.err { background: #ef4444; }
+        .transcript-status-spinner.ok { background: #10b981; }
+        .transcript-status-icon { font-size: 0.95rem; line-height: 1; }
+        /* Dropdown unifié des téléchargements (audios + transcripts) */
+        /* Bloc téléchargements : liste verticale de "types de document", chaque
+           ligne montrant à droite des boutons-icône (un par format). Objectif :
+           pas de jargon dans la liste (que des types) + icônes facilement
+           identifiables pour un néophyte. */
+        .downloads-block {
+            display: flex; flex-direction: column; gap: 0.15rem;
+            margin-top: 0.4rem;
+            border: 1px solid #e2e8f0; border-radius: 8px;
+            background: #fbfcfd; padding: 0.35rem 0.5rem;
+        }
+        .downloads-row {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 0.5rem; padding: 0.08rem 0.2rem;
+            border-bottom: 1px solid #f1f5f9;
+            min-height: 1.8rem;
+        }
+        .downloads-row:last-child { border-bottom: 0; }
+        .downloads-row-label {
+            font-size: 0.82rem; color: #1e293b; flex: 1; min-width: 0;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .downloads-row-icons {
+            display: flex; gap: 0.2rem; flex-shrink: 0;
+        }
+        /* Icônes de téléchargement : bouton minimaliste — juste l'icône,
+           plus grosse, pas de chrome (border/bg) au repos. Hover = scale
+           up + couleur ; active (clic) = scale down + flash background
+           pour un feedback haptique-like. */
+        .downloads-icon-btn {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.75rem; height: 1.75rem;
+            border: 0; border-radius: 6px;
+            background: transparent; color: #64748b;
+            text-decoration: none; cursor: pointer;
+            transition: transform 0.12s ease, color 0.12s ease, background 0.12s ease;
+        }
+        .downloads-icon-btn svg { width: 1.4rem; height: 1.4rem; }
+        /* DSFR injecte une flèche "lien externe" sur les <a target="_blank">
+           via ::after. On la retire pour nos boutons-icône — l'icône SVG
+           porte déjà tout le sens visuel. */
+        .downloads-icon-btn::after,
+        .downloads-icon-btn::before { content: none !important; display: none !important; }
+        .downloads-icon-btn { background-image: none !important; }
+        .downloads-icon-btn:hover {
+            color: #1d4ed8;
+            transform: scale(1.18);
+        }
+        .downloads-icon-btn:active,
+        .downloads-icon-btn.is-clicked {
+            transform: scale(0.92);
+            background: #dbeafe;
+            color: #1e3a8a;
+        }
+        .downloads-icon-btn-play:hover { color: #166534; }
+        .downloads-icon-btn-play:active,
+        .downloads-icon-btn-play.is-clicked {
+            background: #dcfce7; color: #14532d;
+        }
+        /* Feedback flash : ajouté en JS sur tout clic, retiré après 350ms. */
+        @keyframes dlClickFlash {
+            0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45); }
+            100% { box-shadow: 0 0 0 12px rgba(59, 130, 246, 0);  }
+        }
+        .downloads-icon-btn.is-clicked { animation: dlClickFlash 0.45s ease-out; }
+        /* Section "Autres téléchargements" : visuellement DISTINCTE des
+           lignes par défaut — fond légèrement plus foncé, label "Autres :"
+           à gauche, select étroit, icônes à droite. Séparée du bloc
+           principal par un trait fin. */
+        .downloads-other-row {
+            display: flex; align-items: center;
+            gap: 0.45rem; padding: 0.35rem 0.5rem;
+            margin: 0.4rem -0.5rem -0.35rem -0.5rem;  /* étend au bord du bloc */
+            border-top: 1px solid #e2e8f0;
+            background: #f1f5f9;
+            border-radius: 0 0 8px 8px;  /* coins arrondis bas comme le block */
+        }
+        .downloads-other-label {
+            font-size: 0.72rem; color: #475569; font-weight: 600;
+            white-space: nowrap;
+            text-transform: uppercase; letter-spacing: 0.04em;
+        }
+        .downloads-other-select {
+            flex: 0 1 45%; max-width: 45%; min-width: 0;
+            padding: 0.12rem 0.4rem; font-size: 0.72rem;
+            height: 1.65rem; line-height: 1.2;
+            border: 1px solid #94a3b8; border-radius: 5px; background: #fff;
+            color: #1e293b;
+            background-position: right 0.35rem center;
+        }
+        .downloads-other-icons {
+            margin-left: auto;       /* pousse les icônes contre le bord droit */
+            min-width: 2.4rem;       /* réserve la place même quand vide */
+            min-height: 1.85rem;
+            display: inline-flex; gap: 0.2rem;
+        }
+        .file-impact-row { margin-top: 0.35rem; display: flex; align-items: center; gap: 0.5rem; }
+        /* Diagnostic per-step de la transcription IA (dépliable) */
+        .status-details {
+            margin: 0.4rem 0 0.6rem 0; font-size: 0.78rem;
+            border: 1px solid #e2e8f0; border-radius: 6px;
+            background: #fbfcfd;
+        }
+        .status-details > summary {
+            cursor: pointer; padding: 0.45rem 0.6rem;
+            color: #1d4ed8; font-weight: 500;
+        }
+        .status-details > summary:hover { background: #f1f5f9; }
+        .status-step-list { padding: 0 0.6rem 0.6rem 0.6rem; }
+        .status-step {
+            display: grid; grid-template-columns: 1rem 1fr;
+            grid-template-rows: auto auto;
+            gap: 0.1rem 0.5rem; padding: 0.35rem 0;
+            border-bottom: 1px dashed #e2e8f0;
+        }
+        .status-step:last-child { border-bottom: 0; }
+        .status-step > :first-child { grid-row: 1 / 3; font-size: 1rem; line-height: 1; padding-top: 0.05rem; }
+        .status-step-label { font-weight: 600; color: #0f172a; }
+        .status-step-desc { color: #64748b; font-size: 0.74rem; }
+        /* Bouton ⓘ aligné à droite, prend couleur du status */
+        /* Bouton (i) : juste un petit rond neutre avec un i dedans.
+           La couleur ne reflète plus le statut (la pastille colorée porte
+           déjà cette info dans la liste compact). */
+        .file-detail-info-btn {
+            margin-left: auto;
+            width: 1.4rem; height: 1.4rem; padding: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            border: 1.5px solid #94a3b8; background: #fff;
+            cursor: pointer; font-size: 0.78rem; font-weight: 700;
+            font-style: italic; font-family: Georgia, serif;
+            line-height: 1; border-radius: 50%; color: #475569;
+        }
+        .file-detail-info-btn:hover {
+            background: #f1f5f9; border-color: #475569; color: #0f172a;
+        }
+        /* Pulse "il se passe un truc" sur le bouton (i) tant que le pipeline
+           (upload + transcription) n'est pas terminal. Sync avec le dot. */
+        @keyframes infoBtnPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.55); }
+            50%      { box-shadow: 0 0 0 6px rgba(59,130,246,0);  }
+        }
+        .file-detail-info-btn.is-in-progress {
+            border-color: #3b82f6; color: #1d4ed8;
+            animation: infoBtnPulse 1.4s ease-in-out infinite;
+        }
+        /* Modal détails techniques : fenêtre flottante positionnée vers le
+           haut (haut de page reste visible). Backdrop très léger. */
+        .file-info-modal {
+            position: fixed; top: 3.5rem; left: 50%;
+            transform: translateX(-50%);
+            margin: 0;
+            border: 1px solid #cbd5e1; border-radius: 12px; padding: 0;
+            max-width: 560px; width: 92%;
+            max-height: calc(100vh - 5rem); overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.22),
+                        0 0 0 1px rgba(15,23,42,0.05);
+            background: #fff;
+        }
+        .file-info-modal::backdrop {
+            background: rgba(15,23,42,0.18);
+        }
+        .modal-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 0.8rem 1rem; border-bottom: 1px solid #e2e8f0;
+        }
+        .modal-header h3 { margin: 0; font-size: 1rem; color: #0f172a; }
+        .modal-close {
+            border: 0; background: transparent; cursor: pointer;
+            font-size: 1rem; color: #64748b; padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+        }
+        .modal-close:hover { background: #e2e8f0; color: #0f172a; }
+        .modal-body { padding: 0.8rem 1rem 1rem 1rem; font-size: 0.84rem; }
+        .modal-section { margin-bottom: 1rem; }
+        .modal-section:last-child { margin-bottom: 0; }
+        .modal-section-title {
+            font-weight: 700; color: #0f172a; font-size: 0.82rem;
+            margin-bottom: 0.4rem; text-transform: uppercase;
+            letter-spacing: 0.04em; color: #64748b;
+        }
+        .modal-status { margin-bottom: 0.3rem; }
+        .modal-steps { display: flex; flex-direction: column; gap: 0.5rem; }
+        .modal-step {
+            display: grid; grid-template-columns: 1rem 1fr;
+            gap: 0.5rem; align-items: start;
+            padding: 0.3rem 0; border-bottom: 1px dashed #e2e8f0;
+        }
+        .modal-step:last-child { border-bottom: 0; }
+        .modal-step-label { font-weight: 600; color: #0f172a; }
+        .modal-step-desc { color: #64748b; font-size: 0.76rem; line-height: 1.35; }
+        .modal-explain {
+            margin: 0 0 0.5rem 0; color: #475569; font-size: 0.78rem; line-height: 1.4;
+        }
+        .modal-impact-result { margin-top: 0.5rem; font-size: 0.78rem; color: #475569; }
+        /* #3 Détail full-height : le panel détail prend toute la hauteur
+           dispo, le scroll est celui de la page entière, pas un scroll
+           interne secondaire. */
+        .tab-pane[data-tab="transfers"].detail-active .card {
+            border: 0; box-shadow: none; padding: 0.4rem 0.2rem;
+            background: transparent;
+        }
+        .tab-pane[data-tab="transfers"].detail-active #recent-activities-panel {
+            min-height: calc(100vh - 180px);
+        }
+        /* Impact normalisation audio (dépliable, en vue détail) */
+        .impact-details {
+            margin: 0.6rem 0; font-size: 0.78rem;
+            border: 1px solid #e2e8f0; border-radius: 6px;
+            background: #fbfcfd;
+        }
+        .impact-details > summary {
+            cursor: pointer; padding: 0.45rem 0.6rem;
+            color: #1d4ed8; font-weight: 500;
+        }
+        .impact-details > summary:hover { background: #f1f5f9; }
+        .impact-explanation {
+            margin: 0; padding: 0 0.6rem 0.5rem 0.6rem;
+            color: #475569; font-size: 0.76rem; line-height: 1.4;
+        }
+        .impact-details .file-impact-row { padding: 0 0.6rem 0.6rem 0.6rem; margin: 0; }
+        .impact-hint { font-size: 0.72rem; color: #94a3b8; }
+        /* Hint file d'attente Kevent — sobre, atténuée si stale */
+        .queue-hint { color: #475569; }
+        .queue-hint.queue-hint-stale { color: #94a3b8; font-style: italic; }
+        /* Corbeille */
+        .trash-item {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 0.55rem;
+            padding: 0.5rem 0.6rem; border-bottom: 1px solid #f1f5f9;
+        }
+        .trash-item-type {
+            font-size: 0.7rem; color: #64748b; text-transform: uppercase;
+            background: #f1f5f9; padding: 0.1rem 0.4rem; border-radius: 4px;
+        }
+        .trash-item-name { flex: 1; min-width: 0; font-size: 0.85rem; }
+        .trash-item-meta { font-size: 0.72rem; color: #94a3b8; }
+        /* Quand le nouveau module est actif, on cache le header legacy
+           (titre + sort + boutons upload + purge) qui est redessiné par
+           le module dans #sessions-list. Les inputs file restent dans
+           le DOM pour que les boutons du nouveau header puissent les
+           déclencher. */
+        .meetings-new-active .dsfr-inline-actions { display: none !important; }
+        .meetings-new-active #sessions-table-header { display: none !important; }
+        /* Garde la zone "transferts en cours" + "upload progress" visible
+           (peuplée en arrière-plan par legacy.js, utile pendant upload). */
+
+        /* ═══════════════════════════════════════════════════════════════
+           Feedback widget (fiche détail) — pouce ↑/↓ + régénération.
+           ═══════════════════════════════════════════════════════════════ */
+        .file-detail-feedback-block {
+            margin: 0.6rem 0 0.3rem 0;
+            padding: 0.5rem 0.7rem;
+            background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
+        }
+        .feedback-section { margin: 0; }
+        /* Ligne pointillée entre la section "Régénérer" (en haut) et la
+           section "Cette retranscription vous est-elle utile ?" (en bas).
+           Portée par --useful qui est la 2e section. */
+        .feedback-section--useful {
+            margin-top: 0.4rem; padding-top: 0.4rem;
+            border-top: 1px dashed #cbd5e1;
+        }
+        .feedback-section--regen { margin-top: 0; }
+        .feedback-row {
+            display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+        }
+        .feedback-q {
+            font-size: 0.8rem; color: #475569; font-weight: 500;
+            margin-right: 0.2rem;
+        }
+        .feedback-thumb {
+            background: #fff; border: 1px solid #cbd5e1; border-radius: 50%;
+            width: 1.7rem; height: 1.7rem; font-size: 0.95rem;
+            cursor: pointer; padding: 0;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .feedback-thumb:hover { background: #eff6ff; border-color: #93c5fd; }
+        .feedback-thumb-up:hover { background: #dcfce7; border-color: #86efac; }
+        .feedback-thumb-down:hover { background: #fee2e2; border-color: #fca5a5; }
+        .feedback-detail {
+            margin-top: 0.4rem; padding: 0.5rem 0.6rem;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 5px;
+        }
+        .feedback-detail-reasons {
+            display: flex; flex-direction: column; gap: 0.2rem;
+            margin-bottom: 0.4rem;
+        }
+        .feedback-reason {
+            display: flex; align-items: center; gap: 0.4rem;
+            font-size: 0.82rem; color: #334155; cursor: pointer;
+        }
+        .feedback-reason input { margin: 0; }
+        .feedback-detail-text {
+            width: 100%; min-height: 3em; resize: vertical;
+            font-family: inherit; font-size: 0.8rem;
+            padding: 0.3rem 0.5rem;
+            border: 1px solid #cbd5e1; border-radius: 4px;
+            background: #fff;
+        }
+        .feedback-detail-actions {
+            display: flex; gap: 0.4rem; margin-top: 0.4rem;
+        }
+        /* Bouton primary "Envoyer le feedback". Le hover préserve color:#fff
+           !important pour bypasser les règles DSFR qui injectent un
+           background-image/text en hover sur les <button> de couleur. */
+        .feedback-send-btn {
+            background: #1d4ed8 !important; color: #fff !important;
+            border: 1px solid #1d4ed8;
+            border-radius: 5px; padding: 0.3rem 0.7rem;
+            font-size: 0.8rem; font-weight: 500; cursor: pointer;
+            background-image: none !important;
+        }
+        .feedback-send-btn:hover:not(:disabled) {
+            background: #1e40af !important; color: #fff !important;
+            border-color: #1e40af;
+            background-image: none !important;
+        }
+        .feedback-send-btn:disabled { opacity: 0.5; cursor: wait; }
+        .feedback-cancel-btn {
+            background: transparent; color: #475569; border: 1px solid #cbd5e1;
+            border-radius: 5px; padding: 0.35rem 0.7rem;
+            font-size: 0.82rem; cursor: pointer;
+        }
+        .feedback-cancel-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .feedback-thanks {
+            background: #dcfce7; border: 1px solid #86efac; border-radius: 4px;
+            padding: 0.3rem 0.5rem; margin-top: 0.4rem;
+            font-size: 0.78rem; color: #15803d;
+            display: flex; align-items: center; gap: 0.4rem;
+        }
+        /* L'attribut HTML `hidden` doit toujours masquer les éléments du
+           widget feedback, indépendamment du display: flex défini sur la
+           classe (sinon le message "Merci" reste visible avant submit). */
+        .feedback-thanks[hidden],
+        .feedback-detail[hidden] { display: none !important; }
+        .feedback-thanks-icon {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.1rem; height: 1.1rem; border-radius: 50%;
+            background: #15803d; color: #fff; font-weight: 700;
+        }
+        .feedback-regen-btn {
+            background: #fff; border: 1px solid #cbd5e1; border-radius: 5px;
+            padding: 0.25rem 0.6rem; font-size: 0.8rem; color: #475569;
+            cursor: pointer; font-weight: 500;
+        }
+        .feedback-regen-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .feedback-regen-btn--full {
+            border-color: #fcd34d; color: #92400e;
+        }
+        .feedback-regen-btn--full:hover {
+            background: #fef3c7; color: #78350f;
+        }
+        /* Badge "modifications en attente" + clignotement du bouton
+           "🔄 Comptes-rendus (LLM)" pour inviter l'utilisateur à
+           répercuter ses corrections dans le résumé/CR. Toggle géré
+           par JS (incrementPendingCorrections / clearPendingCorrections,
+           état persisté en localStorage). */
+        .pending-corrections-badge {
+            background: #fef3c7; border: 1px solid #fcd34d;
+            border-left: 3px solid #d97706;
+            border-radius: 5px;
+            padding: 0.4rem 0.6rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.78rem; color: #78350f;
+            line-height: 1.45;
+        }
+        .pending-corrections-badge strong { color: #92400e; }
+        .has-pending-corrections .feedback-regen-btn--llm {
+            animation: regenBtnPulse 1.4s ease-in-out infinite;
+            border-color: #f59e0b;
+            background: #fef3c7;
+            color: #78350f;
+            font-weight: 600;
+        }
+        @keyframes regenBtnPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.55); }
+            50%      { box-shadow: 0 0 0 6px rgba(217, 119, 6, 0); }
+        }
+        /* ═══════════════════════════════════════════════════════════════
+           Transcript corrector (fiche détail) — blocs interlocuteur + ▶
+           audio + sélection texte → popup correction inline.
+           ═══════════════════════════════════════════════════════════════ */
+        .file-detail-corrector-block {
+            margin: 0.6rem 0;
+        }
+        .transcript-corrector {
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+            padding: 0.5rem 0.7rem;
+        }
+        .transcript-corrector-summary {
+            font-size: 0.85rem; font-weight: 600; color: #0f172a;
+            cursor: pointer; padding: 0.2rem 0;
+        }
+        /* Sticky : le lecteur audio reste visible en haut du details
+           quand on scroll dans les blocs. */
+        .transcript-corrector-sticky {
+            position: sticky; top: 0; z-index: 2;
+            background: #fff; padding: 0.4rem 0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .transcript-corrector-audio {
+            width: 100%; height: 32px;
+        }
+        .tc-audio-purged {
+            font-size: 0.8rem; color: #92400e;
+            background: #fef3c7; border: 1px solid #fcd34d;
+            border-radius: 4px; padding: 0.35rem 0.5rem;
+        }
+        .tc-notice {
+            font-size: 0.74rem; color: #64748b;
+            background: #f8fafc; border: 1px solid #e2e8f0;
+            border-radius: 4px; padding: 0.4rem 0.6rem;
+            margin: 0.5rem 0;
+            line-height: 1.45;
+            display: flex; gap: 0.6rem; align-items: flex-start;
+        }
+        .tc-notice-text { flex: 1 1 auto; min-width: 0; }
+        .tc-notice strong { color: #334155; }
+        .tc-notice-play, .tc-notice-pencil {
+            display: inline-flex; align-items: center; justify-content: center;
+            min-width: 1.1rem; height: 1.1rem;
+            font-size: 0.7rem;
+            background: #eff6ff; border-radius: 3px;
+            padding: 0 0.2rem;
+            border: 1px solid #cbd5e1;
+        }
+        .tc-find {
+            flex: 0 0 auto;
+            display: flex; align-items: center; gap: 0.25rem;
+            white-space: nowrap;
+        }
+        .tc-find-input {
+            font-size: 0.74rem; padding: 0.15rem 0.4rem;
+            border: 1px solid #cbd5e1; border-radius: 3px;
+            width: 9rem; outline: none;
+        }
+        .tc-find-input:focus { border-color: #1d4ed8; }
+        .tc-find-prev, .tc-find-next {
+            font-size: 0.7rem; line-height: 1;
+            padding: 0.15rem 0.35rem;
+            border: 1px solid #cbd5e1; background: #fff;
+            border-radius: 3px; cursor: pointer;
+        }
+        .tc-find-prev:hover, .tc-find-next:hover {
+            background: #eff6ff; border-color: #1d4ed8;
+        }
+        .tc-find-status {
+            font-size: 0.7rem; color: #64748b;
+            min-width: 5.5rem; text-align: left;
+        }
+        .tc-find-hit {
+            background: #fef9c3; color: inherit; padding: 0 1px; border-radius: 2px;
+        }
+        .tc-find-current {
+            background: #fde047; outline: 1px solid #ca8a04;
+        }
+        .transcript-corrector-blocks {
+            display: flex; flex-direction: column; gap: 0.3rem;
+            max-height: 24em; overflow-y: auto;
+            padding: 0.3rem 0.2rem;
+        }
+        .tc-block {
+            display: grid;
+            grid-template-columns: 1.6rem auto 1.2rem auto 1fr;
+            gap: 0.4rem; align-items: baseline;
+            font-size: 0.82rem; line-height: 1.4;
+            padding: 0.25rem 0.3rem; border-radius: 4px;
+            transition: background 0.15s;
+        }
+        .tc-block:hover { background: #f8fafc; }
+        .tc-block.is-playing {
+            background: #eff6ff;
+            box-shadow: inset 3px 0 0 #1d4ed8;
+        }
+        .tc-play {
+            background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd;
+            border-radius: 50%; width: 1.5rem; height: 1.5rem; padding: 0;
+            font-size: 0.7rem; cursor: pointer; line-height: 1;
+            flex-shrink: 0;
+        }
+        .tc-play:hover:not(:disabled) { background: #dbeafe; }
+        .tc-play:disabled {
+            opacity: 0.35; cursor: not-allowed;
+            background: #f1f5f9; color: #94a3b8; border-color: #cbd5e1;
+        }
+        .tc-speaker {
+            font-weight: 600; color: #0f172a;
+            white-space: nowrap;
+        }
+        .tc-speaker-rename {
+            background: none; border: none; cursor: pointer;
+            color: #94a3b8; padding: 0;
+            font-size: 0.7rem;
+            opacity: 0; transition: opacity 0.15s;
+        }
+        .tc-block:hover .tc-speaker-rename { opacity: 1; }
+        .tc-speaker-rename:hover { color: #1d4ed8; }
+        .tc-time {
+            font-size: 0.7rem; color: #94a3b8;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .tc-text {
+            color: #334155; user-select: text; cursor: text;
+        }
+        .tc-text::selection { background: #fef08a; color: #0f172a; }
+        .transcript-corrector-footer {
+            margin-top: 0.6rem; padding: 0.5rem 0.6rem;
+            background: #fef9c3; border: 1px solid #fde68a; border-radius: 5px;
+        }
+        .transcript-corrector-footer[hidden] { display: none !important; }
+        .tc-correct-head {
+            display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+            font-size: 0.82rem; margin-bottom: 0.4rem;
+        }
+        .tc-correct-label { font-weight: 600; color: #92400e; }
+        .tc-correct-old {
+            background: #fff; padding: 0.1rem 0.4rem; border-radius: 3px;
+            font-family: ui-monospace, monospace; color: #b91c1c;
+            border: 1px solid #fcd34d;
+        }
+        .tc-correct-listen {
+            background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd;
+            border-radius: 4px; padding: 0.1rem 0.5rem; font-size: 0.75rem;
+            cursor: pointer; margin-left: auto;
+        }
+        .tc-correct-listen:hover { background: #dbeafe; }
+        .tc-correct-close {
+            background: none; border: none; cursor: pointer;
+            color: #92400e; font-size: 1.1rem; padding: 0 0.2rem;
+            line-height: 1;
+        }
+        .tc-correct-close:hover { color: #78350f; }
+        .tc-correct-row { margin-bottom: 0.4rem; }
+        .tc-correct-new {
+            width: 100%; font-size: 0.85rem; font-weight: 500;
+            padding: 0.3rem 0.5rem;
+            border: 1px solid #cbd5e1; border-radius: 4px;
+            background: #fff;
+        }
+        .tc-correct-new:focus { outline: none; border-color: #1d4ed8; }
+        .tc-correct-opts {
+            display: flex; flex-direction: column; gap: 0.15rem;
+            margin-bottom: 0.4rem; font-size: 0.78rem; color: #475569;
+        }
+        .tc-correct-opts label { cursor: pointer; }
+        .tc-correct-opts input { margin-right: 0.3rem; }
+        .tc-correct-actions {
+            display: flex; align-items: center; gap: 0.5rem;
+        }
+        .tc-correct-apply {
+            background: #1d4ed8 !important; color: #fff !important;
+            border: 1px solid #1d4ed8;
+            padding: 0.3rem 0.9rem; border-radius: 4px;
+            font-size: 0.82rem; font-weight: 500; cursor: pointer;
+            background-image: none !important;
+        }
+        .tc-correct-apply:hover:not(:disabled) {
+            background: #1e40af !important; color: #fff !important;
+            border-color: #1e40af;
+        }
+        .tc-correct-apply:disabled { opacity: 0.6; cursor: wait; }
+        .tc-correct-status {
+            font-size: 0.78rem; color: #15803d;
+        }
+        .transcript-corrector-fallback {
+            background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 5px;
+            padding: 0.5rem 0.7rem; font-size: 0.82rem;
+        }
+        .transcript-corrector-raw {
+            white-space: pre-wrap; font-family: inherit;
+            color: #334155; margin: 0.4rem 0 0 0;
+            max-height: 16em; overflow-y: auto;
+            background: #fff; padding: 0.4rem 0.6rem;
+            border-radius: 4px;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           Glossaire personnel éditable inline (tab "Mes données utiles").
+           UX : 1-clic max pour favori/blacklist/delete. Ajout : Enter.
+           ═══════════════════════════════════════════════════════════════ */
+        .glossary-add-row { margin-bottom: 0.5rem; }
+        .glossary-add-input {
+            width: 100%; font-size: 0.85rem;
+            padding: 0.35rem 0.6rem;
+            border: 1px solid #cbd5e1; border-radius: 5px;
+            background: #fff;
+        }
+        .glossary-add-input:focus { outline: none; border-color: #1d4ed8; }
+        .glossary-grid {
+            display: grid; grid-template-columns: 1fr;
+            gap: 0.15rem;
+            max-height: 28em; overflow-y: auto;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;
+            padding: 0.3rem;
+        }
+        .glossary-row {
+            display: grid;
+            grid-template-columns: 1fr auto 1.4rem 1.4rem 1.4rem;
+            align-items: center; gap: 0.4rem;
+            padding: 0.2rem 0.4rem; border-radius: 3px;
+            font-size: 0.82rem;
+            transition: background 0.1s;
+        }
+        .glossary-row:hover { background: #f8fafc; }
+        .glossary-row.is-blocked {
+            opacity: 0.45;
+            text-decoration: line-through;
+        }
+        .glossary-row.is-curated {
+            background: #fef9c3;
+        }
+        .glossary-row.is-curated:hover { background: #fef3c7; }
+        .glossary-term {
+            color: #0f172a; font-weight: 500;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .glossary-meta {
+            color: #94a3b8; font-size: 0.7rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .glossary-toggle {
+            background: none; border: none; cursor: pointer;
+            padding: 0; width: 1.4rem; height: 1.4rem;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 0.9rem; line-height: 1;
+            border-radius: 3px;
+            transition: background 0.1s;
+        }
+        .glossary-toggle:hover { background: #e2e8f0; }
+        .glossary-toggle--star.is-on { color: #ca8a04; }
+        .glossary-toggle--block.is-on { color: #b91c1c; }
+        .glossary-toggle--del { color: #94a3b8; font-size: 1rem; }
+        .glossary-toggle--del:hover { color: #b91c1c; background: #fee2e2; }
+
+        /* Tags d'état dans la vue "Mes feedbacks" + admin. */
+        .my-feedback-tag {
+            font-size: 0.7rem; padding: 0.1rem 0.45rem;
+            border-radius: 999px; font-weight: 600;
+            white-space: nowrap;
+        }
+        .my-feedback-tag--new {
+            background: #f1f5f9; color: #475569;
+        }
+        .my-feedback-tag--processed {
+            background: #dcfce7; color: #15803d;
+        }
+        .my-feedback-tag--dismissed {
+            background: #fef3c7; color: #92400e;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
+           NOUVEAU module tabs/meetings.js (refonte UI 2026-05-17).
+           Header séparé + liste à grille fixe + SVG inline pour le status
+           (pas de dépendance au font DSFR fr-icon-*). Préfixe meetings-tab
+           et meeting-row pour isoler des styles legacy.
+           ═══════════════════════════════════════════════════════════════ */
+        .meetings-tab-header {
+            background: #fff; border-bottom: 1px solid #e2e8f0;
+            padding: 0.9rem 1rem 0.7rem;
+            position: sticky; top: 0; z-index: 5;
+        }
+        .meetings-tab-header-top {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; flex-wrap: wrap;
+        }
+        .meetings-tab-title {
+            font-size: 1.15rem; font-weight: 600; margin: 0;
+            color: #0f172a; display: flex; align-items: baseline; gap: 0.5rem;
+        }
+        .meetings-tab-count {
+            font-size: 0.78rem; color: #64748b; font-weight: 500;
+            background: #f1f5f9; padding: 0.1rem 0.5rem; border-radius: 999px;
+        }
+        .meetings-tab-actions {
+            display: inline-flex; gap: 0.4rem; align-items: center;
+        }
+        .meetings-tab-btn {
+            font-size: 0.85rem; line-height: 1.2;
+            padding: 0.42rem 0.9rem; border-radius: 6px;
+            border: 1px solid transparent; cursor: pointer;
+            font-weight: 500; white-space: nowrap;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .meetings-tab-btn--primary {
+            background: #1d4ed8; color: #fff; border-color: #1d4ed8;
+        }
+        .meetings-tab-btn--primary:hover { background: #1e40af; border-color: #1e40af; }
+        .meetings-tab-btn--secondary {
+            background: #fff; color: #1d4ed8; border-color: #1d4ed8;
+        }
+        .meetings-tab-btn--secondary:hover { background: #eff6ff; }
+        .meetings-tab-btn--ghost {
+            background: transparent; color: #475569; border-color: #cbd5e1;
+        }
+        .meetings-tab-btn--ghost:hover { background: #f1f5f9; color: #0f172a; }
+        .meetings-tab-btn--danger {
+            background: #b91c1c; color: #fff; border-color: #b91c1c;
+        }
+        .meetings-tab-btn--danger:hover { background: #991b1b; }
+        .meetings-tab-header-hint {
+            font-size: 0.72rem; color: #94a3b8; margin-top: 0.4rem;
+        }
+        .meetings-tab-header-hint kbd {
+            background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px;
+            padding: 0.05rem 0.3rem; font-family: inherit; font-size: 0.7rem;
+            color: #475569;
+        }
+        .meetings-tab-bulkbar {
+            margin-top: 0.6rem; padding: 0.5rem 0.7rem;
+            background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px;
+            display: flex; align-items: center; gap: 0.6rem;
+            font-size: 0.85rem; color: #92400e;
+        }
+        .meetings-tab-bulkbar-count { margin-right: auto; }
+        .meetings-tab-empty {
+            padding: 2rem 1rem; text-align: center; color: #64748b;
+            font-size: 0.9rem;
+        }
+        .meetings-tab-list { padding: 0; }
+        .meeting-row {
+            border-bottom: 1px solid #f1f5f9;
+            transition: background 0.15s;
+        }
+        .meeting-row:hover { background: #f8fafc; }
+        .meeting-row.is-expanded { background: #f8fafc; }
+        .meeting-row.is-selected { background: #fef9c3; }
+        .meeting-row-main {
+            display: grid;
+            grid-template-columns:
+                0                          /* checkbox (révélée en bulk mode) */
+                20px                       /* status icône (réduite 50%) */
+                minmax(0, 1fr)             /* titre + chevron */
+                auto                       /* date */
+                4.5em;                     /* durée alignée à droite */
+            align-items: center; gap: 0.5rem;
+            padding: 0.4rem 1rem;
+            min-height: 32px;
+        }
+        /* Mode bulk : on révèle la checkbox (1ère colonne passe de 0 à 20px). */
+        body.meetings-bulk-active .meeting-row-main {
+            grid-template-columns:
+                20px                       /* checkbox visible */
+                20px                       /* status */
+                minmax(0, 1fr)             /* titre + chevron */
+                auto                       /* date */
+                4.5em;                     /* durée */
+        }
+        /* Wrap titre + chevron : flex pour que le chevron reste collé à
+           la fin du titre tronqué (au lieu d'être à la fin de la row). */
+        .meeting-row-title-wrap {
+            display: flex; align-items: center; gap: 0.25rem;
+            min-width: 0;
+        }
+        .meeting-row-title-wrap .meeting-row-title-btn {
+            flex: 1; min-width: 0;
+        }
+        .meeting-row-check {
+            display: inline-flex; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none; transition: opacity 0.15s;
+        }
+        body.meetings-bulk-active .meeting-row-check {
+            opacity: 1; pointer-events: auto;
+        }
+        .meeting-row-check input { width: 13px; height: 13px; cursor: pointer; margin: 0; }
+        .meeting-row-status {
+            width: 20px; height: 20px;
+            background: none; border: none; padding: 0; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .meeting-status-svg {
+            width: 16px; height: 16px; display: block;
+        }
+        /* Pulse subtil sur le glyphe central quand pipeline en cours.
+           Le ring lui-même reste STATIQUE et affiche le % d'avancement
+           via stroke-dashoffset (cf statusIcon JS). On évite la rotation
+           continue qui donnait l'impression que tout était toujours en
+           train de bouger. */
+        .meeting-status-glyph.is-pulsing {
+            transform-origin: 12px 12px;
+            animation: meetingStatusGlyphPulse 1.4s ease-in-out infinite;
+        }
+        @keyframes meetingStatusGlyphPulse {
+            0%, 100% { opacity: 1;    transform: scale(1);   }
+            50%      { opacity: 0.45; transform: scale(0.85); }
+        }
+        .meeting-row-title-btn {
+            background: none; border: none; padding: 0;
+            text-align: left; cursor: pointer;
+            min-width: 0; overflow: hidden;
+            color: #1d4ed8; font-weight: 500; font-size: 0.92rem;
+            line-height: 1.3;
+        }
+        .meeting-row-title-btn:hover { color: #1e40af; }
+        .meeting-row-title-text {
+            display: block; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .meeting-row-date {
+            font-size: 0.78rem; color: #475569; white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .meeting-row-dur {
+            font-size: 0.78rem; color: #94a3b8; white-space: nowrap;
+            text-align: right; font-variant-numeric: tabular-nums;
+        }
+        .meeting-row-chevron {
+            background: none; border: none; cursor: pointer;
+            color: #94a3b8; padding: 0; width: 20px; height: 20px;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: color 0.15s, transform 0.2s;
+            flex-shrink: 0;
+        }
+        .meeting-row-chevron:hover { color: #1d4ed8; }
+        .meeting-row.is-expanded .meeting-row-chevron {
+            transform: rotate(180deg); color: #1d4ed8;
+        }
+        .meeting-chevron-svg { width: 10px; height: 10px; display: block; }
+        .meeting-row-expanded {
+            padding: 0.4rem 1rem 0.7rem calc(20px + 2 * 0.5rem + 1rem);
+            background: #f8fafc;
+            font-size: 0.82rem; color: #475569;
+        }
+        body.meetings-bulk-active .meeting-row-expanded {
+            padding-left: calc(20px + 20px + 3 * 0.5rem + 1rem);
+        }
+        .meeting-row-expanded-row {
+            display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+            margin-bottom: 0.5rem;
+        }
+        .meeting-row-source {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            font-size: 0.78rem; color: #475569;
+        }
+        .meeting-source-svg {
+            width: 10px; height: 10px; color: #64748b; display: block;
+        }
+        .meeting-row-created { font-size: 0.78rem; color: #94a3b8; }
+        .meeting-row-summary { margin: 0.4rem 0; }
+        .meeting-row-summary-kp {
+            white-space: pre-wrap; font-family: inherit;
+            font-size: 0.82rem; color: #334155; margin: 0;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;
+            padding: 0.5rem 0.7rem;
+            max-height: 8em; overflow-y: auto;
+        }
+        .meeting-row-summary-loading, .meeting-row-summary-empty {
+            font-size: 0.78rem; color: #94a3b8;
+        }
+        .meeting-row-expanded-actions {
+            display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap;
+        }
+        .meeting-row-action-btn {
+            font-size: 0.78rem; padding: 0.32rem 0.7rem; border-radius: 5px;
+            background: #fff; color: #475569; border: 1px solid #cbd5e1;
+            cursor: pointer; font-weight: 500;
+        }
+        .meeting-row-action-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .meeting-row-action-btn--danger {
+            color: #b91c1c; border-color: #fca5a5;
+        }
+        .meeting-row-action-btn--danger:hover {
+            background: #fee2e2; color: #7f1d1d;
+        }
+        /* ═══════════════════════════════════════════════════════════════ */
+
+        /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
+        .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
+        .file-row-compact-wrapper:hover { background: #f8fafc; }
+        /* Colonnes explicites, plus de débordement quand un libellé est long.
+           Ordre HTML : transcript-section(display:none) | status | titre |
+           source | queue-hint | détails | meta | delete.
+           La section cachée prend bien une colonne dans la grille (auto), donc
+           on a 8 colonnes en tout. */
+        .file-row-compact {
+            display: grid;
+            grid-template-columns:
+                0                                /* transcript-section (display:none, taille 0) */
+                28px                             /* status icône */
+                minmax(0, 1fr)                   /* titre (fr) */
+                24px                             /* source icône */
+                auto                             /* queue-hint (vide → 0) */
+                auto                             /* bouton détails */
+                auto                             /* meta date+durée */
+                32px;                            /* bouton delete */
+            align-items: center; gap: 0.55rem;
+            padding: 0.45rem 0.55rem;
+            min-height: 32px;
+        }
+        /* TKT-101 + finition liste compacte : le statut est rendu en
+           icône-only (taille fixe 24×24), libellé via aria-label + title.
+           Les variantes --<kind> portent les couleurs. L'animation pulse
+           opacity est conservée pour --processing. */
+        .file-row-status-tag {
+            display: inline-flex;
+            align-items: center; justify-content: center;
+            width: 24px; height: 24px; flex-shrink: 0;
+            border-radius: 50%;
+            font-size: 1rem; line-height: 1;
+            vertical-align: middle;
+        }
+        /* La classe DSFR fr-icon-*-line ajoute déjà le picto via ::before.
+           On s'assure que le ::before est centré dans le rond coloré. */
+        .file-row-status-tag::before {
+            margin: 0;
+        }
+        .file-row-status-tag--success {
+            background-color: #dcfce7; color: #15803d;
+        }
+        .file-row-status-tag--processing {
+            background-color: #dbeafe; color: #1d4ed8;
+            animation: filerowStatusTagPulse 1.4s ease-in-out infinite;
+        }
+        .file-row-status-tag--queued {
+            background-color: #f1f5f9; color: #475569;
+        }
+        .file-row-status-tag--partial {
+            background-color: #fef3c7; color: #92400e;
+        }
+        .file-row-status-tag--error {
+            background-color: #fee2e2; color: #b91c1c;
+        }
+        .file-row-status-tag--neutral {
+            background-color: #f3f4f6; color: #475569;
+        }
+        /* Source : icône smartphone (device enrôlé) ou upload (fichier local),
+           taille fixe 22 px, tooltip donne le détail. Remplace l'ancien chip
+           texte qui débordait. */
+        .file-row-source {
+            width: 22px; height: 22px; flex-shrink: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            color: #64748b; font-size: 1.05rem; line-height: 1;
+        }
+        .file-row-source::before { margin: 0; }
+        .file-row-source--local { color: #94a3b8; }
+        .file-row-source--device { color: #475569; }
+        /* Pulse opacity uniquement — scale aurait été disgracieux sur un
+           tag (plus large que le dot d'origine). */
+        @keyframes filerowStatusTagPulse {
+            0%, 100% { opacity: 1;   }
+            50%      { opacity: 0.55; }
+        }
+        .file-row-title {
+            font-weight: 600; color: #1d4ed8;
+            text-decoration: none !important;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            min-width: 0; line-height: 1.2;
+            background-image: none !important; /* DSFR ajoute parfois un underline via gradient */
+        }
+        .file-row-title:hover {
+            color: #1e40af; text-decoration: none !important;
+        }
+        .file-row-meta {
+            font-size: 0.75rem; color: #64748b; white-space: nowrap;
+            display: inline-flex; flex-direction: row; align-items: baseline;
+            justify-content: flex-end;
+            line-height: 1.15; gap: 0.5rem;
+        }
+        .file-row-meta .file-row-meta-date { font-weight: 500; color: #475569; }
+        .file-row-meta .file-row-meta-dur {
+            color: #94a3b8; font-variant-numeric: tabular-nums;
+            /* Largeur min pour aligner verticalement entre lignes (durées de
+               longueurs très variables : "5 s" vs "1 h 23 min"). */
+            min-width: 5em; text-align: right;
+        }
+        /* Hint file d'attente Kevent (liste compacte). Invisible quand vide
+           (CSS :empty), discret quand peuplé. */
+        .file-row-queue-hint {
+            font-size: 0.72rem; color: #2563eb; font-style: italic;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            min-width: 0;
+        }
+        .file-row-queue-hint:empty { display: none; }
+        .file-row-queue-hint.queue-hint-stale { color: #94a3b8; }
+        /* Bandeau d'alerte virus inline (B1) — affiché en tête de la file-row
+           ou de la vue détail quand f.status ∈ {scan_infected, quarantined}.
+           Couleur rouge appuyée, icône ⚠, message explicite. */
+        .file-row-virus-banner {
+            display: flex; align-items: center; gap: 0.55rem;
+            padding: 0.5rem 0.75rem; margin: 0.2rem 0.3rem 0.3rem 0.3rem;
+            background: #fee2e2; border: 1px solid #fca5a5;
+            border-left: 4px solid #b91c1c; border-radius: 6px;
+            color: #7f1d1d; font-size: 0.82rem; line-height: 1.35;
+        }
+        .file-row-virus-icon {
+            font-size: 1.1rem; color: #b91c1c; flex-shrink: 0;
+        }
+        .file-row-virus-msg strong { color: #b91c1c; }
+        /* Quand virus bloqué : la row entière prend un fond rose pâle pour
+           bien marquer la mise en quarantaine. */
+        .file-row-virus { background: #fef2f2; }
+        .file-row-virus .file-row-title {
+            color: #7f1d1d !important;
+            text-decoration: line-through !important;
+        }
+        .file-detail-virus { background: #fef2f2; padding: 0.4rem; border-radius: 8px; }
+        /* En vue détail (queue-hint au-dessus du rail), le widget partage
+           la classe queue-hint. On garde son style existant intact. */
+        .queue-hint:empty { display: none; }
+        /* Nom du fichier audio d'origine à droite de date+durée (vue détail),
+           légèrement bleuté. Aligné horizontalement avec date/durée. */
+        .file-detail-source-filename {
+            font-size: 0.74rem; color: #3b82f6; font-style: italic;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            flex: 1; min-width: 0; text-align: left;
+            margin-left: 0.4rem;
+        }
+        /* En vue détail (techline), la date+durée s'affiche EN LIGNE
+           (pas en colonne empilée comme dans la liste). On surcharge
+           .file-row-meta pour ce contexte uniquement. */
+        .file-detail-techline .file-row-meta {
+            flex-direction: row; align-items: baseline; gap: 0.4rem;
+        }
+        .file-detail-techline .file-row-meta-dur::before,
+        .file-detail-techline .file-detail-source-filename::before {
+            content: "•"; color: #cbd5e1; margin-right: 0.4rem;
+        }
+        /* Bouton icône (poubelle, camion poubelle) : remplace les boutons texte
+           Supprimer/Purger. Fond transparent, hover discret, tooltip natif. */
+        .icon-btn {
+            background: transparent; border: 1px solid transparent;
+            cursor: pointer; padding: 0.18rem 0.32rem; border-radius: 6px;
+            line-height: 1; color: #64748b;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .icon-btn svg { width: 1.05rem; height: 1.05rem; }
+        .icon-btn:hover { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+        .icon-btn:focus { outline: 2px solid #fca5a5; outline-offset: 1px; }
+        .icon-btn[disabled] { opacity: 0.35; cursor: not-allowed; }
+        .icon-btn[disabled]:hover { background: transparent; color: #64748b; border-color: transparent; }
+        /* Variante "purge" plus marquée — camion poubelle, action lourde */
+        .icon-btn-purge { color: #b91c1c; }
+        .icon-btn-purge svg { width: 1.7rem; height: 1.3rem; }
+        .icon-btn-purge:hover { background: #b91c1c; color: #fff; border-color: #991b1b; }
+        /* Mini-poubelle qui s'élève + bascule au hover du bouton purge —
+           petite touche humoristique d'éboueurs au travail. */
+        .icon-btn-purge .purge-bin {
+            transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-origin: 4px 17px;
+        }
+        .icon-btn-purge:hover .purge-bin {
+            transform: translate(8px, -4px) rotate(75deg);
+        }
+        .icon-btn-purge .purge-workers {
+            transition: opacity 0.3s ease;
+            opacity: 0.7;
+        }
+        .icon-btn-purge:hover .purge-workers { opacity: 1; }
+        /* Mode avancé : .advanced-only n'est visible que si body.adv-mode est posée. */
+        .advanced-only { display: none !important; }
+        body.adv-mode .advanced-only { display: inline-flex !important; }
+        .file-row-expand {
+            border: 1px solid transparent; background: transparent;
+            cursor: pointer; color: #475569; font-size: 0.78rem;
+            padding: 0.15rem 0.45rem; border-radius: 4px;
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            white-space: nowrap;
+        }
+        .file-row-expand:hover { background: #e2e8f0; color: #0f172a; border-color: #cbd5e1; }
+        .file-row-expand-icon { display: inline-block; transition: transform 0.15s ease; }
+        .file-row-expand.is-open .file-row-expand-icon { transform: rotate(90deg); }
+        .file-row-delete { white-space: nowrap; }
+        .file-row-expanded {
+            padding: 0.4rem 0.7rem 0.55rem 1.8rem;
+            background: #f8fafc; border-top: 1px dashed #e2e8f0;
+            font-size: 0.8rem;
+        }
+        .file-row-expanded-status {
+            font-weight: 500; color: #475569; margin-bottom: 0.3rem;
+        }
+        .file-row-expanded-empty { color: #94a3b8; font-style: italic; }
+        /* En mode compact (data-compact=1) on réduit le bandeau statut
+           à un simple point coloré avec tooltip (rollover), on cache le
+           résumé (visible seulement en vue détail), le dropdown, les
+           rails ET les détails per-step ("Voir le détail des étapes")
+           qui s'affichent mal sur une seule ligne. */
+        .transcript-section--inline .downloads-block,
+        .transcript-section--inline .pipeline-box,
+        .transcript-section--inline .transcript-meta-details,
+        .transcript-section--inline .transcript-meta-title,
+        .transcript-section--inline .transcript-status-icon,
+        .transcript-section--inline .transcript-status-label,
+        .transcript-section--inline .status-details { display: none !important; }
+        /* En vue détail persistante (data-persistent-summary=1) on
+           cache le bandeau statut redondant (la pastille à côté du nom
+           technique le porte déjà via tooltip) ET le `<details>` per-step
+           dupliqué. La pastille mini reste seul source de vérité visuelle. */
+        .transcript-section[data-persistent-summary="1"] .transcript-status-line,
+        .transcript-section[data-persistent-summary="1"] .status-details { display: none !important; }
+        .transcript-section--inline .transcript-status-line {
+            background: transparent !important; border: 0 !important;
+            padding: 0 !important; margin: 0 !important;
+        }
+        .transcript-section--inline .transcript-status-spinner {
+            width: 12px; height: 12px;
+        }
+        .transcript-section--inline .transcript-meta {
+            background: transparent; border: 0; padding: 0; margin: 0;
+        }
+        /* ── Vue DÉTAIL ───────────────────────────────────────────── */
+        .file-detail { padding: 0.6rem 0.2rem; }
+        .file-detail-header {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 0.5rem; margin-bottom: 0.6rem;
+        }
+        /* Bouton "← Liste" : discret, en lien-texte, pas un gros bouton.
+           Hover = soulignement subtil. */
+        .file-detail-back {
+            background: transparent; border: 0; cursor: pointer;
+            color: #64748b; font-size: 0.72rem; line-height: 1;
+            padding: 0.15rem 0.25rem; border-radius: 4px;
+        }
+        .file-detail-back:hover { color: #1d4ed8; text-decoration: underline; }
+        .file-detail-back:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
+        .file-detail-title-row {
+            display: flex; gap: 0.5rem; align-items: center;
+            margin: 0.3rem 0 0.15rem 0;
+        }
+        .file-detail-title-input {
+            flex: 1; min-width: 0; font-size: 1.05rem; font-weight: 600;
+            color: #0f172a; padding: 0.35rem 0.55rem;
+            border: 1px solid transparent; border-radius: 6px;
+            background: transparent; line-height: 1.25;
+        }
+        .file-detail-title-input:hover,
+        .file-detail-title-input:focus {
+            border-color: #cbd5e1; background: #fff; outline: none;
+        }
+        /* Boutons d'action ronds (✓ valider / ↺ annuler) communs aux 2
+           lignes éditables (titre + date). Cohérent visuellement entre
+           les 2 lignes. */
+        .file-detail-action-btn {
+            width: 1.7rem; height: 1.7rem; padding: 0;
+            border: 1px solid #cbd5e1; border-radius: 50%;
+            background: #fff; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .file-detail-action-btn svg {
+            width: 0.95rem; height: 0.95rem; display: block;
+        }
+        .file-detail-action-btn--validate { color: #15803d; }
+        .file-detail-action-btn--validate:hover:not(:disabled) {
+            background: #dcfce7; border-color: #86efac;
+        }
+        .file-detail-action-btn--revert { color: #64748b; }
+        .file-detail-action-btn--revert:hover:not(:disabled) {
+            background: #f1f5f9; border-color: #94a3b8;
+        }
+        .file-detail-action-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+        /* Info "Uploadé le ..." dans la techline — collée à l'extrême droite
+           (séparation visuelle de date+durée à gauche et nom fichier au
+           milieu). */
+        .file-detail-upload-info {
+            font-size: 0.74rem; color: #64748b;
+            white-space: nowrap;
+            flex-shrink: 0;
+            margin-left: auto;
+        }
+        /* Variante inline du bouton (i) info pipeline quand il est dans
+           la title row : margin-left:auto pour caler à l'extrême droite,
+           taille cohérente avec les autres boutons d'action. */
+        .file-detail-info-btn--inline {
+            margin-left: auto;
+        }
+        /* Bloc d'édition "Date de la réunion" + bouton reset.
+           datetime-local input compact pour rester homogène avec le DSFR. */
+        .file-detail-meeting-row {
+            display: flex; align-items: center; flex-wrap: wrap;
+            gap: 0.5rem; margin: 0.15rem 0 0.35rem 0.6rem;
+            font-size: 0.82rem; color: #475569;
+        }
+        .file-detail-meeting-label {
+            font-weight: 600; color: #1e293b;
+        }
+        .file-detail-meeting-input {
+            font-size: 0.84rem; padding: 0.2rem 0.4rem;
+            border: 1px solid #cbd5e1; border-radius: 6px;
+            background: #fff; color: #0f172a;
+        }
+        .file-detail-meeting-input:focus { outline: none; border-color: #94a3b8; }
+        /* Le .file-detail-meeting-reset historique est désormais rendu via
+           .file-detail-action-btn.file-detail-action-btn--revert (cf. ci-dessus). */
+        .file-detail-meeting-status {
+            font-size: 0.74rem; color: #64748b;
+        }
+        .file-detail-meeting-status.saved { color: #166534; }
+        .file-detail-meeting-status.error { color: #b91c1c; }
+        .file-detail-techline {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 0.45rem; margin: 0 0 0.15rem 0.6rem;
+            font-size: 0.78rem; color: #64748b;
+        }
+        .file-detail-fullinfo { margin-top: 0.2rem; }
+        /* Mode "page détail" : on cache le titre de l'onglet + le bouton
+           purger + la liste des autres sessions. Seul le détail demandé
+           est visible, pour vraiment ressembler à une page dédiée. */
+        .tab-pane[data-tab="transfers"].detail-active .dsfr-inline-actions,
+        .tab-pane[data-tab="transfers"].detail-active #transfer-live { display: none !important; }
+        /* En vue détail : on n'affiche pas le bandeau session
+           (code + état "Enrôlé") — l'utilisateur a cliqué un fichier
+           précis, le contexte session n'apporte rien ici. */
+        .session-device-name {
+            font-weight: 600; color: #0f172a; font-size: 0.92rem;
+            margin-right: 0.35rem;
+        }
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .session-device-name,
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .code,
+        .tab-pane[data-tab="transfers"].detail-active .session-item > .status-badge { display: none !important; }
+        .tab-pane[data-tab="transfers"].detail-active .session-item {
+            border: 0 !important; padding: 0 !important; background: transparent !important;
+        }
+        /* Résumé persistant en vue détail (non collapsible) */
+        .transcript-meta-persistent-title {
+            font-weight: 600; color: #0f172a; font-size: 0.78rem;
+            margin-bottom: 0.2rem;
+        }
+        /* ── Responsive mobile ─────────────────────────────────────── */
+        @media (max-width: 700px) {
+            .file-row-compact {
+                grid-template-columns: auto minmax(0,1fr) auto auto;
+                grid-template-rows: auto auto;
+                gap: 0.25rem 0.5rem;
+            }
+            .file-row-status-mini { grid-column: 1; grid-row: 1; }
+            .file-row-title       { grid-column: 2; grid-row: 1; }
+            .file-row-expand      { grid-column: 3; grid-row: 1; }
+            .file-row-delete      { grid-column: 4; grid-row: 1; }
+            .file-row-meta        { grid-column: 1 / 5; grid-row: 2; }
+            .file-row-expanded    { padding-left: 0.7rem; }
+            .tabs-nav { font-size: 0.85rem; }
+            .tab-btn { padding: 0.45rem 0.55rem; }
+            .downloads-block { flex-direction: column; align-items: stretch; }
+            .downloads-select { width: 100%; }
+        }
+        @keyframes transcriptSpin { to { transform: rotate(360deg); } }
+        .transcript-status-label { font-weight: 500; }
+        .transcript-meta {
+            background: #f8fafc; border-left: 3px solid #3b7dd8;
+            padding: 0.35rem 0.55rem;
+            margin-bottom: 0.3rem;
+            border-radius: 4px;
+            border-bottom: 1px dashed #cbd5e1;
+            padding-bottom: 0.5rem;
+        }
+        .transcript-meta-title { font-weight: 600; color: #0f172a; font-size: 0.84rem; }
+        .transcript-meta-details { margin-top: 0.2rem; font-size: 0.76rem; }
+        .transcript-meta-details summary { cursor: pointer; color: #475569; user-select: none; }
+        .transcript-meta-details summary:hover { color: #0f172a; }
+        .transcript-meta-keypoints { margin: 0.3rem 0 0 0; font-family: inherit; white-space: pre-wrap; font-size: 0.76rem; color: #475569; }
+        .transcript-download-block { font-size: 0.76rem; }
+        .transcript-download-title { font-size: 0.74rem; color: #64748b; margin-bottom: 0.2rem; }
+        .transcript-download-row { display: flex; justify-content: space-between; align-items: center; padding: 0.15rem 0; gap: 0.5rem; flex-wrap: wrap; }
+        .transcript-download-label { color: #334155; font-size: 0.78rem; min-width: 0; flex: 1; }
+        .transcript-download-buttons { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+        .transcript-fmt-btn { display: inline-block; padding: 0.08rem 0.4rem; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 0.7rem; color: #1e293b; background: #fff; text-decoration: none; }
+        .transcript-fmt-btn:hover { background: #e0e7ff; border-color: #6366f1; }
+        .file-links-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+        }
+        .file-links-actions { flex: 1; min-width: 0; }
+        .file-links-block { margin-top: 0.35rem; }
+        .file-links-title { font-size: 0.74rem; color: #64748b; margin-right: 0.4rem; }
+        .impact-icon-btn {
+            width: 20px; height: 20px; border-radius: 999px; border: 1px solid #cbd5e1;
+            background: #fff; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 700;
+            line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+            flex: 0 0 auto;
+        }
+        .impact-icon-btn.loading {
+            color: #1d4ed8; border-color: #93c5fd; background: #dbeafe;
+        }
+        .impact-icon-btn.computed {
+            color: #065f46; border-color: #6ee7b7; background: #d1fae5;
+        }
+        .pipeline-box { margin-top: 0.45rem; }
+        .railroad {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.25rem;
+        }
+        .rail-segment {
+            flex: 1 1 0;
+            display: flex;
+            align-items: center;
+            min-width: 0;
+        }
+        .rail-node {
+            width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            border: 2px solid #cbd5e1;
+            background: #fff;
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+        }
+        .rail-line {
+            height: 3px;
+            flex: 1 1 auto;
+            margin: 0 4px;
+            border-radius: 999px;
+            background: #e2e8f0;
+        }
+        .rail-line-tail {
+            flex: 1 1 auto;
+            margin-left: 4px;
+            margin-right: 0;
+        }
+        .rail-segment.done .rail-node {
+            border-color: #22c55e;
+            background: #dcfce7;
+            color: #166534;
+        }
+        .rail-segment.done .rail-line { background: #86efac; }
+        .rail-segment.active .rail-node {
+            border-color: #3b82f6;
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+        .rail-segment.blocked .rail-node {
+            border-color: #ef4444;
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .rail-labels {
+            margin-top: 0.25rem;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.3rem;
+            font-size: 0.68rem;
+            color: #64748b;
+        }
+        .rail-labels span { text-align: center; }
+        .quality-help {
+            cursor: help; color: #64748b; font-size: 0.78rem; margin-left: 0.25rem;
+            border: 1px solid #cbd5e1; border-radius: 999px; padding: 0 0.35rem;
+            background: #fff;
+        }
+        /* Tabs navigation — onglets DSFR (`fr-tabs`).
+           Les overrides legacy `.tab-btn { color: #475569; ... }` ont été
+           retirés : ils forçaient un texte gris foncé sur le fond bleu
+           que le DSFR pose en arrière-plan des tabs NON-sélectionnés
+           (var(--background-action-low-blue-france)), ce qui produisait
+           un contraste illisible (signalé en prod). Sans override, le
+           DSFR gère lui-même la cohérence couleur fond/texte :
+            - tab inactif : fond bleu DSFR + texte gris foncé DSFR ;
+            - tab actif   : fond blanc + texte bleu France + soulignement.
+           La classe `.tab-btn` reste posée sur les boutons pour la compat
+           des sélecteurs JS (data-tab + activateTab), mais elle ne porte
+           plus aucune règle visuelle. */
+        /* Par défaut on cache tous les panneaux ; activation soit par la
+           classe legacy `.is-active` (gérée par activateTab dans legacy.js),
+           soit par la classe DSFR `.fr-tabs__panel--selected` (gérée par
+           le JS DSFR sur les boutons fr-tabs). Les deux mécanismes
+           cohabitent — voir frontend/lib/tab-manager.js pour la synchro. */
+        .tab-pane { display: none; }
+        .tab-pane.is-active,
+        .tab-pane.fr-tabs__panel--selected { display: block; }
+        /* Toasts feedback (bas-droite, disparaît après 4s) */
+        .toast {
+            position: fixed; right: 1rem; bottom: 1rem; z-index: 9999;
+            max-width: 360px; padding: 0.6rem 0.8rem; border-radius: 8px;
+            font-size: 0.85rem; line-height: 1.3; color: #fff;
+            background: #1e293b; box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+            opacity: 0; transform: translateY(8px); transition: opacity .25s, transform .25s;
+        }
+        .toast.toast-show { opacity: 1; transform: translateY(0); }
+        .toast-error { background: #b91c1c; }
+        .toast-success { background: #047857; }
+        .security-notice {
+            margin: 0.75rem 0 1rem;
+            padding: 0.7rem 0.8rem;
+            border: 1px solid #fcd34d;
+            background: #fffbeb;
+            color: #92400e;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            line-height: 1.35;
+        }
+        .transfer-live {
+            margin: 0.25rem 0 0.8rem;
+            padding: 0.6rem 0.7rem;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background: #f8fafc;
+            font-size: 0.84rem;
+        }
+        .transfer-live-title {
+            font-weight: 700;
+            color: #0f172a;
+            margin-bottom: 0.35rem;
+        }
+        .transfer-live-list {
+            max-height: 160px;
+            overflow-y: auto;
+            display: grid;
+            gap: 0.3rem;
+        }
+        .transfer-live-row {
+            display: flex; flex-direction: column; gap: 0.2rem;
+            padding: 0.4rem 0.55rem; border: 1px solid #e2e8f0;
+            border-radius: 6px; background: #ffffff; color: #334155;
+        }
+        .transfer-live-line1 {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+            font-size: 0.82rem;
+        }
+        .transfer-live-msg { color: #64748b; font-size: 0.78rem; }
+        .railroad-mini .rail-node { width: 14px; height: 14px; font-size: 8px; }
+        .railroad-mini .rail-line { height: 2px; }
+        .transfer-live-code {
+            color: #64748b;
+            font-family: monospace;
+            font-size: 0.8rem;
+        }
+        .transfer-live-name {
+            max-width: 210px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .transfer-live-empty {
+            color: #64748b;
+        }
+        .activity-inline {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            margin-bottom: 0.5rem;
+        }
+        .activity-description {
+            margin: 0;
+            font-size: 0.8rem;
+            color: #64748b;
+            line-height: 1.35;
+        }
+        .activity-main {
+            min-width: 0;
+        }
+        .activity-spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #cbd5e1;
+            border-top-color: #cbd5e1;
+            border-radius: 999px;
+            flex: 0 0 auto;
+            opacity: 0.35;
+        }
+        .activity-spinner.active {
+            opacity: 1;
+            border-top-color: #2563eb;
+            animation: activity-spin 0.9s linear infinite;
+        }
+        @keyframes activity-spin {
+            to { transform: rotate(360deg); }
+        }
+        .activity-mini {
+            min-width: 0;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .activity-mini-text {
+            font-size: 0.8rem;
+            color: #475569;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .activity-rail {
+            display: flex;
+            align-items: center;
+            gap: 0.18rem;
+            width: 100%;
+        }
+        .activity-meta-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.6rem;
+            margin-top: 0.15rem;
+        }
+        .activity-status-inline {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-width: 0;
+            flex: 1;
+        }
+        .activity-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 999px;
+            background: #e5e7eb;
+            color: #475569;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.62rem;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+        .activity-dot.active {
+            background: #2563eb;
+            color: #fff;
+        }
+        .activity-link {
+            width: 100%;
+            height: 2px;
+            border-radius: 999px;
+            background: #e5e7eb;
+        }
+        .activity-link.active {
+            background: #93c5fd;
+        }
+        .activity-toggle-link {
+            font-size: 0.78rem;
+            color: #64748b;
+            text-decoration: none;
+            border-bottom: 1px dotted #cbd5e1;
+            width: fit-content;
+            flex: 0 0 auto;
+        }
+        .activity-toggle-link:hover {
+            color: #334155;
+            border-bottom-color: #94a3b8;
+        }
+        .recent-activities-panel { display: block; }
+        .dsfr-inline-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .dsfr-inline-actions .fr-btn { width: auto; }
+        .fr-header__service-tagline {
+            max-width: 48rem;
+        }
+        .beta-badge {
+            display: inline-block;
+            margin-left: 0.45rem;
+            padding: 0.08rem 0.35rem;
+            border-radius: 0.35rem;
+            background: #e1000f;
+            color: #fff;
+            font-size: 0.66rem;
+            font-weight: 700;
+            line-height: 1.1;
+            transform: rotate(-12deg);
+            transform-origin: center;
+            vertical-align: top;
+        }
+        .fr-header__body-row {
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
+        /* Lot 7 — Timeline horizontale série (Time machine) */
+        .mp-series-timeline {
+            margin: 0.8rem 0;
+            padding: 0.7rem 0.8rem;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.5rem;
+            background: #f8fafc;
+        }
+        .mp-series-timeline-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #1a1a2e;
+            margin: 0 0 0.6rem 0;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .mp-tl-list {
+            list-style: none;
+            margin: 0; padding: 0;
+            display: flex;
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            gap: 0;
+            align-items: stretch;
+        }
+        .mp-tl-item {
+            display: flex;
+            align-items: center;
+            flex: 0 0 auto;
+        }
+        .mp-tl-item:not(:last-child)::after {
+            content: '';
+            display: inline-block;
+            width: 1.2rem; height: 2px;
+            background: #cbd5e1;
+            margin: 0 0.2rem;
+        }
+        .mp-tl-node {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 999px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #475569;
+            font-size: 0.82rem;
+            text-decoration: none;
+            white-space: nowrap;
+            transition: background 0.12s, border-color 0.12s, color 0.12s;
+        }
+        a.mp-tl-node:hover { background: #e0f2fe; border-color: #0ea5e9; color: #0c4a6e; }
+        .mp-tl-node--done { color: #166534; border-color: #86efac; background: #f0fdf4; }
+        .mp-tl-node--current {
+            color: #fff; background: #000091; border-color: #000091;
+            font-weight: 600;
+        }
+        .mp-tl-node--pending { color: #475569; background: #fff; }
+        .mp-tl-node--add {
+            color: #000091; border-style: dashed; border-color: #6b7ed4;
+        }
+        a.mp-tl-node--add:hover { background: #eef0fb; }
+        .mp-tl-icon { font-size: 0.95rem; line-height: 1; }
+        .mp-readonly-banner { margin-bottom: 0.6rem; }
+        .mp-readonly-disabled { cursor: not-allowed !important; }
+    </style>
+</head>
+<body>
+<header role="banner" class="fr-header">
+  <div class="fr-header__body">
+    <div class="fr-container">
+      <div class="fr-header__body-row">
+        <div class="fr-header__brand fr-enlarge-link">
+          <div class="fr-header__brand-top">
+            <div class="fr-header__logo">
+              <p class="fr-logo">
+                République
+                <br>Française
+              </p>
+            </div>
+          </div>
+          <div class="fr-header__service">
+            <a href="#" title="Accueil MIrAI">
+              <p class="fr-header__service-title">MIrAI <span id="header-tab-label" class="header-tab-label"></span><span class="beta-badge">Bêta</span></p>
+            </a>
+            <p class="fr-header__service-tagline">Concentrez-vous sur la réunion.</p>
+          </div>
+        </div>
+        <div class="header-user">
+          <span class="header-user-name">{{ user.name or user.email }}</span>
+          <div style="display:flex;gap:0.6rem;justify-content:flex-end;align-items:center;">
+            <a class="fr-link" href="/logout">Déconnexion</a>
+            <button type="button" id="advanced-toggle" class="advanced-toggle"
+                    onclick="toggleAdvancedDl(this)"
+                    title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
+                    aria-pressed="false">Mode avancé</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="fr-container page-shell">
+<div class="container">
+
+    <!-- Navigation onglets — ordre : (1) Mes transferts (vue principale,
+         là où l'utilisateur passe le plus de temps), (2) Mes appareils,
+         (3) Enrôler un nouvel appareil. L'onglet par défaut est choisi
+         par loadDevices : si aucun device enrôlé → "Enrôler", sinon
+         "Mes transferts et analyses". -->
+    {# Navigation onglets : DSFR `fr-tabs` natif. Les boutons gardent l'attribut
+       `data-tab` pour compat avec le code legacy.js (activateTab + sélecteurs
+       CSS `.tab-pane[data-tab="..."]`). Les panneaux (plus bas) portent à la fois
+       `fr-tabs__panel` (DSFR) et `card tab-pane` (legacy/CSS hérité), et un id
+       `panel-<tab>` référencé par `aria-controls`. L'orchestrateur
+       frontend/lib/tab-manager.js écoute les changements DSFR pour appeler les
+       hooks legacy (loadBriefs/loadTrash/showFilesList/mount-tab admin/useful-data). #}
+    <div class="fr-tabs">
+        <ul class="fr-tabs__list" role="tablist" aria-label="Sections principales">
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="transfers" id="tab-btn-transfers"
+                        aria-selected="true" tabindex="0"
+                        aria-controls="panel-transfers">Mes réunions (IA)</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="brief" id="tab-btn-brief"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-brief">Préparation de réunion</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="devices" id="tab-btn-devices"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-devices">Mes appareils</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="useful-data" id="tab-btn-useful-data"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-useful-data">Mes données utiles</button>
+            </li>
+            <li role="presentation">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="trash" id="tab-btn-trash"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-trash">Corbeille</button>
+            </li>
+            <li role="presentation" id="tab-btn-admin-li" style="display:none;">
+                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                        data-tab="admin" id="tab-btn-admin"
+                        aria-selected="false" tabindex="-1"
+                        aria-controls="panel-admin">Admin</button>
+            </li>
+        </ul>
+
+    <div id="panel-brief" class="fr-tabs__panel card tab-pane" data-tab="brief" role="tabpanel" aria-labelledby="tab-btn-brief" tabindex="0">
+        <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
+        <div id="brief-list-view">
+            <div class="dsfr-inline-actions">
+                <h1 style="font-size:1.1rem;">Préparation de réunion</h1>
+                <button type="button"
+                        class="fr-btn fr-btn--sm fr-icon-add-line fr-btn--icon-left"
+                        data-action="open-wizard"
+                        onclick="window.openWizard && window.openWizard()">
+                    Nouvelle préparation
+                </button>
+            </div>
+            <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
+                Préparez un brief avant chaque réunion : il sera automatiquement
+                rattaché à l'enregistrement audio correspondant pour enrichir la
+                transcription et le compte-rendu. Les briefs sont conservés et
+                restent éditables. La corbeille les retient 30 jours avant suppression définitive.
+            </p>
+            <!-- Meeting-prep v2 §7 : banner purge invitée pour briefs > 90j
+                 sans audio lié. Rendu conditionnel par loadBriefs() via la
+                 réponse de /api/preparations?with_counts=true (older_than_90d_unlinked_count). -->
+            <div id="older-than-90d-banner"
+                 data-banner="older-than-90d-banner"
+                 class="fr-alert fr-alert--warning fr-alert--sm"
+                 style="display:none;margin-bottom:0.8rem;">
+                <p id="older-than-90d-msg" style="margin:0;">Vous avez des briefs anciens (> 90 jours) sans audio lié.</p>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;">
+                    <button type="button" class="fr-btn fr-btn--sm"
+                            data-action="trash-older-90d">Tout déplacer en corbeille</button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                            data-action="dismiss-older-90d">Plus tard</button>
+                </div>
+            </div>
+            <div id="brief-list" style="font-size:0.86rem;color:#64748b;">
+                Chargement des briefs...
+            </div>
+        </div>
+        <!-- Sous-vue détail : brief courant + Renommer + Amender (page-mode in-panel) -->
+        <div id="brief-detail-view" style="display:none;">
+            <div style="margin-bottom:0.6rem;">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-arrow-left-line fr-btn--icon-left"
+                        data-action="show-list">Retour à la liste</button>
+            </div>
+            <!-- Lot 3a — Titre éditable inline. Click sur le titre → bascule en input + validation. -->
+            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
+                <h1 id="brief-detail-title" style="font-size:1.1rem;cursor:text;"
+                    data-action="start-rename-inline" title="Cliquer pour renommer">Brief</h1>
+                <!-- Lot 6 — badge affiché par _renderRecurrenceBlock() si récurrente -->
+                <span id="brief-detail-recurrence-badge"
+                      class="fr-badge fr-badge--info fr-badge--sm"
+                      style="display:none;">🔁 Récurrente</span>
+                <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;">
+                    <input type="text" id="brief-detail-title-input" maxlength="120"
+                           style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;min-width:260px;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line fr-btn--icon-left"
+                            data-action="commit-rename-inline">Valider</button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                            data-action="cancel-rename-inline">Annuler</button>
+                </span>
+            </div>
+            <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
+            <!-- Lot 3 — 4 actions refondues : glossaire(N), lier audio, suivante, menu "Plus d'actions" -->
+            <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
+                 style="margin:0.6rem 0;">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line fr-btn--icon-left"
+                        id="brief-detail-glossary-btn"
+                        data-action="open-glossary-modal">
+                    Glossaire (<span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span>)
+                </button>
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-link"
+                        data-link-brief-btn id="brief-detail-link-audio-btn"
+                        data-action="open-link-audio-modal" style="display:none;">
+                    Lier un fichier audio
+                </button>
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line fr-btn--icon-left"
+                        data-prepare-next-series-btn id="brief-detail-prepare-next"
+                        data-action="open-prepare-next-modal" style="display:none;">
+                    Préparer la prochaine réunion de cette série
+                </button>
+                <!-- Lot 4 — Menu "Télécharger" → TXT / MD / DOCX / ODT.
+                     TXT et MD générés côté front via lib/export-formatter.js,
+                     DOCX et ODT via GET /api/preparations/{id}/export?format=. -->
+                <div style="position:relative;display:inline-block;" data-export-wrap>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-download-line fr-btn--icon-left"
+                            data-action="toggle-export-menu"
+                            aria-haspopup="true" aria-expanded="false"
+                            id="brief-detail-export-btn">Télécharger</button>
+                    <ul id="brief-detail-export-menu"
+                        style="display:none;position:absolute;right:0;top:100%;z-index:10;
+                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
+                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:200px;
+                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="txt"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Texte brut (.txt)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="md"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Markdown (.md)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="docx"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">Word (.docx)</button></li>
+                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="export-brief" data-export-format="odt"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">LibreOffice (.odt)</button></li>
+                    </ul>
+                </div>
+                <!-- Menu "Plus d'actions" → conserve l'accès à l'édition avancée (amend). -->
+                <div style="position:relative;display:inline-block;" data-more-actions-wrap>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line fr-btn--icon-left"
+                            data-action="toggle-more-actions"
+                            aria-haspopup="true" aria-expanded="false"
+                            id="brief-detail-more-btn">Plus d'actions</button>
+                    <ul id="brief-detail-more-menu"
+                        style="display:none;position:absolute;right:0;top:100%;z-index:10;
+                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
+                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:240px;
+                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
+                        <li>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="toggle-amend"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">
+                                Édition avancée (amend)
+                            </button>
+                        </li>
+                        <li>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                                    data-action="rename-brief"
+                                    style="display:block;width:100%;text-align:left;border-radius:0;">
+                                Renommer (boîte de dialogue)
+                            </button>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <!-- Lot 5 — Participants éditables inline depuis la fiche brief. -->
+            <section id="brief-detail-participants" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <strong style="font-size:0.92rem;">
+                        Participants (<span id="brief-detail-participants-count">0</span>)
+                    </strong>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
+                            data-action="add-detail-participant">+ Ajouter</button>
+                </div>
+                <div id="brief-detail-participants-list" style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.4rem;"></div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-participants-save-btn"
+                            data-action="save-detail-participants" style="display:none;">
+                        Enregistrer participants
+                    </button>
+                    <span id="brief-detail-participants-status"
+                          style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+            </section>
+            <!-- Lot 6 — Section "Récurrence" éditable inline -->
+            <section id="brief-detail-recurrence" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <strong style="font-size:0.92rem;">🔁 Récurrence</strong>
+                    <span id="brief-detail-recurrence-summary" style="font-size:0.85rem;color:#475569;flex:1;"></span>
+                    <span id="brief-detail-next-occurrence" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <label style="display:flex;align-items:center;gap:0.4rem;margin-top:0.4rem;cursor:pointer;">
+                    <input type="checkbox" id="brief-detail-recurring-toggle">
+                    <span>Cette réunion est récurrente</span>
+                </label>
+                <div id="brief-detail-recurrence-form"
+                     style="display:none;margin-top:0.4rem;">
+                    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:flex-end;">
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Fréquence</label>
+                            <select data-rrule-freq class="fr-select" style="min-width:160px;">
+                                <option value="WEEKLY" selected>Hebdomadaire</option>
+                                <option value="DAILY">Quotidienne</option>
+                                <option value="MONTHLY">Mensuelle</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Toutes les …</label>
+                            <input type="number" data-rrule-interval min="1" max="365" value="1"
+                                   style="width:80px;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Heure</label>
+                            <input type="time" data-rrule-time value="14:00"
+                                   style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                        <div>
+                            <label style="display:block;font-size:0.85rem;">Fin (optionnel)</label>
+                            <input type="date" data-rrule-until
+                                   style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                        </div>
+                    </div>
+                    <div data-rrule-weekly-only style="margin-top:0.4rem;">
+                        <div style="font-size:0.85rem;margin-bottom:0.2rem;">Jours</div>
+                        <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+                            <label><input type="checkbox" data-rrule-weekday value="MO"> Lundi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="TU"> Mardi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="WE"> Mercredi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="TH"> Jeudi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="FR"> Vendredi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="SA"> Samedi</label>
+                            <label><input type="checkbox" data-rrule-weekday value="SU"> Dimanche</label>
+                        </div>
+                    </div>
+                </div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-recurrence-save-btn"
+                            data-action="save-detail-recurrence">Enregistrer</button>
+                    <span id="brief-detail-recurrence-status"
+                          style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+            </section>
+            <!-- Lot 9 — Section "Thématiques" éditable inline (chips) -->
+            <section id="brief-detail-themes" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;">
+                    <strong style="font-size:0.92rem;">🏷 Thématiques</strong>
+                    <span id="brief-detail-themes-status" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <div id="brief-detail-themes-container" style="margin-top:0.4rem;"></div>
+                <div style="margin-top:0.4rem;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
+                            id="brief-detail-themes-save-btn"
+                            data-action="save-detail-themes">Enregistrer thématiques</button>
+                </div>
+            </section>
+            <!-- Lot 8 — Section "Emails" : invitation mailto + toggle CR auto -->
+            <section id="brief-detail-emails" style="margin:0.6rem 0;
+                     border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                    <strong style="font-size:0.92rem;">📧 Emails</strong>
+                    <span id="brief-detail-emails-status" style="font-size:0.78rem;color:#64748b;"></span>
+                </div>
+                <div style="margin-top:0.4rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
+                    <a id="brief-detail-mailto-link" class="fr-btn fr-btn--sm fr-icon-mail-line fr-btn--icon-left"
+                       href="mailto:" target="_blank" rel="noopener">
+                        Inviter par mail
+                    </a>
+                    <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;">
+                        <input type="checkbox" id="brief-detail-send-cr-toggle"
+                               data-action="toggle-send-cr">
+                        <span style="font-size:0.9rem;">Envoyer le CR aux participants à la fin</span>
+                    </label>
+                </div>
+                <div style="margin-top:0.3rem;font-size:0.78rem;color:#64748b;">
+                    Le bouton "Inviter par mail" ouvre votre client mail avec un brouillon pré-rempli
+                    (sujet, agenda, dossier Drive). Le toggle CR auto requiert qu'au moins un participant
+                    ait une adresse email valide et que le serveur SMTP soit configuré.
+                </div>
+            </section>
+            <!-- Section "Sources Drive" : rendue par _applyBriefPayload si drive_folder_id présent -->
+            <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
+            <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
+                 référence pour le test test_mesreunions_web_template (landmark
+                 « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
+            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;display:none;"></div>
+            <!-- Lot 7 — Timeline horizontale de la série (Time machine).
+                 Remplace progressivement #brief-detail-series-chain ; rempli
+                 par loadBriefSeries() depuis preparations.js + lib/series-timeline.js. -->
+            <div id="brief-detail-series-timeline" style="margin:0.6rem 0;"></div>
+            <div id="brief-detail-body" class="brief-rendered"></div>
+            <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
+                <p style="font-size:0.8rem;color:#64748b;">
+                    Édition manuelle. Pas de ré-appel LLM.
+                </p>
+                <form id="brief-amend-form" data-amend-form>
+                    <!-- Section 1 : Vue d'ensemble -->
+                    <fieldset class="brief-amend-section" data-section="overview"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="0"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Vue d'ensemble
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <label class="fr-label" for="amend-objective" style="font-size:0.8rem;">
+                                Objectif reformulé
+                                <span style="color:#94a3b8;font-weight:normal;">(80–200 caractères suggérés)</span>
+                            </label>
+                            <textarea id="amend-objective" rows="3" required
+                                      style="width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.4rem;font-size:0.85rem;"
+                                      aria-describedby="amend-objective-count"></textarea>
+                            <div id="amend-objective-count" style="font-size:0.72rem;color:#94a3b8;text-align:right;">0 caractères</div>
+                            <div style="margin-top:0.4rem;">
+                                <label style="font-size:0.8rem;">
+                                    <input type="checkbox" id="amend-context-null"> Pas de contexte
+                                </label>
+                                <label class="fr-label" for="amend-context" style="font-size:0.8rem;">
+                                    Rappel du contexte
+                                </label>
+                                <textarea id="amend-context" rows="4"
+                                          style="width:100%;border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.4rem;font-size:0.85rem;"></textarea>
+                            </div>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 2 : Agenda -->
+                    <fieldset class="brief-amend-section" data-section="agenda"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="1"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Agenda
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-agenda-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-agenda-item
+                                    data-action="add-agenda-item"
+                                    style="margin-top:0.4rem;">Ajouter un point</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 3 : Notes participants -->
+                    <fieldset class="brief-amend-section" data-section="participants"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="2"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Notes participants
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-participants-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-participant
+                                    data-action="add-participant"
+                                    style="margin-top:0.4rem;">Ajouter un participant</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 4 : Points en suspens -->
+                    <fieldset class="brief-amend-section" data-section="threads"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="3"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Points en suspens
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-threads-list" style="display:flex;flex-direction:column;gap:0.5rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-thread
+                                    data-action="add-thread"
+                                    style="margin-top:0.4rem;">Ajouter un point en suspens</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 5 : Questions d'ouverture -->
+                    <fieldset class="brief-amend-section" data-section="opening"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="4"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Questions d'ouverture
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-opening-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-opening-question
+                                    data-action="add-opening-question"
+                                    style="margin-top:0.4rem;">Ajouter une question</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 6 : Risques -->
+                    <fieldset class="brief-amend-section" data-section="risks"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="5"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Risques
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-risks-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-risk
+                                    data-action="add-risk"
+                                    style="margin-top:0.4rem;">Ajouter un risque</button>
+                        </div>
+                    </fieldset>
+
+                    <!-- Section 7 : Checklist préparation -->
+                    <fieldset class="brief-amend-section" data-section="checklist"
+                              style="border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.6rem 0.8rem;margin-bottom:0.6rem;">
+                        <legend class="brief-amend-section-header"
+                                data-section-toggle="6"
+                                style="cursor:pointer;font-weight:600;font-size:0.9rem;padding:0 0.4rem;">
+                            <span class="brief-amend-chevron" aria-hidden="true">▾</span>
+                            Checklist préparation
+                        </legend>
+                        <div class="brief-amend-section-body">
+                            <div id="amend-checklist-list" style="display:flex;flex-direction:column;gap:0.3rem;"></div>
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                                    data-add-checklist-item
+                                    data-action="add-checklist-item"
+                                    style="margin-top:0.4rem;">Ajouter un point</button>
+                        </div>
+                    </fieldset>
+
+                    <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
+                         style="margin-top:0.6rem;align-items:center;">
+                        <button type="submit" id="amend-save-btn"
+                                class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left">Enregistrer</button>
+                        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                                data-action="toggle-amend">Annuler</button>
+                        <span id="amend-save-spinner" style="display:none;font-size:0.8rem;color:#64748b;">
+                            Enregistrement…
+                        </span>
+                    </div>
+                </form>
+            </div>
+
+            <!-- ─── Lot 3 — Modales (link-audio, glossaire, prepare-next) ─── -->
+            <div id="prep-modal-backdrop" data-prep-modal-backdrop
+                 style="display:none;position:fixed;inset:0;z-index:1000;
+                        background:rgba(15,23,42,0.45);align-items:flex-start;
+                        justify-content:center;padding:3rem 1rem;">
+                <div id="prep-modal-card" role="dialog" aria-modal="true"
+                     style="background:#fff;border-radius:0.6rem;max-width:780px;width:100%;
+                            max-height:85vh;display:flex;flex-direction:column;
+                            box-shadow:0 12px 32px rgba(0,0,0,0.18);overflow:hidden;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;
+                                padding:0.8rem 1rem;border-bottom:1px solid #e2e8f0;">
+                        <h2 id="prep-modal-title" style="margin:0;font-size:1rem;">Action</h2>
+                        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-close-line"
+                                aria-label="Fermer"
+                                data-action="close-prep-modal">Fermer</button>
+                    </div>
+                    <div id="prep-modal-body" style="padding:1rem;overflow-y:auto;flex:1;"></div>
+                    <div id="prep-modal-footer"
+                         style="padding:0.7rem 1rem;border-top:1px solid #e2e8f0;
+                                display:flex;justify-content:flex-end;gap:0.4rem;background:#f8fafc;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="panel-trash" class="fr-tabs__panel card tab-pane" data-tab="trash" role="tabpanel" aria-labelledby="tab-btn-trash" tabindex="0">
+        <div class="dsfr-inline-actions">
+            <h1 style="font-size:1.1rem;">Corbeille</h1>
+            <span style="color:#64748b;font-size:0.78rem;">
+                Les éléments sont automatiquement supprimés après <strong>30 jours</strong>.
+            </span>
+        </div>
+        <div id="trash-list" style="margin-top:0.6rem;">
+            <p style="color:#999;font-size:0.85rem;">Chargement de la corbeille...</p>
+        </div>
+    </div>
+
+    <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="tab-btn-generate" tabindex="0">
+        <p style="margin:0 0 0.6rem;">
+            <button type="button"
+                    class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                    data-action="back-to-devices"
+                    onclick="window.activateTab && window.activateTab('devices')">Retour à mes appareils</button>
+        </p>
+        <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
+        <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
+
+        <!-- Bloc replié si un device est déjà enrôlé. Conservé pour compat
+             mais non révélé actuellement (cf. tabs/devices.js
+             applyEnrollmentFormVisibility). -->
+        <div id="enrollment-collapsed" style="display:none;padding:0.45rem 0;">
+            <div class="fr-callout fr-callout--blue-ecume">
+                <p class="fr-callout__text">
+                    Vous avez déjà au moins un appareil enrôlé. Vous pouvez uploader directement depuis lui.
+                </p>
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                        data-action="show-enrollment-form">Enrôler un nouvel appareil</button>
+            </div>
+        </div>
+
+        <div id="generate-form">
+            <div class="fr-select-group">
+                <label class="fr-label" for="ttl">
+                    Fenêtre d'enrôlement
+                    <span class="fr-hint-text">
+                        Délai pendant lequel le QR peut être scanné par un mobile pour s'enrôler.
+                        Une fois enrôlé, l'appareil est valide 15 jours pour uploader.
+                    </span>
+                </label>
+                <select id="ttl" class="fr-select">
+                    {% if short_ttl_enabled %}
+                    <option value="15s">15 secondes (test)</option>
+                    <option value="30s">30 secondes (test)</option>
+                    {% endif %}
+                    <option value="5" selected>5 minutes (recommandé)</option>
+                    <option value="15">15 minutes</option>
+                    <option value="30">30 minutes</option>
+                    <option value="60">1 heure</option>
+                </select>
+            </div>
+            <!-- Quota max-uploads/token non exposé à l'utilisateur (cf. mydevices UX
+                 simplification). Reste en hidden pour que le JS lise la valeur sans
+                 casser le flow. Default 299 = MAX_UPLOADS_PER_SESSION côté serveur. -->
+            <input type="hidden" id="max-uploads" value="299">
+            <div class="fr-checkbox-group">
+                <input type="checkbox" id="auto-transcribe" checked>
+                <label class="fr-label" for="auto-transcribe">
+                    Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu
+                    <span class="fr-hint-text">
+                        Dans tous les cas, les fichiers d'enregistrement seront optimisés pour la voix.
+                    </span>
+                </label>
+            </div>
+            <button type="button" class="fr-btn fr-btn--sm" id="btn-generate"
+                    data-action="generate-code">
+                Générer un code
+            </button>
+        </div>
+
+        <div class="fr-alert fr-alert--warning fr-mt-2w">
+            <p>Pour limiter les risques en cas de perte ou vol de votre téléphone, supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.</p>
+        </div>
+
+        <div class="result" id="result">
+            <p style="font-size:0.9rem; color:#666; margin-bottom:0.5rem;">
+                Code à saisir sur le mobile :
+            </p>
+            <div class="simple-code" id="display-code"></div>
+            <div class="qr-container">
+                <img id="qr-img" width="200" height="200" alt="QR Code">
+            </div>
+            <p class="expires" id="display-expires"></p>
+            <p class="expires" id="display-remaining"></p>
+            <button type="button" class="fr-btn fr-btn--secondary fr-btn--sm" style="margin-top:1rem;"
+                    data-action="reset-form">Générer un nouveau code</button>
+        </div>
+    </div>
+
+    <div id="panel-devices" class="fr-tabs__panel card tab-pane" data-tab="devices" role="tabpanel" aria-labelledby="tab-btn-devices" tabindex="0">
+        <div class="dsfr-inline-actions">
+            <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
+            <ul class="fr-btns-group fr-btns-group--sm fr-btns-group--inline" style="margin:0;gap:0.35rem;">
+                <li>
+                    <button type="button" id="enroll-new-device-btn"
+                            class="fr-btn fr-btn--sm fr-btn--icon-left fr-icon-add-line"
+                            data-action="open-enroll"
+                            onclick="window.activateTab && window.activateTab('generate')">Enrôler un nouvel appareil</button>
+                </li>
+                <li>
+                    <button type="button" id="device-filter-btn"
+                            class="fr-btn fr-btn--sm fr-btn--secondary device-filter-btn"
+                            data-action="toggle-device-scope">Voir révoqués</button>
+                </li>
+                <li>
+                    <button type="button" id="revoke-all-devices-btn"
+                            class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline btn-danger-mini"
+                            data-action="revoke-all-devices">Révoquer tous</button>
+                </li>
+            </ul>
+        </div>
+        <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
+            Ces appareils peuvent uploader sans rescanner tant que leur enrôlement est valide.
+        </p>
+        <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils…</div>
+    </div>
+
+    <div id="panel-transfers" class="fr-tabs__panel fr-tabs__panel--selected card tab-pane" data-tab="transfers" role="tabpanel" aria-labelledby="tab-btn-transfers" tabindex="0">
+        <div id="recent-activities-panel" class="recent-activities-panel open">
+            <div class="dsfr-inline-actions">
+                <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
+                <!-- Tri date + compteur sur la même ligne que le titre, à
+                     droite de "Mes réunions (IA)". Tri persisté en
+                     localStorage (mydevices.sort.dir, défaut "desc").
+                     Délégation via data-action="meetings:toggle-sort"
+                     gérée par tabs/meetings.js (l'onclick="" est conservé
+                     en fallback pour les scénarios où le bundle n'est
+                     pas encore initialisé). -->
+                <button type="button" class="sort-toggle" id="sort-toggle-btn"
+                        data-action="meetings:toggle-sort"
+                        onclick="toggleSortDir()"
+                        title="Inverser l'ordre de tri (date de réunion ; à défaut, date d'upload)">
+                    <span class="sort-toggle-label">Plus récent d'abord</span>
+                    <span class="sort-toggle-arrow">▼</span>
+                </button>
+                <span class="file-count" id="file-count" aria-live="polite"></span>
+                <!-- Upload local (sans QR). 2 boutons cachant des <input
+                     type="file"> + une zone drag&drop sur tout le header.
+                     Le pipeline AV→transcode→transfer→kevent prend le
+                     relais comme pour un upload PWA classique.
+                     Délégation `meetings:pick-files` / `meetings:pick-folder`
+                     gérée par tabs/meetings.js. -->
+                <div class="local-upload-zone">
+                    <button type="button" class="local-upload-btn"
+                            id="local-upload-files-btn"
+                            data-action="meetings:pick-files"
+                            onclick="document.getElementById('local-upload-files-input').click()"
+                            title="Sélectionner un ou plusieurs fichiers audio">
+                        <span class="local-upload-btn-icon" aria-hidden="true">📁</span>
+                        <span>Fichiers</span>
+                    </button>
+                    <button type="button" class="local-upload-btn"
+                            id="local-upload-folder-btn"
+                            data-action="meetings:pick-folder"
+                            onclick="document.getElementById('local-upload-folder-input').click()"
+                            title="Sélectionner un dossier — tous les fichiers audio à l'intérieur seront uploadés">
+                        <span class="local-upload-btn-icon" aria-hidden="true">📂</span>
+                        <span>Dossier</span>
+                    </button>
+                    <input type="file" id="local-upload-files-input"
+                           accept="audio/*" multiple
+                           style="display:none;"
+                           onchange="handleLocalUploadInput(this)" />
+                    <input type="file" id="local-upload-folder-input"
+                           webkitdirectory directory multiple
+                           style="display:none;"
+                           onchange="handleLocalUploadInput(this)" />
+                </div>
+                <!-- Action lourde « tout mettre à la corbeille ». Cachée par
+                     défaut, visible uniquement en mode avancé (toggle ON ou
+                     Alt enfoncé) via .advanced-only + body.adv-mode. Icône
+                     composée : benne à ordures + 2 silhouettes d'éboueurs +
+                     mini-poubelle qui bascule au hover (animation CSS). -->
+                <button type="button" id="purge-btn" class="icon-btn icon-btn-purge advanced-only" disabled
+                        data-action="meetings:purge-all"
+                        onclick="purgeSessions()"
+                        title="Mettre toute la liste à la corbeille (supprimée automatiquement après 30 jours)"
+                        aria-label="Tout mettre à la corbeille">
+                    <svg viewBox="0 0 32 24" fill="none" stroke="currentColor"
+                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+                         aria-hidden="true" class="purge-icon-svg">
+                        <!-- mini-poubelle prête à être chargée (anime translateY au hover) -->
+                        <g class="purge-bin">
+                          <rect x="2" y="14" width="4" height="6" rx="0.4"/>
+                          <line x1="1.5" y1="14" x2="6.5" y2="14"/>
+                          <line x1="3" y1="13" x2="5" y2="13"/>
+                        </g>
+                        <!-- benne du camion + cabine -->
+                        <path d="M8 8h13v12H8z" fill="currentColor" fill-opacity="0.08"/>
+                        <path d="M8 8h13v12H8z"/>
+                        <path d="M21 12h4l3 3v5h-7z" fill="currentColor" fill-opacity="0.05"/>
+                        <path d="M21 12h4l3 3v5h-7z"/>
+                        <path d="M22 14h3" />
+                        <!-- 4 stries verticales sur la benne -->
+                        <path d="M11 9v10M14 9v10M17 9v10"/>
+                        <!-- roues -->
+                        <circle cx="12" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
+                        <circle cx="12" cy="21" r="1.6"/>
+                        <circle cx="24" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
+                        <circle cx="24" cy="21" r="1.6"/>
+                        <!-- 2 silhouettes d'éboueurs (têtes + corps simplifiés) à l'arrière du camion -->
+                        <g class="purge-workers">
+                          <!-- éboueur 1 -->
+                          <circle cx="29" cy="10" r="1.1" fill="currentColor" fill-opacity="0.2"/>
+                          <path d="M28.3 11.2v3.2M29.6 11.2v3.2"/>
+                          <!-- éboueur 2 -->
+                          <circle cx="30.5" cy="11.5" r="1" fill="currentColor" fill-opacity="0.2"/>
+                          <path d="M29.9 12.5v2.8M31.1 12.5v2.8"/>
+                        </g>
+                    </svg>
+                </button>
+            </div>
+            <!-- Progression batch upload local. Affichée seulement quand
+                 un upload est en cours. Tient sur 1 ligne + une barre. -->
+            <div class="local-upload-progress" id="local-upload-progress">
+                <div>
+                    <span id="local-upload-progress-label">Upload en cours…</span>
+                    <span id="local-upload-progress-count" style="color:#64748b;"></span>
+                </div>
+                <div class="local-upload-progress-bar">
+                    <div class="local-upload-progress-bar-fill" id="local-upload-progress-fill"></div>
+                </div>
+                <div class="local-upload-progress-errors" id="local-upload-progress-errors"></div>
+            </div>
+            <!-- "Transferts en cours" : un bloc par fichier in-flight avec
+                 son propre chemin de fer + statut transcription inline.
+                 Disparaît quand 0 transfert en cours. -->
+            <div class="transfer-live" id="transfer-live" style="display:none;"></div>
+            <!-- En-tête fr-table triable (chantier UX-Refonte-3). Reste un
+                 simple bandeau de colonnes au-dessus de la liste flex pour
+                 préserver l'ensemble des comportements (expand inline,
+                 virus banner, vue détail, polling queue-hint). Le tri
+                 (data-sort-col) appelle window.setSortColumn(key) géré
+                 dans legacy.js. -->
+            <div id="sessions-table-header" class="sessions-table-header"
+                 role="row" style="display:none;">
+                <span class="sth-cell sth-cell-dot" role="columnheader"
+                      aria-label="Statut">●</span>
+                <button type="button" class="sth-cell sth-cell-title"
+                        data-sort-col="title"
+                        title="Trier par titre"
+                        onclick="setSortColumn('title')">
+                    Titre <span class="sort-arrow" aria-hidden="true">↕</span>
+                </button>
+                <span class="sth-cell sth-cell-source" role="columnheader">Source</span>
+                <button type="button" class="sth-cell sth-cell-duration"
+                        data-sort-col="duration"
+                        title="Trier par durée"
+                        onclick="setSortColumn('duration')">
+                    Durée <span class="sort-arrow" aria-hidden="true">↕</span>
+                </button>
+                <button type="button" class="sth-cell sth-cell-date"
+                        data-sort-col="date"
+                        title="Trier par date"
+                        onclick="setSortColumn('date')">
+                    Date <span class="sort-arrow" aria-hidden="true">▼</span>
+                </button>
+                <span class="sth-cell sth-cell-actions" role="columnheader"
+                      aria-label="Actions"></span>
+            </div>
+            <div class="sessions-list" id="sessions-list">
+                <p style="color:#999; font-size:0.85rem;">Chargement...</p>
+            </div>
+        </div>
+    </div>
+
+    {# Onglet « Mes données utiles » — créé par PR-UX-Onglets. Contenu monté
+       dynamiquement par frontend/tabs/useful-data.js au premier affichage. #}
+    <div id="panel-useful-data" class="fr-tabs__panel card tab-pane"
+         data-tab="useful-data" role="tabpanel"
+         aria-labelledby="tab-btn-useful-data" tabindex="0">
+        <div data-useful-data-root>
+            <p style="color:#999;font-size:0.85rem;">Chargement…</p>
+        </div>
+    </div>
+
+    {# Onglet « Admin » — visible uniquement si l'utilisateur a la claim
+       « admin » (cf. lib/auth.js isAdmin()). Le `<li>` parent du bouton est
+       masqué côté template par défaut puis révélé par tabs/admin.js. #}
+    <div id="panel-admin" class="fr-tabs__panel card tab-pane"
+         data-tab="admin" role="tabpanel"
+         aria-labelledby="tab-btn-admin" tabindex="0">
+        <div data-admin-root>
+            <p style="color:#999;font-size:0.85rem;">Chargement…</p>
+        </div>
+    </div>
+    </div> {# /fr-tabs #}
+</div>
+
+{# ── Wizard "Nouvelle préparation" — modale fullscreen (UX-Refonte-3 #3).
+   Pilotée par frontend/tabs/wizard.js : openWizard() / closeWizard().
+   Le menu principal reste visible derrière la backdrop semi-transparente.
+   Stepper 5 étapes : Identité / Contexte / Documents / Focus / Récap. #}
+<div id="wizard-modal-backdrop" class="wizard-modal-backdrop"
+     role="dialog" aria-modal="true" aria-labelledby="wizard-modal-title">
+    <div class="wizard-modal" role="document">
+        <button type="button" class="wizard-modal-close" id="wizard-close-btn"
+                aria-label="Fermer le wizard">×</button>
+        <h1 id="wizard-modal-title" style="font-size:1.2rem;margin:0 0 0.4rem;">
+            Préparer un brief de réunion
+        </h1>
+        <p class="subtitle" style="margin:0 0 0.8rem;">
+            L'IA lit vos documents de prép (Drive si renseigné) et produit un
+            brief personnalisé + un glossaire qui enrichira la transcription
+            de l'audio de la réunion.
+        </p>
+        <div id="wizard-stepper" class="wizard-stepper" aria-label="Étapes"></div>
+
+        {# Banner "Suite de : ..." si series_parent_id présent #}
+        <div id="wizard-series-banner" style="display:none;
+             background:#eef3fb;border:1px solid #c0d2f5;
+             border-radius:0.4rem;padding:0.4rem 0.7rem;margin-bottom:0.6rem;
+             font-size:0.85rem;color:#1a2640;">
+            Suite de : <strong id="wizard-series-banner-title">…</strong>
+        </div>
+
+        <form id="wizard-form" autocomplete="off">
+            <input type="hidden" id="wizard-series-parent" value="">
+            <input type="hidden" id="wizard-target-date" value="">
+
+            {# ── Step 1 : Identité ── #}
+            <div id="wizard-step-identite" class="wizard-step is-active">
+                <h2>1. Identité de la réunion</h2>
+                <div class="wizard-question">
+                    <label for="wizard-meeting-type">Type de réunion *</label>
+                    <div class="hint">Le brief sera structuré selon ce type.</div>
+                    <select id="wizard-meeting-type" required>
+                        <option value="general">Général</option>
+                        <option value="one_on_one">Entretien 1:1</option>
+                        <option value="project_update">Point projet / équipe</option>
+                        <option value="steering_committee">Comité de pilotage (COPIL)</option>
+                        <option value="brainstorm">Atelier / brainstorm</option>
+                    </select>
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-subject">Sujet de la réunion *</label>
+                    <div class="hint">En une phrase, le thème ou la décision principale.</div>
+                    <input type="text" id="wizard-subject" required maxlength="500"
+                           placeholder="Ex : Arbitrer la trajectoire budgétaire 2027 du programme X">
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-duration">Durée prévue *</label>
+                    <input type="text" id="wizard-duration" required
+                           placeholder="Ex : 1 heure">
+                    <div class="wizard-chips" data-target="wizard-duration">
+                        <span class="wizard-chip" data-minutes="15">15 minutes</span>
+                        <span class="wizard-chip" data-minutes="30">30 minutes</span>
+                        <span class="wizard-chip" data-minutes="60">1 heure</span>
+                        <span class="wizard-chip" data-minutes="120">2 heures</span>
+                        <span class="wizard-chip" data-minutes="240">Demi-journée</span>
+                        <span class="wizard-chip" data-minutes="480">Journée complète</span>
+                    </div>
+                </div>
+                {# Lot 6 — Récurrence (RRULE structuré) #}
+                <div class="wizard-question">
+                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+                        <input type="checkbox" id="wizard-recurring-toggle">
+                        <span>Cette réunion est récurrente</span>
+                    </label>
+                    <div class="hint">
+                        Active la définition d'une règle de récurrence (RRULE) qui
+                        servira à pré-renseigner la prochaine occurrence.
+                    </div>
+                    <div id="wizard-recurrence-form"
+                         style="display:none;margin-top:0.5rem;border:1px solid #e2e8f0;
+                                border-radius:0.4rem;padding:0.6rem 0.8rem;background:#fafbfc;">
+                        <div style="display:flex;gap:0.6rem;flex-wrap:wrap;align-items:flex-end;">
+                            <div>
+                                <label for="wizard-rrule-freq"
+                                       style="display:block;font-size:0.85rem;">Fréquence</label>
+                                <select id="wizard-rrule-freq" data-rrule-freq
+                                        class="fr-select" style="min-width:180px;">
+                                    <option value="WEEKLY" selected>Hebdomadaire</option>
+                                    <option value="DAILY">Quotidienne</option>
+                                    <option value="MONTHLY">Mensuelle</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-interval"
+                                       style="display:block;font-size:0.85rem;">Toutes les …</label>
+                                <input type="number" id="wizard-rrule-interval"
+                                       data-rrule-interval min="1" max="365" value="1"
+                                       style="width:80px;border:1px solid #cbd5e1;
+                                              border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-time"
+                                       style="display:block;font-size:0.85rem;">Heure</label>
+                                <input type="time" id="wizard-rrule-time"
+                                       data-rrule-time value="14:00"
+                                       style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                            <div>
+                                <label for="wizard-rrule-until"
+                                       style="display:block;font-size:0.85rem;">Date de fin (optionnelle)</label>
+                                <input type="date" id="wizard-rrule-until"
+                                       data-rrule-until
+                                       style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.4rem;">
+                            </div>
+                        </div>
+                        <div data-rrule-weekly-only style="margin-top:0.5rem;">
+                            <div style="font-size:0.85rem;margin-bottom:0.2rem;">Jours de la semaine</div>
+                            <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+                                <label><input type="checkbox" data-rrule-weekday value="MO"> Lundi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="TU"> Mardi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="WE"> Mercredi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="TH"> Jeudi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="FR"> Vendredi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="SA"> Samedi</label>
+                                <label><input type="checkbox" data-rrule-weekday value="SU"> Dimanche</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {# ── Step 2 : Contexte ── #}
+            <div id="wizard-step-contexte" class="wizard-step">
+                <h2>2. Votre rôle &amp; vos attentes</h2>
+                <div class="wizard-question">
+                    <label for="wizard-role">Quel est votre rôle dans cette réunion ? *</label>
+                    <input type="text" id="wizard-role" maxlength="300"
+                           placeholder="J'anime la réunion, je participe, je dois décider…">
+                    <div class="wizard-chips" data-target="wizard-role">
+                        <span class="wizard-chip">J'anime la réunion</span>
+                        <span class="wizard-chip">J'y participe</span>
+                        <span class="wizard-chip">Je dois décider</span>
+                        <span class="wizard-chip">Je découvre l'équipe</span>
+                        <span class="wizard-chip">J'observe</span>
+                    </div>
+                </div>
+                <div class="wizard-question">
+                    <label for="wizard-expectation">Qu'attendez-vous principalement de ce brief ? *</label>
+                    <input type="text" id="wizard-expectation" maxlength="300"
+                           placeholder="Comprendre le contexte, anticiper les objections…">
+                    <div class="wizard-chips" data-target="wizard-expectation">
+                        <span class="wizard-chip">Comprendre le contexte</span>
+                        <span class="wizard-chip">Préparer ma prise de parole</span>
+                        <span class="wizard-chip">Anticiper les objections</span>
+                        <span class="wizard-chip">Valider une décision</span>
+                        <span class="wizard-chip">Apprendre le vocabulaire</span>
+                    </div>
+                </div>
+                {# Lot 5 — Participants (optionnels) #}
+                <div class="wizard-question">
+                    <label>Participants attendus (optionnel)</label>
+                    <div class="hint">
+                        Ajoutez les personnes attendues : nom, email (pour invitations / CR), rôle.
+                        Vous pourrez les modifier après création depuis la fiche du brief.
+                    </div>
+                    <div id="wizard-participants-list"
+                         style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.3rem;"></div>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-add-line fr-btn--icon-left"
+                            id="wizard-add-participant-btn"
+                            style="margin-top:0.3rem;">Ajouter un participant</button>
+                </div>
+            </div>
+
+            {# ── Step 3 : Documents ── #}
+            <div id="wizard-step-documents" class="wizard-step">
+                <h2>3. Documents source (optionnel)</h2>
+                <div class="wizard-question">
+                    <label for="wizard-drive-folder">Dossier Drive</label>
+                    <div class="hint">
+                        Optionnel — si renseigné, les documents seront lus pour enrichir le brief.
+                        Collez l'URL du dossier <em>mesfichiers</em> (ou l'identifiant brut).
+                    </div>
+                    <input type="text" id="wizard-drive-folder"
+                           placeholder="https://mesfichiers.…/explorer/items/xxxxxxxx">
+                    <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
+                        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-search-line fr-btn--icon-left"
+                                id="wizard-drive-test-btn">Vérifier l'accès</button>
+                        <span id="wizard-drive-test-spinner" style="display:none;color:#64748b;font-size:0.85rem;">
+                            Vérification en cours…
+                        </span>
+                    </div>
+                    <div id="wizard-drive-test-result" style="margin-top:0.5rem;"></div>
+                </div>
+            </div>
+
+            {# ── Step 4 : Focus ── #}
+            <div id="wizard-step-focus" class="wizard-step">
+                <h2>4. Sur quoi concentrer l'analyse ?</h2>
+                <div class="wizard-question">
+                    <div class="hint">Cochez les axes pertinents (plusieurs choix possibles).</div>
+                    <div class="wizard-focus-grid">
+                        <label><input type="checkbox" name="wizard-focus" value="Aspects budgétaires"> Aspects budgétaires</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Risques et points de vigilance"> Risques et points de vigilance</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Décisions à prendre"> Décisions à prendre</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Historique des échanges"> Historique des échanges</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Acronymes et jargon"> Acronymes et jargon</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Parties prenantes"> Parties prenantes</label>
+                        <label><input type="checkbox" name="wizard-focus" value="Calendrier et jalons"> Calendrier et jalons</label>
+                    </div>
+                </div>
+
+                {# Lot 9 — Thématiques additionnelles (chips libres). #}
+                {# TKT-107 : force fr-h6 sur le h3 pour cohérence avec les
+                   autres sous-titres du wizard (sans classe, h3 héritait
+                   du dimensionnement DSFR par défaut, démesuré). #}
+                <div class="wizard-question" style="margin-top:1.2rem;">
+                    <h3 class="fr-h6" style="margin-bottom:0.3rem;">Thématiques additionnelles</h3>
+                    <div class="hint">
+                        Ajoutez des sujets ou mots-clés spécifiques à votre contexte
+                        (ex. « Budget 2026 », « Plan de continuité »). Ces thématiques
+                        seront proposées en auto-complétion lors de vos prochaines
+                        préparations.
+                    </div>
+                    <div id="wizard-themes-container" style="margin-top:0.6rem;"></div>
+                </div>
+
+                {# Lot 8 — Toggle envoi CR auto par email aux participants. #}
+                <div class="wizard-question" style="margin-top:1.2rem;">
+                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+                        <input type="checkbox" id="wizard-send-cr-email">
+                        <span>Envoyer le CR aux participants à la fin de la transcription</span>
+                    </label>
+                    <div class="hint" style="margin-top:0.3rem;">
+                        Requiert qu'au moins un participant ait une adresse email
+                        et que le serveur SMTP soit configuré côté infrastructure.
+                    </div>
+                </div>
+            </div>
+
+            {# ── Step 5 : Récap ── #}
+            <div id="wizard-step-recap" class="wizard-step">
+                <h2>5. Récapitulatif</h2>
+                <p class="hint" style="margin-bottom:0.5rem;">
+                    Vérifiez les informations puis cliquez « Générer le brief ».
+                    La génération peut prendre quelques secondes selon la taille
+                    des documents Drive associés.
+                </p>
+                <div class="wizard-recap" id="wizard-recap-content"></div>
+            </div>
+
+            <div id="wizard-status" class="wizard-status"></div>
+            <div id="wizard-generation-progress" style="display:none;margin-top:0.6rem;"></div>
+
+            <div class="wizard-actions">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                        id="wizard-cancel-btn">Annuler</button>
+                <div class="wizard-actions-right">
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                            id="wizard-prev-btn" style="visibility:hidden;">
+                        ← Précédent
+                    </button>
+                    <button type="button" class="fr-btn fr-btn--sm"
+                            id="wizard-next-btn">
+                        Suivant →
+                    </button>
+                    <button type="submit" class="fr-btn fr-btn--sm"
+                            id="wizard-submit-btn" style="display:none;">
+                        Générer le brief
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+</main>
+
+{# Footer DSFR minimal : conforme aux exigences du Système de Design de
+   l'État Français (mention "République Française", liens institutionnels
+   obligatoires, accessibilité partielle déclarée). Sans plus de contenu
+   pour l'instant — la liste de liens institutionnels (mentions légales,
+   accessibilité, données personnelles) sera enrichie quand les pages
+   correspondantes seront publiées côté Flask. #}
+<footer class="fr-footer" role="contentinfo" id="footer">
+    <div class="fr-container">
+        <div class="fr-footer__body">
+            <div class="fr-footer__brand fr-enlarge-link">
+                <p class="fr-logo">
+                    République
+                    <br>Française
+                </p>
+            </div>
+            <div class="fr-footer__content">
+                <p class="fr-footer__content-desc">
+                    Service d'enregistrement et d'analyse de réunions —
+                    transcription IA, comptes-rendus automatisés et
+                    préparation de réunion.
+                </p>
+            </div>
+        </div>
+        <div class="fr-footer__bottom">
+            <ul class="fr-footer__bottom-list">
+                <li class="fr-footer__bottom-item">
+                    <a class="fr-footer__bottom-link" href="https://www.systeme-de-design.gouv.fr/" target="_blank" rel="noopener noreferrer">Système de design de l'État</a>
+                </li>
+            </ul>
+            <div class="fr-footer__bottom-copy">
+                <p>Sauf mention contraire, tous les contenus de ce site sont sous licence
+                    <a href="https://github.com/etalab/licence-ouverte/blob/master/LO.md" target="_blank" rel="noopener noreferrer">etalab-2.0</a>
+                </p>
+            </div>
+        </div>
+    </div>
+</footer>
+
+{# PR4 — bootstrap context pour le bundle Vite. Le JSON est lu par
+   frontend/lib/bootstrap.js qui peuple window.ALLOWED_AUDIO_EXTENSIONS,
+   window.DEVICE_RETENTION_DAYS et window.__BOOTSTRAP__.user. #}
+<script type="application/json" id="bootstrap-data">
+{
+  "allowed_audio_extensions": "{{ allowed_audio_extensions|default('', true) }}",
+  "device_retention_days": {{ device_retention_days|default(15, true) }},
+  "user": {
+    "email": "{{ (user.email or '')|e }}",
+    "name": "{{ (user.name or '')|e }}",
+    "roles": {{ (user.roles or [])|tojson }}
+  }
+}
+</script>
+{% include '_vite_shell_loader.html' %}
+{# DSFR JS auto-hébergé (cf. <link> en head pour le rationale). Le module
+   est chargé après le bundle Vite pour que les composants DSFR s'auto-
+   attachent aux éléments `data-fr-*` injectés par notre rendu. #}
+<script type="module" src="/static/dsfr/dsfr/dsfr.module.min.js"></script>
+<script nomodule src="/static/dsfr/dsfr/dsfr.nomodule.min.js"></script>
+</body>
+</html>

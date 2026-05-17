@@ -2,7 +2,7 @@
 
 Couvre :
 
-1. **Unit** sur ``services/mydevices-web/app/mailer.py`` (importable sans
+1. **Unit** sur ``services/mesreunions-web/app/mailer.py`` (importable sans
    SMTP réel) : ``is_configured`` en mode dry-run, ``_valid_emails`` dédup
    et filtrage, ``build_cr_email`` génère subject/body sans dépendance
    externe, ``send_meeting_cr_email`` retourne ``skipped_reason`` quand
@@ -24,18 +24,18 @@ import sys
 import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-_MYDEVICES_PATH = os.path.join(_REPO_ROOT, "services", "mydevices-web")
+_MESREUNIONS_PATH = os.path.join(_REPO_ROOT, "services", "mesreunions-web")
 
 # Pytest peut avoir collecté un autre test qui a déjà mappé ``app`` à un
 # autre service (ex. test_preparations_recurrence importe DTA). On purge
-# l'éventuel namespace ``app`` du cache pour réimporter depuis mydevices-web.
+# l'éventuel namespace ``app`` du cache pour réimporter depuis mesreunions-web.
 for _mod in list(sys.modules):
     if _mod == "app" or _mod.startswith("app."):
         del sys.modules[_mod]
-# Insère mydevices-web en TÊTE de sys.path pour shadow l'autre ``app``.
-if _MYDEVICES_PATH in sys.path:
-    sys.path.remove(_MYDEVICES_PATH)
-sys.path.insert(0, _MYDEVICES_PATH)
+# Insère mesreunions-web en TÊTE de sys.path pour shadow l'autre ``app``.
+if _MESREUNIONS_PATH in sys.path:
+    sys.path.remove(_MESREUNIONS_PATH)
+sys.path.insert(0, _MESREUNIONS_PATH)
 
 try:
     from app.mailer import (  # type: ignore
@@ -174,7 +174,7 @@ def _alive():
         r = requests.get(f"{BASE_URL}/healthz", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"mydevices-web not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"mesreunions-web not reachable at {BASE_URL}: {exc}")
 
 
 @pytest.fixture(scope="module")
@@ -187,7 +187,7 @@ def _alive_with_send_cr(_alive):
     )
     if probe.status_code == 404:
         pytest.skip(
-            "stack mydevices-web déployée localement ne contient pas "
+            "stack mesreunions-web déployée localement ne contient pas "
             "l'endpoint /api/meetings/<id>/send-cr (Lot 8). Rebuild + "
             "rollout requis."
         )
@@ -217,7 +217,7 @@ def test_amend_accepts_send_cr_email_toggle(_alive):
 
 # ─── 3) Front — selectors UI emails ─────────────────────────────────────
 
-_INDEX = pathlib.Path(_REPO_ROOT) / "services" / "mydevices-web" / "app" / "templates" / "index.html"
+_INDEX = pathlib.Path(_REPO_ROOT) / "services" / "mesreunions-web" / "app" / "templates" / "index.html"
 
 
 def test_emails_section_present_in_template():

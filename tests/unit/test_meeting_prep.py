@@ -1,5 +1,5 @@
 """
-Unit tests for services.mydevices-web.app.meeting_prep.
+Unit tests for services.mesreunions-web.app.meeting_prep.
 
 Same path-based loading pattern as test_drive_client / test_doc_extractor:
 the service package contains a hyphen so it can't be imported with normal
@@ -28,7 +28,7 @@ import pytest
 # ─── Locate + load the module under test ──────────────────────────
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MODULE_PATH = os.path.join(ROOT, "services", "mydevices-web", "app", "meeting_prep.py")
+MODULE_PATH = os.path.join(ROOT, "services", "mesreunions-web", "app", "meeting_prep.py")
 
 
 def _fresh_meeting_prep(monkeypatch=None):

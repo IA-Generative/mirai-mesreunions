@@ -2,7 +2,7 @@
 
 Couvre :
 
-1. **Unit** sur ``services/mydevices-web/app/modules/preparations/exporters.py``
+1. **Unit** sur ``services/mesreunions-web/app/modules/preparations/exporters.py``
    (importable sans Postgres) : ``render(prep, fmt)`` doit retourner des
    bytes non-vides + un Content-Type + un filename slugifié pour ``docx``
    et ``odt``. Les formats TXT/MD sont sérialisés côté front
@@ -28,16 +28,16 @@ import tempfile
 import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-_MYDEVICES_PATH = os.path.join(_REPO_ROOT, "services", "mydevices-web")
+_MESREUNIONS_PATH = os.path.join(_REPO_ROOT, "services", "mesreunions-web")
 
 # Si un autre test a déjà bindé ``app`` à un autre service (DTA), purge
-# le cache d'imports avant de remapper sur mydevices-web.
+# le cache d'imports avant de remapper sur mesreunions-web.
 for _mod in list(sys.modules):
     if _mod == "app" or _mod.startswith("app."):
         del sys.modules[_mod]
-if _MYDEVICES_PATH in sys.path:
-    sys.path.remove(_MYDEVICES_PATH)
-sys.path.insert(0, _MYDEVICES_PATH)
+if _MESREUNIONS_PATH in sys.path:
+    sys.path.remove(_MESREUNIONS_PATH)
+sys.path.insert(0, _MESREUNIONS_PATH)
 
 try:
     from app.modules.preparations.exporters import (  # type: ignore
@@ -168,7 +168,7 @@ def _have_node() -> bool:
 def test_export_formatter_parses_via_node():
     """Garde-fou syntaxe : le helper front TXT/MD doit parser en JS."""
     path = os.path.join(
-        _REPO_ROOT, "services", "mydevices-web", "frontend", "lib",
+        _REPO_ROOT, "services", "mesreunions-web", "frontend", "lib",
         "export-formatter.js",
     )
     if not os.path.isfile(path):
@@ -207,7 +207,7 @@ def _alive_with_v2():
         r = requests.get(f"{BASE_URL}/healthz", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"mydevices-web not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"mesreunions-web not reachable at {BASE_URL}: {exc}")
     # Sonde : si /export retourne 404 → stack ancienne, skip
     pid = "00000000-0000-0000-0000-000000000000"
     probe = requests.get(
@@ -216,7 +216,7 @@ def _alive_with_v2():
     )
     if probe.status_code == 404:
         pytest.skip(
-            "mydevices-web déployé localement ne contient pas les "
+            "mesreunions-web déployé localement ne contient pas les "
             "endpoints meeting-prep v2 (export). Rebuild + rollout requis."
         )
 

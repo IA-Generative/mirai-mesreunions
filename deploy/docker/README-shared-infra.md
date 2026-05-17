@@ -18,7 +18,7 @@ L'overlay `docker-compose.shared-infra.yml` :
   via le réseau externe `owui-net`
 - remap `admin-console` host port 8082 → **8222** (le 8082 est pris par le
   Keycloak owuicore)
-- garde tous les autres ports inchangés (8080 mydevices-web, 8081 mobile-upload-pwa,
+- garde tous les autres ports inchangés (8080 mesreunions-web, 8081 mobile-upload-pwa,
   8090 internal-ingester, 8091 device-token-authority, 9000-9005 MinIO, 5672/15672 RabbitMQ,
   3310 ClamAV)
 
@@ -113,7 +113,7 @@ docker compose \
   up -d \
     rabbitmq clamav \
     minio-upload minio-processed minio-internal \
-    mydevices-web mobile-upload-pwa admin-console \
+    mesreunions-web mobile-upload-pwa admin-console \
     clamav-scanner audio-normalizer dmz-to-internal-bridge \
     device-token-authority internal-ingester transcription-relay
 ```
@@ -125,7 +125,7 @@ Liste explicite des services pour ne pas inclure `postgres-external`,
 
 | Cible          | URL                              |
 |----------------|----------------------------------|
-| mydevices-web | <http://localhost:8080>          |
+| mesreunions-web | <http://localhost:8080>          |
 | mobile-upload-pwa  | <http://localhost:8081>          |
 | admin-console   | <http://localhost:8222> (remap)  |
 | internal-ingester    | <http://localhost:8090>          |

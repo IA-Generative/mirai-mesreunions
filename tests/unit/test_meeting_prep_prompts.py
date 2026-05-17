@@ -1,5 +1,5 @@
 """
-Tests for the multi-prompt resolution in services.mydevices-web.app.meeting_prep.
+Tests for the multi-prompt resolution in services.mesreunions-web.app.meeting_prep.
 
 The wizard now picks among 5 prompt files via ``prompt_path_for_type``. These
 tests verify that:
@@ -19,8 +19,8 @@ import pytest
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MODULE_PATH = os.path.join(ROOT, "services", "mydevices-web", "app", "meeting_prep.py")
-PROMPTS_DIR = os.path.join(ROOT, "services", "mydevices-web", "app", "prompts")
+MODULE_PATH = os.path.join(ROOT, "services", "mesreunions-web", "app", "meeting_prep.py")
+PROMPTS_DIR = os.path.join(ROOT, "services", "mesreunions-web", "app", "prompts")
 
 
 def _load():

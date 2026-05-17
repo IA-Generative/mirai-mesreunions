@@ -7,7 +7,7 @@
 #     -f docker-compose.yml -f docker-compose.shared-infra.yml \
 #     up -d rabbitmq clamav \
 #        minio-upload minio-processed minio-internal \
-#        mydevices-web mobile-upload-pwa admin-console \
+#        mesreunions-web mobile-upload-pwa admin-console \
 #        clamav-scanner audio-normalizer dmz-to-internal-bridge \
 #        device-token-authority internal-ingester transcription-relay
 #
@@ -35,7 +35,7 @@ services:
   # ZONE EXTERNE — re-câblage vers owuicore-postgres-1 + owuicore-keycloak-1
   # ═══════════════════════════════════════════════════════════════════════
 
-  mydevices-web:
+  mesreunions-web:
     environment:
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8082/realms/openwebui
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui

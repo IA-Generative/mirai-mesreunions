@@ -138,11 +138,11 @@ SECRET_KEY = _str("SECRET_KEY", "dev-secret-change-me")
 UPLOAD_MAX_FILE_SIZE_MB = _int("UPLOAD_MAX_FILE_SIZE_MB", 100)
 ALLOWED_AUDIO_EXTENSIONS = _list("ALLOWED_AUDIO_EXTENSIONS", "mp3,wav,ogg,flac,m4a,aac,wma,opus,webm")
 UPLOAD_PORTAL_BASE_URL = _str("UPLOAD_PORTAL_BASE_URL", "http://localhost:8081")
-MYDEVICES_PORTAL_URL = _str("MYDEVICES_PORTAL_URL", "")
+MESREUNIONS_PORTAL_URL = _str("MESREUNIONS_PORTAL_URL", "")
 TOKEN_EXPIRY_WARNING_DAYS = _int("TOKEN_EXPIRY_WARNING_DAYS", 7)
 # Rétention device après enrôlement. Source de vérité : device-token-authority
 # (qui applique la valeur lors d'une enroll/renew). Exposé ici pour les
-# autres services (mydevices-web) qui ont besoin d'afficher la durée
+# autres services (mesreunions-web) qui ont besoin d'afficher la durée
 # réelle à l'utilisateur dans les messages de confirmation.
 DEVICE_TOKEN_RETENTION_HOURS = _int("DEVICE_TOKEN_RETENTION_HOURS", 168)
 # Internal-pull cross-cluster channel.
@@ -184,7 +184,7 @@ TRANSCRIPTION_BACKEND = _str("TRANSCRIPTION_BACKEND", "stub")
 # MCR backend (when TRANSCRIPTION_BACKEND=mcr). The user-delegated push uses
 # a refresh token captured at OIDC login and exchanged on demand by internal-ingester.
 #   MCR_GATEWAY_URL             : base URL of the MCR API gateway (no trailing /).
-#   OIDC_OFFLINE_ACCESS         : when true, mydevices-web + admin-console
+#   OIDC_OFFLINE_ACCESS         : when true, mesreunions-web + admin-console
 #                                 request the offline_access scope at login
 #                                 and persist the resulting refresh_token.
 #   OIDC_TOKEN_ENDPOINT         : Keycloak's token endpoint, used by internal-ingester

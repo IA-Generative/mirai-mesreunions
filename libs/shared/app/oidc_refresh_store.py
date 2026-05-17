@@ -1,5 +1,5 @@
 """
-Client-side helper used by services that perform OIDC login (mydevices-web
+Client-side helper used by services that perform OIDC login (mesreunions-web
 and admin-console) to persist a refresh token after a successful Authlib /
 manual code-exchange flow.
 
@@ -12,7 +12,7 @@ or decryption actually happens (CG/admin write side, internal-ingester read side
 
 Why go through device-token-authority instead of a direct DB write ?
 
-  - mydevices-web and admin-console connect to postgres-external by default
+  - mesreunions-web and admin-console connect to postgres-external by default
     (and to admin-int-db-secret in read-only mode for admin). Granting them
     direct write to ``oidc_refresh_tokens`` would expand their DB privileges
     in a way that costs more than this small HTTP indirection.

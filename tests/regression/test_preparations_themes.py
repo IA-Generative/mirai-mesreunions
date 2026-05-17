@@ -40,7 +40,7 @@ def _alive():
         r = requests.get(f"{BASE_URL}/healthz", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"mydevices-web not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"mesreunions-web not reachable at {BASE_URL}: {exc}")
 
 
 def test_themes_suggestions_endpoint_registered(_alive):
@@ -113,7 +113,7 @@ class TestThemesNormalizationSpec:
 # ─── 3) Front — selectors UI thématiques ────────────────────────────────
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_INDEX = _REPO_ROOT / "services" / "mydevices-web" / "app" / "templates" / "index.html"
+_INDEX = _REPO_ROOT / "services" / "mesreunions-web" / "app" / "templates" / "index.html"
 
 
 def test_themes_sections_present_in_template():

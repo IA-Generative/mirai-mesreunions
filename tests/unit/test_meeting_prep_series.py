@@ -17,10 +17,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def _load_meeting_prep():
-    """Importe meeting_prep côté mydevices-web."""
+    """Importe meeting_prep côté mesreunions-web."""
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    path = os.path.join(ROOT, "services", "mydevices-web", "app", "meeting_prep.py")
+    path = os.path.join(ROOT, "services", "mesreunions-web", "app", "meeting_prep.py")
     spec = importlib.util.spec_from_file_location("mp_series_under_test", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -64,7 +64,7 @@ def test_build_prompt_renders_aucun_when_prior_key_points_empty():
 
 def test_all_5_prompt_templates_have_prior_key_points_placeholder():
     prompts_dir = os.path.join(
-        ROOT, "services", "mydevices-web", "app", "prompts",
+        ROOT, "services", "mesreunions-web", "app", "prompts",
     )
     for fname in os.listdir(prompts_dir):
         if not fname.endswith(".txt"):

@@ -50,7 +50,7 @@ spec:
         - protocol: TCP
           port: 8090
 ---
-# ── Network Policy: Allow device-token-authority to receive from mydevices-web ONLY ──
+# ── Network Policy: Allow device-token-authority to receive from mesreunions-web ONLY ──
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -69,7 +69,7 @@ spec:
               zone: external
           podSelector:
             matchLabels:
-              app: mydevices-web
+              app: mesreunions-web
       ports:
         - protocol: TCP
           port: 8091

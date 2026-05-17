@@ -1,8 +1,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 — Build du bundle Vite pour mydevices-web (PR0 toolchain front).
+# Stage 1 — Build du bundle Vite pour mesreunions-web (PR0 toolchain front).
 #
 # Ce stage tourne pour TOUS les services (image partagée), mais le `dist/`
-# produit n'est utile qu'à mydevices-web. L'overhead est minime grâce au
+# produit n'est utile qu'à mesreunions-web. L'overhead est minime grâce au
 # cache BuildKit (~10s npm install au premier build, <1s ensuite si les
 # sources frontend n'ont pas changé).
 #
@@ -12,9 +12,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 FROM node:22-alpine AS node-builder
 WORKDIR /build
-COPY services/mydevices-web/package.json services/mydevices-web/package-lock.json* services/mydevices-web/vite.config.js ./
-COPY services/mydevices-web/scripts/ ./scripts/
-COPY services/mydevices-web/frontend/ ./frontend/
+COPY services/mesreunions-web/package.json services/mesreunions-web/package-lock.json* services/mesreunions-web/vite.config.js ./
+COPY services/mesreunions-web/scripts/ ./scripts/
+COPY services/mesreunions-web/frontend/ ./frontend/
 RUN npm install --no-fund --no-audit \
  && npm run build
 
@@ -43,12 +43,12 @@ COPY services /app/services
 # `glossary_correction` step (KEVENT_GLOSSARY_DIR defaults to /app/glossaire).
 COPY glossaire /app/glossaire
 
-# Inject bundle Vite (utile uniquement pour mydevices-web ; inerte pour les
+# Inject bundle Vite (utile uniquement pour mesreunions-web ; inerte pour les
 # autres services qui n'incluent pas le partial _vite_shell_loader.html).
-COPY --from=node-builder /build/app/static/dist /app/services/mydevices-web/app/static/dist
+COPY --from=node-builder /build/app/static/dist /app/services/mesreunions-web/app/static/dist
 # Inject assets DSFR auto-hébergés (CSS/JS DSFR + fonts Marianne + icônes).
 # Servis par Flask via /static/dsfr/... — référencés par index.html.
-COPY --from=node-builder /build/app/static/dsfr /app/services/mydevices-web/app/static/dsfr
+COPY --from=node-builder /build/app/static/dsfr /app/services/mesreunions-web/app/static/dsfr
 
 # Default: overridden per service
 CMD ["python", "-m", "app.main"]

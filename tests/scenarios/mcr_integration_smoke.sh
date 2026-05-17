@@ -3,7 +3,7 @@
 # Manual end-to-end scenario, run after the prod-bêta switch:
 #   1. apply oidc-refresh-token-encryption secret (Fernet key)
 #   2. apply migration 003
-#   3. deploy mydevices-web + admin-console with OIDC_OFFLINE_ACCESS=true
+#   3. deploy mesreunions-web + admin-console with OIDC_OFFLINE_ACCESS=true
 #   4. wait long enough for users to relog
 #   5. set MCR_GATEWAY_URL on internal-ingester and flip MCR_PUSH_ENABLED=true
 #   6. run this script

@@ -3,18 +3,18 @@
 Couvre :
 
 1. **HTTP smoke** sur ``POST /api/preparations/<id>/glossary`` (nouveau
-   endpoint mydevices-web) : route enregistrée, retourne 302/401 sans
+   endpoint mesreunions-web) : route enregistrée, retourne 302/401 sans
    cookie OIDC (jamais 404).
 
 2. Vérification que le ``user_glossary_terms`` upsert-batch existe bien
    côté ``device-token-authority`` (endpoint de proxy attendu par le
-   handler mydevices-web quand ``global=true``).
+   handler mesreunions-web quand ``global=true``).
 
 3. Garde-fou template : la modale glossaire est bien présente dans
    ``index.html`` avec les selectors attendus côté front.
 
 Skip propre :
-- service ``mydevices-web`` injoignable → skip section HTTP
+- service ``mesreunions-web`` injoignable → skip section HTTP
 - service ``device-token-authority`` injoignable → skip section DTA
 """
 
@@ -30,7 +30,7 @@ BASE_URL = os.getenv("MYDEVICES_WEB_URL", "http://localhost:8080")
 DTA_URL = os.getenv("DEVICE_TOKEN_AUTHORITY_URL", "http://localhost:5000")
 
 
-# ─── 1) HTTP smoke mydevices-web ─────────────────────────────────────────
+# ─── 1) HTTP smoke mesreunions-web ─────────────────────────────────────────
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +39,7 @@ def _alive_web():
         r = requests.get(f"{BASE_URL}/healthz", timeout=2)
         r.raise_for_status()
     except Exception as exc:
-        pytest.skip(f"mydevices-web not reachable at {BASE_URL}: {exc}")
+        pytest.skip(f"mesreunions-web not reachable at {BASE_URL}: {exc}")
     # Sonde feature flag : si glossary endpoint 404 → stack ancienne
     pid = "00000000-0000-0000-0000-000000000000"
     probe = requests.post(
@@ -48,7 +48,7 @@ def _alive_web():
     )
     if probe.status_code == 404:
         pytest.skip(
-            "stack mydevices-web déployée localement ne contient pas "
+            "stack mesreunions-web déployée localement ne contient pas "
             "l'endpoint glossary (Lot 3c). Rebuild + rollout requis."
         )
 
@@ -110,7 +110,7 @@ def test_user_glossary_upsert_batch_endpoint_registered(_alive_dta):
 # ─── 3) Front — selectors modale glossaire ──────────────────────────────
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_INDEX = _REPO_ROOT / "services" / "mydevices-web" / "app" / "templates" / "index.html"
+_INDEX = _REPO_ROOT / "services" / "mesreunions-web" / "app" / "templates" / "index.html"
 
 
 def test_glossary_button_present_in_template():

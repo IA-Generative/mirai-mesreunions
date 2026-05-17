@@ -1,6 +1,6 @@
 """
 Unit tests for the Flask routes of the meeting-prep wizard, hosted in
-``services/mydevices-web/app/main.py`` :
+``services/mesreunions-web/app/main.py`` :
 
   - POST /api/preparations                : génération d'un brief
   - GET  /api/preparations/test-drive     : diagnostic 3-étapes du bouton
@@ -11,7 +11,7 @@ Le module ``main.py`` a deux particularités gênantes en test :
   * il appelle ``create_app()`` à l'import (init DB + bucket S3) — on stubbe
     ``init_tables`` / ``create_session_factory`` / ``require_strong_shared_secret``
     avant le ``exec_module``.
-  * il vit dans un package au tiret (``mydevices-web``), donc on le charge
+  * il vit dans un package au tiret (``mesreunions-web``), donc on le charge
     via ``importlib.util.spec_from_file_location`` à la manière de
     test_meeting_prep_persistence.py.
 
@@ -49,8 +49,8 @@ def _purge_libs_shared_stubs():
                 sys.modules.pop(name, None)
 
 
-def _load_mydevices_web():
-    """Load services/mydevices-web/app/main.py with DB/S3 init stubbed.
+def _load_mesreunions_web():
+    """Load services/mesreunions-web/app/main.py with DB/S3 init stubbed.
 
     Returns the loaded module. The caller can ``monkeypatch.setattr`` on the
     module-level constants (DRIVE_BASE_URL, OIDC_TOKEN_ENDPOINT, …) before
@@ -79,8 +79,8 @@ def _load_mydevices_web():
             sys.modules.pop(_name, None)
 
     # ``main.py`` fait ``from app import meeting_prep`` (le package ``app``
-    # est ``services/mydevices-web/app/``). On rend ce package importable.
-    cg_dir = os.path.join(ROOT, "services", "mydevices-web")
+    # est ``services/mesreunions-web/app/``). On rend ce package importable.
+    cg_dir = os.path.join(ROOT, "services", "mesreunions-web")
     if cg_dir not in sys.path:
         sys.path.insert(0, cg_dir)
     sys.modules.pop("app", None)
@@ -120,10 +120,10 @@ def _load_mydevices_web():
     sys.modules["libs.shared.app.database"] = db_stub
 
     # Drop any cached version so each call returns a fresh module.
-    sys.modules.pop("mydevices_web_under_route_test", None)
+    sys.modules.pop("mesreunions_web_under_route_test", None)
     spec = importlib.util.spec_from_file_location(
-        "mydevices_web_under_route_test",
-        os.path.join(ROOT, "services", "mydevices-web", "app", "main.py"),
+        "mesreunions_web_under_route_test",
+        os.path.join(ROOT, "services", "mesreunions-web", "app", "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -132,12 +132,12 @@ def _load_mydevices_web():
 
 @pytest.fixture
 def cg(monkeypatch):
-    """Test client for mydevices-web, with module-level config knobs set to
+    """Test client for mesreunions-web, with module-level config knobs set to
     sane defaults so the meeting-prep routes consider themselves configured.
 
     Each test can further override these via ``monkeypatch.setattr(mod, …)``.
     """
-    mod = _load_mydevices_web()
+    mod = _load_mesreunions_web()
     # PR3 : les handlers vivent dans app.modules.preparations.routes et
     # importent leurs constantes paresseusement depuis libs.shared.app.config —
     # on patche donc la source pour que les imports lazy voient les valeurs.

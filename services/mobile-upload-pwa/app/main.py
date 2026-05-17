@@ -26,7 +26,7 @@ from libs.shared.app.config import (
     load_ext_db, load_s3_upload, load_s3_processed, RabbitMQConfig, SECRET_KEY,
     MAX_UPLOADS_PER_SESSION, UPLOAD_MAX_FILE_SIZE_MB, ALLOWED_AUDIO_EXTENSIONS,
     UPLOAD_STATUS_VIEW_TTL_MINUTES, INTERNAL_API_TOKEN, UPLOAD_EXPIRY_GRACE_SECONDS,
-    MYDEVICES_PORTAL_URL, TOKEN_EXPIRY_WARNING_DAYS,
+    MESREUNIONS_PORTAL_URL, TOKEN_EXPIRY_WARNING_DAYS,
 )
 from libs.shared.app.models import ExternalBase, UploadSession, UploadedFile, SessionStatus, UploadStatus
 from libs.shared.app.database import create_session_factory, init_tables
@@ -56,7 +56,7 @@ _purge_thread_started = False
 EXTERNAL_PURGE_INTERVAL_SECONDS = max(60, int(os.getenv("EXTERNAL_PURGE_INTERVAL_SECONDS", "86400")))
 EXTERNAL_PURGE_MAX_AGE_HOURS = max(1, int(os.getenv("EXTERNAL_PURGE_MAX_AGE_HOURS", "12")))
 EXTERNAL_PURGE_LOCK_ID = int(os.getenv("EXTERNAL_PURGE_LOCK_ID", "810018001"))
-DEVICE_API_PROXY_BASE_URL = os.getenv("DEVICE_API_PROXY_BASE_URL", "http://mydevices-web:8080").rstrip("/")
+DEVICE_API_PROXY_BASE_URL = os.getenv("DEVICE_API_PROXY_BASE_URL", "http://mesreunions-web:8080").rstrip("/")
 TOKEN_ISSUER_ENROLL_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/enroll-proxy"
 TOKEN_ISSUER_VALIDATE_DEVICE_URL = f"{DEVICE_API_PROXY_BASE_URL}/api/device/validate-proxy"
 DEVICE_REVALIDATE_INTERVAL_SECONDS = max(60, int(os.getenv("DEVICE_REVALIDATE_INTERVAL_SECONDS", "14400")))
@@ -586,7 +586,7 @@ def upload_page(qr_token):
         device_revalidate_max_failure_seconds=DEVICE_REVALIDATE_MAX_FAILURE_SECONDS,
         shared_manual=request.args.get("shared_manual") == "1",
         session_expires_at=session_obj.expires_at.isoformat() if session_obj.expires_at else None,
-        mydevices_portal_url=MYDEVICES_PORTAL_URL,
+        mesreunions_portal_url=MESREUNIONS_PORTAL_URL,
         token_expiry_warning_days=TOKEN_EXPIRY_WARNING_DAYS,
     )
 
@@ -870,7 +870,7 @@ def api_upload(qr_token):
 
 @app.route("/api/queue-status")
 def api_queue_status():
-    """Proxy léger vers mydevices-web /api/queue-status (qui proxy
+    """Proxy léger vers mesreunions-web /api/queue-status (qui proxy
     internal-ingester, qui lui interroge la gateway Kevent).
 
     Query: ``job_id`` (optionnel). Sert la même réponse QueueSummary —
@@ -893,7 +893,7 @@ def api_queue_status():
         )
         return resp.json(), resp.status_code
     except Exception:
-        logger.warning("queue-status proxy to mydevices-web failed", exc_info=True)
+        logger.warning("queue-status proxy to mesreunions-web failed", exc_info=True)
         from datetime import datetime as _dt, timezone as _tz
         return jsonify({
             "pending_total": None, "processing_total": None,

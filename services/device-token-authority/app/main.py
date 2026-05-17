@@ -2,7 +2,7 @@
 Token Issuer Service (Zone Interne)
 ====================================
 Seule autorité de génération des tokens de session (simple_code + qr_token).
-Le mydevices-web (zone externe) appelle cette API pour obtenir un token.
+Le mesreunions-web (zone externe) appelle cette API pour obtenir un token.
 La zone interne est ainsi maître des identifiants de liaison.
 
 FLUX :
@@ -108,7 +108,7 @@ def healthz():
 def issue_token():
     """
     Génère un couple (simple_code, qr_token) et l'enregistre en base interne.
-    Appelé par le mydevices-web (zone externe) via API authentifiée.
+    Appelé par le mesreunions-web (zone externe) via API authentifiée.
     """
     if not verify_token():
         logger.warning("Unauthorized token issue request from %s", request.remote_addr)
@@ -767,7 +767,7 @@ def revoke_device(device_id: str):
 def delete_session(simple_code: str):
     """Permanently remove an issued token + its options + any linked devices.
 
-    Used by mydevices-web when the user clicks "Supprimer cette session" on
+    Used by mesreunions-web when the user clicks "Supprimer cette session" on
     a session card. Cascades:
       - issued_token_options (FK on simple_code)
       - device_enrollments  (FK on simple_code, may be 0 rows for never-enrolled codes)
@@ -818,9 +818,9 @@ def delete_session(simple_code: str):
 def delete_file_by_session():
     """Permanently remove a user_audio_files row + its transcription_events.
 
-    Called by mydevices-web quand l'utilisateur clique "Supprimer ce
+    Called by mesreunions-web quand l'utilisateur clique "Supprimer ce
     fichier" depuis mydevices. La suppression côté externe (uploaded_files
-    + S3) est faite par mydevices-web avant cet appel ; cette route ne
+    + S3) est faite par mesreunions-web avant cet appel ; cette route ne
     s'occupe que de la zone interne.
 
     Le lookup se fait sur ``(user_sub, simple_code, original_filename)`` :
@@ -1058,7 +1058,7 @@ def oidc_refresh_store():
     """
     UPSERT a (Fernet-encrypted) OIDC refresh token, keyed by user_sub.
 
-    Called by mydevices-web and admin-console after a successful OIDC login
+    Called by mesreunions-web and admin-console after a successful OIDC login
     when offline_access was requested. The plaintext token is never sent in
     the body — the caller has already encrypted it with the shared Fernet
     key via libs.shared.app.secrets_crypto.
@@ -1193,7 +1193,7 @@ def admin_revoke_all_devices():
 # ─── Preparation CRUD (zone interne) ────────────────────────
 #
 # La table `preparations` vit en zone INTERNE (postgres-internal). Le
-# mydevices-web (zone externe) relaie via les endpoints ci-dessous, comme
+# mesreunions-web (zone externe) relaie via les endpoints ci-dessous, comme
 # il le fait pour rename/delete des fichiers (cf. rename_file_by_session,
 # delete_file_by_session). Migration 012 a éclaté `meeting_briefs` en
 # `preparations` (amont-réunion) et `meetings` (post-réunion).
@@ -1498,7 +1498,7 @@ def list_preparations_with_counts():
 @app.route("/api/v1/preparations/purge", methods=["POST"])
 def purge_preparations():
     """Hard-delete des préparations en corbeille depuis > N jours pour
-    `user_sub`. Appelé par mydevices-web (`_purge_expired_trash`).
+    `user_sub`. Appelé par mesreunions-web (`_purge_expired_trash`).
     Body: `{"user_sub": "...", "older_than_days": 30}`.
     """
     if not verify_token():

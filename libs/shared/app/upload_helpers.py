@@ -1,6 +1,6 @@
 """
 Helpers d'upload partagés entre mobile-upload-pwa (zone externe, flow QR/PWA)
-et mydevices-web (zone externe, flow upload local OIDC).
+et mesreunions-web (zone externe, flow upload local OIDC).
 
 Concentre la mécanique commune : validation extension, génération du nom S3,
 PUT S3, publication du message AV scan. La logique propre à chaque endpoint
