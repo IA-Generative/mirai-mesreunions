@@ -568,6 +568,14 @@ def api_file_transcript_status(file_id):
             "reformulated_text": audio.get("reformulated_text"),
             "absentee_summary": audio.get("absentee_summary"),
             "meeting_analysis_json": audio.get("meeting_analysis_json"),
+            # Compteur + horodatage des régénérations (pour affichage du
+            # numéro de version dans le bandeau de statut + statistiques
+            # côté admin).
+            "reprocess_version": audio.get("reprocess_version") or 0,
+            "last_reprocessed_at": (
+                audio.get("last_reprocessed_at").isoformat()
+                if audio.get("last_reprocessed_at") else None
+            ),
         })
     finally:
         db.close()

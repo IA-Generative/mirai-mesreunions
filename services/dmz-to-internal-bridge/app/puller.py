@@ -1728,6 +1728,14 @@ def audio_lookup():
             "meeting_datetime": (
                 row.meeting_datetime.isoformat() if row.meeting_datetime else None
             ),
+            # Compteur + horodatage des régénérations LLM (utilisé pour
+            # afficher "Version N · dernière régen 14:32" dans le bandeau
+            # de statut côté frontend + statistiques admin).
+            "reprocess_version": int(row.reprocess_version or 0),
+            "last_reprocessed_at": (
+                row.last_reprocessed_at.isoformat()
+                if row.last_reprocessed_at else None
+            ),
             # PR2d : liens canoniques meeting/preparation. L'alias legacy
             # ``meeting_brief_id`` est gardé en double pour migration progressive
             # des consommateurs (à retirer après PR3/PR4).

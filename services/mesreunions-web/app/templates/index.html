@@ -1757,6 +1757,19 @@
         .file-detail-info-btn--inline {
             margin-left: auto;
         }
+        /* Pulse du bouton (i) quand un traitement est en cours côté pipeline
+           IA (status `kevent_reprocessing`, `kevent_transcribing`, etc.). Le
+           bouton clignote en bleu pour signaler "il se passe quelque chose,
+           ouvre-moi pour voir le détail des étapes". */
+        @keyframes file-detail-info-pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(29,78,216,0.55); background: #dbeafe; }
+            50%      { box-shadow: 0 0 0 6px rgba(29,78,216,0); background: #93c5fd; }
+        }
+        .file-detail-info-btn--pulse {
+            animation: file-detail-info-pulse 1.4s ease-in-out infinite;
+            color: #0c4498 !important;
+            border-color: #1d4ed8 !important;
+        }
         /* Bloc d'édition "Date de la réunion" + bouton reset.
            datetime-local input compact pour rester homogène avec le DSFR. */
         .file-detail-meeting-row {

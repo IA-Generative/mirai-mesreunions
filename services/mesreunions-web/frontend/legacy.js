@@ -3617,6 +3617,9 @@ function updateTranscribeRail(fileId, engine, status) {
     } else if (s === 'disabled') {
         cls = '';
         label_text = `${baseName} désactivée`;
+    } else if (s === 'kevent_reprocessing') {
+        cls = 'active';
+        label_text = `Régénération en cours…`;
     } else if (s) {
         cls = 'active';
         label_text = `${baseName} en cours`;
@@ -3636,6 +3639,7 @@ const TRANSCRIPT_STATUS_LABELS = {
     'kevent_completed':            { label: 'Pipeline Kevent terminé', polling: false },
     'kevent_partially_completed':  { label: 'Pipeline Kevent partiel — certaines étapes ont échoué', polling: false },
     'kevent_failed':               { label: 'Accès au backend IA refusé ou indisponible', polling: false },
+    'kevent_reprocessing':         { label: 'Régénération en cours — chaîne LLM (glossaire → CR → synthèses)', polling: true },
     'mcr_pushed':                  { label: 'Poussé vers MCR', polling: false },
     'mcr_auth_failed':             { label: 'MCR : échec auth', polling: false },
     'mcr_rejected':                { label: 'MCR : rejeté', polling: false },
@@ -3779,18 +3783,30 @@ async function loadTranscriptStatus(fileId, container) {
             'meeting-cr':              { label: 'Compte-rendu structuré',                       desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
         };
         let stepsDetails = '';
-        // On n'affiche le diagnostic que lorsque la transcription est terminée
-        // (en cours = pas encore d'outputs) — sinon ça ferait du bruit.
+        // Diagnostic visible quand la transcription est terminée OU pendant
+        // une régénération (on voit la chaîne LLM se rejouer étape par
+        // étape sur les outputs existants — ils restent visibles pendant
+        // le reprocess et sont écrasés à la fin).
         const showSteps = (status === 'kevent_completed'
                           || status === 'kevent_partially_completed'
                           || status === 'kevent_failed'
+                          || status === 'kevent_reprocessing'
                           || status === 'completed' || status === 'failed');
+        const isReprocessing = (status === 'kevent_reprocessing');
         if (showSteps) {
             const rows = Object.keys(STEP_INFO).map(k => {
                 const info = STEP_INFO[k];
                 const ok = !!outputs[k];
-                const icon = ok ? '✓' : '✗';
-                const color = ok ? '#10b981' : '#b91c1c';
+                let icon, color;
+                if (isReprocessing && k !== 'transcript' && k !== 'transcript-tagged') {
+                    // En reprocess : étapes LLM en train d'être rejouées
+                    // (glossary/cleaned/reformulated/meeting-cr). Whisper et
+                    // diarisation NE sont PAS rejoués (reprocess = LLM only).
+                    icon = '🔄'; color = '#1d4ed8';
+                } else {
+                    icon = ok ? '✓' : '✗';
+                    color = ok ? '#10b981' : '#b91c1c';
+                }
                 const note = (!ok && k === 'transcript-tagged')
                     ? ' <small style="color:#94a3b8">(pyannote a peut-être eu un problème avec ce signal — voir logs côté admin)</small>'
                     : '';
@@ -3800,16 +3816,47 @@ async function loadTranscriptStatus(fileId, container) {
                     <span class="status-step-desc">${escapeHtml(info.desc)}${note}</span>
                 </div>`;
             }).join('');
-            stepsDetails = `<details class="status-details">
-                <summary>Voir le détail des étapes</summary>
+            const summaryLabel = isReprocessing
+                ? 'Voir la régénération en cours, étape par étape'
+                : 'Voir le détail des étapes';
+            stepsDetails = `<details class="status-details" ${isReprocessing ? 'open' : ''}>
+                <summary>${summaryLabel}</summary>
                 <div class="status-step-list">${rows}</div>
             </details>`;
+        }
+        // Badge regen count : si reprocess_version > 0, on affiche
+        // "(version N · dernière régen 14:32)" en petit après le label.
+        // Permet à l'utilisateur de voir d'un coup d'œil combien de fois
+        // les CR ont été régénérés sur ce fichier (statistique utile).
+        const rpv = data.reprocess_version || 0;
+        let regenBadge = '';
+        if (rpv > 0) {
+            let when = '';
+            if (data.last_reprocessed_at) {
+                try {
+                    const d = new Date(data.last_reprocessed_at);
+                    when = ` · dernière ${d.toLocaleString('fr-FR', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' })}`;
+                } catch (e) {}
+            }
+            regenBadge = ` <small style="color:#0c4498;background:#dbeafe;padding:0.1rem 0.4rem;border-radius:8px;font-weight:600;" title="Régénérations LLM effectuées sur ce fichier">↻ ${rpv}${when}</small>`;
         }
         const statusBadge = `<div class="transcript-status-line ${bannerClass}">
             ${leadIcon}
             <span class="transcript-status-spinner ${dotClass}"></span>
-            <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}</span>
+            <span class="transcript-status-label">${escapeHtml(meta.label)}${engine ? ` <small style="color:#94a3b8">(${escapeHtml(engine)})</small>` : ''}${regenBadge}</span>
         </div>${stepsDetails}`;
+
+        // Fait pulser le bouton (i) "Détails techniques" tant qu'un
+        // traitement est en cours (polling). Permet de signaler que la
+        // fiche est en train de bouger sans rien lire d'autre.
+        const isInProgressNow = !!(meta && meta.polling);
+        const infoBtnEl = document.querySelector(`[data-file-info-btn="${CSS.escape(fileId)}"]`);
+        if (infoBtnEl) {
+            infoBtnEl.classList.toggle('file-detail-info-btn--pulse', isInProgressNow);
+            infoBtnEl.setAttribute('title', isInProgressNow
+                ? `Traitement en cours (${meta.label}) — cliquer pour voir les détails`
+                : 'Détails techniques (statut, qualité, étapes IA, normalisation)');
+        }
 
         // Nouvelle UX downloads : on liste les TYPES de document (pas les
         // formats × types), avec à droite une rangée de boutons-icône, un
