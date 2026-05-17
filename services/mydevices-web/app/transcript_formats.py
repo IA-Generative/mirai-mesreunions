@@ -314,16 +314,23 @@ def _fmt_date_fr(iso: str | None) -> str:
 # en sous-titre, sous "Mes Réunions IA"). Source de vérité unique :
 # évite d'avoir à mapper côté routes.
 #
-# Règle : auto-porteur pour un néophyte. Pas de jargon ("brute",
-# "nettoyée", "corrigée" sans contexte) — on dit explicitement ce
-# qui a été fait au texte.
+# Convention 2026-05-17 — 3 macro-libellés exposés à l'utilisateur :
+#   • Transcription nettoyée  : texte lisible (cumul des fix Whisper +
+#                               sigles + hésitations)
+#   • Synthèse narrative      : reformulation au discours indirect
+#                               ("X explique que…") pour lecture rapide
+#   • Compte-rendu structuré  : analyse 5 sections (acteurs, thèmes,
+#                               décisions, gaps, recommandations)
+# Les 3 intermédiaires (raw, tagged, corrected) sont des étapes du
+# pipeline ; leur libellé reste descriptif pour cohérence si l'user
+# les télécharge en mode avancé via URL directe.
 DOCUMENT_KIND_LABELS = {
-    "transcript":              "Transcription mot-à-mot",
-    "transcript-tagged":       "Transcription avec identification des interlocuteurs",
-    "transcript-corrected":    "Transcription avec sigles corrigés",
-    "transcript-cleaned":      "Transcription sans hésitations ni redites",
-    "transcript-reformulated": "Reformulation au discours indirect",
-    "meeting-cr":              "Compte-rendu de réunion structuré",
+    "transcript":              "Transcription brute (étape intermédiaire)",
+    "transcript-tagged":       "Transcription par interlocuteur (étape intermédiaire)",
+    "transcript-corrected":    "Transcription avec sigles corrigés (étape intermédiaire)",
+    "transcript-cleaned":      "Transcription nettoyée",
+    "transcript-reformulated": "Synthèse narrative",
+    "meeting-cr":              "Compte-rendu structuré",
 }
 
 

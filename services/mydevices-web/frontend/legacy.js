@@ -261,12 +261,12 @@ async function openFileInfoModal(fileId) {
         return;
     }
     const STEPS = {
-        'transcript':              { label: 'Transcription brute',          desc: 'Texte issu de Whisper (faster-whisper).' },
-        'transcript-tagged':       { label: 'Identification des locuteurs', desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur monolocuteur/audio très court.' },
-        'transcript-corrected':    { label: 'Correction des sigles',        desc: 'LLM relit avec un glossaire métier pour corriger les acronymes.' },
-        'transcript-cleaned':      { label: 'Nettoyage hors-sujet',         desc: 'LLM retire les passages parasites (faux départs, bruits verbalisés).' },
-        'transcript-reformulated': { label: 'Discours indirect',            desc: 'LLM reformule au style indirect pour lecture rapide.' },
-        'meeting-cr':              { label: 'Compte-rendu structuré',      desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
+        'transcript':              { label: 'Transcription brute (Whisper)',                   desc: 'Texte issu de Whisper (faster-whisper, gateway Mirai). Étape obligatoire pour toutes les autres.' },
+        'transcript-tagged':       { label: 'Identification des interlocuteurs',               desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur monolocuteur/audio très court.' },
+        'transcript-corrected':    { label: 'Correction des sigles',                            desc: 'LLM relit avec votre glossaire métier pour corriger les acronymes mal transcrits (ex: EHS → EFS).' },
+        'transcript-cleaned':      { label: 'Suppression des hésitations et redites',          desc: 'LLM retire les passages parasites du discours oral (faux départs, "euh", redites, bruits verbalisés).' },
+        'transcript-reformulated': { label: 'Synthèse narrative',                               desc: 'LLM reformule au style indirect ("X explique que…") pour une lecture rapide.' },
+        'meeting-cr':              { label: 'Compte-rendu structuré',                          desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
     };
     // État par étape :
     //   ok    → output présent (vert ✓)
@@ -700,7 +700,7 @@ if (document.readyState === 'loading') {
 const deviceRetentionDays = window.DEVICE_RETENTION_DAYS;
 
 // Mode "Mode avancé" pour les téléchargements : OFF (défaut) montre
-// le CR + audio interne + Transcription nettoyée + Discours indirect, le
+// le CR + audio interne + Transcription nettoyée + Synthèse narrative, le
 // reste va dans le menu "Autres". ON affiche tout à plat (pas de menu).
 // Persistant en sessionStorage. Astuce power-user non documentée : Alt
 // active un peek temporaire (sans changer l'état persistant) — pratique
@@ -1868,12 +1868,18 @@ async function loadSessions(opts) {
 // TODO follow-up: button to send the rendered document to the user's Drive
 // folder. Out of scope for this PR — needs OAuth scope + Drive provider config.
 
+// Libellés du dropdown "Autres téléchargements" (vue détail).
+// 3 macro-libellés exposés par défaut (cf SIMPLE_OTHER_KINDS) :
+// Transcription nettoyée + Synthèse narrative ; + le CR via son
+// propre dropdown. Les 3 intermédiaires (raw/tagged/corrected) sont
+// visibles UNIQUEMENT en mode avancé pour debug — d'où l'étiquette
+// "étape intermédiaire" qui dissipe la confusion utilisateur.
 const TRANSCRIPT_KIND_LABELS = {
-    'transcript':              'Transcription brute',
-    'transcript-tagged':       'Transcription par locuteur',
-    'transcript-corrected':    'Transcription (sigles corrigés)',
+    'transcript':              'Transcription brute (étape intermédiaire)',
+    'transcript-tagged':       'Transcription par interlocuteur (étape intermédiaire)',
+    'transcript-corrected':    'Transcription avec sigles corrigés (étape intermédiaire)',
     'transcript-cleaned':      'Transcription nettoyée',
-    'transcript-reformulated': 'Discours indirect',
+    'transcript-reformulated': 'Synthèse narrative',
 };
 
 const TRANSCRIPT_KIND_FORMATS = {
@@ -2001,11 +2007,11 @@ const TRANSCRIPT_STATUS_LABELS = {
 // Étapes du pipeline IA — ordre d'exécution. Réutilisé pour construire la
 // checklist de progression dans le tooltip du (i) et le modal Détails.
 const PIPELINE_STEPS = [
-    { key: 'transcript',              label: 'Transcription brute' },
-    { key: 'transcript-tagged',       label: 'Identification des locuteurs' },
+    { key: 'transcript',              label: 'Transcription brute (Whisper)' },
+    { key: 'transcript-tagged',       label: 'Identification des interlocuteurs' },
     { key: 'transcript-corrected',    label: 'Correction des sigles' },
-    { key: 'transcript-cleaned',      label: 'Nettoyage hors-sujet' },
-    { key: 'transcript-reformulated', label: 'Discours indirect' },
+    { key: 'transcript-cleaned',      label: 'Suppression des hésitations et redites' },
+    { key: 'transcript-reformulated', label: 'Synthèse narrative' },
     { key: 'meeting-cr',              label: 'Compte-rendu structuré' },
 ];
 
@@ -2126,12 +2132,12 @@ async function loadTranscriptStatus(fileId, container) {
         // outputs absents (visible uniquement quand la transcription
         // est terminée, partiellement ou non, ou échouée).
         const STEP_INFO = {
-            'transcript':              { label: 'Transcription brute',          desc: 'Texte issu du Whisper (faster-whisper). Étape obligatoire pour toutes les autres.' },
-            'transcript-tagged':       { label: 'Identification des locuteurs', desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur les enregistrements très courts ou monolocuteurs.' },
-            'transcript-corrected':    { label: 'Correction des sigles',        desc: 'LLM relit le texte avec un glossaire pour corriger les acronymes mal entendus (ex: "EFS" → "EHS" repassé en "EFS").' },
-            'transcript-cleaned':      { label: 'Nettoyage hors-sujet',         desc: 'LLM retire les passages parasites (faux départs, bruits ambiants verbalisés).' },
-            'transcript-reformulated': { label: 'Discours indirect',            desc: 'LLM reformule au style indirect ("X a dit que...") pour une lecture rapide.' },
-            'meeting-cr':              { label: 'Compte-rendu structuré',      desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
+            'transcript':              { label: 'Transcription brute (Whisper)',                desc: 'Texte issu du Whisper (faster-whisper, gateway Mirai). Étape obligatoire pour toutes les autres.' },
+            'transcript-tagged':       { label: 'Identification des interlocuteurs',            desc: 'Diarisation pyannote — sépare le texte par interlocuteur. Peut échouer sur les enregistrements très courts ou monolocuteurs.' },
+            'transcript-corrected':    { label: 'Correction des sigles',                         desc: 'LLM relit le texte avec votre glossaire pour corriger les acronymes mal entendus (ex: "EHS" repassé en "EFS").' },
+            'transcript-cleaned':      { label: 'Suppression des hésitations et redites',       desc: 'LLM retire les passages parasites du discours oral (faux départs, "euh", redites, bruits ambiants verbalisés).' },
+            'transcript-reformulated': { label: 'Synthèse narrative',                            desc: 'LLM reformule au style indirect ("X explique que…") pour une lecture rapide.' },
+            'meeting-cr':              { label: 'Compte-rendu structuré',                       desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
         };
         let stepsDetails = '';
         // On n'affiche le diagnostic que lorsque la transcription est terminée
