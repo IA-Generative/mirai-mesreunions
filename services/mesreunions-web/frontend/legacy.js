@@ -277,12 +277,27 @@ async function openFileInfoModal(fileId) {
     const isFail = (window._FAILED_TS && window._FAILED_TS.has(status))
         || ['failed','kevent_failed','mcr_auth_failed','mcr_rejected','mcr_push_failed'].includes(status);
     const isRunning = ['pending','processing','kevent_queued','kevent_transcribing','kevent_processing'].includes(status);
+    // Régénération LLM-only : les 4 étapes glossary/cleaned/reformulated/
+    // meeting-cr sont rejouées. Whisper + diarisation NE sont PAS rejoués.
+    // On marque les 4 étapes "à refaire" en bleu pendant le reprocess
+    // pour signaler clairement que les anciens outputs sont obsolètes.
+    const isReprocessing = (status === 'kevent_reprocessing');
+    const REPROCESSED_KEYS = new Set([
+        'transcript-corrected',
+        'transcript-cleaned',
+        'transcript-reformulated',
+        'meeting-cr',
+    ]);
     let runMarked = false;
     const stepsHtml = Object.keys(STEPS).map(k => {
         const ok = !!(cached.outputs || {})[k];
         let icon, color, suffix = '';
-        if (ok) { icon = '✓'; color = '#10b981'; }
-        else if (isFail) {
+        if (isReprocessing && REPROCESSED_KEYS.has(k)) {
+            icon = '⏳'; color = '#1d4ed8';
+            suffix = ` <small style="color:#1d4ed8;font-weight:600;">— en cours de régénération</small>`;
+        } else if (ok) {
+            icon = '✓'; color = '#10b981';
+        } else if (isFail) {
             icon = '✗'; color = '#b91c1c';
             suffix = ` <small style="color:#94a3b8">(échec du pipeline — étape non aboutie)</small>`;
         } else if (isRunning && !runMarked) {
@@ -832,6 +847,7 @@ function _uploadStateLabel(status) {
 // pipeline d'upload (file.status) et de transcription (Kevent/MCR).
 const _TRANSCRIPT_SUCCESS = new Set(['completed', 'kevent_completed', 'mcr_pushed']);
 const _TRANSCRIPT_PROCESSING = new Set(['processing', 'kevent_transcribing', 'kevent_processing']);
+const _TRANSCRIPT_REPROCESSING = new Set(['kevent_reprocessing']);
 const _TRANSCRIPT_QUEUED = new Set(['pending', 'kevent_queued']);
 const _TRANSCRIPT_PARTIAL = new Set(['kevent_partially_completed']);
 const _TRANSCRIPT_FAILED = new Set([
@@ -853,6 +869,11 @@ function _statusTagInfo(status, opts) {
     }
     if (_TRANSCRIPT_FAILED.has(status) || _UPLOAD_FAILED.has(status)) {
         return { label: 'Erreur', icon: 'fr-icon-error-warning-line', kind: 'error' };
+    }
+    if (_TRANSCRIPT_REPROCESSING.has(status)) {
+        // kind=processing pour réutiliser la CSS de pulse existante
+        // (filerowStatusTagPulse) → l'icône clignote dans la liste.
+        return { label: 'Régénération en cours', icon: 'fr-icon-refresh-line', kind: 'processing' };
     }
     if (_TRANSCRIPT_PROCESSING.has(status) || UPLOAD_IN_PROGRESS_STATES.has(status)) {
         return { label: 'En traitement', icon: 'fr-icon-time-line', kind: 'processing' };
