@@ -827,6 +827,218 @@
         }
         .trash-item-name { flex: 1; min-width: 0; font-size: 0.85rem; }
         .trash-item-meta { font-size: 0.72rem; color: #94a3b8; }
+        /* Quand le nouveau module est actif, on cache le header legacy
+           (titre + sort + boutons upload + purge) qui est redessiné par
+           le module dans #sessions-list. Les inputs file restent dans
+           le DOM pour que les boutons du nouveau header puissent les
+           déclencher. */
+        .meetings-new-active .dsfr-inline-actions { display: none !important; }
+        .meetings-new-active #sessions-table-header { display: none !important; }
+        /* Garde la zone "transferts en cours" + "upload progress" visible
+           (peuplée en arrière-plan par legacy.js, utile pendant upload). */
+
+        /* ═══════════════════════════════════════════════════════════════
+           NOUVEAU module tabs/meetings.js (refonte UI 2026-05-17).
+           Header séparé + liste à grille fixe + SVG inline pour le status
+           (pas de dépendance au font DSFR fr-icon-*). Préfixe meetings-tab
+           et meeting-row pour isoler des styles legacy.
+           ═══════════════════════════════════════════════════════════════ */
+        .meetings-tab-header {
+            background: #fff; border-bottom: 1px solid #e2e8f0;
+            padding: 0.9rem 1rem 0.7rem;
+            position: sticky; top: 0; z-index: 5;
+        }
+        .meetings-tab-header-top {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 1rem; flex-wrap: wrap;
+        }
+        .meetings-tab-title {
+            font-size: 1.15rem; font-weight: 600; margin: 0;
+            color: #0f172a; display: flex; align-items: baseline; gap: 0.5rem;
+        }
+        .meetings-tab-count {
+            font-size: 0.78rem; color: #64748b; font-weight: 500;
+            background: #f1f5f9; padding: 0.1rem 0.5rem; border-radius: 999px;
+        }
+        .meetings-tab-actions {
+            display: inline-flex; gap: 0.4rem; align-items: center;
+        }
+        .meetings-tab-btn {
+            font-size: 0.85rem; line-height: 1.2;
+            padding: 0.42rem 0.9rem; border-radius: 6px;
+            border: 1px solid transparent; cursor: pointer;
+            font-weight: 500; white-space: nowrap;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .meetings-tab-btn--primary {
+            background: #1d4ed8; color: #fff; border-color: #1d4ed8;
+        }
+        .meetings-tab-btn--primary:hover { background: #1e40af; border-color: #1e40af; }
+        .meetings-tab-btn--secondary {
+            background: #fff; color: #1d4ed8; border-color: #1d4ed8;
+        }
+        .meetings-tab-btn--secondary:hover { background: #eff6ff; }
+        .meetings-tab-btn--ghost {
+            background: transparent; color: #475569; border-color: #cbd5e1;
+        }
+        .meetings-tab-btn--ghost:hover { background: #f1f5f9; color: #0f172a; }
+        .meetings-tab-btn--danger {
+            background: #b91c1c; color: #fff; border-color: #b91c1c;
+        }
+        .meetings-tab-btn--danger:hover { background: #991b1b; }
+        .meetings-tab-header-hint {
+            font-size: 0.72rem; color: #94a3b8; margin-top: 0.4rem;
+        }
+        .meetings-tab-header-hint kbd {
+            background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px;
+            padding: 0.05rem 0.3rem; font-family: inherit; font-size: 0.7rem;
+            color: #475569;
+        }
+        .meetings-tab-bulkbar {
+            margin-top: 0.6rem; padding: 0.5rem 0.7rem;
+            background: #fef3c7; border: 1px solid #fde68a; border-radius: 6px;
+            display: flex; align-items: center; gap: 0.6rem;
+            font-size: 0.85rem; color: #92400e;
+        }
+        .meetings-tab-bulkbar-count { margin-right: auto; }
+        .meetings-tab-empty {
+            padding: 2rem 1rem; text-align: center; color: #64748b;
+            font-size: 0.9rem;
+        }
+        .meetings-tab-list { padding: 0; }
+        .meeting-row {
+            border-bottom: 1px solid #f1f5f9;
+            transition: background 0.15s;
+        }
+        .meeting-row:hover { background: #f8fafc; }
+        .meeting-row.is-expanded { background: #f8fafc; }
+        .meeting-row.is-selected { background: #fef9c3; }
+        .meeting-row-main {
+            display: grid;
+            grid-template-columns:
+                0                          /* checkbox (révélée en bulk mode) */
+                32px                       /* status icône */
+                minmax(0, 1fr)             /* titre */
+                auto                       /* date */
+                4.5em                      /* durée alignée à droite */
+                32px;                      /* chevron */
+            align-items: center; gap: 0.55rem;
+            padding: 0.55rem 1rem;
+            min-height: 40px;
+        }
+        /* Mode bulk : on révèle la checkbox (1ère colonne passe de 0 à 24px). */
+        body.meetings-bulk-active .meeting-row-main {
+            grid-template-columns:
+                24px                       /* checkbox visible */
+                32px                       /* status */
+                minmax(0, 1fr)             /* titre */
+                auto                       /* date */
+                4.5em                      /* durée */
+                32px;                      /* chevron */
+        }
+        .meeting-row-check {
+            display: inline-flex; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none; transition: opacity 0.15s;
+        }
+        body.meetings-bulk-active .meeting-row-check {
+            opacity: 1; pointer-events: auto;
+        }
+        .meeting-row-check input { width: 16px; height: 16px; cursor: pointer; margin: 0; }
+        .meeting-row-status {
+            width: 32px; height: 32px;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .meeting-status-svg {
+            width: 28px; height: 28px; display: block;
+        }
+        /* Animation rotation continue pour le ring quand pipeline en cours. */
+        .meeting-status-ring.is-spinning {
+            transform-origin: 12px 12px;
+            animation: meetingStatusSpin 1.6s linear infinite;
+        }
+        @keyframes meetingStatusSpin {
+            from { transform: rotate(-90deg); }
+            to { transform: rotate(270deg); }
+        }
+        .meeting-row-title-btn {
+            background: none; border: none; padding: 0;
+            text-align: left; cursor: pointer;
+            min-width: 0; overflow: hidden;
+            color: #1d4ed8; font-weight: 500; font-size: 0.92rem;
+            line-height: 1.3;
+        }
+        .meeting-row-title-btn:hover { color: #1e40af; }
+        .meeting-row-title-text {
+            display: block; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        .meeting-row-date {
+            font-size: 0.78rem; color: #475569; white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }
+        .meeting-row-dur {
+            font-size: 0.78rem; color: #94a3b8; white-space: nowrap;
+            text-align: right; font-variant-numeric: tabular-nums;
+        }
+        .meeting-row-chevron {
+            background: none; border: none; cursor: pointer;
+            color: #94a3b8; padding: 0; width: 32px; height: 32px;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: color 0.15s, transform 0.2s;
+        }
+        .meeting-row-chevron:hover { color: #1d4ed8; }
+        .meeting-row.is-expanded .meeting-row-chevron {
+            transform: rotate(180deg); color: #1d4ed8;
+        }
+        .meeting-chevron-svg { width: 18px; height: 18px; display: block; }
+        .meeting-row-expanded {
+            padding: 0.4rem 1rem 0.85rem calc(32px + 2 * 0.55rem + 1rem);
+            background: #f8fafc;
+            font-size: 0.85rem; color: #475569;
+        }
+        body.meetings-bulk-active .meeting-row-expanded {
+            padding-left: calc(24px + 32px + 3 * 0.55rem + 1rem);
+        }
+        .meeting-row-expanded-row {
+            display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+            margin-bottom: 0.5rem;
+        }
+        .meeting-row-source {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            font-size: 0.78rem; color: #475569;
+        }
+        .meeting-source-svg {
+            width: 16px; height: 16px; color: #64748b; display: block;
+        }
+        .meeting-row-created { font-size: 0.78rem; color: #94a3b8; }
+        .meeting-row-summary { margin: 0.4rem 0; }
+        .meeting-row-summary-kp {
+            white-space: pre-wrap; font-family: inherit;
+            font-size: 0.82rem; color: #334155; margin: 0;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;
+            padding: 0.5rem 0.7rem;
+            max-height: 8em; overflow-y: auto;
+        }
+        .meeting-row-summary-loading, .meeting-row-summary-empty {
+            font-size: 0.78rem; color: #94a3b8;
+        }
+        .meeting-row-expanded-actions {
+            display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap;
+        }
+        .meeting-row-action-btn {
+            font-size: 0.78rem; padding: 0.32rem 0.7rem; border-radius: 5px;
+            background: #fff; color: #475569; border: 1px solid #cbd5e1;
+            cursor: pointer; font-weight: 500;
+        }
+        .meeting-row-action-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .meeting-row-action-btn--danger {
+            color: #b91c1c; border-color: #fca5a5;
+        }
+        .meeting-row-action-btn--danger:hover {
+            background: #fee2e2; color: #7f1d1d;
+        }
+        /* ═══════════════════════════════════════════════════════════════ */
+
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
         .file-row-compact-wrapper:hover { background: #f8fafc; }

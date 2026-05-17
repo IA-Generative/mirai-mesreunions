@@ -1346,6 +1346,30 @@ async function loadSessions(opts) {
             }
         }
 
+        // Hook nouveau module tabs/meetings.js (rebuild UI 2026-05-17).
+        // Si le module a publié son renderer, on lui délègue intégralement
+        // le rendu de #sessions-list (y compris l'empty state). Le reste
+        // de loadSessions (transferBox, activityRail, file count global)
+        // est conservé pour compat — il pourra être déplacé dans le
+        // module en suite.
+        if (window.__meetingsTab && typeof window.__meetingsTab.renderList === 'function') {
+            try {
+                window.__meetingsTab.renderList(sessions);
+                // L'en-tête de table legacy est obsolète avec le nouveau
+                // module (qui dessine son propre header).
+                const legacyHeader = document.getElementById('sessions-table-header');
+                if (legacyHeader) legacyHeader.style.display = 'none';
+                // Le compteur global du header legacy est aussi pris en
+                // charge par le module (file-count dans l'ancien layout).
+                const legacyCount = document.getElementById('file-count');
+                if (legacyCount) legacyCount.textContent = '';
+                return;
+            } catch (e) {
+                console.error('[meetings tab] renderList failed, falling back to legacy render', e);
+                // On enchaîne sur le rendu legacy en cas d'erreur.
+            }
+        }
+
         if (sessions.length === 0) {
             container.innerHTML = _renderMeetingsEmptyState();
             const purgeBtn = document.getElementById('purge-btn');
