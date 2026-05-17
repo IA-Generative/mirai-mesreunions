@@ -145,6 +145,10 @@ function _renderAdminFeedbackRow(fb) {
       (p.free_text ? `<div style="color:#475569;margin-top:0.2rem;">« ${_esc(p.free_text)} »</div>` : '');
   } else if (fb.type === 'regenerate') {
     summary = `🔄 <strong>Régénération</strong> (${_esc(p.scope || '?')}) · « ${_esc(p.reason || '')} »`;
+  } else if (fb.type === 'correction') {
+    const applied = Array.isArray(p.applied) ? p.applied.join(', ') : '';
+    summary = `✏️ <strong>Correction</strong> · « <span style="color:#b91c1c;">${_esc(p.old || '')}</span> » → <strong style="color:#15803d;">${_esc(p.new || '')}</strong>` +
+              (applied ? `<div style="font-size:0.72rem;color:#64748b;margin-top:0.2rem;">Actions : ${_esc(applied)}</div>` : '');
   }
   const status = (fb.status || 'new').toLowerCase();
   const statusTag = status === 'processed'

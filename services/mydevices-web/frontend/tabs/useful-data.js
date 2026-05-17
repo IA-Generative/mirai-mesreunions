@@ -355,6 +355,14 @@ function _renderMyFeedbackRow(fb) {
     const scopeLabel = p.scope === 'full' ? 'Transcription + diarisation' : 'Comptes-rendus (LLM)';
     summary = `<div><strong>🔄 Demande de régénération</strong> — ${_esc(scopeLabel)}</div>
                <div style="font-size:0.82rem;color:#334155;margin-top:0.2rem;">« ${_esc(p.reason || '')} »</div>`;
+  } else if (fb.type === 'correction') {
+    const applied = Array.isArray(p.applied) && p.applied.length
+      ? `<div style="font-size:0.72rem;color:#64748b;margin-top:0.2rem;">Actions appliquées : ${_esc(p.applied.join(', '))}</div>` : '';
+    summary = `<div><strong>✏️ Correction de terme</strong></div>
+               <div style="font-size:0.82rem;color:#334155;margin-top:0.2rem;">
+                 « <span style="color:#b91c1c;">${_esc(p.old || '')}</span> »
+                 → <strong style="color:#15803d;">${_esc(p.new || '')}</strong>
+               </div>${applied}`;
   } else {
     summary = `<div><em>${_esc(fb.type)}</em></div>`;
   }
