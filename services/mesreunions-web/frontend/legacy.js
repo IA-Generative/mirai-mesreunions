@@ -2155,19 +2155,32 @@ function _formatMeetingAnalysisAsMarkdown(jsonText) {
         }
         return '';
     };
+    // Champs jamais affichés en extras (mots-clés techniques / structurels
+    // qui n'apportent rien à l'utilisateur final).
     const SKIP_KEYS = new Set([
-        // Champs déjà extraits par section (vide = on les enlève des extras).
+        'id', 'uuid', 'type', 'kind', 'index', 'order', 'idx',
+        'items', 'children', 'subitems', 'sub_items',
+        'metadata', 'meta', 'raw', 'source', 'sources',
+        'speaker_index', 'block_index', 'segment_index',
     ]);
+    // Filtre conservateur : on n'affiche en extras que les *scalaires*
+    // non-vides et non-techniques. Les objets/arrays imbriqués ne se
+    // rendent pas bien en ligne ; on les drop silencieusement plutôt
+    // que d'afficher du JSON brut ou "(items: [...])".
     const fmtExtras = (o, consumedKeys) => {
         if (!o || typeof o !== 'object') return '';
         const consumed = new Set([...(consumedKeys || []), ...SKIP_KEYS]);
         const extras = Object.entries(o)
-            .filter(([k, v]) => !consumed.has(k) && v != null && String(v).trim())
-            .map(([k, v]) => {
-                if (Array.isArray(v)) v = v.join(', ');
-                else if (typeof v === 'object') v = JSON.stringify(v);
-                return `${k}: ${v}`;
-            });
+            .filter(([k, v]) => {
+                if (consumed.has(k)) return false;
+                if (v == null) return false;
+                // Drop objets, arrays, booleans (false aurait été filtré
+                // par v==null mais on est defensif).
+                if (typeof v !== 'string' && typeof v !== 'number') return false;
+                if (String(v).trim() === '') return false;
+                return true;
+            })
+            .map(([k, v]) => `${k}: ${v}`);
         if (extras.length === 0) return '';
         return ` _(${extras.join(' · ')})_`;
     };
@@ -2194,8 +2207,17 @@ function _formatMeetingAnalysisAsMarkdown(jsonText) {
         const owner = pick(d, ['owner', 'assignee', 'responsible']);
         const deadline = pick(d, ['deadline', 'due', 'date', 'when']);
         const consumed = ['decision','text','title','statement','owner','assignee','responsible','deadline','due','date','when'];
-        const meta = [owner && `porteur : ${owner}`, deadline && `échéance : ${deadline}`].filter(Boolean).join(' · ');
-        const main = meta ? `${text} _(${meta})_` : text;
+        const metaParts = [];
+        if (owner) metaParts.push(`porteur : ${owner}`);
+        if (deadline) metaParts.push(`échéance : ${deadline}`);
+        const meta = metaParts.join(' · ');
+        // Si pas de texte de décision (rare mais arrive), on ne rend
+        // pas un parenthese orpheline. On affiche au moins le owner.
+        let main;
+        if (text && meta)      main = `${text} _(${meta})_`;
+        else if (text)         main = text;
+        else if (meta)         main = `_${meta}_`;
+        else                   main = '(décision non spécifiée)';
         return `- ${main}${fmtExtras(d, consumed)}`;
     };
     const fmtGap = (g) => {
