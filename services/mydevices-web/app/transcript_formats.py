@@ -310,9 +310,23 @@ def _fmt_date_fr(iso: str | None) -> str:
     return f"{dt.day} {mois[dt.month]} {dt.year} à {dt.hour:02d}:{dt.minute:02d}"
 
 
+# Libellés humains pour la nature du document (rappelés dans l'en-tête
+# en sous-titre, sous "Mes Réunions IA"). Source de vérité unique :
+# évite d'avoir à mapper côté routes.
+DOCUMENT_KIND_LABELS = {
+    "transcript":              "Transcription brute",
+    "transcript-tagged":       "Transcription avec interlocuteurs",
+    "transcript-corrected":    "Transcription corrigée (glossaire)",
+    "transcript-cleaned":      "Transcription nettoyée",
+    "transcript-reformulated": "Reformulation au discours indirect",
+    "meeting-cr":              "Compte-rendu structuré",
+}
+
+
 def build_document_header_md(
     *,
     title: str,
+    kind: str | None = None,
     meeting_date_iso: str | None = None,
     upload_date_iso: str | None = None,
     duration_seconds: float | None = None,
@@ -325,7 +339,7 @@ def build_document_header_md(
     pour TXT (strip MD).
 
     Layout :
-      🇫🇷 République Française · Mes Réunions IA
+      🇫🇷 République Française · Mes Réunions IA · <Nature du document>
       # <Titre de la réunion>
       📅 Date : ...    ⏱  Durée : ...
       ## Points clés
@@ -333,7 +347,12 @@ def build_document_header_md(
       ─── (séparateur)
     """
     lines: list[str] = []
-    lines.append("🇫🇷 **République Française** · _Mes Réunions IA_")
+    # Bandeau d'identification : RF + service + nature du document.
+    kind_label = DOCUMENT_KIND_LABELS.get(kind or "") if kind else ""
+    if kind_label:
+        lines.append(f"🇫🇷 **République Française** · _Mes Réunions IA_ · **{kind_label}**")
+    else:
+        lines.append("🇫🇷 **République Française** · _Mes Réunions IA_")
     lines.append("")
     if title:
         lines.append(f"# {title}")

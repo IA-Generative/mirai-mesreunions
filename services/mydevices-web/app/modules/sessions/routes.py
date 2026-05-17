@@ -448,6 +448,7 @@ def api_file_transcript_download(kind, ext, file_id):
         upload_dt_iso = file_obj.created_at.isoformat() if file_obj.created_at else None
         header_md = build_document_header_md(
             title=stem,
+            kind=kind,
             meeting_date_iso=meeting_dt_iso,
             upload_date_iso=upload_dt_iso,
             duration_seconds=file_obj.audio_duration_seconds,
@@ -511,6 +512,7 @@ def api_file_meeting_cr_download(ext, file_id):
         upload_dt_iso = file_obj.created_at.isoformat() if file_obj.created_at else None
         header_md = build_document_header_md(
             title=stem,
+            kind="meeting-cr",
             meeting_date_iso=meeting_dt_iso,
             upload_date_iso=upload_dt_iso,
             duration_seconds=file_obj.audio_duration_seconds,
