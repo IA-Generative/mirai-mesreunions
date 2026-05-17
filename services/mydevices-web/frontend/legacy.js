@@ -2024,15 +2024,6 @@ async function loadSessions(opts) {
                             Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
                         </span>
                     </div>
-                    <!-- Bloc feedback utilisateur (Phase F1) : pouce ↑/↓
-                         "Cette retranscription est-elle utile ?" + 2 boutons
-                         de régénération (LLM-only / full pipeline). Voir
-                         services/mydevices-web/app/modules/feedback/routes.py
-                         pour le backend.
-                         Le rendu interne du widget est délégué à
-                         mountFeedbackBlock() côté JS (mountOnReady ci-dessous
-                         le déclenche après insertion DOM). -->
-                    <div class="file-detail-feedback-block" data-feedback-for="${f.id}"></div>
                     <!-- transcript-section caché pour déclencher
                          loadTranscriptStatus qui met à jour la couleur du
                          bouton (i) selon le status. -->
@@ -2056,6 +2047,13 @@ async function loadSessions(opts) {
                          data-transcript-file-id="${f.id}"
                          data-audio-downloads="${audioDownloadsAttr}"
                          data-persistent-summary="1"></div>
+                    <!-- Bloc feedback (en bas de fiche, après la lecture du
+                         contenu) : Régénérer + pouce ↑/↓ "utile?". Voir
+                         services/mydevices-web/app/modules/feedback/routes.py
+                         pour le backend. Le rendu interne du widget est
+                         délégué à mountFeedbackBlock() côté JS (déclenché
+                         par MutationObserver après insertion DOM). -->
+                    <div class="file-detail-feedback-block" data-feedback-for="${f.id}"></div>
                 </div>`;
             }).join('');
 
