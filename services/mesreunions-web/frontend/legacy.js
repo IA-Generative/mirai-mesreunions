@@ -2800,9 +2800,14 @@ document.addEventListener('click', async (ev) => {
             // Persiste le terme corrigé pour faire apparaître la pastille
             // 🔍 dans le CR inline (option C drawer source).
             try { _saveAppliedTermForFile(fileId, old, newText); } catch (e) {}
-            // Si patch_text actif, on refresh la fiche pour voir la transcription patched.
+            // Patch in-place de la transcription visible (sans reload :
+            // un loadSessions ici refermerait la vue détail et le footer
+            // de correction, ce qui interrompt le flow de l'utilisateur
+            // qui veut enchaîner plusieurs corrections). Le serveur a
+            // déjà appliqué le str.replace sur toutes les colonnes texte,
+            // donc le prochain refresh manuel sera cohérent.
             if (body.patch_text || body.reprocess_llm) {
-                setTimeout(() => { if (typeof loadSessions === 'function') loadSessions({ force: true }); }, 600);
+                _patchVisibleTranscriptOccurrences(fileId, old, newText);
             }
             // Garde le footer ouvert pour enchaîner d'autres corrections sans
             // re-sélectionner. On vide juste le champ "remplacer par" et on
@@ -2816,6 +2821,33 @@ document.addEventListener('click', async (ev) => {
         }
     }
 });
+
+// Remplace en place les occurrences de `oldTerm` par `newTerm` dans
+// tous les .tc-text de la fiche détail correspondant au fileId (vue
+// "Transcription de la réunion"). Evite un loadSessions() qui
+// refermerait la vue. Le serveur a déjà appliqué le patch côté DB,
+// c'est juste pour synchroniser l'affichage immédiat.
+function _patchVisibleTranscriptOccurrences(fileId, oldTerm, newTerm) {
+    if (!oldTerm || !newTerm || oldTerm === newTerm) return;
+    const corrector = document.querySelector(
+        `.file-detail-corrector-block[data-corrector-for="${CSS.escape(fileId)}"]`
+    );
+    if (!corrector) return;
+    const oldLower = oldTerm.toLowerCase();
+    corrector.querySelectorAll('.tc-text').forEach((el) => {
+        const txt = el.textContent || '';
+        if (txt.toLowerCase().indexOf(oldLower) < 0) return;
+        // Case-preserving substitution simple : on remplace les occurrences
+        // exactes (case-sensitive d'abord, puis case-insensitive).
+        let updated = txt.split(oldTerm).join(newTerm);
+        if (updated === txt) {
+            // Fallback case-insensitive : substring lookup, splice manuel.
+            const re = new RegExp(oldTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+            updated = txt.replace(re, newTerm);
+        }
+        el.textContent = updated;
+    });
+}
 
 window.loadSessions = function(opts) { return loadSessions(opts); };
 async function loadSessions(opts) {
