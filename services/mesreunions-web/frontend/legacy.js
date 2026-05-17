@@ -2306,7 +2306,27 @@ function _openCrEditorModal(fileId, data) {
     const findNext = root.querySelector('[data-cr-find="next"]');
     const findStatus = root.querySelector('[data-cr-find-status]');
 
-    const correctedTerms = _getAppliedTermsForFile(fileId);
+    // Termes à pastiller dans le CR avec 🔍 :
+    //   1. Corrections appliquées via popup correct-term (localStorage par fileId)
+    //   2. + TOUS les termes du glossaire personnel de l'utilisateur (DB
+    //      source de vérité — fetch /api/my-glossary). Permet à l'user de
+    //      voir 🔍 sur les termes "qu'il connaît" même s'il ne les a pas
+    //      explicitement corrigés sur CE fichier. Cache window pour ne
+    //      pas re-fetch entre ouvertures de modale.
+    let correctedTerms = _getAppliedTermsForFile(fileId);
+    _fetchUserGlossaryCached().then((glossaryTerms) => {
+        if (glossaryTerms && glossaryTerms.length > 0) {
+            const seenNew = new Set(correctedTerms.map((c) => (c.new || '').toLowerCase()));
+            glossaryTerms.forEach((t) => {
+                if (t && !seenNew.has(t.toLowerCase())) {
+                    correctedTerms.push({ old: '', new: t, fromGlossary: true });
+                }
+            });
+            // Re-applique le markage sur le body actuel si encore monté.
+            if (body.isConnected) _markCorrectedTermsInBody(body, correctedTerms);
+        }
+    }).catch(() => {});
+
     let activeKey = tabs[0]?.getAttribute('data-cr-tab') || 'meeting_cr';
 
     const renderBody = (key) => {
@@ -2497,6 +2517,29 @@ function _onCrInlineSelection(body, fileId, parentContainer) {
     _showCorrectionFooter(parentContainer, fileId, selected, null, null, []);
 }
 
+// Fetch + cache (60s) du glossaire personnel pour pastiller dans le CR.
+// Retourne une Promise<string[]> des termes (champ `term` de chaque item).
+let _userGlossaryCache = null;
+let _userGlossaryCacheTs = 0;
+function _fetchUserGlossaryCached() {
+    const now = Date.now();
+    if (_userGlossaryCache && (now - _userGlossaryCacheTs) < 60000) {
+        return Promise.resolve(_userGlossaryCache);
+    }
+    return fetch('/api/my-glossary?limit=500')
+        .then((r) => r.ok ? r.json() : { items: [] })
+        .then((d) => {
+            const items = (d && d.items) || (Array.isArray(d) ? d : []);
+            const terms = items
+                .map((it) => (typeof it === 'string') ? it : (it.term || it.new || ''))
+                .filter((t) => t && t.length >= 2);
+            _userGlossaryCache = terms;
+            _userGlossaryCacheTs = now;
+            return terms;
+        })
+        .catch(() => []);
+}
+
 function _getAppliedTermsForFile(fileId) {
     // Récupère les termes déjà corrigés sur ce file via localStorage.
     // Format : Map { fileId -> [{old, new}, ...] }.
@@ -2551,7 +2594,9 @@ function _markCorrectedTermsInBody(body, correctedTerms) {
             const sp = document.createElement('span');
             sp.className = 'cr-corrected-term';
             sp.setAttribute('data-cr-term', newTerm);
-            sp.setAttribute('title', `Terme corrigé — cliquez pour voir les sources brutes`);
+            sp.setAttribute('title', c.fromGlossary
+                ? `Terme du glossaire personnel — cliquez pour voir les sources brutes`
+                : `Terme corrigé — cliquez pour voir les sources brutes`);
             sp.textContent = hit;
             frag.appendChild(sp);
             if (after) frag.appendChild(document.createTextNode(after));
