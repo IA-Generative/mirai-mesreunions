@@ -742,7 +742,7 @@ function statusLabel(status) {
 }
 
 // Phases d'upload où le pipeline tourne encore (avant que la transcription
-// ne prenne le relais). Utilisé pour animer le dot dès le départ.
+// ne prenne le relais). Utilisé pour animer le tag dès le départ.
 const UPLOAD_IN_PROGRESS_STATES = new Set([
     'pending', 'scanning', 'scan_clean',
     'transcoding', 'ready_for_transfer', 'transferring',
@@ -753,6 +753,63 @@ function _uploadStateLabel(status) {
         return `Étape en cours : ${statusLabel(status)}`;
     }
     return statusLabel(status);
+}
+
+// ── TKT-101 : tag de statut DSFR (remplace l'ancienne pastille ●) ─────────
+// Renvoie { label, icon, kind, srLabel } pour rendu en `fr-tag fr-tag--sm`
+// + classe sémantique `file-row-status-tag--<kind>` (success/processing/
+// queued/partial/error/neutral). On accepte indifféremment les statuts du
+// pipeline d'upload (file.status) et de transcription (Kevent/MCR).
+const _TRANSCRIPT_SUCCESS = new Set(['completed', 'kevent_completed', 'mcr_pushed']);
+const _TRANSCRIPT_PROCESSING = new Set(['processing', 'kevent_transcribing', 'kevent_processing']);
+const _TRANSCRIPT_QUEUED = new Set(['pending', 'kevent_queued']);
+const _TRANSCRIPT_PARTIAL = new Set(['kevent_partially_completed']);
+const _TRANSCRIPT_FAILED = new Set([
+    'failed', 'kevent_failed',
+    'mcr_auth_failed', 'mcr_rejected', 'mcr_push_failed',
+]);
+const _UPLOAD_FAILED = new Set(['transcode_failed', 'error']);
+
+function _statusTagInfo(status, opts) {
+    const o = opts || {};
+    if (o.virus) {
+        return { label: 'Quarantaine', icon: 'fr-icon-error-warning-line', kind: 'error' };
+    }
+    if (_TRANSCRIPT_SUCCESS.has(status)) {
+        return { label: 'Prête', icon: 'fr-icon-success-line', kind: 'success' };
+    }
+    if (_TRANSCRIPT_PARTIAL.has(status)) {
+        return { label: 'Partiellement prête', icon: 'fr-icon-warning-line', kind: 'partial' };
+    }
+    if (_TRANSCRIPT_FAILED.has(status) || _UPLOAD_FAILED.has(status)) {
+        return { label: 'Erreur', icon: 'fr-icon-error-warning-line', kind: 'error' };
+    }
+    if (_TRANSCRIPT_PROCESSING.has(status) || UPLOAD_IN_PROGRESS_STATES.has(status)) {
+        return { label: 'En traitement', icon: 'fr-icon-time-line', kind: 'processing' };
+    }
+    if (_TRANSCRIPT_QUEUED.has(status) || status === 'transferred') {
+        return { label: 'En file d\'attente', icon: 'fr-icon-time-line', kind: 'queued' };
+    }
+    if (status === 'disabled') {
+        return { label: 'Désactivée', icon: 'fr-icon-information-line', kind: 'neutral' };
+    }
+    return { label: 'En attente', icon: 'fr-icon-time-line', kind: 'queued' };
+}
+
+function _renderStatusTag(status, opts) {
+    const o = opts || {};
+    const info = _statusTagInfo(status, o);
+    // aria-label détaillé : libellé court + statut technique (utile au screen
+    // reader pour distinguer "kevent_partially_completed" d'une vraie erreur).
+    const tech = o.virus ? `Virus détecté — ${statusLabel(status)}` : (o.tooltip || _uploadStateLabel(status));
+    const aria = `Statut : ${info.label} — ${tech}`;
+    const fileId = o.fileId || '';
+    return `<span class="fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}"
+                  data-file-status-tag="${escapeHtml(fileId)}"
+                  data-status-kind="${info.kind}"
+                  role="status"
+                  aria-label="${escapeHtml(aria)}"
+                  title="${escapeHtml(tech)}">${escapeHtml(info.label)}</span>`;
 }
 
 function tokenValidityDaysLabel(retentionExpiresAt) {
@@ -1463,18 +1520,13 @@ async function loadSessions(opts) {
                                  data-audio-downloads="${audioDownloadsAttr}"
                                  data-compact="1"
                                  style="display:none;"></div>
-                            <!-- Dot inline (caractère unicode) : aligné comme
-                                 un caractère sur la baseline du titre. Sa
-                                 couleur+animation est ajustée par
-                                 loadTranscriptStatus via la classe
-                                 file-row-dot-<status>. À l'init, on pose
-                                 file-row-dot-upload-in-progress tant que
-                                 l'upload n'est pas TRANSFERRED — ça suffit à
-                                 animer "il se passe un truc" avant même que
-                                 la transcription démarre. -->
-                            <span class="file-row-dot ${UPLOAD_IN_PROGRESS_STATES.has(f.status) ? 'file-row-dot-upload-in-progress' : ''} ${isVirusBlocked ? `file-row-dot-${f.status}` : ''}"
-                                  data-file-dot="${f.id}"
-                                  title="${escapeHtml(isVirusBlocked ? `Virus détecté — ${statusLabel(f.status)}` : _uploadStateLabel(f.status))}">●</span>
+                            <!-- TKT-101 : tag DSFR de statut (remplace l'ancienne
+                                 pastille ● 6px par un libellé textuel + icône
+                                 fr-icon-*). Le rendu initial s'appuie sur
+                                 file.status ; loadTranscriptStatus remplacera
+                                 ensuite le tag par le statut transcription dès
+                                 que celui-ci est disponible. -->
+                            ${_renderStatusTag(f.status, { fileId: f.id, virus: isVirusBlocked })}
                             <a href="#" class="file-row-title" data-file-id="${f.id}"
                                onclick="event.preventDefault();showFileDetail('${f.id}');"
                                title="${escapeHtml(f.original_filename)}">
@@ -2155,16 +2207,20 @@ async function loadTranscriptStatus(fileId, container) {
                 }
             }
             if (container.getAttribute('data-compact') === '1') {
-                // Met à jour le dot caractère unicode "●" inline dans la
-                // file-row (aligné naturellement avec le titre). La couleur
-                // dépend du statut via la classe file-row-dot-<status>,
-                // l'animation pulse aussi (les classes in-progress portent
-                // l'animation CSS — cf. @keyframes filerowDotPulse).
-                const dot = document.querySelector(`[data-file-dot="${fileId}"]`);
-                if (dot) {
-                    dot.className = `file-row-dot file-row-dot-${status}`;
+                // TKT-101 : remplace le tag de statut (rendu initial basé sur
+                // file.status) par celui qui reflète le statut transcription
+                // dès qu'il est connu. L'animation pulse est portée par la
+                // classe file-row-status-tag--processing (cf. CSS).
+                const tag = document.querySelector(`[data-file-status-tag="${fileId}"]`);
+                if (tag) {
                     const friendly = (TRANSCRIPT_STATUS_LABELS[status] || {}).label || status;
-                    dot.title = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
+                    const tooltip = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
+                    const info = _statusTagInfo(status);
+                    tag.className = `fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}`;
+                    tag.setAttribute('data-status-kind', info.kind);
+                    tag.setAttribute('aria-label', `Statut : ${info.label} — ${tooltip}`);
+                    tag.title = tooltip;
+                    tag.textContent = info.label;
                 }
                 // Bouton (i) : tooltip multi-ligne avec checklist par étape
                 // (☐/✓/✗). Pulse + bordure bleue si le pipeline tourne.
