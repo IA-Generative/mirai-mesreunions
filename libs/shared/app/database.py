@@ -14,8 +14,23 @@ logger = logging.getLogger(__name__)
 
 
 def create_session_factory(db_cfg: DatabaseConfig) -> sessionmaker:
-    """Create a SQLAlchemy session factory."""
-    engine = create_engine(db_cfg.sync_url, pool_pre_ping=True, pool_size=10, max_overflow=20)
+    """Create a SQLAlchemy session factory.
+
+    `pool_pre_ping=True` envoie un SELECT 1 avant de servir une connexion
+    (détecte les sockets fermées par le serveur). En complément,
+    `pool_recycle=180` force le recyclage de toute connexion plus vieille
+    que 3 min, AVANT que Scaleway managed Postgres ne la kill (idle
+    timeout ~5 min selon les obs). Sans recycle, on attrape parfois la
+    "server closed the connection unexpectedly" entre le pre_ping et la
+    requête réelle (race condition sur connexion mourante).
+    """
+    engine = create_engine(
+        db_cfg.sync_url,
+        pool_pre_ping=True,
+        pool_recycle=int(os.getenv("DB_POOL_RECYCLE_SECONDS", "180")),
+        pool_size=10,
+        max_overflow=20,
+    )
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
