@@ -2316,17 +2316,20 @@
         .cr-corrected-term:hover { background: linear-gradient(180deg, transparent 60%, #fde047 60%); }
         .cr-corrected-term:hover::after { opacity: 1; }
 
-        /* Drawer source slide-in depuis la droite. */
+        /* Drawer source slide-in depuis la droite.
+           z-index > 10000 (modale CR-editor) pour passer DEVANT quand
+           on l'ouvre depuis 🔍 dans la modale. Sinon il est masqué et
+           inaccessible. */
         .cr-drawer-backdrop {
             position: fixed; inset: 0; background: rgba(15, 23, 42, 0.35);
-            z-index: 9000; opacity: 0; pointer-events: none;
+            z-index: 10100; opacity: 0; pointer-events: none;
             transition: opacity 180ms ease;
         }
         .cr-drawer-backdrop.is-open { opacity: 1; pointer-events: auto; }
         .cr-drawer {
             position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw);
             background: #fff; box-shadow: -4px 0 18px rgba(0,0,0,0.18);
-            z-index: 9001;
+            z-index: 10101;
             transform: translateX(100%);
             transition: transform 220ms ease;
             display: flex; flex-direction: column;
@@ -2379,10 +2382,14 @@
         }
         .cr-drawer-foot .status { font-size: 0.72rem; color: #16a34a; }
     </style>
-    <!-- marked.js : markdown → HTML pour rendu inline des CR (option C).
-         CDN cdnjs (CSP-allowed, déjà whitelisted pour DSFR). 11kb gzip. -->
+    <!-- marked.js : markdown → HTML pour rendu inline des CR (modale
+         "Modifier le compte-rendu"). CDN cdnjs. Pas d'integrity hash
+         pour éviter le silencieux blocage si le hash ne matche pas la
+         version servie (cas vu : marked.js 12.0.2 hash invalide → CR
+         affichait du markdown brut). Le fallback côté JS rend en
+         <pre> si window.marked indisponible — l'app continue de
+         fonctionner, juste sans mise en forme markdown. -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"
-            integrity="sha512-AwLD5L1xVGRYzhxLLvrdjvR9PUKwwsx0nrybT2dB7uy/EMG5QXNqd6lLT2qNvA4nFvfMRSCAUDFW2vQiwM9DOQ=="
             crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
