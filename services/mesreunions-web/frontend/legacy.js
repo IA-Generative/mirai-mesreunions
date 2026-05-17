@@ -1622,6 +1622,20 @@ async function _openRegenerateModal(fileId, scope) {
         alert('La raison est obligatoire — annulé.');
         return;
     }
+    // Désactive le bouton + change son label pendant la requête (la
+    // chaîne LLM tourne synchrone et peut prendre 30s-5min). Affiche
+    // aussi un overlay non-bloquant fixé en bas-droite avec spinner.
+    const btn = document.querySelector(
+        `[data-feedback-regen="${scope}"][data-feedback-file="${fileId}"]`
+    );
+    const originalLabel = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '🔄 Régénération en cours…';
+        btn.style.opacity = '0.7';
+        btn.style.cursor = 'wait';
+    }
+    const overlay = _showRegenInProgressOverlay(scope);
     try {
         const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/regenerate`, {
             method: 'POST',
@@ -1630,20 +1644,84 @@ async function _openRegenerateModal(fileId, scope) {
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.status === 202) {
+            overlay.dismiss();
             alert(data.message || 'Demande enregistrée — traitement admin en attente.');
         } else if (resp.ok) {
-            alert('Régénération lancée. Le statut de la transcription sera mis à jour automatiquement.');
-            // Clear le compteur "corrections en attente" — les CR ont
-            // été refaits avec les corrections appliquées.
+            overlay.dismiss();
+            alert('Régénération terminée. La fiche va se rafraîchir avec les nouveaux contenus.');
             clearPendingCorrections(fileId);
-            // Force un refresh pour voir le nouveau status.
             if (typeof loadSessions === 'function') loadSessions({ force: true });
         } else {
+            overlay.dismiss();
             alert(`Échec de la régénération : HTTP ${resp.status} — ${data.error || ''}`);
         }
     } catch (e) {
+        overlay.dismiss();
         alert(`Échec de la régénération : ${e.message}`);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = originalLabel;
+            btn.style.opacity = '';
+            btn.style.cursor = '';
+        }
     }
+}
+
+// Overlay non-bloquant fixé en bas-droite avec spinner + minuteur
+// "Régénération en cours… 0:15". Renvoie un objet avec dismiss().
+function _showRegenInProgressOverlay(scope) {
+    const id = 'regen-progress-overlay';
+    document.querySelectorAll(`#${id}`).forEach((el) => el.remove());
+    const el = document.createElement('div');
+    el.id = id;
+    el.style.cssText = 'position:fixed;bottom:1rem;right:1rem;'
+        + 'background:#fff;border:1px solid #1d4ed8;border-left:4px solid #1d4ed8;'
+        + 'border-radius:6px;padding:0.7rem 1rem;box-shadow:0 4px 18px rgba(0,0,0,0.18);'
+        + 'z-index:11000;display:flex;align-items:center;gap:0.7rem;'
+        + 'font-size:0.85rem;color:#1e293b;max-width:360px;';
+    const label = scope === 'full'
+        ? 'Transcription + diarisation + CR'
+        : 'Comptes-rendus (chaîne LLM)';
+    el.innerHTML = `
+      <div style="width:1.2rem;height:1.2rem;border:2px solid #cbd5e1;
+                  border-top-color:#1d4ed8;border-radius:50%;
+                  animation:regen-spin 0.9s linear infinite;"></div>
+      <div>
+        <div style="font-weight:600;color:#0c4498;">🔄 Régénération en cours…</div>
+        <div style="font-size:0.74rem;color:#64748b;">
+          ${label} · <span data-regen-elapsed>0:00</span>
+        </div>
+        <div style="font-size:0.7rem;color:#94a3b8;margin-top:0.15rem;">
+          ${scope === 'full'
+            ? 'Compte 3-15 min selon la longueur audio.'
+            : 'Compte 30s à 5 min selon la chaîne LLM.'}
+        </div>
+      </div>
+    `;
+    // CSS animation injectée une fois.
+    if (!document.getElementById('regen-spin-style')) {
+        const st = document.createElement('style');
+        st.id = 'regen-spin-style';
+        st.textContent = '@keyframes regen-spin { to { transform: rotate(360deg); } }';
+        document.head.appendChild(st);
+    }
+    document.body.appendChild(el);
+    const startedAt = Date.now();
+    const elapsedEl = el.querySelector('[data-regen-elapsed]');
+    const tick = setInterval(() => {
+        const s = Math.floor((Date.now() - startedAt) / 1000);
+        const m = Math.floor(s / 60);
+        elapsedEl.textContent = `${m}:${String(s % 60).padStart(2, '0')}`;
+    }, 1000);
+    return {
+        dismiss() {
+            clearInterval(tick);
+            el.style.transition = 'opacity 280ms';
+            el.style.opacity = '0';
+            setTimeout(() => el.remove(), 300);
+        },
+    };
 }
 
 // MutationObserver : mount tout nouveau bloc feedback inséré dans le DOM.
@@ -1779,7 +1857,7 @@ async function mountTranscriptCorrector(container) {
     container.innerHTML = `
       <details class="transcript-corrector">
         <summary class="transcript-corrector-summary">
-          📜 Transcription par interlocuteur
+          📜 Transcription de la réunion
           <span style="font-weight:400;font-size:0.78rem;color:#64748b;">
             (${blocks.length} bloc${blocks.length > 1 ? 's' : ''})
           </span>
@@ -2047,32 +2125,30 @@ function _attachLocalSearch(container) {
     btnPrev.addEventListener('click', (ev) => { ev.preventDefault(); inp.focus(); jump(-1); });
 }
 
-// ─── CR inline (option C : rendu CR + corrector + drawer source) ────────
+// ─── Édition du CR (modale + drawer source) ────────────────────────────
 //
 // Architecture :
-//   1. _renderCrInlineBlock(fileId, data) → HTML d'un <details> avec
-//      onglets (compte-rendu, reformulation, nettoyée, absentee, brute)
-//      et placeholder vide.
-//   2. _attachCrInline(container, fileId, data) → bind tabs, render
-//      markdown via marked.js, hook sélection-pour-corriger, scanne
-//      les "termes corrigés" déjà appliqués pour ajouter pastille 🔍.
-//   3. _openSourceDrawer(fileId, term, audio) → ouvre le drawer slide-in
-//      avec les sources brutes (fetch /api/file/<id>/term-sources),
-//      permet ré-écoute audio + propagation sélective.
+//   1. _openCrEditorModal(fileId, data) → modale plein-écran avec 4
+//      onglets (compte-rendu, reformulation, nettoyée, pour-les-absents),
+//      recherche locale, sélection-pour-corriger (réutilise pipe
+//      correct-term), pastilles 🔍 sur termes corrigés, bouton 🔍 par
+//      ligne (→ drawer query fuzzy).
+//   2. _openSourceDrawer(fileId, termOrQuery, opts) → drawer slide-in
+//      droite avec les sources brutes. Deux modes :
+//        - opts.mode === 'term' (défaut) : substring exact + propagation.
+//        - opts.mode === 'query' : recherche fuzzy multi-mots (back-link
+//          CR ligne → segments brute), pas de propagation.
+//   La section "Transcription de la réunion" (corrector audio standalone)
+//   reste séparée et n'apparaît pas dans la modale CR.
 
-// 5 onglets fusionnés : 4 surfaces synthèse (markdown via marked.js) +
-// 1 surface "Audio synchro" qui héberge le corrector audio (blocs par
-// interlocuteur + ▶ par segment + sync audio). La surface audio
-// remplace l'ancien bloc standalone "Transcription par interlocuteur"
-// pour éliminer la redondance — un seul point d'entrée pour tout le
-// contenu détaillé. Le tab `audio` a `source: null` pour signaler le
-// rendu spécial (mount corrector au lieu de markdown).
+// 4 onglets de la modale d'édition du CR. La section "Transcription de
+// la réunion" (corrector audio par interlocuteur + ▶ par segment + sync
+// audio) reste séparée et inchangée — c'est la surface audio dédiée.
 const CR_TABS = [
     { key: 'meeting_cr',    label: '📋 Compte-rendu',     source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json) },
     { key: 'reformulated',  label: '✍️ Reformulation',    source: (d) => d.reformulated_text || '' },
     { key: 'cleaned',       label: '🧹 Nettoyée',         source: (d) => d.cleaned_text || '' },
     { key: 'absentee',      label: '🪧 Pour les absents', source: (d) => d.absentee_summary || '' },
-    { key: 'audio',         label: '🎤 Audio synchro',    source: null /* mount corrector au lieu de markdown */ },
 ];
 
 function _formatMeetingAnalysisAsMarkdown(jsonText) {
@@ -2143,25 +2219,42 @@ function _formatMeetingAnalysisAsMarkdown(jsonText) {
     return parts.join('\n') || jsonText;
 }
 
-function _renderCrInlineBlock(fileId, data) {
-    // Filtre : on garde un onglet "audio" seulement si on a une donnée
-    // exploitable (speaker_tagged_text ou au moins transcription_text).
-    const tabsWithContent = CR_TABS.filter((t) => {
-        if (t.source === null) {
-            // Tab audio : besoin de speaker_tagged_text (le corrector
-            // n'affiche pas grand-chose sans diarisation).
-            return !!(data.speaker_tagged_text || data.transcription_text);
-        }
-        return (t.source(data) || '').trim().length > 0;
-    });
-    if (tabsWithContent.length === 0) return '';
+function _openCrEditorModal(fileId, data) {
+    // Modale plein-écran d'édition du CR. 4 onglets (Compte-rendu,
+    // Reformulation, Nettoyée, Pour les absents) avec recherche locale,
+    // sélection→corriger (réutilise pipe correct-term), pastilles 🔍 sur
+    // les termes corrigés (→ drawer sources), et bouton 🔍 par ligne
+    // (→ drawer query fuzzy). La section "Transcription de la réunion"
+    // reste séparée et n'apparaît pas dans cette modale.
+    const tabsWithContent = CR_TABS.filter((t) => (t.source(data) || '').trim().length > 0);
+    if (tabsWithContent.length === 0) {
+        alert('Aucun contenu à afficher (le compte-rendu n\'a pas encore été généré).');
+        return;
+    }
+    document.querySelectorAll('.cr-editor-modal').forEach((el) => el.remove());
+
+    const wrap = document.createElement('div');
+    wrap.className = 'cr-editor-modal';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);'
+        + 'display:flex;align-items:center;justify-content:center;z-index:10000;'
+        + 'padding:2rem;';
     const tabsHtml = tabsWithContent.map((t, i) => `
       <button type="button" class="cr-inline-tab ${i === 0 ? 'cr-inline-tab--active' : ''}"
               data-cr-tab="${t.key}">${t.label}</button>
     `).join('');
-    return `
-      <details class="cr-inline" data-cr-inline-for="${escapeHtml(fileId)}" open>
-        <summary>📑 Contenu détaillé (compte-rendu, transcriptions, synthèses)</summary>
+    wrap.innerHTML = `
+      <div class="cr-editor-inner cr-inline" data-cr-inline-for="${escapeHtml(fileId)}"
+           style="background:#fff;border-radius:0.5rem;max-width:980px;width:100%;
+                  max-height:90vh;display:flex;flex-direction:column;
+                  box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+        <div style="display:flex;justify-content:space-between;align-items:center;
+                    padding:0.7rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
+          <div style="font-weight:600;color:#0c4498;font-size:1rem;">📑 Modifier le compte-rendu</div>
+          <button type="button" class="cr-editor-close" aria-label="Fermer"
+                  style="background:transparent;border:0;font-size:1.3rem;cursor:pointer;color:#64748b;">×</button>
+        </div>
         <div class="cr-inline-tabs">
           ${tabsHtml}
           <div class="cr-inline-find">
@@ -2171,18 +2264,24 @@ function _renderCrInlineBlock(fileId, data) {
             <span data-cr-find-status></span>
           </div>
         </div>
-        <div class="cr-inline-body" data-cr-body></div>
-        <div class="cr-inline-foot" style="padding:0.4rem 0.7rem;border-top:1px solid #f1f5f9;font-size:0.7rem;color:#64748b;">
-          Astuce : sélectionnez un mot pour le corriger.
-          🔍 sur les termes corrigés = retrouver les sources dans la brute.
+        <div class="cr-inline-body" data-cr-body
+             style="flex:1 1 auto;overflow-y:auto;max-height:none;"></div>
+        <div class="cr-inline-foot" style="padding:0.4rem 0.7rem;border-top:1px solid #f1f5f9;
+             font-size:0.72rem;color:#64748b;text-align:center;">
+          Astuce : sélectionnez un mot pour le corriger ·
+          🔍 par ligne pour retrouver la source brute (audio + texte).
         </div>
-      </details>
+      </div>
     `;
-}
+    document.body.appendChild(wrap);
+    const close = () => wrap.remove();
+    wrap.querySelector('.cr-editor-close').addEventListener('click', close);
+    wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
+    wrap.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
 
-function _attachCrInline(container, fileId, data) {
-    const root = container.querySelector(`[data-cr-inline-for="${CSS.escape(fileId)}"]`);
-    if (!root) return;
+    // Bind l'intérieur — équivalent à l'ancien _attachCrInline mais
+    // s'attache à `wrap` (le container modale).
+    const root = wrap.querySelector('.cr-editor-inner');
     const body = root.querySelector('[data-cr-body]');
     const tabs = Array.from(root.querySelectorAll('[data-cr-tab]'));
     const findInp = root.querySelector('.cr-inline-find input');
@@ -2190,69 +2289,15 @@ function _attachCrInline(container, fileId, data) {
     const findNext = root.querySelector('[data-cr-find="next"]');
     const findStatus = root.querySelector('[data-cr-find-status]');
 
-    // Track corrections appliquées par fileId pour pastiller 🔍 sur les
-    // "new" termes ayant été appliqués (récupéré depuis l'historique
-    // sessions/feedback via window. Fallback : juste les pending locales).
     const correctedTerms = _getAppliedTermsForFile(fileId);
-
     let activeKey = tabs[0]?.getAttribute('data-cr-tab') || 'meeting_cr';
 
-    // Audio corrector container — créé une seule fois, réutilisé entre
-    // les switchs d'onglet (pour ne pas re-fetch /transcript-status à
-    // chaque clic). Initialisé lazily à l'activation du tab audio.
-    let audioCorrectorEl = null;
-    const ensureAudioCorrector = () => {
-        if (audioCorrectorEl) return audioCorrectorEl;
-        // Récupère le bloc corrector standalone existant pour copier ses
-        // attributs (data-corrector-for, data-audio-url, data-audio-purged)
-        // puis on le neutralise (display:none) pour éviter le doublon.
-        const fileWrap = root.closest('[data-transcript-file-id]')?.parentElement;
-        const legacyCorrector = fileWrap?.querySelector(`[data-corrector-for="${CSS.escape(fileId)}"]`);
-        const dataAudioUrl = legacyCorrector?.getAttribute('data-audio-url') || '';
-        const dataAudioPurged = legacyCorrector?.getAttribute('data-audio-purged') || '0';
-        if (legacyCorrector) legacyCorrector.style.display = 'none';
-        audioCorrectorEl = document.createElement('div');
-        audioCorrectorEl.className = 'file-detail-corrector-block';
-        audioCorrectorEl.setAttribute('data-corrector-for', fileId);
-        audioCorrectorEl.setAttribute('data-audio-url', dataAudioUrl);
-        audioCorrectorEl.setAttribute('data-audio-purged', dataAudioPurged);
-        return audioCorrectorEl;
-    };
-
-    const findWrap = root.querySelector('.cr-inline-find');
-    const footEl = root.querySelector('.cr-inline-foot');
     const renderBody = (key) => {
         const tab = CR_TABS.find((t) => t.key === key);
         if (!tab) {
             body.innerHTML = `<div class="cr-inline-empty">Onglet inconnu.</div>`;
             return;
         }
-        if (tab.source === null) {
-            // Tab audio : monte le corrector audio si pas déjà fait.
-            // Le corrector a son propre search local + son propre notice,
-            // on cache donc ceux du CR-inline pour éviter le doublon.
-            if (findWrap) findWrap.style.visibility = 'hidden';
-            if (footEl) footEl.style.display = 'none';
-            // Désactive la contrainte de hauteur du body (le corrector
-            // gère son propre scroll interne sur les blocs).
-            body.style.maxHeight = 'none';
-            body.style.padding = '0';
-            const el = ensureAudioCorrector();
-            body.innerHTML = '';
-            body.appendChild(el);
-            // mountTranscriptCorrector est idempotent (guard
-            // dataset.correctorMounted) : 1er appel charge + render, les
-            // suivants no-op et le DOM est conservé.
-            if (typeof mountTranscriptCorrector === 'function') {
-                mountTranscriptCorrector(el);
-            }
-            return;
-        }
-        // Tab markdown : re-active search + foot + max-height standard.
-        if (findWrap) findWrap.style.visibility = '';
-        if (footEl) footEl.style.display = '';
-        body.style.maxHeight = '';
-        body.style.padding = '';
         const text = tab.source(data) || '';
         if (!text.trim()) {
             body.innerHTML = `<div class="cr-inline-empty">Pas de contenu pour cet onglet.</div>`;
@@ -2363,12 +2408,11 @@ function _attachCrInline(container, fileId, data) {
         findPrev.addEventListener('click', (ev) => { ev.preventDefault(); findInp.focus(); jump(-1); });
     }
 
-    // Sélection texte pour corriger : on réutilise le _showCorrectionFooter
-    // existant. Le footer est rendu dans le container parent (data-tc-corrector-footer).
-    body.addEventListener('mouseup', () => _onCrInlineSelection(body, fileId, container));
-    body.addEventListener('touchend', () => _onCrInlineSelection(body, fileId, container));
+    // Sélection texte pour corriger : footer attaché au root de la modale.
+    body.addEventListener('mouseup', () => _onCrInlineSelection(body, fileId, root));
+    body.addEventListener('touchend', () => _onCrInlineSelection(body, fileId, root));
 
-    // Click sur pastille 🔍 → drawer source.
+    // Click sur pastille 🔍 (terme corrigé) → drawer sources brutes mode term.
     body.addEventListener('click', (ev) => {
         const span = ev.target.closest && ev.target.closest('.cr-corrected-term');
         if (!span) return;
@@ -2379,6 +2423,34 @@ function _attachCrInline(container, fileId, data) {
 
     renderBody(activeKey);
 }
+
+// Délégation click globale : bouton ✏️ "Modifier" sur la ligne CR ouvre
+// la modale d'édition. On lit `data` depuis le container persistent qui
+// l'a stocké (cf loadTranscriptStatus). Fallback : refetch depuis l'API.
+document.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest && ev.target.closest('[data-cr-edit]');
+    if (!btn) return;
+    ev.preventDefault();
+    const fileId = btn.getAttribute('data-cr-edit') || '';
+    if (!fileId) return;
+    // Cherche le container persistent qui stocke `data`.
+    const persistentCt = document.querySelector(`.transcript-section[data-transcript-file-id="${CSS.escape(fileId)}"]`);
+    let data = persistentCt && persistentCt._mesreunionsCrData;
+    if (!data) {
+        try {
+            const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+            data = await resp.json();
+        } catch (e) {
+            alert(`Chargement impossible : ${e.message}`);
+            return;
+        }
+    }
+    if (!data || !data.available) {
+        alert('Le compte-rendu n\'est pas encore disponible.');
+        return;
+    }
+    _openCrEditorModal(fileId, data);
+});
 
 function _onCrInlineSelection(body, fileId, parentContainer) {
     const sel = window.getSelection();
@@ -3443,7 +3515,7 @@ async function loadSessions(opts) {
 // "étape intermédiaire" qui dissipe la confusion utilisateur.
 const TRANSCRIPT_KIND_LABELS = {
     'transcript':              'Transcription brute (étape intermédiaire)',
-    'transcript-tagged':       'Transcription par interlocuteur (étape intermédiaire)',
+    'transcript-tagged':       'Transcription de la réunion (par interlocuteur — étape intermédiaire)',
     'transcript-corrected':    'Transcription avec sigles corrigés (étape intermédiaire)',
     'transcript-cleaned':      'Transcription nettoyée',
     'transcript-reformulated': 'Synthèse narrative',
@@ -3821,10 +3893,14 @@ async function loadTranscriptStatus(fileId, container) {
         }
 
         // Compte-rendu structuré : accès direct (en TÊTE des défauts).
+        // Ajoute un bouton ✏️ Modifier en bout de ligne qui ouvre la
+        // modale d'édition du CR (markdown + corrector + drawer source).
         if (outputs['meeting-cr']) {
             const icons = CR_FORMATS.map((ext) =>
                 fmtIconHtml(ext, `/api/file/meeting-cr/${ext}/${fileId}`)
-            ).join('');
+            ).join('') + `<button type="button" class="downloads-cr-edit-btn"
+                                   data-cr-edit="${escapeHtml(fileId)}"
+                                   title="Modifier le compte-rendu (sélection→corriger, sources brutes)">✏️</button>`;
             defaultRows.unshift({ label: 'Compte-rendu structuré', iconsHtml: icons });
         }
 
@@ -3863,23 +3939,13 @@ async function loadTranscriptStatus(fileId, container) {
             dropdownBlock = `<div class="downloads-block">${defaultHtml}${otherSection}</div>`;
         }
 
-        // CR inline (option C) : en vue détail (persistent), on affiche
-        // le contenu des CR dans un bloc dépliable, avec onglets pour
-        // basculer entre meeting_analysis / cleaned / reformulated / absentee.
-        // Sélection texte → correction (réutilise la pipe correct-term).
-        // Pastille 🔍 sur les termes déjà corrigés → drawer "Sources brutes".
-        const crInlineHtml = persistent ? _renderCrInlineBlock(fileId, data) : '';
-
-        // Ordre vertical : statut → résumé → téléchargements → CR inline.
-        // CR inline est placé APRÈS les téléchargements pour rester proche
-        // de "Transcription par interlocuteur" qui le suit dans le DOM,
-        // et pour ne pas casser le scan-pattern résumé→download de l'user.
-        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}${crInlineHtml}`;
-        if (persistent) {
-            // Bind les interactions du CR inline (tabs, search, sélection,
-            // pastilles 🔍). Doit être fait APRÈS l'innerHTML pour avoir
-            // accès aux noeuds DOM.
-            _attachCrInline(container, fileId, data);
+        // Le CR éditable est désormais exposé via une modale ouverte par
+        // le bouton ✏️ "Modifier" sur la ligne "Compte-rendu structuré"
+        // (cf dropdownBlock plus haut). On stocke `data` sur le container
+        // pour que le click-handler global puisse y accéder sans re-fetch.
+        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        if (persistent && data) {
+            container._mesreunionsCrData = data;
         }
         // Peuple immédiatement les icônes du select "Autres téléchargements"
         // pour la première entrée sélectionnée (sinon la zone reste vide
