@@ -1935,54 +1935,107 @@ function _attachLocalSearch(container) {
 //      avec les sources brutes (fetch /api/file/<id>/term-sources),
 //      permet ré-écoute audio + propagation sélective.
 
+// 5 onglets fusionnés : 4 surfaces synthèse (markdown via marked.js) +
+// 1 surface "Audio synchro" qui héberge le corrector audio (blocs par
+// interlocuteur + ▶ par segment + sync audio). La surface audio
+// remplace l'ancien bloc standalone "Transcription par interlocuteur"
+// pour éliminer la redondance — un seul point d'entrée pour tout le
+// contenu détaillé. Le tab `audio` a `source: null` pour signaler le
+// rendu spécial (mount corrector au lieu de markdown).
 const CR_TABS = [
-    { key: 'meeting_cr',    label: '📋 Compte-rendu',  source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json) },
-    { key: 'reformulated',  label: '✍️ Reformulation', source: (d) => d.reformulated_text || '' },
-    { key: 'cleaned',       label: '🧹 Nettoyée',      source: (d) => d.cleaned_text || '' },
+    { key: 'meeting_cr',    label: '📋 Compte-rendu',     source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json) },
+    { key: 'reformulated',  label: '✍️ Reformulation',    source: (d) => d.reformulated_text || '' },
+    { key: 'cleaned',       label: '🧹 Nettoyée',         source: (d) => d.cleaned_text || '' },
     { key: 'absentee',      label: '🪧 Pour les absents', source: (d) => d.absentee_summary || '' },
-    { key: 'raw',           label: '🎤 Brute (texte)', source: (d) => d.speaker_tagged_text || '' },
+    { key: 'audio',         label: '🎤 Audio synchro',    source: null /* mount corrector au lieu de markdown */ },
 ];
 
 function _formatMeetingAnalysisAsMarkdown(jsonText) {
-    // Le meeting_analysis_json contient un objet structuré 5-sections.
+    // Le meeting_analysis_json est un objet 5-sections produit par LLM :
+    //   { actors: [{name, role}],
+    //     themes: [{title, summary}],
+    //     decisions: [{decision, owner?, deadline?}|string],
+    //     gaps: [{question|gap, raised_by?}|string],
+    //     recommendations: [{recommendation, why?}|string] }
     // Si c'est déjà du markdown stocké en string, on retourne tel quel.
-    // Si c'est un objet JSON, on rend les sections proprement.
     if (!jsonText) return '';
-    try {
-        const obj = JSON.parse(jsonText);
-        if (!obj || typeof obj !== 'object') return jsonText;
-        const parts = [];
-        const sections = [
-            { key: 'actors',          title: 'Acteurs' },
-            { key: 'themes',          title: 'Thèmes' },
-            { key: 'decisions',       title: 'Décisions' },
-            { key: 'gaps',            title: 'Points en suspens' },
-            { key: 'recommendations', title: 'Recommandations' },
-        ];
-        for (const s of sections) {
-            const v = obj[s.key];
-            if (!v) continue;
-            parts.push(`## ${s.title}`);
-            if (Array.isArray(v)) parts.push(v.map((x) => `- ${typeof x === 'string' ? x : JSON.stringify(x)}`).join('\n'));
-            else if (typeof v === 'string') parts.push(v);
-            else parts.push(JSON.stringify(v, null, 2));
-            parts.push('');
+    let obj;
+    try { obj = JSON.parse(jsonText); }
+    catch (e) { return jsonText; }
+    if (!obj || typeof obj !== 'object') return String(jsonText);
+
+    const fmtActor = (a) => {
+        if (typeof a === 'string') return `- ${a}`;
+        const name = a.name || a.speaker || a.label || '';
+        const role = a.role || a.title || '';
+        return role ? `- **${name}** — ${role}` : `- **${name}**`;
+    };
+    const fmtTheme = (t) => {
+        if (typeof t === 'string') return `- ${t}`;
+        const title = t.title || t.label || '';
+        const summary = t.summary || t.description || '';
+        return summary ? `- **${title}** : ${summary}` : `- **${title}**`;
+    };
+    const fmtDecision = (d) => {
+        if (typeof d === 'string') return `- ${d}`;
+        const text = d.decision || d.text || d.title || '';
+        const owner = d.owner || d.assignee || '';
+        const deadline = d.deadline || d.due || d.date || '';
+        const extra = [owner && `_porteur :_ ${owner}`, deadline && `_échéance :_ ${deadline}`].filter(Boolean).join(' · ');
+        return extra ? `- ${text} (${extra})` : `- ${text}`;
+    };
+    const fmtGap = (g) => {
+        if (typeof g === 'string') return `- ${g}`;
+        const text = g.question || g.gap || g.text || g.title || '';
+        const raised = g.raised_by || g.asked_by || '';
+        return raised ? `- ${text} _(soulevé par ${raised})_` : `- ${text}`;
+    };
+    const fmtReco = (r) => {
+        if (typeof r === 'string') return `- ${r}`;
+        const text = r.recommendation || r.text || r.title || '';
+        const why = r.why || r.reason || '';
+        return why ? `- ${text} _— ${why}_` : `- ${text}`;
+    };
+    const sections = [
+        { key: 'actors',          title: 'Acteurs',           fmt: fmtActor },
+        { key: 'themes',          title: 'Thèmes',            fmt: fmtTheme },
+        { key: 'decisions',       title: 'Décisions',         fmt: fmtDecision },
+        { key: 'gaps',            title: 'Points en suspens', fmt: fmtGap },
+        { key: 'recommendations', title: 'Recommandations',   fmt: fmtReco },
+    ];
+    const parts = [];
+    for (const s of sections) {
+        const v = obj[s.key];
+        if (!v || (Array.isArray(v) && v.length === 0)) continue;
+        parts.push(`## ${s.title}`);
+        if (Array.isArray(v)) {
+            parts.push(v.map(s.fmt).join('\n'));
+        } else if (typeof v === 'string') {
+            parts.push(v);
         }
-        return parts.join('\n');
-    } catch (e) {
-        return jsonText; // déjà markdown
+        parts.push('');
     }
+    return parts.join('\n') || jsonText;
 }
 
 function _renderCrInlineBlock(fileId, data) {
-    const tabsWithContent = CR_TABS.filter((t) => (t.source(data) || '').trim().length > 0);
+    // Filtre : on garde un onglet "audio" seulement si on a une donnée
+    // exploitable (speaker_tagged_text ou au moins transcription_text).
+    const tabsWithContent = CR_TABS.filter((t) => {
+        if (t.source === null) {
+            // Tab audio : besoin de speaker_tagged_text (le corrector
+            // n'affiche pas grand-chose sans diarisation).
+            return !!(data.speaker_tagged_text || data.transcription_text);
+        }
+        return (t.source(data) || '').trim().length > 0;
+    });
     if (tabsWithContent.length === 0) return '';
     const tabsHtml = tabsWithContent.map((t, i) => `
       <button type="button" class="cr-inline-tab ${i === 0 ? 'cr-inline-tab--active' : ''}"
               data-cr-tab="${t.key}">${t.label}</button>
     `).join('');
     return `
-      <details class="cr-inline" data-cr-inline-for="${escapeHtml(fileId)}">
+      <details class="cr-inline" data-cr-inline-for="${escapeHtml(fileId)}" open>
         <summary>📑 Contenu détaillé (compte-rendu, transcriptions, synthèses)</summary>
         <div class="cr-inline-tabs">
           ${tabsHtml}
@@ -2019,14 +2072,67 @@ function _attachCrInline(container, fileId, data) {
 
     let activeKey = tabs[0]?.getAttribute('data-cr-tab') || 'meeting_cr';
 
+    // Audio corrector container — créé une seule fois, réutilisé entre
+    // les switchs d'onglet (pour ne pas re-fetch /transcript-status à
+    // chaque clic). Initialisé lazily à l'activation du tab audio.
+    let audioCorrectorEl = null;
+    const ensureAudioCorrector = () => {
+        if (audioCorrectorEl) return audioCorrectorEl;
+        // Récupère le bloc corrector standalone existant pour copier ses
+        // attributs (data-corrector-for, data-audio-url, data-audio-purged)
+        // puis on le neutralise (display:none) pour éviter le doublon.
+        const fileWrap = root.closest('[data-transcript-file-id]')?.parentElement;
+        const legacyCorrector = fileWrap?.querySelector(`[data-corrector-for="${CSS.escape(fileId)}"]`);
+        const dataAudioUrl = legacyCorrector?.getAttribute('data-audio-url') || '';
+        const dataAudioPurged = legacyCorrector?.getAttribute('data-audio-purged') || '0';
+        if (legacyCorrector) legacyCorrector.style.display = 'none';
+        audioCorrectorEl = document.createElement('div');
+        audioCorrectorEl.className = 'file-detail-corrector-block';
+        audioCorrectorEl.setAttribute('data-corrector-for', fileId);
+        audioCorrectorEl.setAttribute('data-audio-url', dataAudioUrl);
+        audioCorrectorEl.setAttribute('data-audio-purged', dataAudioPurged);
+        return audioCorrectorEl;
+    };
+
+    const findWrap = root.querySelector('.cr-inline-find');
+    const footEl = root.querySelector('.cr-inline-foot');
     const renderBody = (key) => {
         const tab = CR_TABS.find((t) => t.key === key);
-        const text = tab ? (tab.source(data) || '') : '';
+        if (!tab) {
+            body.innerHTML = `<div class="cr-inline-empty">Onglet inconnu.</div>`;
+            return;
+        }
+        if (tab.source === null) {
+            // Tab audio : monte le corrector audio si pas déjà fait.
+            // Le corrector a son propre search local + son propre notice,
+            // on cache donc ceux du CR-inline pour éviter le doublon.
+            if (findWrap) findWrap.style.visibility = 'hidden';
+            if (footEl) footEl.style.display = 'none';
+            // Désactive la contrainte de hauteur du body (le corrector
+            // gère son propre scroll interne sur les blocs).
+            body.style.maxHeight = 'none';
+            body.style.padding = '0';
+            const el = ensureAudioCorrector();
+            body.innerHTML = '';
+            body.appendChild(el);
+            // mountTranscriptCorrector est idempotent (guard
+            // dataset.correctorMounted) : 1er appel charge + render, les
+            // suivants no-op et le DOM est conservé.
+            if (typeof mountTranscriptCorrector === 'function') {
+                mountTranscriptCorrector(el);
+            }
+            return;
+        }
+        // Tab markdown : re-active search + foot + max-height standard.
+        if (findWrap) findWrap.style.visibility = '';
+        if (footEl) footEl.style.display = '';
+        body.style.maxHeight = '';
+        body.style.padding = '';
+        const text = tab.source(data) || '';
         if (!text.trim()) {
             body.innerHTML = `<div class="cr-inline-empty">Pas de contenu pour cet onglet.</div>`;
             return;
         }
-        // Rendu markdown via marked.js, fallback escape si lib pas chargée.
         let html;
         try {
             html = window.marked ? window.marked.parse(text) : `<pre>${escapeHtml(text)}</pre>`;
@@ -2034,7 +2140,6 @@ function _attachCrInline(container, fileId, data) {
             html = `<pre>${escapeHtml(text)}</pre>`;
         }
         body.innerHTML = html;
-        // Pastiller 🔍 sur les termes corrigés.
         if (correctedTerms && correctedTerms.length > 0) {
             _markCorrectedTermsInBody(body, correctedTerms);
         }
@@ -3575,7 +3680,11 @@ async function loadTranscriptStatus(fileId, container) {
         // Pastille 🔍 sur les termes déjà corrigés → drawer "Sources brutes".
         const crInlineHtml = persistent ? _renderCrInlineBlock(fileId, data) : '';
 
-        container.innerHTML = `${statusBadge}${subtitle}${crInlineHtml}${dropdownBlock}`;
+        // Ordre vertical : statut → résumé → téléchargements → CR inline.
+        // CR inline est placé APRÈS les téléchargements pour rester proche
+        // de "Transcription par interlocuteur" qui le suit dans le DOM,
+        // et pour ne pas casser le scan-pattern résumé→download de l'user.
+        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}${crInlineHtml}`;
         if (persistent) {
             // Bind les interactions du CR inline (tabs, search, sélection,
             // pastilles 🔍). Doit être fait APRÈS l'innerHTML pour avoir
