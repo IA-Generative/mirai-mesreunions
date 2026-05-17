@@ -1005,7 +1005,9 @@
             border-radius: 4px; padding: 0.4rem 0.6rem;
             margin: 0.5rem 0;
             line-height: 1.45;
+            display: flex; gap: 0.6rem; align-items: flex-start;
         }
+        .tc-notice-text { flex: 1 1 auto; min-width: 0; }
         .tc-notice strong { color: #334155; }
         .tc-notice-play, .tc-notice-pencil {
             display: inline-flex; align-items: center; justify-content: center;
@@ -1014,6 +1016,36 @@
             background: #eff6ff; border-radius: 3px;
             padding: 0 0.2rem;
             border: 1px solid #cbd5e1;
+        }
+        .tc-find {
+            flex: 0 0 auto;
+            display: flex; align-items: center; gap: 0.25rem;
+            white-space: nowrap;
+        }
+        .tc-find-input {
+            font-size: 0.74rem; padding: 0.15rem 0.4rem;
+            border: 1px solid #cbd5e1; border-radius: 3px;
+            width: 9rem; outline: none;
+        }
+        .tc-find-input:focus { border-color: #1d4ed8; }
+        .tc-find-prev, .tc-find-next {
+            font-size: 0.7rem; line-height: 1;
+            padding: 0.15rem 0.35rem;
+            border: 1px solid #cbd5e1; background: #fff;
+            border-radius: 3px; cursor: pointer;
+        }
+        .tc-find-prev:hover, .tc-find-next:hover {
+            background: #eff6ff; border-color: #1d4ed8;
+        }
+        .tc-find-status {
+            font-size: 0.7rem; color: #64748b;
+            min-width: 5.5rem; text-align: left;
+        }
+        .tc-find-hit {
+            background: #fef9c3; color: inherit; padding: 0 1px; border-radius: 2px;
+        }
+        .tc-find-current {
+            background: #fde047; outline: 1px solid #ca8a04;
         }
         .transcript-corrector-blocks {
             display: flex; flex-direction: column; gap: 0.3rem;

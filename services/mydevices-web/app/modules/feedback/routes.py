@@ -278,8 +278,13 @@ def regenerate_file(file_id: str):
                 "error": "audio_not_found_or_not_ready",
             }), 404
         try:
+            # Timeout généreux : la chaîne LLM (glossary_correction → oob_cleaning
+            # → reformulation → meeting_analysis → absentee_summary) tourne en
+            # synchrone côté ingester et prend 30s–3min selon la longueur audio.
+            # 10s par défaut = 502 quasi-systématique.
             r = _call_ingester("POST", f"/api/v1/audio/{internal_id}/reprocess",
-                               json_body={"user_sub": user_sub, "force": True})
+                               json_body={"user_sub": user_sub, "force": True},
+                               timeout=600)
         except req.RequestException:
             return jsonify({
                 "feedback_id": feedback.get("id"),

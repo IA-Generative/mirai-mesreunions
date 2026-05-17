@@ -4,6 +4,28 @@
 
 Le systeme applique un cloisonnement strict entre zone externe et zone interne pour proteger l'identite utilisateur, les tokens de session et les fichiers audio importes.
 
+## Identité SSO Keycloak
+
+Depuis le 2026-05-16, **tous les modes** de déploiement (Docker Compose,
+intégration, recette, prod-bêta) utilisent le client Keycloak
+`mes-reunions` sur le realm `openwebui`. Les anciens noms
+`audio-upload-app` (client) et `audio-upload` (realm) ne sont plus
+utilisés et doivent disparaître de tout nouveau manifeste.
+
+| Environnement | Hostname public |
+| --- | --- |
+| Docker Compose local | `localhost:8080` |
+| Intégration | `import-audio.fake-domain.name` |
+| Prod-bêta canonique | `mesreunions.fake-domain.name` |
+| Prod-bêta transition | `mydevices.fake-domain.name` |
+
+> **Note critique** — quand le `clientId` change côté Keycloak (ou
+> qu'un nouveau client est créé), il faut **aussi** patcher le Secret
+> Kubernetes `oidc-secret` (gitignored, géré séparément du realm
+> export). Sinon le pod continue d'envoyer l'ancien `client_id` et le
+> login casse silencieusement — un cookie de session existant peut
+> masquer le bug pendant plusieurs minutes.
+
 ## Parcours De Lecture
 
 1. `README.md` pour la vue d'ensemble et l'exploitation.
@@ -222,6 +244,29 @@ flowchart TD
 > Whisper + pyannote + intelligence de réunion LLM cf
 > [docs/integrate-with-kevent.md](integrate-with-kevent.md)).
 
+### Backend selector diarisation
+
+Le backend `kevent` route désormais la diarisation via un sélecteur
+runtime indépendant de la transcription Whisper :
+
+- `DIARIZATION_BACKEND ∈ {kevent, vm-direct}` — choisit la cible
+  d'appel pyannote.
+- `DIARIZATION_VM_URL` — endpoint utilisé quand le backend vaut
+  `vm-direct` (ex. `http://198.51.100.10:8080`).
+
+Depuis le 2026-05-17, **prod-bêta interne tourne sur `vm-direct`**
+(VM L4 dédiée) pour contourner les limites TTL/timeout de la gateway
+Kevent sur les longs audios. Voir
+[docs/DIARIZATION_BACKEND.md](DIARIZATION_BACKEND.md).
+
+**Baselines RTF observées** (Real-Time Factor, plus bas = plus rapide) :
+
+| Plateforme | RTF |
+| --- | --- |
+| VM L4 directe | 0.027 |
+| MIG10 prod (Kevent) | 0.060 |
+| MIG20 prod (Kevent) | 0.097 |
+
 ### Évolution prévue — Pipeline V2 backend Kevent (DAG composable)
 
 **Statut : planifié, non implémenté** (cf. `~/.claude/plans/federated-finding-whisper.md`).
@@ -284,6 +329,47 @@ flowchart LR
 > Ingress, via la queue AMQP — la zone interne ouvre alors la seule socket
 > qui traverse la frontière, dans le sens sortant.
 
+### Pièges connus
+
+- **State in-memory + multi-replicas** : `mydevices-web` tourne en
+  2+ replicas en prod-bêta. Tout state stocké en mémoire de processus
+  (dict Python, cache local, etc.) est perdu ~50 % des polls à cause
+  du round-robin ClusterIP. Toute donnée qui doit survivre à plusieurs
+  requêtes consécutives doit être persistée (DB ou Redis) ou bien le
+  Service doit activer `sessionAffinity: ClientIP`.
+
+### Pattern CNAME delegation cert-manager
+
+Pour chaque nouvel hôte exposé via cert-manager + webhook Scaleway,
+créer dans la zone parente le CNAME :
+
+```
+_acme-challenge.<host>  CNAME  _acme-challenge.<host>.acme.fake-domain.name.
+```
+
+Sans ce CNAME, le challenge DNS-01 échoue avec « domain not found » :
+le webhook Scaleway ne sait répondre que dans la sous-zone déléguée
+`acme.fake-domain.name`. Toute nouvelle entrée d'Ingress avec
+TLS automatique doit être précédée de ce CNAME côté DNS parent.
+
+## Déploiement Kubernetes
+
+**Règle d'or** — passer **toujours** par l'overlay kustomize de
+l'environnement cible :
+
+```bash
+kustomize build --load-restrictor=LoadRestrictionsNone \
+  deploy/kubernetes/environments/prod-beta/internal/ \
+  | kubectl apply -f -
+```
+
+**JAMAIS** `kubectl apply -f` directement sur les manifests base.
+Sinon ~15 variables d'environnement critiques (`TRANSCRIPTION_BACKEND=kevent`,
+`KEVENT_*_ENABLED`, `LITELLM_BASE_URL`, `DIARIZATION_BACKEND`,
+`DIARIZATION_VM_URL`, etc.) injectées uniquement par l'overlay sont
+écrasées par les valeurs de base, et le pipeline de transcription
+casse silencieusement (le pod démarre, mais route vers le stub local).
+
 ## Pull-Trigger HTTP optionnel
 
 Pour ramener la latence du flux vers la zone interne en dessous du tick
@@ -310,6 +396,75 @@ des deux Deployments. Les anciens pods sur l'ancien token reçoivent 401 et
 basculent silencieusement sur le polling AMQP sans perte de message —
 c'est le bon comportement.
 
+## Cycle Meeting-Prep
+
+Boucle de préparation et d'enrichissement des réunions :
+
+1. **Brief** — l'utilisateur rédige un brief (contexte + participants
+   + glossaire ad hoc) côté `mydevices-web`.
+2. **Auto-link audio** — à chaque nouvel upload, le système calcule
+   une similarité cosinus brief↔transcription et lie automatiquement
+   si `cosine ≥ 0.55` **et** écart avec le 2e candidat `≥ 0.15`.
+   Pas de boucle « suggestion + confirmation » utilisateur.
+3. **Reprocess** — si le glossaire du brief est amendé après la
+   transcription, le pipeline rejoue les étapes LLM (glossary
+   correction + reformulation + compte-rendu) avec le glossaire à
+   jour.
+4. **Chaînage série** — une réunion peut référencer un parent via
+   `series_parent_id` (suite d'une série), ce qui propage le brief et
+   le glossaire de la session précédente.
+
+**Caps glossaire** (anti-débordement contexte LLM) :
+
+| Source | Cap |
+| --- | --- |
+| Brief courant | 50 termes |
+| Glossaire utilisateur global | 200 termes |
+| Combiné (passé au LLM) | 300 termes |
+
+**Export Drive** — 4 fichiers par réunion + `glossaire-utilisateur.txt`
+au niveau racine utilisateur. Persistance Drive en **best-effort
+async overwrite** : la DB reste la source de vérité, le champ
+`drive_sync_status` trace les échecs sans bloquer l'UX. Soft-delete
+DB → trash Drive (corbeille Drive, pas suppression définitive).
+
+## Corrector De Transcript & Feedback Utilisateur
+
+Édition segment-par-segment de la transcription côté `mydevices-web`,
+avec table `user_feedback` (migration 015) typée :
+
+- `usefulness` — note de pertinence globale du compte-rendu ;
+- `regenerate` — demande explicite de relancer les étapes LLM ;
+- `correction` — correctif local sur un segment.
+
+Depuis le 2026-05-17, la popup de correction n'expose **plus**
+l'option « Relancer les étapes LLM » à chaque édit. À la place, un
+badge `pending-corrections` (orange, persisté à la fois en
+`localStorage` et en base) invite l'utilisateur à régénérer le
+compte-rendu en fin de session d'édition — moins d'appels LLM
+redondants, meilleure UX.
+
+**Distinction critique des identifiants** : le `file_id` externe
+(`uploaded_files.id`, zone DMZ) ≠ `audio.id` interne
+(`user_audio_files.id`, zone interne). Le proxy `mydevices-web` fait
+la résolution via `_resolve_internal_audio_id` qui chaîne
+`get_owned_file` (vérif propriété DMZ) puis `lookup_audio_outputs`
+(mapping vers l'ID interne). Toute nouvelle route corrector / feedback
+doit passer par ce helper.
+
+## Corbeille (Soft-Delete)
+
+Un DELETE côté `mydevices-web` ne supprime jamais immédiatement : il
+positionne `trashed_at` (soft-delete) sur la session et les fichiers
+liés. L'auto-purge à 30 jours est déclenchée paresseusement par
+`api_my_sessions` (premier appel après expiration).
+
+> **Aligner** `EXTERNAL_PURGE_MAX_AGE_HOURS=720` avec
+> `TRASH_RETENTION_DAYS=30` (720 h = 30 j). Si la purge externe tombe
+> en deçà, les items externes disparaissent du S3 / DB DMZ **avant**
+> d'apparaître dans la corbeille, ce qui rend la restauration
+> impossible.
+
 ## Modeles De Donnees Utiles
 
 - Zone interne:
@@ -318,6 +473,30 @@ c'est le bon comportement.
 - Zone externe:
   - `upload_sessions` (suivi d'usage et statut)
   - `upload_token_options` (copie flag `auto_transcribe`)
+
+### Glossaire utilisateur — `user_glossary_terms`
+
+Table **globale par `user_sub`** (zone interne), upsertée en batch à
+chaque brief meeting-prep. Elle est lue par `internal-ingester` pour
+**toutes** les transcriptions du même utilisateur — pas seulement
+celles liées à un brief. Le pipeline LLM combine ce glossaire global
+avec celui éventuel du brief courant (caps 200 / 50 / 300, cf. cycle
+meeting-prep).
+
+**Stratégie complémentaire** côté transcription :
+
+- Whisper `initial_prompt` (limite stricte ~244 tokens) — termes les
+  plus discriminants en priorité ;
+- LLM `glossary_correction` en post-traitement — exploite l'intégralité
+  du glossaire combiné, indépendamment du cap Whisper.
+
+### Migration SQL avant rollout
+
+Toujours appliquer un `ALTER TABLE` **AVANT** le rollout du service
+qui lira la colonne. Sinon SQLAlchemy retourne `UndefinedColumn` en
+boucle (le metadata est figé au démarrage), et un **second rollout**
+est nécessaire après la migration pour réinitialiser le pool de
+connexions, doublant la fenêtre d'indispo.
 
 ## Comportement Du Flag auto_transcribe
 

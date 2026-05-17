@@ -1,590 +1,506 @@
-# Secure Audio Upload Pipeline
+# Mes Réunions — pipeline sécurisé d'upload, transcription et compte-rendu
 
-> Système sécurisé d'upload audio par QR code avec cloisonnement zone externe / zone interne, génération de tokens côté interne, analyse antivirale, transcodage et transcription optionnelle.
+> Service souverain de captation audio par QR code, avec cloisonnement zone externe / zone interne, transcription Whisper + diarisation pyannote, et génération de comptes-rendus structurés par LLM. Conçu pour les ministères français — design DSFR, déploiement Scaleway, SSO Keycloak.
 
-## Parcours De Lecture Recommandé
+---
 
-1. `README.md` (vue d'ensemble + mode d'emploi)
-2. `docs/ARCHITECTURE.md` (architecture détaillée + sécurité + flux)
-3. `tests/DISCOVERY_TEST_PLAN.md` (test humain guidé)
-4. `tests/TEST_COVERAGE_STATUS.md` (statut de couverture et résultats)
+## 1. À qui ça sert (et à quoi)
 
-## Principe fondamental
+- **Pour l'agent en réunion** : un QR code généré depuis le poste de travail → captation depuis le mobile (PWA installable) → compte-rendu structuré dans Mes Réunions sans manipulation de fichier.
+- **Pour l'administrateur** : un parcours d'enrôlement de devices, une corbeille, un suivi du pipeline, un éditeur de glossaire personnel.
+- **Pour l'architecte** : un exemple concret de cloisonnement DMZ/interne avec PULL strict (aucun flux HTTP entrant côté interne hors un trigger optionnel filtré).
 
-**La zone interne est l'autorité de confiance.** Aucun identifiant de session n'est généré côté externe. Le `device-token-authority` (zone interne) est la seule source de vérité pour les codes d'upload. La zone externe ne fait que relayer et consommer ces tokens — elle ne peut en aucun cas en forger.
+**Sous-titre produit** : *« Concentrez-vous sur la réunion. »*
 
-## Architecture
+---
+
+## 2. Parcours de lecture
+
+| Vous voulez… | Lisez |
+|---|---|
+| Comprendre ce que fait le système | Section 3 (vue d'ensemble) de ce README |
+| Le lancer en 10 min sur votre machine | Section 6 (Démarrage rapide) |
+| Comprendre les choix de sécurité | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Brancher un backend de transcription | [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md), [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md) |
+| Comprendre le selector de diarisation | [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md) |
+| Tester manuellement bout-en-bout | [tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md) |
+| Voir l'état de la couverture | [tests/TEST_COVERAGE_STATUS.md](tests/TEST_COVERAGE_STATUS.md) |
+
+---
+
+## 3. Vue d'ensemble
+
+### 3.1 Le principe en une phrase
+
+**La zone interne est seule autorité de confiance.** Aucun identifiant de session n'est généré côté externe ; le `device-token-authority` (interne) frappe les codes d'upload, la zone externe ne fait que les consommer.
+
+### 3.2 Trois zones, trois rôles
 
 ```mermaid
 flowchart LR
   subgraph EXT["ZONE EXTERNE (DMZ)"]
-    CG["Code Generator<br/>(OIDC/Keycloak)"]
-    UP["Upload Portal<br/>(mobile)"]
-    EOPT["upload_token_options<br/>(auto_transcribe)"]
-    S3U["S3 audio-upload<br/>(brut)"]
-    AV["AV Worker<br/>(ClamAV)"]
-    TR["Transcode Worker<br/>(FFmpeg)"]
-    S3P["S3 audio-processed<br/>(guichet DMZ ↔ interne)"]
-    FM["File Mover<br/>(notificateur)"]
-
-    CG -->|"QR url"| UP
-    CG --> EOPT
-    UP -->|"upload fichier"| S3U
-    S3U --> AV --> TR --> S3P --> FM
+    direction TB
+    MW["mydevices-web<br/>(génération QR, OIDC)"]
+    PWA["mobile-upload-pwa<br/>(captation mobile)"]
+    CV["clamav-scanner"]
+    AN["audio-normalizer<br/>(FFmpeg voix)"]
+    BR["dmz-to-internal-bridge<br/>(notif AMQP)"]
   end
 
   subgraph INT["ZONE INTERNE"]
-    TI["Token Issuer<br/>(autorité unique token)"]
-    IOPT["issued_token_options<br/>(auto_transcribe)"]
-    FP["File Puller<br/>(PULL depuis audio-processed)"]
-    S3I["S3 audio-internal<br/>(zone protégée)"]
-    STT["Transcription Stub<br/>(conditionnel)"]
-    DB["PostgreSQL"]
-
-    TI --> IOPT
-    FP --> S3I
-    FP -->|"si auto_transcribe=true"| STT
+    direction TB
+    DTA["device-token-authority<br/>(autorité tokens)"]
+    ING["internal-ingester<br/>(pull + dispatch)"]
+    REL["transcription-relay"]
   end
 
-  MQ["RabbitMQ<br/>(broker, en zone EXT)"]
-  EXT --- MQ
+  subgraph EXTSVC["SERVICES EXTERNES"]
+    direction TB
+    KEV["Kevent / Mirai<br/>(Whisper + LLM)"]
+    VM["VM diarisation L4<br/>(pyannote)"]
+    MCR["Plateforme MCR"]
+  end
 
-  CG -->|"API token<br/>(Bearer auth)"| TI
-  FM -->|"publish internal_pull"| MQ
-  FP -->|"consume internal_pull<br/>(socket sortante)"| MQ
-  FM -.->|"trigger HTTP optionnel<br/>(Bearer + ACL nginx)"| FP
+  MW -->|Bearer| DTA
+  PWA -->|upload| CV --> AN --> BR
+  BR -.->|AMQP internal_pull| ING
+  ING --> REL
+  ING -->|Whisper + LLM| KEV
+  ING -->|diarize| VM
+  ING -->|push| MCR
 ```
 
-> Le broker RabbitMQ vit côté DMZ et la zone interne ouvre une socket
-> sortante pour publier *et* consommer ses queues. Aucune connexion HTTP
-> entrante n'atteint la zone interne hors du chemin `pull-trigger.…` qui
-> est filtré par ACL IP au niveau nginx puis bearer applicatif.
+**Lecture rapide** :
+- L'externe accueille les uploads, scanne et normalise.
+- L'interne reçoit par PULL (queue AMQP + trigger HTTP optionnel) et orchestre transcription/diarisation/LLM.
+- Les appels lourds (Whisper, pyannote, LLM) sortent vers des services externes mais sont initiés *depuis l'interne*.
 
-## Flux de génération de token (interne → externe)
+### 3.3 Cycle complet d'un fichier
 
 ```mermaid
 sequenceDiagram
   participant U as Utilisateur
-  participant CG as Code Generator (ext)
-  participant TI as Token Issuer (int)
-  participant PGI as PostgreSQL interne
-  participant PGE as PostgreSQL externe
-
-  U->>CG: login OIDC
-  U->>CG: Générer un code (+ auto_transcribe)
-  CG->>TI: POST /issue-token {user_sub, ttl, max, auto_transcribe}
-  TI->>PGI: generate code + qr_token
-  TI->>PGI: INSERT issued_tokens + issued_token_options
-  TI-->>CG: {simple_code, qr_token, auto_transcribe}
-  CG->>PGE: INSERT upload_sessions + upload_token_options
-  CG-->>U: QR code + code
+  participant MW as mydevices-web (ext)
+  participant DTA as device-token-authority (int)
+  participant PWA as mobile-upload-pwa (ext)
+  participant PIPE as Pipeline ext (CV→AN→BR)
+  participant ING as internal-ingester (int)
+  participant KEV as Kevent (Whisper+LLM)
+  participant VM as VM diarisation
+  U->>MW: Login OIDC, demande de code
+  MW->>DTA: POST /issue-token
+  DTA-->>MW: simple_code + qr_token
+  MW-->>U: QR + code court
+  U->>PWA: Ouvre QR depuis mobile
+  PWA->>PIPE: Upload .m4a
+  PIPE-->>ING: notif internal_pull (AMQP)
+  ING->>KEV: Whisper (Bearer)
+  ING->>VM: pyannote (DIARIZATION_BACKEND=vm-direct)
+  ING->>KEV: glossary_correction + reformulation + meeting_cr
+  ING-->>MW: brief disponible (corbeille, corrector, glossaire)
 ```
 
-Le mydevices-web **ne contient aucune logique de génération de token**. Il délègue à 100% au device-token-authority via API authentifiée (bearer token). La table `issued_tokens` en zone interne fait foi.
+### 3.4 Les neuf services applicatifs
 
-## Composants
+Tous les noms sont *self-explanatory* depuis le rebranding du 2026-05-16. Le format `nom (zone, port, rôle court)` :
 
 | Service | Zone | Port | Rôle |
-|---------|------|------|------|
-| **mydevices-web** | Externe | 8080 | Interface OIDC, demande de token au device-token-authority interne, affiche QR |
-| **mobile-upload-pwa** | Externe | 8081 | Page mobile d'upload audio (QR/code), WebSocket temps réel |
-| **clamav-scanner** | Externe | — | Scan ClamAV, quarantaine si virus |
-| **audio-normalizer** | Externe | — | FFmpeg : loudnorm dual-pass (linear) **conditionnel** (sondage RMS à +60s/+5min, skip si déjà ≥ -30 dBFS — cf bench [bench/reports/SYNTHESE.md](bench/reports/SYNTHESE.md)), highpass 80Hz, lowpass 7kHz, limiter, score qualité 1-5 |
-| **dmz-to-internal-bridge** | Externe | — | Publie une notification *fichier prêt* sur la queue durable `internal_pull` (AMQP) ; trigger HTTP optionnel pour ramener la latence quasi-zéro |
-| **device-token-authority** | **Interne** | 8091 | **Autorité unique** de génération des tokens (simple_code + qr_token) |
-| **internal-ingester** | Interne | 8090 | Consomme `internal_pull` (poll 30 s par défaut) et tire les fichiers transcodés depuis le bucket `audio-processed` (guichet) ; expose `/api/v1/pull-trigger` (bearer + ACL) pour wake-up |
-| **transcription-relay** | Interne | — | Backend par défaut (`TRANSCRIPTION_BACKEND=stub`), simule la STT via la queue locale |
-| **MCR push** | Interne (internal-ingester) | — | Backend `mcr` : pousse le fichier transcodé vers la plateforme MCR via OIDC refresh token (cf [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md)) |
-| **Kevent / Mirai** | Interne (internal-ingester) | — | Backend `kevent` : Whisper + pyannote diarisation + intelligence de réunion LLM (speaker naming, **glossary correction**, OOB cleaning, reformulation, analyse 5 sections). Glossaire administratif embarqué image (fallback) ou monté en ConfigMap K8s sans rebuild — cf [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md) |
+|---|---|---|---|
+| **mydevices-web** | Externe | 8080 | Frontend OIDC, demande de tokens, suivi corbeille, édition glossaire, corrector de transcript |
+| **mobile-upload-pwa** | Externe | 8081 | PWA installable mobile, captation audio, WebSocket |
+| **admin-console** | Externe | 8082 | Suivi pipeline, S3 browser, métriques |
+| **clamav-scanner** | Externe | — | Scan AV, quarantaine |
+| **audio-normalizer** | Externe | — | FFmpeg voix (probe RMS + loudnorm dual-pass conditionnel) |
+| **dmz-to-internal-bridge** | Externe | — | Publie `internal_pull` (AMQP, durable) + trigger HTTP optionnel |
+| **device-token-authority** | **Interne** | 8091 | Autorité unique de frappe des codes d'upload |
+| **internal-ingester** | Interne | 8090 | Drain queue + pull S3 + orchestrateur transcription/diarisation/LLM |
+| **transcription-relay** | Interne | — | Backend `stub` (simulation par queue locale) |
 
-## Principes de sécurité
+---
 
-1. **Tokens générés côté interne** — Le `device-token-authority` est la seule autorité. La zone externe ne peut pas forger de codes de session. En cas de compromission DMZ, aucun token frauduleux ne peut être créé.
+## 4. Identité et SSO
 
-2. **Pattern PULL strict (notification + données)** — Aucune donnée ni notification n'est *poussée* vers la zone interne. La zone externe publie sur la queue AMQP `internal_pull` ; la zone interne ouvre une socket sortante vers le broker pour la consommer, puis tire le fichier depuis S3. Le wake-up HTTP optionnel est purement une optimisation de latence et fonctionne sous bearer + ACL nginx — sa rotation n'a aucun impact fonctionnel grâce au polling de la queue.
+| Environnement | Realm Keycloak | Client | Hostname |
+|---|---|---|---|
+| Docker Compose local | `openwebui` | `mes-reunions` | `http://localhost:8080` |
+| Intégration interne | `openwebui` | `mes-reunions` | `https://import-audio.fake-domain.name` |
+| Recette | `openwebui` | `mes-reunions` | (cf overlays kustomize recette) |
+| Prod-bêta (cible) | `openwebui` | `mes-reunions` | `https://mesreunions.fake-domain.name` (canonique) + `https://mydevices.fake-domain.name` (transition) |
 
-3. **Surface d'entrée contrôlée vers la zone interne** — La zone interne n'expose que deux services :
-   - `device-token-authority:8091` ← accessible uniquement par `mydevices-web` via NetworkPolicy intra-cluster
-   - `internal-ingester` via Ingress public restreint `pull-trigger.fake-domain.name` : annotation `whitelist-source-range` (IP NAT egress du dmz-to-internal-bridge + IPs admins), bearer `INTERNAL_PUSH_TRIGGER_TOKEN`, et 4e couche optionnelle d'ACL applicative. Le port 8090 intra-cluster ne sert plus qu'aux probes Kubernetes (`/healthz`).
+> Depuis le 2026-05-16 **tous les modes** utilisent le client `mes-reunions` sur le realm `openwebui`. Les noms historiques (`audio-upload-app` / realm `audio-upload`) ne sont plus utilisés.
 
-4. **3 stockages S3 séparés** — `audio-upload` (bruts, DMZ), `audio-processed` (transcodés, *guichet* DMZ↔interne avec IAM segmenté writer/reader), `audio-internal` (comptes usagers, zone protégée uniquement)
+Quand le `clientId` change, le secret K8s `oidc-secret` (gitignored) doit être patché sur le cluster — sinon le pod envoie l'ancien `client_id` et le login casse silencieusement (le cookie de session existant masque le problème).
 
-5. **Codes éphémères** — QR codes avec TTL configurable (15 min → 7 jours), limite d'uploads par session configurable (299 par défaut, plafond serveur silencieux côté pipeline)
+---
 
-6. **Analyse antivirale obligatoire** — Tout fichier passe par ClamAV. Fichiers infectés en quarantaine.
+## 5. Concepts à connaître avant de toucher au code
 
-7. **Transfert idempotent** — Si une notification `file_ready` est rejouée (retry réseau/queue), le `internal-ingester` détecte le fichier déjà importé et répond `already_pulled` sans doublonner les données.
+### 5.1 Le pattern PULL strict
 
-8. **Enrôlement persistant device navigateur** — Le portail upload enrôle le navigateur (token device persistant), vérifie sa validité à chaque initialisation et permet la révocation unitaire/globale côté QR interne et admin.
+Aucune donnée n'est *poussée* vers l'interne. La DMZ publie une notification sur la queue `internal_pull` ; l'interne ouvre une socket sortante vers le broker pour la consommer, puis tire le fichier depuis S3. Le trigger HTTP optionnel est purement une optimisation de latence (filtré par bearer + ACL nginx).
 
-## Démarrage rapide
+### 5.2 Le triple stockage S3
 
-## Captures D'écran
+| Bucket | Localisation | Contenu | IAM |
+|---|---|---|---|
+| `audio-upload` | DMZ | Fichiers bruts, scannés en place | writer DMZ only |
+| `audio-processed` | DMZ (guichet) | Fichiers transcodés, *guichet* vers l'interne | writer DMZ + reader interne |
+| `audio-internal` | Interne | Comptes usagers, zone protégée | interne only |
 
-1. QR Generator (création de code, options token, suivi activité)
-![QR Generator](docs/screenshots/qr-code-gen.png)
-![Activité](docs/screenshots/activity-follow.png)
+### 5.3 Le selector de backend transcription
 
-2. Upload mobile (code court, upload, application PWA)
-![Code court mobile](docs/screenshots/enter-small-code.png)
-![Upload mobile](docs/screenshots/upload-mobile.png)
-![Application mobile](docs/screenshots/mobile-application.jpeg)
-![Android - installation PWA](docs/screenshots/install-android.png)
-![Android - bouton installation](docs/screenshots/install-android-button.png)
-![Android - application](docs/screenshots/mobile-app-android.png)
+`TRANSCRIPTION_BACKEND ∈ {stub, mcr, kevent}` choisit l'orchestrateur post-pull. En prod-bêta interne : `kevent` (Whisper + LLM via gateway Mirai).
 
-3. Admin / Compte-rendu (suivi pipeline et transcription)
-![Admin panel](docs/screenshots/admin-panel.png)
+### 5.4 Le selector de backend diarisation
 
-### Docker Compose
+`DIARIZATION_BACKEND ∈ {kevent, vm-direct}` choisit le moteur pyannote. En prod-bêta interne depuis le 2026-05-17 : `vm-direct` à `http://198.51.100.10:8080` (cf [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md)).
+
+### 5.5 La corbeille (soft-delete)
+
+DELETE depuis mydevices = soft-delete via `trashed_at`. Auto-purge 30j déclenchée par `api_my_sessions`. **Aligner** `EXTERNAL_PURGE_MAX_AGE_HOURS=720` avec `TRASH_RETENTION_DAYS` sinon les items external sont purgés avant la corbeille.
+
+### 5.6 La rétention device = source de vérité
+
+Le `DEVICE_TOKEN_RETENTION_HOURS=360` (15j) pilote tout. La grâce QR (5 min) est un effet de bord. Le renew bump *les deux*. Cette variable doit être positionnée sur **token-issuer ET code-generator**.
+
+### 5.7 Le glossaire utilisateur
+
+La table `user_glossary_terms` stocke un glossaire *global* par `user_sub`. Il est :
+- alimenté en upsert batch à chaque brief Mes Réunions ;
+- lu par le `internal-ingester` pour **toutes** les transcriptions du même utilisateur (pas seulement audio↔brief liés) ;
+- éditable depuis mydevices (CRUD via API) ;
+- envoyé à Whisper via `initial_prompt` (~244 tokens max) + post-traité côté LLM via `glossary_correction` (stratégies complémentaires).
+
+### 5.8 Le cycle meeting-prep
+
+```
+brief → auto-link audio (cosine ≥ 0.55 + écart ≥ 0.15)
+     → reprocess avec glossaire amendé
+     → chaînage série via series_parent_id
+```
+
+Caps glossaire : 50 (brief) / 200 (utilisateur) / 300 (combiné). 4 fichiers exportés au Drive + `glossaire-utilisateur.txt`.
+
+### 5.9 Le corrector de transcript
+
+Côté mydevices : édition des segments, marquage des termes glossaire (« ignorer », « toujours utiliser »), feedback structuré (`usefulness`, `regenerate`, `correction`). Les corrections segment-par-segment **n'utilisent plus** l'option « Relancer les étapes LLM » (depuis 2026-05-17) — un badge orange `pending-corrections` invite l'utilisateur à régénérer le compte-rendu en fin d'édition. Persisté en `localStorage` + base (table `user_feedback`).
+
+---
+
+## 6. Démarrage rapide (Docker Compose)
 
 ```bash
-# Cloner le repo
-git clone https://github.com/votre-org/secure-audio-upload.git
-cd secure-audio-upload
-
-# Copier la config
+git clone https://github.com/votre-org/mirai-mesreunions.git
+cd mirai-mesreunions
 cp configs/.env.example configs/.env
-
-# Lancer (script automatisé)
-bash deploy/scripts/setup.sh
+bash deploy/scripts/setup.sh             # ou : docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
-Ou manuellement :
+Accès :
 
+| Service | URL | Identifiants de test (**ne JAMAIS utiliser en prod**) |
+|---|---|---|
+| mydevices-web | http://localhost:8080 | `testuser` / `testpassword` (OIDC) |
+| mobile-upload-pwa | http://localhost:8081 | accès par code/QR |
+| admin-console | http://localhost:8082 | `admin` / `adminpassword` (OIDC) |
+| Keycloak admin | http://localhost:8180 | `admin` / `admin` |
+| RabbitMQ | http://localhost:15672 | `audio` / `change-me-rabbit` |
+| MinIO upload / processed / internal | :9001 / :9003 / :9005 | `minioadmin` / `minioadmin` |
+
+**Test mobile sur LAN** : `PUBLIC_HOST=192.168.x.x docker compose ... up -d --build` (ou `deploy/scripts/compose-up.sh`).
+
+**Compatibilité multi-arch** : `linux/amd64` et `linux/arm64`. Tous les images infra sont figées par digest pour la reproductibilité.
+
+**Générer un token interne robuste** :
 ```bash
-docker compose -f deploy/docker/docker-compose.yml up -d
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-### Compatibilité AMD64 / ARM64
-
-La stack Docker Compose est compatible `linux/amd64` et `linux/arm64` :
-- Images infra multi-arch (PostgreSQL, RabbitMQ, MinIO, Keycloak, ClamAV)
-- Image applicative basée sur `python:3.12-slim` (multi-arch)
-- Les images infra du `docker-compose.yml` sont figées par digest (`image: tag@sha256:...`) pour une exécution reproductible sur les deux architectures.
-
-Pour forcer un test sur une architecture donnée :
-
-```bash
-# Test amd64
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f deploy/docker/docker-compose.yml up -d --build
-
-# Test arm64
-DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose -f deploy/docker/docker-compose.yml up -d --build
-```
-
-Mise à jour des digests (quand nécessaire) :
-
-```bash
-docker buildx imagetools inspect <image:tag> | sed -n '1,6p'
-```
-
-## Mode d'emploi
-
-### 0. Si la stack est déjà installée
-
-> Exécuter d'abord le cahier de test humain pour valider les parcours.
-
-[tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md)
-
-
-### 1. Démarrer la stack
-
-```bash
-docker compose -f deploy/docker/docker-compose.yml up -d --build
-```
-
-Ou avec détection automatique de l'IP hôte (recommandé pour tests mobile/LAN):
-
-```bash
-./deploy/scripts/compose-up.sh
-```
-
-Pour forcer les URLs générées (QR/code) sur l'IP publique ou LAN du serveur :
-
-```bash
-PUBLIC_HOST=<IP_PUBLIQUE_OU_LAN> docker compose -f deploy/docker/docker-compose.yml up -d --build
-```
-
-Exemple : `PUBLIC_HOST=192.168.1.50`
-Important : ouvre aussi le Code Generator via cette même IP (`http://<IP>:8080`) et pas via `localhost`.
-Note : `PUBLIC_HOST` est prioritaire pour la génération des URLs QR (`http://<PUBLIC_HOST>:8081/upload/...`).
-
-### 2. Vérifier que tout est démarré
-
-```bash
-docker compose -f deploy/docker/docker-compose.yml ps
-```
-
-Vérifications rapides :
-
-```bash
-curl -sS http://localhost:8090/health
-curl -sS http://localhost:8091/health
-```
-
-### 3. Utiliser l'application (web)
-
-1. Ouvrir le code generator : `http://localhost:8080`
-2. Se connecter via OIDC (Keycloak)
-3. Générer un code/QR
-   - En mode test Docker Compose, des durées courtes `15s` et `30s` sont disponibles
-4. Ouvrir le portail d'upload : `http://localhost:8081`
-5. Uploader un fichier audio et suivre les statuts
-   - Une fenêtre de grâce après expiration (`UPLOAD_EXPIRY_GRACE_SECONDS`) permet de finir un upload en cours.
-   - Purge automatique côté upload: exécution quotidienne, suppression des fichiers de plus de 12h.
-
-### 4. Utiliser l'application (mobile, même Wi-Fi)
-
-1. Trouver l'IP locale de la machine hôte (ex: `192.168.x.x`)
-2. Accéder depuis le mobile :
-   - `http://<IP_LOCALE>:8080`
-   - `http://<IP_LOCALE>:8081`
-   - `http://<IP_LOCALE>:8082` (admin)
-3. Les QR codes générés utiliseront cette IP (et non `localhost`) si `PUBLIC_HOST` est défini.
-
-### 5. Suivi administration
-
-- Admin Portal : `http://localhost:8082`
-- Fonctions disponibles :
-  - suivi sessions/fichiers pipeline
-  - suivi transcription (statuts + journal des appels stub STT)
-  - affichage impact de normalisation (LUFS/TP/LRA avant/après + delta) directement dans la liste des fichiers
-  - visualisation S3 (`upload`, `processed`, `internal`)
-  - téléchargement d'objets S3
-
-### 5.bis Interface code generator (QR)
-
-- Formulaire de génération:
-  - checkbox `Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu`
-  - cette option est associée au token généré et pilote l'appel du stub de transcription en fin de pipeline
-  - dans tous les cas, les fichiers audio restent optimisés pour la voix (analyse + transcodage)
-- Dans la liste des fichiers:
-  - le nom long est forcé à la ligne pour rester lisible dans le bloc gris clair
-  - `Télécharger` et `Écouter` sont disponibles pour chaque fichier
-- `2.5/5` = indice de qualité audio (score 1 à 5)
-  - un infobulle `i` décrit le calcul (RMS, ratio de silence, durée, fréquence d'échantillonnage)
-- Bouton `Purger liste + fichiers`:
-  - supprime la liste de sessions côté utilisateur
-  - supprime les objets audio associés dans les buckets externes
-- Bouton `Impact normalisation` (par fichier transcodé):
-  - affiche une comparaison avant/après (`LUFS`, `True Peak`, `LRA`) et les deltas
-- Gestion des appareils enrôlés:
-  - liste des devices du compte utilisateur (avec validité restante en jours)
-  - affichage du compteur d'appareils actifs
-  - bouton `Voir révoqués` / `Masquer révoqués` pour alterner entre vue active et vue complète
-  - renommage d'un device
-  - révocation d'un device
-  - renouvellement d'un device `+7j` (prolonge la validité et ajoute un quota de téléchargements)
-  - révocation globale des devices du compte
-  - le bouton `Renouveller` est mis en évidence si le token expire dans moins de 2 jours ou s'il reste moins de 2 uploads
-- Sur les sessions:
-  - affichage `téléchargements restants` et `utilisés/max`
-  - affichage `récents 24h`
-  - renouvellement `+7 jours` possible depuis l'interface
-
-### 5.ter Enrôlement device (upload)
-
-- À l'ouverture du lien QR, le navigateur:
-  - tente de réutiliser un `device_token` persistant (`localStorage`)
-  - sinon déclenche un enrôlement initial (clé device + fingerprint)
-- Chaque requête upload/status envoie le header `X-Device-Token`.
-- Le backend applique:
-  - fast-path local (signature + rétention),
-  - validation backend forte à l'initialisation de session (détection rapide des révocations),
-  - puis validation asynchrone backend périodique.
-- Si la validation backend échoue au-delà de la fenêtre configurée, les requêtes sont refusées avec message explicite invitant à renouveler le token (durée + téléchargements) dans l'interface admin/QR.
-
-### 6. Sécurité API interne
-
-- `API-token` (`/api/v1/issue-token`, `/api/v1/validate-token`) : authentification obligatoire par header
-  `Authorization: Bearer <INTERNAL_API_TOKEN>`.
-- `NOTIFY` (`/api/notify-status`) : authentification obligatoire par le même header Bearer.
-- Vérification de token en comparaison constante (`hmac.compare_digest`).
-- Les services refusent de démarrer si `INTERNAL_API_TOKEN` est faible (minimum 32 caractères, pas de placeholder
-  type `change-me`, `dev-`, `test-`, etc.).
-
-### 7. Créer des comptes de test Keycloak (script local non versionné)
-
-Un wrapper local est fourni pour éviter d'exposer des credentials admin dans Git.
-
-1. Copier le fichier d'exemple :
-
+**Créer des comptes Keycloak de test** :
 ```bash
 cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
    deploy/kubernetes/scripts/create-keycloak-test-users.local.env
-```
-
-2. Modifier localement `deploy/kubernetes/scripts/create-keycloak-test-users.local.env`
-   avec les vraies valeurs `KEYCLOAK_ADMIN_USER` et `KEYCLOAK_ADMIN_PASSWORD`.
-
-3. Lancer la création des comptes :
-
-```bash
+# éditer les credentials admin
 ./deploy/kubernetes/scripts/create-keycloak-test-users.local.sh
+# crée testuser01 → testuser10
 ```
 
-Le script crée/met à jour par défaut `testuser01` à `testuser10`.
+---
 
-### 8. Scénario de test bout-en-bout (E2E)
+## 7. Déploiement Kubernetes (prod-bêta)
 
-1. Générer une session/QR via `https://import-audio.fake-domain.name`.
-2. Depuis mobile, ouvrir le lien QR et uploader un audio court.
-3. Vérifier la progression du statut : `uploaded` -> `scanned` -> `transcoded` -> `transferred`.
-4. Contrôler côté admin (`http://localhost:8082`) que la session apparaît avec ses événements.
-5. Vérifier la présence des objets dans les buckets :
-   - `audio-upload` / `ingate-audio` pour l'entrée,
-   - `audio-processed` pour le transcodé,
-   - `audio-internal` après transfert interne.
-6. Tester lecture et téléchargement des fichiers source/transcodé depuis l'interface.
-7. Vérifier la transcription selon le flag:
-   - checkbox activée: stub appelé et journal visible dans l'admin,
-   - checkbox désactivée: aucune mise en file transcription (stub non appelé).
+> **Règle d'or** : *toujours* passer par kustomize, *jamais* `kubectl apply -f` directement sur les manifests `base/`.
+>
+> ```bash
+> kustomize build --load-restrictor=LoadRestrictionsNone \
+>   deploy/kubernetes/environments/prod-beta/internal/ \
+>   | kubectl apply -f -
+> ```
+>
+> Sinon ~15 env vars critiques (`TRANSCRIPTION_BACKEND=kevent`, `KEVENT_*_ENABLED`, `LITELLM_BASE_URL`, …) sont écrasées → pipeline cassé.
 
-### Accès local (sans exposer d'information sensible)
+### 7.1 Pipeline de build prod-bêta
 
-| Service | URL | Authentification |
-|---------|-----|------------------|
-| Code Generator | http://localhost:8080 | OIDC Keycloak (utilisateurs via variables/realm) |
-| Upload Portal | http://localhost:8081 | accès par code/QR |
-| Admin Portal | http://localhost:8082 | OIDC Keycloak + filtre admin |
-| Token Issuer (API) | http://localhost:8091/health | API interne (bearer token) |
-| Keycloak Admin | http://localhost:8180 | compte admin défini par configuration |
-| RabbitMQ | http://localhost:15672 | identifiants via variables d'environnement |
-| MinIO Upload | http://localhost:9001 | identifiants via variables d'environnement |
-| MinIO Processed | http://localhost:9003 | identifiants via variables d'environnement |
-| MinIO Internal | http://localhost:9005 | identifiants via variables d'environnement |
+Le script `deploy/scripts/commit-push-build.sh` :
+1. `git push`
+2. `ssh root@198.51.100.10` (cloud build VM)
+3. `docker buildx build --platform linux/amd64`
+4. `docker push` registry SCW
+5. `kubectl set image` (rollout strategy `surge=100%` pour fast rollouts)
 
-### Docker Compose (identifiants de test uniquement)
+### 7.2 Cert-manager + DNS-01 (CNAME delegation)
 
-Les identifiants ci-dessous sont **uniquement pour un environnement local de test**.  
-Ils ne doivent jamais être réutilisés en intégration/production.
+Pattern N1 CDS : sous-zone dédiée `acme.fake-domain.name` pour la délégation cert-manager.
 
-| Service | URL | Identifiants de test |
-|---------|-----|----------------------|
-| Code Generator (OIDC user) | http://localhost:8080 | `testuser` / `testpassword` |
-| Admin Portal (OIDC user) | http://localhost:8082 | `admin` / `adminpassword` (test, change-me en prod) |
-| Keycloak Admin | http://localhost:8180 | `admin` / `admin` (test, change-me en prod) |
-| RabbitMQ | http://localhost:15672 | `audio` / `change-me-rabbit` |
-| MinIO Upload | http://localhost:9001 | `minioadmin` / `minioadmin` (test, change-me en prod) |
-| MinIO Processed | http://localhost:9003 | `minioadmin` / `minioadmin` (test, change-me en prod) |
-| MinIO Internal | http://localhost:9005 | `minioadmin` / `minioadmin` (test, change-me en prod) |
-
-Pour générer un token interne robuste :
-
-```bash
-python - <<'PY'
-import secrets
-print(secrets.token_urlsafe(32))
-PY
+Pour chaque nouvel hôte, créer dans la zone parente :
+```
+_acme-challenge.<host>   CNAME   _acme-challenge.<host>.acme.fake-domain.name.
 ```
 
-### Kubernetes
+Sans ce CNAME, le challenge échoue avec `domain not found` (le webhook Scaleway ne gère que la sous-zone déléguée).
+
+### 7.3 Autoscaling
+
+| Workload | Type | Source |
+|---|---|---|
+| `audio-normalizer` | KEDA | queue `transcode` (≤ 50 replicas) |
+| `dmz-to-internal-bridge` | KEDA | queue `file_ready` (≤ 50 replicas) |
+| `transcription-relay` | KEDA | queue `transcription` (≤ 20 replicas) |
+| `internal-ingester` | HPA | CPU/mémoire (1 → 20 replicas) |
+
+### 7.4 Runbook debug transfert
 
 ```bash
-# Namespaces + NetworkPolicies
-kubectl apply -f deploy/kubernetes/shared/namespaces.yaml
-
-# Secrets (éditer les valeurs avant !)
-kubectl apply -f deploy/kubernetes/shared/secrets.yaml
-
-# Zone externe (namespace: audio-external)
-kubectl apply -f deploy/kubernetes/external-zone/
-
-# Zone interne (namespace: audio-internal)
-kubectl apply -f deploy/kubernetes/internal-zone/
-```
-
-Autoscaling Kubernetes configuré:
-- `audio-normalizer` via KEDA sur la queue `transcode` (jusqu'à 50 replicas)
-- `dmz-to-internal-bridge` via KEDA sur la queue `file_ready` (jusqu'à 50 replicas)
-- `transcription-relay` via KEDA sur la queue `transcription` (jusqu'à 20 replicas)
-- `internal-ingester` via HPA CPU/Mémoire (1 à 20 replicas)
-
-### Runbook debug transfert (Kubernetes)
-
-Quand un fichier reste bloqué en `transferring` ou `transcoded`, vérifier dans cet ordre:
-
-```bash
-# 1) Santé pods
+# Santé
 kubectl -n audio-external get pods
 kubectl -n audio-internal get pods
 
-# 2) Autoscaling actif
+# Autoscaling actif
 kubectl -n audio-external get scaledobject
-kubectl -n audio-internal get scaledobject
-kubectl -n audio-internal get hpa
+kubectl -n audio-internal get scaledobject hpa
 
-# 3) Backlog RabbitMQ (queue file_ready/transcode/transcription)
-kubectl -n audio-external logs deploy/rabbitmq --tail=200
-
-# 4) Chaîne de transfert
+# Chaîne de transfert
 kubectl -n audio-external logs deploy/dmz-to-internal-bridge --tail=200
-kubectl -n audio-internal logs deploy/internal-ingester --tail=200
+kubectl -n audio-internal logs deploy/internal-ingester     --tail=200
 
-# 5) Redémarrage ciblé (si nécessaire)
+# Redémarrage ciblé
 kubectl -n audio-external rollout restart deploy/dmz-to-internal-bridge
 kubectl -n audio-internal rollout restart deploy/internal-ingester
 ```
 
-Points à confirmer:
-- `dmz-to-internal-bridge` publie bien la notification interne (pas d'erreur HTTP vers `internal-ingester`).
-- `internal-ingester` répond `already_pulled` en cas de rejeu (idempotence), sans créer de doublon.
-- Les secrets S3 sont présents et identiques dans les namespaces `audio-external` et `audio-internal`.
+À vérifier : `dmz-to-internal-bridge` publie sans erreur, `internal-ingester` répond `already_pulled` au rejeu (idempotence), secrets S3 cohérents entre namespaces.
 
-## Isolation réseau
+### 7.5 Migration SQL avant rollout (sinon crash)
 
-### Docker Compose (3 réseaux)
+**Toujours** appliquer `ALTER TABLE` AVANT le rollout du service qui lit la colonne. Sinon SQLAlchemy retourne `UndefinedColumn` en boucle, et un re-rollout est requis après migration pour reset le pool de connexions.
 
-| Réseau | Services | Rôle |
-|--------|----------|------|
-| `external-net` | mydevices-web, mobile-upload-pwa, admin-console, workers, ClamAV, MinIO upload/processed, PostgreSQL ext | Zone DMZ |
-| `internal-net` | device-token-authority, internal-ingester, transcription-relay, admin-console, MinIO internal, PostgreSQL int | Zone interne |
-| `dmz-net` | mydevices-web ↔ device-token-authority, dmz-to-internal-bridge ↔ internal-ingester | Bridge contrôlé (2 flux seulement) |
+---
 
-### Kubernetes (NetworkPolicies)
+## 8. Sécurité — les huit principes
 
-```mermaid
-flowchart LR
-  EXTNS["Namespace audio-external"]
-  INTNS["Namespace audio-internal (deny-all par défaut)"]
-  CG["mydevices-web"]
-  FM["dmz-to-internal-bridge"]
-  TI["device-token-authority:8091"]
-  FP["internal-ingester:8090"]
-  INTRA["Trafic intra-zone interne autorisé"]
+1. **Tokens frappés en interne** — `device-token-authority` est seule autorité. En cas de compromission DMZ, aucun token frauduleux possible.
+2. **PULL strict** — Aucune donnée poussée vers l'interne. AMQP sortant + S3 pull. Trigger HTTP optionnel = optimisation latence uniquement.
+3. **Surface entrante interne minimale** — `device-token-authority:8091` réservé à `mydevices-web` via NetworkPolicy ; `internal-ingester` exposé uniquement via `pull-trigger.fake-domain.name` (whitelist IP nginx + bearer + ACL applicative optionnelle).
+4. **Triple S3 segmenté** — `audio-upload` / `audio-processed` (guichet) / `audio-internal`.
+5. **Codes éphémères** — TTL configurable (15 min → 7 jours), quota uploads configurable (default 299).
+6. **AV obligatoire** — ClamAV systématique, quarantaine sur infection.
+7. **Idempotent** — Rejeu `file_ready` → `already_pulled`, pas de doublon.
+8. **Enrôlement device persistant** — Token device en `localStorage`, validation fast-path + backend, révocation unitaire/globale.
 
-  EXTNS --- CG
-  EXTNS --- FM
-  INTNS --- TI
-  INTNS --- FP
-  INTNS --- INTRA
+---
 
-  CG -->|"Exception 1 autorisée"| TI
-  FM -->|"Exception 2 autorisée"| FP
-```
+## 9. Captures d'écran
 
-## Configuration
+QR Generator
+![QR Generator](docs/screenshots/qr-code-gen.png)
+![Activité](docs/screenshots/activity-follow.png)
 
-Variables d'environnement principales (`configs/.env.example`) :
+Upload mobile
+![Code court mobile](docs/screenshots/enter-small-code.png)
+![Upload mobile](docs/screenshots/upload-mobile.png)
+![Application mobile](docs/screenshots/mobile-application.jpeg)
+![Android — installation PWA](docs/screenshots/install-android.png)
+![Android — bouton installation](docs/screenshots/install-android-button.png)
+![Android — application](docs/screenshots/mobile-app-android.png)
+
+Admin
+![Admin panel](docs/screenshots/admin-panel.png)
+
+---
+
+## 10. Référence — variables d'environnement
+
+### 10.1 Codes et sessions
 
 | Variable | Défaut | Description |
-|----------|--------|-------------|
-| `CODE_TTL_MINUTES` | `10080` | Durée de validité par défaut des codes (7 jours) |
-| `CODE_TTL_MAX_MINUTES` | `10080` | TTL max (7 jours) |
-| `ALLOW_SHORT_QR_TTL_SECONDS_TEST` | `false` | Autorise les TTL de test `15s`/`30s` |
-| `MAX_UPLOADS_PER_SESSION` | `299` | Uploads max par code (plafond silencieux côté serveur) |
+|---|---|---|
+| `CODE_TTL_MINUTES` | `10080` | TTL par défaut (7j) |
+| `CODE_TTL_MAX_MINUTES` | `10080` | TTL max |
+| `ALLOW_SHORT_QR_TTL_SECONDS_TEST` | `false` | Autorise les TTL test `15s`/`30s` |
+| `MAX_UPLOADS_PER_SESSION` | `299` | Quota uploads (plafond silencieux serveur) |
 | `CODE_LENGTH` | `6` | Longueur du code simple |
-| `UPLOAD_STATUS_VIEW_TTL_MINUTES` | `60` | Durée de consultation du statut après expiration |
-| `UPLOAD_EXPIRY_GRACE_SECONDS` | `300` | Fenêtre de grâce pour terminer un upload après expiration du code |
-| `EXTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté upload portal |
-| `EXTERNAL_PURGE_MAX_AGE_HOURS` | `12` | Âge max des fichiers externes avant purge |
-| `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence de purge automatique côté internal-ingester |
-| `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max des fichiers importés côté intranet avant purge |
-| `INTERNAL_PUSH_TRIGGER_URL` | `""` | URL HTTP(S) de wake-up cross-cluster vers `pull-trigger.…/api/v1/pull-trigger`. Toute valeur non-URL (`""`, `deactivate`, `false`, …) désactive le trigger ; le internal-ingester continue à drainer la queue par polling |
-| `INTERNAL_PUSH_TRIGGER_TOKEN` | — | Bearer pour `/api/v1/pull-trigger` (côté dmz-to-internal-bridge et internal-ingester). Distinct de `INTERNAL_API_TOKEN`, rotable indépendamment |
-| `INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST` | `""` | CIDR list applicative redondante côté internal-ingester (vide = on s'appuie sur l'ACL nginx) |
-| `INTERNAL_PULL_QUEUE_INTERVAL_SECONDS` | `30` | Intervalle de drain périodique de la queue `internal_pull` côté internal-ingester |
-| `PULL_TRIGGER_HTTP_TIMEOUT_SECONDS` | `3` | Timeout du POST best-effort de dmz-to-internal-bridge vers le trigger HTTP |
-| `QUEUE_MAX_RETRIES` | `5` | Nombre max de retries (via header `x-retry-count`) avant qu'un message empoisonné soit droppé par les workers consommateurs |
-| `DEVICE_TOKEN_RETENTION_HOURS` | `168` | Durée de rétention d'un enrôlement device (zone interne) |
-| `DEVICE_REVALIDATE_INTERVAL_SECONDS` | `14400` | Intervalle de revalidation asynchrone des device tokens côté upload |
-| `DEVICE_REVALIDATE_MAX_FAILURE_SECONDS` | `14400` | Fenêtre max d'échec backend avant refus des requêtes device |
-| `DEVICE_API_PROXY_BASE_URL` | `http://mydevices-web:8080` | URL du proxy API device utilisé par mobile-upload-pwa |
-| `NORMALIZATION_CACHE_TTL_SECONDS` | `3600` | Durée du cache des métriques de normalisation côté admin |
-| `NORMALIZATION_MAX_COMPUTE_PER_REFRESH` | `0` | Nombre max d'analyses de normalisation lancées par refresh dashboard (0 = non bloquant) |
-| `NORMALIZATION_ANALYSIS_MAX_SECONDS` | `180` | Durée max de l'échantillon analysé pour l'impact de normalisation (page QR/interne) |
-| `TOKEN_ISSUER_API_URL` | `http://device-token-authority:8091/api/v1/issue-token` | URL du device-token-authority interne |
-| `INTERNAL_API_TOKEN` | — | Bearer token partagé inter-zones |
-| `PUBLIC_HOST` | — | Hôte/IP publique utilisée pour les URLs générées (QR + redirects) |
+| `UPLOAD_STATUS_VIEW_TTL_MINUTES` | `60` | Durée de consultation post-expiration |
+| `UPLOAD_EXPIRY_GRACE_SECONDS` | `300` | Grâce pour terminer un upload en cours |
+
+### 10.2 Devices
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `DEVICE_TOKEN_RETENTION_HOURS` | `168` | Rétention enrôlement (15j en prod = 360). **Source de vérité, à positionner sur token-issuer ET code-generator** |
+| `DEVICE_REVALIDATE_INTERVAL_SECONDS` | `14400` | Intervalle revalidation asynchrone |
+| `DEVICE_REVALIDATE_MAX_FAILURE_SECONDS` | `14400` | Fenêtre max d'échec avant refus |
+| `DEVICE_API_PROXY_BASE_URL` | `http://mydevices-web:8080` | Proxy device |
+
+### 10.3 Purges et corbeille
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `EXTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence purge upload portal |
+| `EXTERNAL_PURGE_MAX_AGE_HOURS` | `12` (prod : `720`) | Âge max fichiers externes. **Aligner avec `TRASH_RETENTION_DAYS`** |
+| `INTERNAL_PURGE_INTERVAL_SECONDS` | `86400` | Fréquence purge interne |
+| `INTERNAL_PURGE_MAX_AGE_DAYS` | `7` | Âge max fichiers internes |
+| `TRASH_RETENTION_DAYS` | `30` | Rétention soft-delete |
+
+### 10.4 Trigger HTTP optionnel (PULL)
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `INTERNAL_PUSH_TRIGGER_URL` | `""` | Wake-up cross-cluster ; toute non-URL désactive |
+| `INTERNAL_PUSH_TRIGGER_TOKEN` | — | Bearer dédié, rotable indépendamment d'`INTERNAL_API_TOKEN` |
+| `INTERNAL_PUSH_TRIGGER_IP_ALLOWLIST` | `""` | ACL CIDR applicative (4e couche) |
+| `INTERNAL_PULL_QUEUE_INTERVAL_SECONDS` | `30` | Drain périodique de la queue |
+| `PULL_TRIGGER_HTTP_TIMEOUT_SECONDS` | `3` | Timeout du POST best-effort |
+| `QUEUE_MAX_RETRIES` | `5` | Drop des messages poisons (header `x-retry-count`) |
+
+### 10.5 Audio et normalisation
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `FFMPEG_AUDIO_FILTER` | `highpass=f=80,lowpass=f=7000,loudnorm=...` | Filtre voix |
+| `ENABLE_LOUDNORM` | `true` | Active loudnorm dual-pass linear. Ignoré si `LOUDNORM_AUTO_DECISION=true` |
+| `POST_LOUDNORM_FILTER_CHAIN` | `highpass=f=80,lowpass=f=7000,alimiter=limit=0.95` | Post-loudnorm (ordre strict) |
+| `LOUDNORM_AUTO_DECISION` | `true` | Probe RMS : skip loudnorm si déjà au-dessus du seuil |
+| `LOUDNORM_RMS_THRESHOLD_DBFS` | `-30.0` | Seuil de décision |
+| `LOUDNORM_PROBE_OFFSETS_S` | `60,300` | Offsets de mesure |
+| `LOUDNORM_PROBE_DURATION_S` | `5.0` | Durée fenêtre |
+| `NORMALIZATION_CACHE_TTL_SECONDS` | `3600` | Cache métriques admin |
+| `NORMALIZATION_MAX_COMPUTE_PER_REFRESH` | `0` | Max analyses par refresh (0 = non bloquant) |
+| `NORMALIZATION_ANALYSIS_MAX_SECONDS` | `180` | Durée max échantillon analysé |
+
+### 10.6 Backends transcription / diarisation
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `TRANSCRIPTION_BACKEND` | `stub` | `stub` (simulation), `mcr` (push MCR), `kevent` (Whisper+LLM Mirai) |
+| `DIARIZATION_BACKEND` | `kevent` | `kevent` (via gateway) ou `vm-direct` (HTTP direct) |
+| `DIARIZATION_VM_URL` | — | URL VM si backend `vm-direct` (ex `http://198.51.100.10:8080`) |
+
+### 10.7 Communs
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `TOKEN_ISSUER_API_URL` | `http://device-token-authority:8091/api/v1/issue-token` | URL device-token-authority |
+| `INTERNAL_API_TOKEN` | — | Bearer partagé inter-zones (min 32 char, pas de placeholder) |
+| `PUBLIC_HOST` | — | Hôte/IP publique pour QR + redirects |
 | `OIDC_ISSUER` | — | URL Keycloak |
-| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/openwebui` | URL Keycloak utilisée par les services Docker pour les appels serveur-à-serveur OIDC |
-| `FFMPEG_AUDIO_FILTER` | `highpass=f=80,lowpass=f=7000,loudnorm=...` | Filtre FFmpeg voix |
-| `ENABLE_LOUDNORM` | `true` | Active/desactive `loudnorm` dans le worker de transcodage (mode dual-pass `linear=true`). Ignoré si `LOUDNORM_AUTO_DECISION=true`. |
-| `POST_LOUDNORM_FILTER_CHAIN` | `highpass=f=80,lowpass=f=7000,alimiter=limit=0.95` | Filtres appliqués après loudnorm (ordre strict) |
-| `LOUDNORM_AUTO_DECISION` | `true` | Sondage RMS par-fichier : si l'audio est déjà au-dessus du seuil, skip la passe loudnorm (couteuse) et garde uniquement le post-chain |
-| `LOUDNORM_RMS_THRESHOLD_DBFS` | `-30.0` | Seuil de décision (dBFS). Si max RMS mesuré ≥ seuil → skip ; sinon → loudnorm dual-pass |
-| `LOUDNORM_PROBE_OFFSETS_S` | `60,300` | Offsets (CSV, secondes) où sont prélevées les fenêtres de mesure RMS |
-| `LOUDNORM_PROBE_DURATION_S` | `5.0` | Durée de chaque fenêtre de mesure (secondes) |
+| `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/openwebui` | URL Keycloak interne (serveur-à-serveur) |
+| `OIDC_REDIRECT_URI` | — | URI code-generator (sans `/admin` !). admin-portal override via env inline |
 
-## Mesure de l'impact de normalisation
+---
 
-Script local:
-
-```bash
-python deploy/scripts/measure_normalization_impact.py \
-  --source /chemin/source.wav \
-  --normalized /chemin/normalise.wav
-```
-
-JSON:
-
-```bash
-python deploy/scripts/measure_normalization_impact.py \
-  --source /chemin/source.wav \
-  --normalized /chemin/normalise.wav \
-  --json
-```
-
-## Pipeline de traitement audio
+## 11. Référence — pipeline audio
 
 ```mermaid
 flowchart TD
-  U["Upload mobile"] --> S3U["S3 audio-upload<br/>(brut)"] --> AV["Scan ClamAV"]
-  AV -->|CLEAN| TR["FFmpeg transcode<br/>loudnorm dual-pass -> highpass 80Hz -> lowpass 7kHz -> alimiter<br/>16kHz mono WAV"]
+  U["Upload mobile"] --> S3U["S3 audio-upload (brut)"] --> AV["Scan ClamAV"]
+  AV -->|CLEAN| TR["FFmpeg<br/>loudnorm dual-pass → highpass 80Hz → lowpass 7kHz → alimiter<br/>16kHz mono WAV + score qualité 1-5"]
   AV -->|INFECTED| Q["Quarantaine"]
-  TR --> QL["Score qualité 1-5"] --> S3P["S3 audio-processed<br/>(guichet)"]
-  S3P --> N["NOTIFY queue internal_pull<br/>(+ auto_transcribe)"] --> P["PULL côté interne"] --> S3I["S3 audio-internal<br/>(zone protégée)"]
+  TR --> S3P["S3 audio-processed (guichet)"]
+  S3P --> N["NOTIFY queue internal_pull"] --> P["PULL côté interne"] --> S3I["S3 audio-internal (zone protégée)"]
   P --> C{"auto_transcribe ?"}
-  C -->|oui| STT["Transcription STT (stub)"]
-  C -->|non| SKIP["Pas de transcription<br/>(audio optimisé voix conservé)"]
+  C -->|oui| BK{"TRANSCRIPTION_BACKEND"}
+  C -->|non| SKIP["Audio voix conservé, pas de STT"]
+  BK -->|stub| STUB["queue locale (simulation)"]
+  BK -->|mcr| MCR["push MCR (OIDC refresh)"]
+  BK -->|kevent| KEV["Whisper + diarize + LLM"]
 ```
 
-> **Roadmap pipeline V2 (backend Kevent)** — planifié, non implémenté :
-> refonte du `_transcribe_via_kevent` monolithique en **9 step functions
-> idempotentes** (1 queue RabbitMQ par étape) avec **fan-out parallèle
-> post-whisper** : `glossary`, `oob_cleaning`, `reformulation` et un
-> `meeting_cr` *provisoire* (v1 sans locuteurs) sont lancés en parallèle
-> de `diarize`, puis `meeting_cr` *final* (v2 avec locuteurs) est rejoué
-> après `speaker_names`. Cible : TTFV (1er compte-rendu utile visible
-> en UI) ramené de ~25 min à ~5 min. Plan complet :
-> `~/.claude/plans/federated-finding-whisper.md` et section *Évolution
-> prévue* dans [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md#évolution-prévue--pipeline-v2-dag-composable-sprint-reliability).
+> **Formats supportés** : MP3, WAV, OGG, FLAC, M4A, AAC, WMA, OPUS, WEBM.
 
-## Formats audio supportés
+> **Roadmap V2 (sprint reliability)** — refonte du `_transcribe_via_kevent` monolithique en 9 step functions idempotentes (1 queue RabbitMQ par étape) avec fan-out parallèle post-whisper (`glossary`, `oob_cleaning`, `reformulation`, `meeting_cr` provisoire) puis `meeting_cr` final après `speaker_names`. Cible : TTFV ramené de ~25 min à ~5 min. Plan : `~/.claude/plans/federated-finding-whisper.md` et [docs/integrate-with-kevent.md#évolution-prévue--pipeline-v2-dag-composable-sprint-reliability](docs/integrate-with-kevent.md).
 
-MP3, WAV, OGG, FLAC, M4A, AAC, WMA, OPUS, WEBM
+---
 
-## Arborescence du projet
+## 12. Référence — isolation réseau
+
+### Docker Compose
+
+| Réseau | Services | Rôle |
+|---|---|---|
+| `external-net` | mydevices-web, mobile-upload-pwa, admin-console, workers, ClamAV, MinIO upload/processed, PG ext | DMZ |
+| `internal-net` | device-token-authority, internal-ingester, transcription-relay, admin-console, MinIO internal, PG int | Interne |
+| `dmz-net` | mydevices-web ↔ device-token-authority, dmz-to-internal-bridge ↔ internal-ingester | Bridge contrôlé (2 flux) |
+
+### Kubernetes
+
+NetworkPolicies par namespace, deny-all par défaut côté interne, 2 exceptions :
+1. `mydevices-web` → `device-token-authority:8091` (intra-cluster pour Docker Compose ; cross-cluster via egress contrôlé en K8s)
+2. `dmz-to-internal-bridge` → `internal-ingester` (uniquement via Ingress `pull-trigger.fake-domain.name`)
+
+---
+
+## 13. Tests et validation
+
+| Cahier | Objet |
+|---|---|
+| [tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md) | Cahier humain bout-en-bout |
+| [tests/TEST_COVERAGE_STATUS.md](tests/TEST_COVERAGE_STATUS.md) | Couverture / résultats |
+| [tests/TEST_PLAN_DEVICE_ENROLLMENT.md](tests/TEST_PLAN_DEVICE_ENROLLMENT.md) | Enrôlement device |
+| [tests/unit/test_device_token.py](tests/unit/test_device_token.py) | Unitaire token device |
+| [tests/scenarios/device_enrollment_sequence.sh](tests/scenarios/device_enrollment_sequence.sh) | Scénario simulé |
+
+**Scénario E2E** :
+1. Générer un code via `https://import-audio.fake-domain.name` (ou `http://localhost:8080`).
+2. Ouvrir le QR depuis mobile, uploader un audio court.
+3. Vérifier progression : `uploaded` → `scanned` → `transcoded` → `transferred`.
+4. Côté admin (`:8082`) : session présente avec ses événements.
+5. Vérifier objets : `audio-upload` (brut) / `audio-processed` (transcodé) / `audio-internal` (transféré).
+6. Vérifier transcription selon flag :
+   - `auto_transcribe=true` → backend appelé, journal visible.
+   - `auto_transcribe=false` → aucune file STT.
+
+---
+
+## 14. Mesure d'impact normalisation (outil local)
+
+```bash
+python deploy/scripts/measure_normalization_impact.py \
+  --source /chemin/source.wav --normalized /chemin/normalise.wav [--json]
+```
+
+---
+
+## 15. Arborescence du projet
 
 ```mermaid
 flowchart TD
-  R["secure-audio-upload/"]
+  R["mirai-mesreunions/"]
   R --> C["configs/.env.example"]
   R --> D["deploy/"]
-  D --> DD["docker/"]
-  DD --> DDC["docker-compose.yml"]
-  DD --> DDK["keycloak-realm.json"]
+  D --> DD["docker/docker-compose.yml + keycloak-realm.json"]
   D --> DK["kubernetes/"]
   DK --> DKS["shared/namespaces.yaml + secrets.yaml"]
-  DK --> DKE["external-zone/deployments.yaml"]
-  DK --> DKI["internal-zone/deployments.yaml"]
-  R --> DOC["docs/ARCHITECTURE.md"]
+  DK --> DKE["environments/prod-beta/{external,internal}/"]
+  D --> DS["scripts/{setup.sh, commit-push-build.sh, ...}"]
+  R --> DOC["docs/{ARCHITECTURE, DIARIZATION_BACKEND, integrate-with-*, ...}"]
   R --> L["libs/shared/app/ (config, models, DB, S3, queue)"]
-  R --> S["services/ (mydevices-web, mobile-upload-pwa, workers, device-token-authority, internal-ingester, transcription-relay)"]
-  R --> DS["deploy/scripts/setup.sh"]
-  R --> DF["deploy/docker/Dockerfile"]
-  R --> REQ["requirements.txt"]
+  R --> S["services/{mydevices-web, mobile-upload-pwa, admin-console, clamav-scanner, audio-normalizer, dmz-to-internal-bridge, device-token-authority, internal-ingester, transcription-relay}/"]
+  R --> T["tests/"]
   R --> RMD["README.md"]
 ```
 
-## Licence
+---
+
+## 16. Licence
 
 Apache-2.0
-
-## Validation enrôlement device
-
-- Cahier de tests: `tests/TEST_PLAN_DEVICE_ENROLLMENT.md`
-- Test unitaire token device: `tests/unit/test_device_token.py`
-- Scénario simulé: `tests/scenarios/device_enrollment_sequence.sh`
-- Synthèse couverture/statut: `tests/TEST_COVERAGE_STATUS.md`

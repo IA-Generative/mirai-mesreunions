@@ -1633,13 +1633,22 @@ async function mountTranscriptCorrector(container) {
     // Notice d'utilisation (visible quand le details est ouvert).
     const noticeHtml = `
       <div class="tc-notice">
-        <strong>Mode d'emploi.</strong>
-        Cliquez <span class="tc-notice-play">▶</span> pour écouter un passage.
-        <strong>Sélectionnez un mot</strong> mal transcrit pour le corriger
-        (avec ré-écoute du contexte 🔊).
-        Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
-        interlocuteur (« SPEAKER_03 », etc.) pour le renommer.
-        ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio.'}
+        <div class="tc-notice-text">
+          <strong>Mode d'emploi.</strong>
+          Cliquez <span class="tc-notice-play">▶</span> pour écouter un passage.
+          <strong>Sélectionnez un mot</strong> mal transcrit pour le corriger
+          (avec ré-écoute du contexte 🔊).
+          Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
+          interlocuteur (« SPEAKER_03 », etc.) pour le renommer.
+          ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio.'}
+        </div>
+        <div class="tc-find" data-tc-find>
+          <input type="search" class="tc-find-input" placeholder="Chercher…"
+                 autocomplete="off" spellcheck="false" />
+          <button type="button" class="tc-find-prev" title="Précédent (Maj+Entrée)">▲</button>
+          <button type="button" class="tc-find-next" title="Suivant (Entrée)">▼</button>
+          <span class="tc-find-status" data-tc-find-status></span>
+        </div>
       </div>
     `;
     container.innerHTML = `
@@ -1787,12 +1796,130 @@ async function mountTranscriptCorrector(container) {
                 alert(`Échec renommage : ${data.error || resp.status}`);
                 return;
             }
-            // Refresh la fiche pour voir le nouveau nom partout.
-            if (typeof loadSessions === 'function') loadSessions({ force: true });
+            // Patch in-place les occurrences visibles du nom (label .tc-speaker
+            // + bouton ✏️ + textes `**NOM**`) pour éviter un loadSessions qui
+            // collapserait la vue détail. La propagation backend (brute,
+            // par-interlocuteur, glossaire, nettoyée, reformulation) a déjà
+            // été faite par le POST ci-dessus ; un refresh manuel ou le
+            // prochain polling re-synchronisera.
+            container.querySelectorAll(`.tc-speaker`).forEach((el) => {
+                if ((el.textContent || '').trim() === oldName) el.textContent = trimmed;
+            });
+            container.querySelectorAll(`[data-tc-speaker-rename="${CSS.escape(oldName)}"]`).forEach((el) => {
+                el.setAttribute('data-tc-speaker-rename', trimmed);
+                el.setAttribute('title', `Renommer cet interlocuteur partout`);
+            });
+            // Remplace `**oldName**` → `**trimmed**` dans tous les .tc-text rendus.
+            const oldMd = `**${oldName}**`;
+            const newMd = `**${trimmed}**`;
+            container.querySelectorAll('.tc-text').forEach((el) => {
+                if (el.innerHTML && el.innerHTML.includes(escapeHtml(oldName))) {
+                    el.innerHTML = el.innerHTML.split(escapeHtml(oldName)).join(escapeHtml(trimmed));
+                }
+                if (el.textContent && el.textContent.includes(oldMd)) {
+                    el.textContent = el.textContent.split(oldMd).join(newMd);
+                }
+            });
         } catch (e) {
             alert(`Erreur réseau : ${e.message}`);
         }
     });
+
+    _attachLocalSearch(container);
+}
+
+// Recherche locale dans la transcription : highlight + navigation ▲/▼,
+// Entrée = suivant, Maj+Entrée = précédent, statut "n/N", "début", "fin".
+// On stocke le texte original par .tc-text (data-tc-original) au 1er appel
+// pour pouvoir reconstruire sans accumuler les <mark>.
+function _attachLocalSearch(container) {
+    const find = container.querySelector('[data-tc-find]');
+    if (!find) return;
+    const inp = find.querySelector('.tc-find-input');
+    const btnPrev = find.querySelector('.tc-find-prev');
+    const btnNext = find.querySelector('.tc-find-next');
+    const status = find.querySelector('[data-tc-find-status]');
+    const textsEls = Array.from(container.querySelectorAll('.tc-text'));
+    textsEls.forEach((el) => { el.setAttribute('data-tc-original', el.textContent || ''); });
+
+    let hits = [];      // [{el, idxInText, length}]
+    let cursor = -1;    // index courant dans hits
+
+    const renderHighlights = (q) => {
+        const norm = (q || '').toLowerCase();
+        hits = [];
+        textsEls.forEach((el) => {
+            const orig = el.getAttribute('data-tc-original') || '';
+            if (!norm) { el.textContent = orig; return; }
+            const lower = orig.toLowerCase();
+            // Build innerHTML avec <mark> autour de chaque occurrence.
+            let out = '';
+            let i = 0;
+            while (i < orig.length) {
+                const j = lower.indexOf(norm, i);
+                if (j < 0) { out += escapeHtml(orig.slice(i)); break; }
+                if (j > i) out += escapeHtml(orig.slice(i, j));
+                const hitText = orig.slice(j, j + norm.length);
+                const hitId = `tc-hit-${hits.length}`;
+                out += `<mark class="tc-find-hit" id="${hitId}">${escapeHtml(hitText)}</mark>`;
+                hits.push({ elId: hitId });
+                i = j + norm.length;
+            }
+            el.innerHTML = out;
+        });
+    };
+
+    const updateStatus = () => {
+        if (!inp.value) { status.textContent = ''; return; }
+        if (hits.length === 0) { status.textContent = '0 résultat'; return; }
+        const pos = cursor < 0 ? 0 : cursor + 1;
+        let suffix = '';
+        if (cursor >= 0) {
+            if (cursor === 0 && hits.length > 1) suffix = ' — début';
+            else if (cursor === hits.length - 1 && hits.length > 1) suffix = ' — fin';
+            else if (hits.length === 1) suffix = ' — unique';
+        }
+        status.textContent = `${pos}/${hits.length}${suffix}`;
+    };
+
+    const setCurrent = (idx) => {
+        find.querySelectorAll('.tc-find-current').forEach((el) => el.classList.remove('tc-find-current'));
+        if (idx < 0 || idx >= hits.length) return;
+        const el = document.getElementById(hits[idx].elId);
+        if (el) {
+            el.classList.add('tc-find-current');
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+    };
+
+    const jump = (delta) => {
+        if (hits.length === 0) { updateStatus(); return; }
+        if (cursor < 0) cursor = delta > 0 ? 0 : hits.length - 1;
+        else cursor = (cursor + delta + hits.length) % hits.length;
+        setCurrent(cursor);
+        updateStatus();
+    };
+
+    let debounce;
+    inp.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+            cursor = -1;
+            renderHighlights(inp.value);
+            if (hits.length > 0) { cursor = 0; setCurrent(0); }
+            updateStatus();
+        }, 120);
+    });
+    inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+            ev.preventDefault();
+            jump(ev.shiftKey ? -1 : 1);
+        } else if (ev.key === 'Escape') {
+            inp.value = ''; cursor = -1; renderHighlights(''); updateStatus();
+        }
+    });
+    btnNext.addEventListener('click', (ev) => { ev.preventDefault(); inp.focus(); jump(1); });
+    btnPrev.addEventListener('click', (ev) => { ev.preventDefault(); inp.focus(); jump(-1); });
 }
 
 function _onTranscriptSelection(container, fileId, audio, blocks) {
@@ -1902,8 +2029,12 @@ document.addEventListener('click', async (ev) => {
             if (body.patch_text || body.reprocess_llm) {
                 setTimeout(() => { if (typeof loadSessions === 'function') loadSessions({ force: true }); }, 600);
             }
-            // Auto-close footer après 1.2s.
-            setTimeout(() => { footer.hidden = true; footer.innerHTML = ''; }, 1400);
+            // Garde le footer ouvert pour enchaîner d'autres corrections sans
+            // re-sélectionner. On vide juste le champ "remplacer par" et on
+            // réactive le bouton ; le statut ✓ reste visible.
+            const inp = footer.querySelector('.tc-correct-new');
+            if (inp) { inp.value = ''; inp.focus(); }
+            applyBtn.disabled = false;
         } catch (e) {
             if (status) status.textContent = `Erreur : ${e.message}`;
             applyBtn.disabled = false;
