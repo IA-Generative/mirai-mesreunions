@@ -1280,8 +1280,25 @@ function mountFeedbackBlock(container) {
     const fileId = container.getAttribute('data-feedback-for') || '';
     if (!fileId) return;
     container.dataset.feedbackMounted = '1';
+    // Ordre : régénération en haut, pouce ↑/↓ en bas de la fiche (le pouce
+    // = action de clôture/post-lecture, doit venir après la consultation).
     container.innerHTML = `
-      <div class="feedback-section">
+      <div class="feedback-section feedback-section--regen">
+        <div class="feedback-row">
+          <span class="feedback-q">Régénérer&nbsp;:</span>
+          <button type="button" class="feedback-regen-btn"
+                  data-feedback-regen="llm-only" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Relance les étapes LLM (glossaire → compte-rendu) avec le glossaire actuel">
+            🔄 Comptes-rendus (LLM)
+          </button>
+          <button type="button" class="feedback-regen-btn feedback-regen-btn--full"
+                  data-feedback-regen="full" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Relance TOUT le pipeline depuis l'audio (Whisper + diarisation + LLM). Très coûteux en calcul — à demander uniquement si vraiment nécessaire.">
+            🔁 Transcription + diarisation
+          </button>
+        </div>
+      </div>
+      <div class="feedback-section feedback-section--useful">
         <div class="feedback-row">
           <span class="feedback-q">Cette retranscription vous est-elle utile ?</span>
           <button type="button" class="feedback-thumb feedback-thumb-up"
@@ -1295,21 +1312,6 @@ function mountFeedbackBlock(container) {
         <div class="feedback-thanks" data-feedback-thanks-for="${_escapeAttr(fileId)}" hidden>
           <span class="feedback-thanks-icon">✓</span>
           Merci pour votre feedback — il nourrit l'amélioration du service.
-        </div>
-      </div>
-      <div class="feedback-section feedback-section--regen">
-        <div class="feedback-row">
-          <span class="feedback-q">Régénérer&nbsp;:</span>
-          <button type="button" class="feedback-regen-btn"
-                  data-feedback-regen="llm-only" data-feedback-file="${_escapeAttr(fileId)}"
-                  title="Relance les étapes LLM (glossaire → compte-rendu) avec le glossaire actuel">
-            🔄 Comptes-rendus (LLM)
-          </button>
-          <button type="button" class="feedback-regen-btn feedback-regen-btn--full"
-                  data-feedback-regen="full" data-feedback-file="${_escapeAttr(fileId)}"
-                  title="Relance TOUT le pipeline depuis l'audio (Whisper + diarisation + LLM). Traité par un admin.">
-            🔁 Transcription + diarisation
-          </button>
         </div>
       </div>
     `;
@@ -1406,6 +1408,27 @@ async function _submitUsefulnessFeedback(fileId) {
 }
 
 async function _openRegenerateModal(fileId, scope) {
+    // Garde-fou explicite pour la régen full (re-Whisper + re-diarisation) :
+    // c'est lourd en compute (GPU L4 + LLM downstream), ne doit être lancé
+    // que si l'utilisateur en a vraiment besoin. Demande confirmation
+    // explicite avant d'ouvrir la modale de raison.
+    if (scope === 'full') {
+        const ok = window.confirm(
+            "⚠️  Régénération complète : transcription + diarisation\n\n" +
+            "Cette opération relance TOUT le pipeline depuis l'audio brut :\n" +
+            "• Whisper (transcription, GPU)\n" +
+            "• pyannote (diarisation, GPU)\n" +
+            "• Toute la chaîne LLM en aval (CR, glossaire, etc.)\n\n" +
+            "C'est très coûteux en ressources de calcul.\n" +
+            "Ne lancez cette régénération QUE SI VRAIMENT NÉCESSAIRE\n" +
+            "(ex: transcription totalement à côté, diarisation cassée).\n\n" +
+            "Pour une simple maj du compte-rendu suite à un glossaire modifié,\n" +
+            "utilisez plutôt le bouton « 🔄 Comptes-rendus (LLM) ».\n\n" +
+            "Confirmer la régénération complète ?"
+        );
+        if (!ok) return;
+    }
+
     const scopeLabel = scope === 'full'
         ? 'transcription + diarisation (refonte complète du pipeline)'
         : 'comptes-rendus (étapes LLM seulement, instantané)';

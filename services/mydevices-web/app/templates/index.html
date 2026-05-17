@@ -909,6 +909,11 @@
             font-size: 0.82rem; color: #15803d;
             display: flex; align-items: center; gap: 0.4rem;
         }
+        /* L'attribut HTML `hidden` doit toujours masquer les éléments du
+           widget feedback, indépendamment du display: flex défini sur la
+           classe (sinon le message "Merci" reste visible avant submit). */
+        .feedback-thanks[hidden],
+        .feedback-detail[hidden] { display: none !important; }
         .feedback-thanks-icon {
             display: inline-flex; align-items: center; justify-content: center;
             width: 1.1rem; height: 1.1rem; border-radius: 50%;
