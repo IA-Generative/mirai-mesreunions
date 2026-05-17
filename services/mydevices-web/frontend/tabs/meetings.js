@@ -99,28 +99,33 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// Pastille status — anneau de progression (stroke-dasharray) + glyphe au
-// centre. Animée via classe `is-spinning` quand kind=processing.
+// Pastille status — anneau STATIQUE qui reflète le % d'avancement réel
+// (stroke-dashoffset proportionnel à pct), + glyphe central qui pulse
+// subtilement quand kind=processing (au lieu d'une rotation continue).
+// Cette approche porte 2 informations à la fois :
+//   • % d'avancement = arc rempli (visible d'un coup d'œil)
+//   • activité en cours = pulse du glyphe (signal vivant subtil)
 function statusIcon(kind, pct, animated) {
   const col = KIND_COLORS[kind] || KIND_COLORS.queued;
   const r = 10;
   const circumference = 2 * Math.PI * r;     // ~62.83
   const offset = circumference * (1 - (Math.max(0, Math.min(100, pct)) / 100));
-  const ringClass = animated ? 'meeting-status-ring is-spinning' : 'meeting-status-ring';
-  // Glyphe central par kind.
+  // Glyphe central par kind. Le pulse est porté par la classe is-active
+  // sur le <g> qui contient le glyphe (CSS animation opacity).
   const glyphs = {
     success:    '<path d="M8 12.5l2.5 2.5L16 9" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
     processing: '<circle cx="12" cy="12" r="2.5" fill="currentColor"/>',
-    queued:     '<path d="M9 8h6M9 16h6M10 8v2c0 1.5 1 2.5 2 3 1-.5 2-1.5 2-3V8M10 16v-2c0-1.5 1-2.5 2-3 1 .5 2 1.5 2 3v2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+    queued:     '<circle cx="12" cy="12" r="1.6" fill="currentColor"/>',
     partial:    '<path d="M12 7v6M12 16v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
     error:      '<path d="M8 8l8 8M16 8l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   };
+  const glyphClass = animated ? 'meeting-status-glyph is-pulsing' : 'meeting-status-glyph';
   return `<svg class="meeting-status-svg" viewBox="0 0 24 24" style="--ring-bg:${col.bg}; --ring-fg:${col.ring}; color:${col.fg};" aria-hidden="true">
     <circle cx="12" cy="12" r="${r}" fill="var(--ring-bg)" stroke="none"/>
-    <circle class="${ringClass}" cx="12" cy="12" r="${r}" fill="none" stroke="var(--ring-fg)" stroke-width="2" stroke-linecap="round"
+    <circle class="meeting-status-ring" cx="12" cy="12" r="${r}" fill="none" stroke="var(--ring-fg)" stroke-width="2" stroke-linecap="round"
       stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
       transform="rotate(-90 12 12)" />
-    ${glyphs[kind] || glyphs.queued}
+    <g class="${glyphClass}">${glyphs[kind] || glyphs.queued}</g>
   </svg>`;
 }
 

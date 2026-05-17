@@ -917,19 +917,19 @@
             display: grid;
             grid-template-columns:
                 0                          /* checkbox (révélée en bulk mode) */
-                32px                       /* status icône */
+                20px                       /* status icône (réduite 50%) */
                 minmax(0, 1fr)             /* titre + chevron */
                 auto                       /* date */
                 4.5em;                     /* durée alignée à droite */
-            align-items: center; gap: 0.55rem;
-            padding: 0.55rem 1rem;
-            min-height: 40px;
+            align-items: center; gap: 0.5rem;
+            padding: 0.4rem 1rem;
+            min-height: 32px;
         }
-        /* Mode bulk : on révèle la checkbox (1ère colonne passe de 0 à 24px). */
+        /* Mode bulk : on révèle la checkbox (1ère colonne passe de 0 à 20px). */
         body.meetings-bulk-active .meeting-row-main {
             grid-template-columns:
-                24px                       /* checkbox visible */
-                32px                       /* status */
+                20px                       /* checkbox visible */
+                20px                       /* status */
                 minmax(0, 1fr)             /* titre + chevron */
                 auto                       /* date */
                 4.5em;                     /* durée */
@@ -937,7 +937,7 @@
         /* Wrap titre + chevron : flex pour que le chevron reste collé à
            la fin du titre tronqué (au lieu d'être à la fin de la row). */
         .meeting-row-title-wrap {
-            display: flex; align-items: center; gap: 0.3rem;
+            display: flex; align-items: center; gap: 0.25rem;
             min-width: 0;
         }
         .meeting-row-title-wrap .meeting-row-title-btn {
@@ -950,22 +950,27 @@
         body.meetings-bulk-active .meeting-row-check {
             opacity: 1; pointer-events: auto;
         }
-        .meeting-row-check input { width: 16px; height: 16px; cursor: pointer; margin: 0; }
+        .meeting-row-check input { width: 13px; height: 13px; cursor: pointer; margin: 0; }
         .meeting-row-status {
-            width: 32px; height: 32px;
+            width: 20px; height: 20px;
+            background: none; border: none; padding: 0; cursor: pointer;
             display: inline-flex; align-items: center; justify-content: center;
         }
         .meeting-status-svg {
-            width: 28px; height: 28px; display: block;
+            width: 16px; height: 16px; display: block;
         }
-        /* Animation rotation continue pour le ring quand pipeline en cours. */
-        .meeting-status-ring.is-spinning {
+        /* Pulse subtil sur le glyphe central quand pipeline en cours.
+           Le ring lui-même reste STATIQUE et affiche le % d'avancement
+           via stroke-dashoffset (cf statusIcon JS). On évite la rotation
+           continue qui donnait l'impression que tout était toujours en
+           train de bouger. */
+        .meeting-status-glyph.is-pulsing {
             transform-origin: 12px 12px;
-            animation: meetingStatusSpin 1.6s linear infinite;
+            animation: meetingStatusGlyphPulse 1.4s ease-in-out infinite;
         }
-        @keyframes meetingStatusSpin {
-            from { transform: rotate(-90deg); }
-            to { transform: rotate(270deg); }
+        @keyframes meetingStatusGlyphPulse {
+            0%, 100% { opacity: 1;    transform: scale(1);   }
+            50%      { opacity: 0.45; transform: scale(0.85); }
         }
         .meeting-row-title-btn {
             background: none; border: none; padding: 0;
@@ -989,22 +994,23 @@
         }
         .meeting-row-chevron {
             background: none; border: none; cursor: pointer;
-            color: #94a3b8; padding: 0; width: 32px; height: 32px;
+            color: #94a3b8; padding: 0; width: 20px; height: 20px;
             display: inline-flex; align-items: center; justify-content: center;
             transition: color 0.15s, transform 0.2s;
+            flex-shrink: 0;
         }
         .meeting-row-chevron:hover { color: #1d4ed8; }
         .meeting-row.is-expanded .meeting-row-chevron {
             transform: rotate(180deg); color: #1d4ed8;
         }
-        .meeting-chevron-svg { width: 18px; height: 18px; display: block; }
+        .meeting-chevron-svg { width: 10px; height: 10px; display: block; }
         .meeting-row-expanded {
-            padding: 0.4rem 1rem 0.85rem calc(32px + 2 * 0.55rem + 1rem);
+            padding: 0.4rem 1rem 0.7rem calc(20px + 2 * 0.5rem + 1rem);
             background: #f8fafc;
-            font-size: 0.85rem; color: #475569;
+            font-size: 0.82rem; color: #475569;
         }
         body.meetings-bulk-active .meeting-row-expanded {
-            padding-left: calc(24px + 32px + 3 * 0.55rem + 1rem);
+            padding-left: calc(20px + 20px + 3 * 0.5rem + 1rem);
         }
         .meeting-row-expanded-row {
             display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
@@ -1015,7 +1021,7 @@
             font-size: 0.78rem; color: #475569;
         }
         .meeting-source-svg {
-            width: 16px; height: 16px; color: #64748b; display: block;
+            width: 10px; height: 10px; color: #64748b; display: block;
         }
         .meeting-row-created { font-size: 0.78rem; color: #94a3b8; }
         .meeting-row-summary { margin: 0.4rem 0; }
