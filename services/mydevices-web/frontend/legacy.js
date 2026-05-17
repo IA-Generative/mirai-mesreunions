@@ -1280,13 +1280,17 @@ function mountFeedbackBlock(container) {
     const fileId = container.getAttribute('data-feedback-for') || '';
     if (!fileId) return;
     container.dataset.feedbackMounted = '1';
+    // Restaure l'état "corrections en attente" persisté côté localStorage
+    // (le badge + le clignotement du bouton 🔄 sont rendus après).
+    const pendingCount = getPendingCorrectionsCount(fileId);
+    // Le badge est inséré APRÈS innerHTML ci-dessous (sinon écrasé).
     // Ordre : régénération en haut, pouce ↑/↓ en bas de la fiche (le pouce
     // = action de clôture/post-lecture, doit venir après la consultation).
     container.innerHTML = `
       <div class="feedback-section feedback-section--regen">
         <div class="feedback-row">
           <span class="feedback-q">Régénérer&nbsp;:</span>
-          <button type="button" class="feedback-regen-btn"
+          <button type="button" class="feedback-regen-btn feedback-regen-btn--llm"
                   data-feedback-regen="llm-only" data-feedback-file="${_escapeAttr(fileId)}"
                   title="Relance les étapes LLM (glossaire → compte-rendu) avec le glossaire actuel">
             🔄 Comptes-rendus (LLM)
@@ -1298,7 +1302,7 @@ function mountFeedbackBlock(container) {
           </button>
         </div>
       </div>
-      <div class="feedback-section feedback-section--useful">
+      <div class="feedback-section feedback-section--useful" data-feedback-useful-for="${_escapeAttr(fileId)}">
         <div class="feedback-row">
           <span class="feedback-q">Cette retranscription vous est-elle utile ?</span>
           <button type="button" class="feedback-thumb feedback-thumb-up"
@@ -1315,6 +1319,10 @@ function mountFeedbackBlock(container) {
         </div>
       </div>
     `;
+    // Restaure le badge "modifications en attente" si présent en localStorage.
+    if (pendingCount > 0) {
+        _applyPendingCorrectionsBadge(fileId, pendingCount);
+    }
 }
 
 // Délégation click sur tous les éléments du widget feedback.
@@ -1376,6 +1384,53 @@ function _openFeedbackDetail(fileId, thumb) {
       </div>
     `;
     detailEl.hidden = false;
+}
+
+// État "modifs en attente de reprocess LLM" — survit au refresh via
+// localStorage. Permet d'inviter l'utilisateur à régénérer le CR
+// (clignotement bouton "🔄 Comptes-rendus (LLM)") sans relancer le
+// LLM à chaque correction (coûteux).
+function _pendingCorrectionsKey(fileId) {
+    return `mcr_pending_corrections_${fileId}`;
+}
+function getPendingCorrectionsCount(fileId) {
+    try { return parseInt(localStorage.getItem(_pendingCorrectionsKey(fileId)) || '0', 10) || 0; }
+    catch (e) { return 0; }
+}
+function incrementPendingCorrections(fileId) {
+    try {
+        const n = getPendingCorrectionsCount(fileId) + 1;
+        localStorage.setItem(_pendingCorrectionsKey(fileId), String(n));
+        _applyPendingCorrectionsBadge(fileId, n);
+        return n;
+    } catch (e) { return 0; }
+}
+function clearPendingCorrections(fileId) {
+    try {
+        localStorage.removeItem(_pendingCorrectionsKey(fileId));
+        _applyPendingCorrectionsBadge(fileId, 0);
+    } catch (e) { /* ignore */ }
+}
+// Applique/retire la classe `has-pending-corrections` sur le bloc
+// feedback du fichier concerné (cible le bouton "🔄 Comptes-rendus
+// (LLM)" via CSS pour le clignotement amber). Ajoute aussi un badge
+// compteur "N modifs non répercutées" sur le bloc.
+function _applyPendingCorrectionsBadge(fileId, count) {
+    const block = document.querySelector(`[data-feedback-for="${fileId}"]`);
+    if (!block) return;
+    block.classList.toggle('has-pending-corrections', count > 0);
+    let badge = block.querySelector('[data-pending-badge]');
+    if (count > 0) {
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.setAttribute('data-pending-badge', '');
+            badge.className = 'pending-corrections-badge';
+            block.insertBefore(badge, block.firstChild);
+        }
+        badge.innerHTML = `⚠️ <strong>${count}</strong> modification${count > 1 ? 's' : ''} de transcription en attente — cliquez « 🔄 Comptes-rendus (LLM) » ci-dessous pour les répercuter dans le résumé/CR.`;
+    } else if (badge) {
+        badge.remove();
+    }
 }
 
 async function _submitUsefulnessFeedback(fileId) {
@@ -1453,6 +1508,9 @@ async function _openRegenerateModal(fileId, scope) {
             alert(data.message || 'Demande enregistrée — traitement admin en attente.');
         } else if (resp.ok) {
             alert('Régénération lancée. Le statut de la transcription sera mis à jour automatiquement.');
+            // Clear le compteur "corrections en attente" — les CR ont
+            // été refaits avec les corrections appliquées.
+            clearPendingCorrections(fileId);
             // Force un refresh pour voir le nouveau status.
             if (typeof loadSessions === 'function') loadSessions({ force: true });
         } else {
@@ -1629,7 +1687,10 @@ async function mountTranscriptCorrector(container) {
             ev.preventDefault();
             const t = parseFloat(playBtn.getAttribute('data-tc-play')) || 0;
             if (audio) {
-                try { audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
+                // pause() avant play() : sinon, si l'audio jouait déjà,
+                // chrome/firefox cumulent (rare mais reproduit par user)
+                // et on entend la bande son 2× désynchronisée.
+                try { audio.pause(); audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
             }
             return;
         }
@@ -1772,7 +1833,11 @@ function _showCorrectionFooter(container, fileId, selectedText, blockIdx, audio,
         <div class="tc-correct-opts">
           <label><input type="checkbox" class="tc-opt-glossary" checked /> Ajouter au glossaire personnel</label>
           <label><input type="checkbox" class="tc-opt-patch" checked /> Remplacer dans cette transcription</label>
-          <label><input type="checkbox" class="tc-opt-reprocess" /> Relancer les étapes LLM (∼2 min)</label>
+          <!-- Case "Relancer les étapes LLM" retirée : le user déclenche
+               manuellement la régénération CR via le bouton dédié en bas
+               (signalé par un clignotement quand des modifs sont
+               appliquées sans reprocess). Réduit le nb de runs LLM
+               coûteux par session de correction. -->
         </div>
         <div class="tc-correct-actions">
           <button type="button" class="tc-correct-apply"
@@ -1824,6 +1889,15 @@ document.addEventListener('click', async (ev) => {
             }
             const applied = (data.applied || []).join(', ') || 'rien';
             if (status) status.textContent = `✓ ${applied}`;
+            // Incrémente le compteur "corrections en attente de reprocess
+            // LLM" pour ce fichier (persisté en localStorage) → le badge
+            // apparaît sur le bloc feedback et le bouton "🔄 Comptes-rendus"
+            // se met à clignoter pour inviter l'utilisateur à régénérer.
+            // Sauf si l'user a inclus reprocess_llm (= les CR sont déjà
+            // refaits avec la nouvelle correction).
+            if (!body.reprocess_llm) {
+                incrementPendingCorrections(fileId);
+            }
             // Si patch_text actif, on refresh la fiche pour voir la transcription patched.
             if (body.patch_text || body.reprocess_llm) {
                 setTimeout(() => { if (typeof loadSessions === 'function') loadSessions({ force: true }); }, 600);

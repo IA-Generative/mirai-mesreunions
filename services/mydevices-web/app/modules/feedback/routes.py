@@ -22,6 +22,8 @@ if ROOT not in sys.path:
 from libs.shared.app.config import INTERNAL_API_TOKEN  # noqa: E402
 
 from app.shared import get_current_user, require_auth  # noqa: E402
+from app.runtime import session_scope  # noqa: E402
+from app.modules.sessions import service as sess_svc  # noqa: E402
 
 
 bp = Blueprint("feedback", __name__)
@@ -69,6 +71,31 @@ def _ensure_admin_or_403(user):
     if not _is_admin(user):
         return jsonify({"error": "admin_required"}), 403
     return None
+
+
+def _resolve_internal_audio_id(user_sub: str, external_file_id: str) -> str | None:
+    """Mappe un file_id externe (uploaded_files.id, table external) vers
+    l'audio.id interne (user_audio_files.id, table internal) via le lookup
+    déjà utilisé par sessions/routes.py.
+
+    Critique pour les endpoints qui parlent à internal-ingester avec un
+    audio_id : sans ce mapping, l'ingester cherche user_audio_files.id ==
+    external_file_id et retourne 404 (les 2 tables ont des UUIDs distincts).
+
+    Retourne None si le fichier n'existe pas ou n'a pas encore d'audio
+    associé (transcription pas encore démarrée).
+    """
+    db = session_scope()
+    try:
+        file_obj = sess_svc.get_owned_file(db, user_sub, external_file_id)
+        if not file_obj:
+            return None
+        audio = sess_svc.lookup_audio_outputs(db, file_obj)
+        if not audio:
+            return None
+        return audio.get("id")
+    finally:
+        db.close()
 
 
 # ─── POST feedback (utilisateur lambda) ─────────────────────────────
@@ -239,9 +266,19 @@ def regenerate_file(file_id: str):
 
     # 2. Selon scope, déclenche le pipeline.
     if scope == "llm-only":
-        # Délègue à l'endpoint existant (relance LLM aval).
+        # Délègue à l'endpoint existant (relance LLM aval). Le file_id
+        # de l'URL est l'ID externe (uploaded_files.id) — on le mappe
+        # vers l'audio.id interne (user_audio_files.id) avant l'appel
+        # ingester, sinon 404 not_found.
+        internal_id = _resolve_internal_audio_id(user_sub, file_id)
+        if not internal_id:
+            return jsonify({
+                "feedback_id": feedback.get("id"),
+                "reprocessed": False,
+                "error": "audio_not_found_or_not_ready",
+            }), 404
         try:
-            r = _call_ingester("POST", f"/api/v1/audio/{file_id}/reprocess",
+            r = _call_ingester("POST", f"/api/v1/audio/{internal_id}/reprocess",
                                json_body={"user_sub": user_sub, "force": True})
         except req.RequestException:
             return jsonify({
@@ -365,8 +402,14 @@ def correct_file_term(file_id: str):
         return jsonify({"error": "unauthenticated"}), 401
     body = request.get_json(silent=True) or {}
     body["user_sub"] = user_sub
+    # Mappe le file_id externe (uploaded_files.id côté DMZ) vers
+    # l'audio.id interne (user_audio_files.id côté internal-ingester) —
+    # sinon l'ingester retourne 404 not_found.
+    internal_id = _resolve_internal_audio_id(user_sub, file_id)
+    if not internal_id:
+        return jsonify({"error": "audio_not_found_or_not_ready"}), 404
     try:
-        resp = _call_ingester("POST", f"/api/v1/audio/{file_id}/correct-term",
+        resp = _call_ingester("POST", f"/api/v1/audio/{internal_id}/correct-term",
                               json_body=body, timeout=30)
     except req.RequestException:
         return jsonify({"error": "ingester_unavailable"}), 502
