@@ -976,9 +976,10 @@ async function purgeSessions() {
     try {
         const resp = await fetch('/api/purge-my-sessions', { method: 'POST' });
         const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'Erreur purge');
+        // TKT-211 : libellés user-facing débarrassés du terme "purge".
+        if (!resp.ok) throw new Error(data.error || 'Erreur lors de la mise à la corbeille');
         alert(`Mis à la corbeille: ${data.deleted_sessions || 0} session(s), ${data.deleted_files || 0} fichier(s).\n` +
-              `Purge définitive automatique au bout de 30 jours.`);
+              `Suppression définitive automatique au bout de 30 jours.`);
         loadSessions();
         loadDevices();
     } catch (e) {
@@ -1559,7 +1560,7 @@ async function loadSessions(opts) {
                             </span>
                             <button type="button" class="icon-btn file-row-delete"
                                     onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                    title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                    title="Mettre à la corbeille (supprimée automatiquement après 30 jours)"
                                     aria-label="Mettre à la corbeille">
                                 ${ICONS.trash}
                             </button>
@@ -1590,7 +1591,7 @@ async function loadSessions(opts) {
                                 aria-label="Retour à la liste">← Liste</button>
                         <button type="button" class="icon-btn"
                                 onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                title="Mettre à la corbeille (supprimée automatiquement après 30 jours)"
                                 aria-label="Mettre à la corbeille">
                             ${ICONS.trash}
                         </button>
@@ -2398,11 +2399,19 @@ async function loadTrash() {
             </p>`;
             return;
         }
+        // TKT-211 : bannir le terme "purge" côté user-facing au profit de
+        // "Sera supprimé automatiquement dans N jour(s)" (libellé explicite).
+        const autoDeleteLabel = (daysLeft) => {
+            if (daysLeft == null) return 'Sera supprimé automatiquement prochainement';
+            const n = Number(daysLeft);
+            if (!Number.isFinite(n) || n <= 0) return 'Sera supprimé automatiquement aujourd\'hui';
+            return `Sera supprimé automatiquement dans ${n} ${n > 1 ? 'jours' : 'jour'}`;
+        };
         const sessionsHtml = sessions.map(s => `
             <div class="trash-item">
                 <span class="trash-item-type">Session</span>
                 <span class="trash-item-name"><strong>${escapeHtml(s.simple_code)}</strong> · ${s.files_count} fichier(s)</span>
-                <span class="trash-item-meta">reste ${s.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(s.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreSession('${s.simple_code}')">Restaurer</button>
             </div>
@@ -2411,7 +2420,7 @@ async function loadTrash() {
             <div class="trash-item">
                 <span class="trash-item-type">Fichier</span>
                 <span class="trash-item-name">${escapeHtml(f.original_filename)} <small style="color:#94a3b8;">(${escapeHtml(f.simple_code || '?')})</small></span>
-                <span class="trash-item-meta">reste ${f.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(f.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreFile('${f.id}')">Restaurer</button>
                 <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
@@ -2424,7 +2433,7 @@ async function loadTrash() {
             <div class="trash-item" data-trash-kind="brief">
                 <span class="trash-item-type">[Brief]</span>
                 <span class="trash-item-name">${escapeHtml(b.title || '(sans titre)')}</span>
-                <span class="trash-item-meta">reste ${b.days_left == null ? '?' : b.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(b.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreBrief('${b.id}')">Restaurer</button>
                 <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
