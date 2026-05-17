@@ -838,6 +838,111 @@
            (peuplée en arrière-plan par legacy.js, utile pendant upload). */
 
         /* ═══════════════════════════════════════════════════════════════
+           Feedback widget (fiche détail) — pouce ↑/↓ + régénération.
+           ═══════════════════════════════════════════════════════════════ */
+        .file-detail-feedback-block {
+            margin: 0.8rem 0 0.5rem 0;
+            padding: 0.7rem 0.8rem;
+            background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
+        }
+        .feedback-section { margin-bottom: 0.6rem; }
+        .feedback-section:last-child { margin-bottom: 0; }
+        .feedback-section--regen {
+            margin-top: 0.7rem; padding-top: 0.6rem;
+            border-top: 1px dashed #cbd5e1;
+        }
+        .feedback-row {
+            display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+        }
+        .feedback-q {
+            font-size: 0.82rem; color: #475569; font-weight: 500;
+            margin-right: 0.3rem;
+        }
+        .feedback-thumb {
+            background: #fff; border: 1px solid #cbd5e1; border-radius: 50%;
+            width: 1.9rem; height: 1.9rem; font-size: 1rem;
+            cursor: pointer; padding: 0;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .feedback-thumb:hover { background: #eff6ff; border-color: #93c5fd; }
+        .feedback-thumb-up:hover { background: #dcfce7; border-color: #86efac; }
+        .feedback-thumb-down:hover { background: #fee2e2; border-color: #fca5a5; }
+        .feedback-detail {
+            margin-top: 0.5rem; padding: 0.6rem 0.7rem;
+            background: #fff; border: 1px solid #e2e8f0; border-radius: 5px;
+        }
+        .feedback-detail-reasons {
+            display: flex; flex-direction: column; gap: 0.3rem;
+            margin-bottom: 0.5rem;
+        }
+        .feedback-reason {
+            display: flex; align-items: center; gap: 0.4rem;
+            font-size: 0.82rem; color: #334155; cursor: pointer;
+        }
+        .feedback-reason input { margin: 0; }
+        .feedback-detail-text {
+            width: 100%; min-height: 4em; resize: vertical;
+            font-family: inherit; font-size: 0.82rem;
+            padding: 0.4rem 0.5rem;
+            border: 1px solid #cbd5e1; border-radius: 4px;
+            background: #fff;
+        }
+        .feedback-detail-actions {
+            display: flex; gap: 0.4rem; margin-top: 0.5rem;
+        }
+        .feedback-send-btn {
+            background: #1d4ed8; color: #fff; border: 1px solid #1d4ed8;
+            border-radius: 5px; padding: 0.35rem 0.8rem;
+            font-size: 0.82rem; font-weight: 500; cursor: pointer;
+        }
+        .feedback-send-btn:hover { background: #1e40af; }
+        .feedback-send-btn:disabled { opacity: 0.5; cursor: wait; }
+        .feedback-cancel-btn {
+            background: transparent; color: #475569; border: 1px solid #cbd5e1;
+            border-radius: 5px; padding: 0.35rem 0.7rem;
+            font-size: 0.82rem; cursor: pointer;
+        }
+        .feedback-cancel-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .feedback-thanks {
+            background: #dcfce7; border: 1px solid #86efac; border-radius: 4px;
+            padding: 0.4rem 0.6rem; margin-top: 0.5rem;
+            font-size: 0.82rem; color: #15803d;
+            display: flex; align-items: center; gap: 0.4rem;
+        }
+        .feedback-thanks-icon {
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.1rem; height: 1.1rem; border-radius: 50%;
+            background: #15803d; color: #fff; font-weight: 700;
+        }
+        .feedback-regen-btn {
+            background: #fff; border: 1px solid #cbd5e1; border-radius: 5px;
+            padding: 0.35rem 0.7rem; font-size: 0.82rem; color: #475569;
+            cursor: pointer; font-weight: 500;
+        }
+        .feedback-regen-btn:hover { background: #f1f5f9; color: #0f172a; }
+        .feedback-regen-btn--full {
+            border-color: #fcd34d; color: #92400e;
+        }
+        .feedback-regen-btn--full:hover {
+            background: #fef3c7; color: #78350f;
+        }
+        /* Tags d'état dans la vue "Mes feedbacks" + admin. */
+        .my-feedback-tag {
+            font-size: 0.7rem; padding: 0.1rem 0.45rem;
+            border-radius: 999px; font-weight: 600;
+            white-space: nowrap;
+        }
+        .my-feedback-tag--new {
+            background: #f1f5f9; color: #475569;
+        }
+        .my-feedback-tag--processed {
+            background: #dcfce7; color: #15803d;
+        }
+        .my-feedback-tag--dismissed {
+            background: #fef3c7; color: #92400e;
+        }
+
+        /* ═══════════════════════════════════════════════════════════════
            NOUVEAU module tabs/meetings.js (refonte UI 2026-05-17).
            Header séparé + liste à grille fixe + SVG inline pour le status
            (pas de dépendance au font DSFR fr-icon-*). Préfixe meetings-tab

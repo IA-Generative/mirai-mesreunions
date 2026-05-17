@@ -1239,6 +1239,226 @@ window.showUploadHelp = function showUploadHelp() {
     document.body.appendChild(modal);
 };
 
+// ─── Feedback widget (Phase F1 — pouce ↑/↓ + régénération) ────────
+//
+// Inséré dans la fiche détail via <div class="file-detail-feedback-block"
+// data-feedback-for="<fileId>"></div>. Un MutationObserver détecte
+// chaque insertion et appelle mountFeedbackBlock(), idempotent grâce
+// au flag data-feedback-mounted="1".
+//
+// 2 sections :
+//   1) Pouce ↑/↓ "Cette retranscription vous est-elle utile ?"
+//      → checklist raisons + free-text → POST /api/file/<id>/feedback
+//      → message "Merci !"
+//   2) Régénération
+//      → bouton "Régénérer les comptes-rendus" (LLM-only, instantané)
+//      → bouton "Régénérer transcription + diarisation" (full, queue admin)
+//      → chaque bouton ouvre une modale "Pourquoi ?" (raison obligatoire)
+//      → POST /api/file/<id>/regenerate
+
+const USEFULNESS_REASONS_DOWN = [
+    { id: 'transcription_imprecise',  label: 'Transcription imprécise (mots ou phrases mal compris)' },
+    { id: 'speakers_wrong',           label: 'Locuteurs mal identifiés' },
+    { id: 'sigles_wrong',             label: 'Sigles / acronymes non corrigés' },
+    { id: 'summary_off',              label: 'Résumé / CR à côté du sujet' },
+    { id: 'missing_content',          label: 'Du contenu important est manquant' },
+    { id: 'too_long',                 label: 'Trop verbeux / illisible' },
+    { id: 'other_down',               label: 'Autre' },
+];
+const USEFULNESS_REASONS_UP = [
+    { id: 'transcription_good',       label: 'Transcription fidèle' },
+    { id: 'summary_useful',           label: 'Résumé / CR pertinent' },
+    { id: 'gained_time',              label: 'M\'a fait gagner du temps' },
+    { id: 'shareable',                label: 'Partageable en l\'état' },
+    { id: 'other_up',                 label: 'Autre' },
+];
+
+function _escapeAttr(s) { return escapeHtml(s); }
+
+function mountFeedbackBlock(container) {
+    if (!container || container.dataset.feedbackMounted === '1') return;
+    const fileId = container.getAttribute('data-feedback-for') || '';
+    if (!fileId) return;
+    container.dataset.feedbackMounted = '1';
+    container.innerHTML = `
+      <div class="feedback-section">
+        <div class="feedback-row">
+          <span class="feedback-q">Cette retranscription vous est-elle utile ?</span>
+          <button type="button" class="feedback-thumb feedback-thumb-up"
+                  data-feedback-thumb="up" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Oui, utile">👍</button>
+          <button type="button" class="feedback-thumb feedback-thumb-down"
+                  data-feedback-thumb="down" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Non, à améliorer">👎</button>
+        </div>
+        <div class="feedback-detail" data-feedback-detail-for="${_escapeAttr(fileId)}" hidden></div>
+        <div class="feedback-thanks" data-feedback-thanks-for="${_escapeAttr(fileId)}" hidden>
+          <span class="feedback-thanks-icon">✓</span>
+          Merci pour votre feedback — il nourrit l'amélioration du service.
+        </div>
+      </div>
+      <div class="feedback-section feedback-section--regen">
+        <div class="feedback-row">
+          <span class="feedback-q">Régénérer&nbsp;:</span>
+          <button type="button" class="feedback-regen-btn"
+                  data-feedback-regen="llm-only" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Relance les étapes LLM (glossaire → compte-rendu) avec le glossaire actuel">
+            🔄 Comptes-rendus (LLM)
+          </button>
+          <button type="button" class="feedback-regen-btn feedback-regen-btn--full"
+                  data-feedback-regen="full" data-feedback-file="${_escapeAttr(fileId)}"
+                  title="Relance TOUT le pipeline depuis l'audio (Whisper + diarisation + LLM). Traité par un admin.">
+            🔁 Transcription + diarisation
+          </button>
+        </div>
+      </div>
+    `;
+}
+
+// Délégation click sur tous les éléments du widget feedback.
+document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+
+    // Pouce ↑↓ → expand checklist.
+    const thumb = t.closest('[data-feedback-thumb]');
+    if (thumb) {
+        ev.preventDefault();
+        const fileId = thumb.getAttribute('data-feedback-file') || '';
+        const thumbVal = thumb.getAttribute('data-feedback-thumb') || '';
+        _openFeedbackDetail(fileId, thumbVal);
+        return;
+    }
+    // Régénérer → modale raison.
+    const regen = t.closest('[data-feedback-regen]');
+    if (regen) {
+        ev.preventDefault();
+        const fileId = regen.getAttribute('data-feedback-file') || '';
+        const scope = regen.getAttribute('data-feedback-regen') || '';
+        _openRegenerateModal(fileId, scope);
+        return;
+    }
+    // Bouton "Envoyer" du formulaire de feedback détail.
+    const send = t.closest('[data-feedback-send]');
+    if (send) {
+        ev.preventDefault();
+        const fileId = send.getAttribute('data-feedback-send') || '';
+        _submitUsefulnessFeedback(fileId);
+        return;
+    }
+});
+
+function _openFeedbackDetail(fileId, thumb) {
+    const detailEl = document.querySelector(`[data-feedback-detail-for="${fileId}"]`);
+    if (!detailEl) return;
+    const reasons = (thumb === 'up') ? USEFULNESS_REASONS_UP : USEFULNESS_REASONS_DOWN;
+    const reasonsHtml = reasons.map(r =>
+        `<label class="feedback-reason">
+           <input type="checkbox" name="feedback-reason" value="${_escapeAttr(r.id)}" />
+           <span>${escapeHtml(r.label)}</span>
+         </label>`
+    ).join('');
+    detailEl.innerHTML = `
+      <input type="hidden" data-feedback-thumb-value="${_escapeAttr(thumb)}" />
+      <div class="feedback-detail-reasons">${reasonsHtml}</div>
+      <textarea class="feedback-detail-text"
+                placeholder="Optionnel — détaillez votre retour, qu'on s'améliore."
+                maxlength="2000"></textarea>
+      <div class="feedback-detail-actions">
+        <button type="button" class="feedback-send-btn"
+                data-feedback-send="${_escapeAttr(fileId)}">Envoyer le feedback</button>
+        <button type="button" class="feedback-cancel-btn"
+                onclick="document.querySelector('[data-feedback-detail-for=\\'${_escapeAttr(fileId)}\\']').hidden=true; document.querySelector('[data-feedback-detail-for=\\'${_escapeAttr(fileId)}\\']').innerHTML='';">
+          Annuler
+        </button>
+      </div>
+    `;
+    detailEl.hidden = false;
+}
+
+async function _submitUsefulnessFeedback(fileId) {
+    const detailEl = document.querySelector(`[data-feedback-detail-for="${fileId}"]`);
+    if (!detailEl) return;
+    const thumbInput = detailEl.querySelector('[data-feedback-thumb-value]');
+    const thumb = thumbInput ? thumbInput.getAttribute('data-feedback-thumb-value') : '';
+    const reasons = Array.from(detailEl.querySelectorAll('input[name="feedback-reason"]:checked')).map(c => c.value);
+    const free = (detailEl.querySelector('.feedback-detail-text')?.value || '').trim().slice(0, 2000);
+    const sendBtn = detailEl.querySelector('[data-feedback-send]');
+    if (sendBtn) sendBtn.disabled = true;
+    try {
+        const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/feedback`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'usefulness',
+                payload: { thumb, reasons, free_text: free },
+            }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        // Cache le form, affiche le merci.
+        detailEl.hidden = true; detailEl.innerHTML = '';
+        const thanks = document.querySelector(`[data-feedback-thanks-for="${fileId}"]`);
+        if (thanks) thanks.hidden = false;
+    } catch (e) {
+        if (sendBtn) sendBtn.disabled = false;
+        alert(`Envoi du feedback échoué : ${e.message}`);
+    }
+}
+
+async function _openRegenerateModal(fileId, scope) {
+    const scopeLabel = scope === 'full'
+        ? 'transcription + diarisation (refonte complète du pipeline)'
+        : 'comptes-rendus (étapes LLM seulement, instantané)';
+    const reason = window.prompt(
+        `Régénérer ${scopeLabel} ?\n\nMerci d'indiquer la raison (pour traçabilité et amélioration) :`,
+        ''
+    );
+    if (reason === null) return;  // user clicked Cancel
+    const trimmed = (reason || '').trim();
+    if (!trimmed) {
+        alert('La raison est obligatoire — annulé.');
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/regenerate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope, reason: trimmed }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.status === 202) {
+            alert(data.message || 'Demande enregistrée — traitement admin en attente.');
+        } else if (resp.ok) {
+            alert('Régénération lancée. Le statut de la transcription sera mis à jour automatiquement.');
+            // Force un refresh pour voir le nouveau status.
+            if (typeof loadSessions === 'function') loadSessions({ force: true });
+        } else {
+            alert(`Échec de la régénération : HTTP ${resp.status} — ${data.error || ''}`);
+        }
+    } catch (e) {
+        alert(`Échec de la régénération : ${e.message}`);
+    }
+}
+
+// MutationObserver : mount tout nouveau bloc feedback inséré dans le DOM.
+(function _setupFeedbackObserver() {
+    if (typeof MutationObserver === 'undefined') return;
+    const obs = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of m.addedNodes) {
+                if (node.nodeType !== 1) continue;
+                if (node.matches && node.matches('.file-detail-feedback-block')) {
+                    mountFeedbackBlock(node);
+                }
+                if (node.querySelectorAll) {
+                    node.querySelectorAll('.file-detail-feedback-block').forEach(mountFeedbackBlock);
+                }
+            }
+        }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+})();
+
 window.loadSessions = function(opts) { return loadSessions(opts); };
 async function loadSessions(opts) {
     opts = opts || {};
@@ -1781,6 +2001,15 @@ async function loadSessions(opts) {
                             Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
                         </span>
                     </div>
+                    <!-- Bloc feedback utilisateur (Phase F1) : pouce ↑/↓
+                         "Cette retranscription est-elle utile ?" + 2 boutons
+                         de régénération (LLM-only / full pipeline). Voir
+                         services/mydevices-web/app/modules/feedback/routes.py
+                         pour le backend.
+                         Le rendu interne du widget est délégué à
+                         mountFeedbackBlock() côté JS (mountOnReady ci-dessous
+                         le déclenche après insertion DOM). -->
+                    <div class="file-detail-feedback-block" data-feedback-for="${f.id}"></div>
                     <!-- transcript-section caché pour déclencher
                          loadTranscriptStatus qui met à jour la couleur du
                          bouton (i) selon le status. -->

@@ -2088,6 +2088,187 @@ def reprocess_audio(audio_id: str):
         db.close()
 
 
+# ─── User feedback (migration 015) ─────────────────────────────────
+#
+# 4 endpoints CRUD pour la table user_feedback :
+#   POST   /api/v1/feedback                          → insert
+#   GET    /api/v1/feedback/mine?user_sub=…          → list propre à un user
+#   GET    /api/v1/feedback/all?status=…             → list admin (tout user)
+#   PATCH  /api/v1/feedback/<id>                     → update (status, comment)
+# Tous Bearer-protégés par INTERNAL_API_TOKEN — mydevices-web ajoute
+# côté wrapper une couche d'autorisation utilisateur (admin claim
+# requis pour /all et PATCH).
+
+
+def _feedback_to_dict(fb):
+    """Sérialise une row UserFeedback en dict JSON-safe."""
+    return {
+        "id": str(fb.id),
+        "user_sub": fb.user_sub,
+        "file_id": str(fb.file_id) if fb.file_id else None,
+        "type": fb.type,
+        "payload": fb.payload or {},
+        "status": fb.status,
+        "ai_suggestion": fb.ai_suggestion,
+        "processed_at": fb.processed_at.isoformat() if fb.processed_at else None,
+        "processed_by": fb.processed_by,
+        "admin_comment": fb.admin_comment,
+        "created_at": fb.created_at.isoformat() if fb.created_at else None,
+    }
+
+
+@app.route("/api/v1/feedback", methods=["POST"])
+def create_feedback():
+    """Body : {user_sub, type, file_id?, payload}.
+
+    type ∈ {'usefulness', 'regenerate'}. file_id facultatif (peut être
+    un feedback global). payload : dict libre (schéma documenté dans
+    la migration 015).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    fb_type = (data.get("type") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if fb_type not in ("usefulness", "regenerate"):
+        return jsonify({"error": "type must be 'usefulness' or 'regenerate'"}), 400
+    file_id = data.get("file_id")
+    payload = data.get("payload") or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "payload must be a JSON object"}), 400
+
+    from libs.shared.app.models import UserFeedback
+    db = SessionLocal()
+    try:
+        fb = UserFeedback(
+            user_sub=user_sub,
+            file_id=file_id if file_id else None,
+            type=fb_type,
+            payload=payload,
+            status="new",
+        )
+        db.add(fb)
+        db.commit()
+        db.refresh(fb)
+        logger.info("Feedback created id=%s type=%s user_sub=%s file_id=%s",
+                    fb.id, fb_type, user_sub, file_id)
+        return jsonify(_feedback_to_dict(fb)), 201
+    except Exception:
+        db.rollback()
+        logger.exception("Feedback create failed")
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/feedback/mine", methods=["GET"])
+def list_feedback_mine():
+    """Query : ?user_sub=<sub>&limit=50&offset=0.
+
+    Retourne `{items: [...], total: N}` pour la vue "Mes feedbacks"
+    côté useful-data tab.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    offset = max(0, int(request.args.get("offset", 0)))
+
+    from libs.shared.app.models import UserFeedback
+    db = SessionLocal()
+    try:
+        q = db.query(UserFeedback).filter(UserFeedback.user_sub == user_sub)
+        total = q.count()
+        items = q.order_by(UserFeedback.created_at.desc()).offset(offset).limit(limit).all()
+        return jsonify({
+            "items": [_feedback_to_dict(fb) for fb in items],
+            "total": total, "limit": limit, "offset": offset,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/feedback/all", methods=["GET"])
+def list_feedback_all():
+    """Query : ?status=<new|processed|dismissed>&limit=&offset=.
+
+    Retourne tous les feedbacks (vue admin). Filtre status optionnel.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    status_filter = (request.args.get("status") or "").strip()
+    limit = max(1, min(int(request.args.get("limit", 100)), 500))
+    offset = max(0, int(request.args.get("offset", 0)))
+
+    from libs.shared.app.models import UserFeedback
+    db = SessionLocal()
+    try:
+        q = db.query(UserFeedback)
+        if status_filter:
+            q = q.filter(UserFeedback.status == status_filter)
+        total = q.count()
+        items = q.order_by(UserFeedback.created_at.desc()).offset(offset).limit(limit).all()
+        return jsonify({
+            "items": [_feedback_to_dict(fb) for fb in items],
+            "total": total, "limit": limit, "offset": offset,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/feedback/<feedback_id>", methods=["PATCH"])
+def update_feedback(feedback_id: str):
+    """Body : {status?, admin_comment?, ai_suggestion?, processed_by?}.
+
+    Met à jour les marqueurs admin. Si status='processed', renseigne
+    processed_at = now() automatiquement.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+
+    from libs.shared.app.models import UserFeedback
+    db = SessionLocal()
+    try:
+        fb = db.query(UserFeedback).filter(UserFeedback.id == feedback_id).first()
+        if not fb:
+            return jsonify({"error": "not_found"}), 404
+        if "status" in data:
+            new_status = (data.get("status") or "").strip()
+            if new_status not in ("new", "processed", "dismissed"):
+                return jsonify({"error": "invalid status"}), 400
+            fb.status = new_status
+            if new_status == "processed" and not fb.processed_at:
+                fb.processed_at = datetime.now(timezone.utc)
+        if "admin_comment" in data:
+            fb.admin_comment = data.get("admin_comment") or None
+        if "ai_suggestion" in data:
+            fb.ai_suggestion = data.get("ai_suggestion") or None
+        if "processed_by" in data:
+            fb.processed_by = data.get("processed_by") or None
+        db.commit()
+        db.refresh(fb)
+        return jsonify(_feedback_to_dict(fb))
+    except Exception:
+        db.rollback()
+        logger.exception("Feedback update failed")
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
 def create_app():
     global SessionLocal, _purge_thread_started, _pull_loop_thread_started, _orphan_resume_started, _orphan_watchdog_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")

@@ -123,6 +123,30 @@ export function mount(container /*, ctx */) {
 
     </div>
 
+    <!-- Mes feedbacks — vue lecture des retours laissés par l'utilisateur
+         (pouce ↑/↓ + demandes de regénération) avec tag "pris en
+         compte" quand un admin a traité. Peuplé via fetch GET
+         /api/my-feedback au mount. -->
+    <section class="fr-accordion" style="margin-top:0.8rem;">
+      <h3 class="fr-accordion__title">
+        <button type="button" class="fr-accordion__btn"
+                aria-expanded="false" aria-controls="ud-acc-my-feedback">
+          Mes feedbacks
+        </button>
+      </h3>
+      <div class="fr-collapse" id="ud-acc-my-feedback">
+        <p class="subtitle" style="margin-top:0;margin-bottom:0.6rem;">
+          Tous les retours que vous avez laissés sur vos réunions
+          (pouce ↑/↓ ou demandes de regénération). Les éléments
+          tagués <em>pris en compte</em> ont été traités par un
+          administrateur.
+        </p>
+        <div data-my-feedback-list>
+          <p style="color:#94a3b8;font-size:0.85rem;">Chargement…</p>
+        </div>
+      </div>
+    </section>
+
     <!-- TKT-115 : l'accordéon "Corbeille" doublonnait l'onglet de premier
          niveau du même nom. Remplacé par un callout DSFR simple qui
          pointe vers l'onglet, pour garder la mention dans la rubrique
@@ -163,6 +187,71 @@ export function mount(container /*, ctx */) {
     const trashBtn = document.getElementById('tab-btn-trash');
     if (trashBtn) trashBtn.click();
   });
+
+  // Charge les feedbacks utilisateur (asynchrone, ne bloque pas le rendu).
+  _loadMyFeedback(root);
+}
+
+async function _loadMyFeedback(root) {
+  const list = root.querySelector('[data-my-feedback-list]');
+  if (!list) return;
+  try {
+    const resp = await fetch('/api/my-feedback?limit=50');
+    if (!resp.ok) {
+      list.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Erreur de chargement (HTTP ${resp.status}).</p>`;
+      return;
+    }
+    const data = await resp.json();
+    const items = data.items || [];
+    if (!items.length) {
+      list.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Aucun feedback laissé pour l'instant.</p>`;
+      return;
+    }
+    list.innerHTML = items.map(_renderMyFeedbackRow).join('');
+  } catch (e) {
+    list.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur réseau : ${_esc(e.message)}</p>`;
+  }
+}
+
+function _renderMyFeedbackRow(fb) {
+  const created = fb.created_at
+    ? new Date(fb.created_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' })
+        + ' à ' + new Date(fb.created_at).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })
+    : '';
+  const status = (fb.status || 'new').toLowerCase();
+  const statusTag = status === 'processed'
+    ? '<span class="my-feedback-tag my-feedback-tag--processed">✓ Pris en compte</span>'
+    : (status === 'dismissed'
+        ? '<span class="my-feedback-tag my-feedback-tag--dismissed">Écarté</span>'
+        : '<span class="my-feedback-tag my-feedback-tag--new">En attente</span>');
+  const p = fb.payload || {};
+  let summary = '';
+  if (fb.type === 'usefulness') {
+    const thumb = p.thumb === 'up' ? '👍' : '👎';
+    const reasons = Array.isArray(p.reasons) && p.reasons.length
+      ? `<div style="font-size:0.78rem;color:#64748b;">${_esc(p.reasons.join(', '))}</div>` : '';
+    const free = p.free_text
+      ? `<div style="font-size:0.82rem;color:#334155;margin-top:0.2rem;">« ${_esc(p.free_text)} »</div>` : '';
+    summary = `<div><strong>${thumb} Utilité de la transcription</strong></div>${reasons}${free}`;
+  } else if (fb.type === 'regenerate') {
+    const scopeLabel = p.scope === 'full' ? 'Transcription + diarisation' : 'Comptes-rendus (LLM)';
+    summary = `<div><strong>🔄 Demande de régénération</strong> — ${_esc(scopeLabel)}</div>
+               <div style="font-size:0.82rem;color:#334155;margin-top:0.2rem;">« ${_esc(p.reason || '')} »</div>`;
+  } else {
+    summary = `<div><em>${_esc(fb.type)}</em></div>`;
+  }
+  const adminCmt = fb.admin_comment
+    ? `<div style="font-size:0.78rem;color:#1d4ed8;margin-top:0.3rem;border-left:2px solid #1d4ed8;padding-left:0.5rem;">
+         Réponse admin : ${_esc(fb.admin_comment)}
+       </div>` : '';
+  return `<div class="my-feedback-item" style="border-bottom:1px solid #f1f5f9;padding:0.6rem 0;">
+    <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.2rem;">
+      <span style="font-size:0.75rem;color:#94a3b8;">${_esc(created)}</span>
+      ${statusTag}
+    </div>
+    ${summary}
+    ${adminCmt}
+  </div>`;
 }
 
 export function unmount(/* container */) {

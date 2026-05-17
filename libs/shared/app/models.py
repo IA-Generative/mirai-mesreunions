@@ -562,6 +562,46 @@ class UserGlossaryTerm(InternalBase):
 # `Preparation.content` (renommé en migration 012).
 
 
+class UserFeedback(InternalBase):
+    """Feedback utilisateur — pouce ↑/↓ ou demande de regénération.
+
+    Migration 015. Centralise 2 types de feedback laissés depuis la fiche
+    détail d'une réunion :
+
+      • ``type='usefulness'`` → pouce ↑/↓ + checklist raisons + free-text
+        payload : {thumb: 'up'|'down', reasons: [...], free_text: str}
+      • ``type='regenerate'`` → demande de relancer un pipeline
+        payload : {scope: 'full'|'llm-only', reason: str}
+
+    Cycle de vie via ``status`` : ``new`` (créé) → ``processed`` (admin a
+    pris en compte) ou ``dismissed`` (écarté). L'utilisateur voit ses
+    feedbacks dans "Mes données utiles" avec un tag "pris en compte" si
+    ``status='processed'``.
+    """
+    __tablename__ = "user_feedback"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_sub = Column(Text, nullable=False)
+    # file_id peut être NULL (feedback global) — pas de FK pour ne pas
+    # perdre l'historique quand un fichier est trashé.
+    file_id = Column(UUID(as_uuid=True), nullable=True)
+    type = Column(String(32), nullable=False)
+    payload = Column(_JSON_TYPE, nullable=False, default=dict)
+    status = Column(String(16), nullable=False, default="new")
+    ai_suggestion = Column(Text, nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    processed_by = Column(Text, nullable=True)
+    admin_comment = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    __table_args__ = (
+        Index("ix_user_feedback_user_created", "user_sub", "created_at"),
+    )
+
+
 class TranscriptionEvent(InternalBase):
     """Audit trail of transcription stub calls and outcomes."""
     __tablename__ = "transcription_events"
