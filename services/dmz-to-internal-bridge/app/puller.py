@@ -49,6 +49,7 @@ from libs.shared.app.config import (
     TRANSCRIPTION_BACKEND, MCR_GATEWAY_URL, OIDC_TOKEN_ENDPOINT,
     KEVENT_GATEWAY_URL, KEVENT_API_KEY,
     KEVENT_TRANSCRIPTION_MODEL, KEVENT_DIARIZATION_MODEL,
+    DIARIZATION_BACKEND, DIARIZATION_VM_URL,
     KEVENT_DIARIZATION_ENABLED, KEVENT_SPEAKER_NAMING_ENABLED,
     KEVENT_OOB_CLEANING_ENABLED, KEVENT_REFORMULATION_ENABLED,
     KEVENT_MEETING_ANALYSIS_ENABLED,
@@ -275,6 +276,8 @@ def _build_kevent_client() -> Optional[KeventClient]:
             transcription_model=KEVENT_TRANSCRIPTION_MODEL,
             diarization_model=KEVENT_DIARIZATION_MODEL,
             timeout=KEVENT_HTTP_TIMEOUT_SECONDS,
+            diarization_backend=DIARIZATION_BACKEND,
+            diarization_vm_url=DIARIZATION_VM_URL,
         )
     except ValueError:
         logger.exception(

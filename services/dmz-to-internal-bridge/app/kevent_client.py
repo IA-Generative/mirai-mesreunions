@@ -46,8 +46,12 @@ diarization speaker spans.
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
+import urllib.error
+import urllib.request
+import uuid
 from typing import Callable, Optional
 
 import requests as req
@@ -116,16 +120,28 @@ class KeventClient:
         transcription_model: str = "faster-whisper-large-v3-turbo",
         diarization_model: str = "pyannote-diarization",
         timeout: int = 600,
+        diarization_backend: str = "kevent",
+        diarization_vm_url: str = "",
     ):
         if not gateway_url:
             raise ValueError("KEVENT_GATEWAY_URL is required to build KeventClient")
         if not api_key:
             raise ValueError("KEVENT_API_KEY is required to build KeventClient")
+        if diarization_backend not in ("kevent", "vm-direct"):
+            raise ValueError(
+                f"diarization_backend must be 'kevent' or 'vm-direct', got {diarization_backend!r}"
+            )
+        if diarization_backend == "vm-direct" and not diarization_vm_url:
+            raise ValueError(
+                "diarization_backend='vm-direct' requires diarization_vm_url to be set"
+            )
         self.gateway_url = gateway_url.rstrip("/")
         self.api_key = api_key
         self.transcription_model = transcription_model
         self.diarization_model = diarization_model
         self.timeout = timeout
+        self.diarization_backend = diarization_backend
+        self.diarization_vm_url = diarization_vm_url.rstrip("/")
 
     # ── Helpers ─────────────────────────────────────────────
 
@@ -438,7 +454,14 @@ class KeventClient:
         """Async equivalent of ``diarize``.
 
         Voir ``transcribe_async`` pour la sémantique de ``on_submitted``.
+
+        Si ``diarization_backend='vm-direct'``, redirige vers ``_diarize_vm``
+        (sync) — la VM répond en <3 min sur 105 min d'audio, le modèle async
+        polling n'apporte rien. ``on_status`` / ``on_submitted`` ne sont pas
+        appelés dans ce cas (pas de job_id à persister).
         """
+        if self.diarization_backend == "vm-direct":
+            return self._diarize_vm(audio_bytes, filename, content_type)
         job_id = self.submit_job(
             audio_bytes, filename, content_type,
             service_type=service_type, operation=operation,
@@ -477,9 +500,16 @@ class KeventClient:
 
     def diarize(self, audio_bytes: bytes, filename: str, content_type: str) -> dict:
         """
-        POST /v1/audio/diarizations. Returns ``{segments: [{speaker, start,
-        end}, …], num_speakers, duration, processing_time}``.
+        Diarisation synchrone. Retourne ``{segments: [{speaker, start, end}, …],
+        num_speakers, duration, processing_time}``.
+
+        Si ``diarization_backend='vm-direct'``, tape directement le container
+        diarization-api via ``DIARIZATION_VM_URL``. Sinon, POST
+        ``/v1/audio/diarizations`` sur le gateway Kevent.
         """
+        if self.diarization_backend == "vm-direct":
+            return self._diarize_vm(audio_bytes, filename, content_type)
+
         url = f"{self.gateway_url}/v1/audio/diarizations"
         files = {"file": (self._whisper_safe_filename(filename), audio_bytes, content_type)}
         data = {"model": self.diarization_model}
@@ -498,3 +528,71 @@ class KeventClient:
             return resp.json()
         except Exception as exc:
             raise KeventApplicativeError(f"Kevent /diarizations returned non-JSON: {exc}") from exc
+
+    # ── Backend vm-direct ────────────────────────────────────
+    #
+    # Implémenté avec stdlib urllib.request (et PAS requests) parce que
+    # ``requests==2.32.3`` envoie un multipart qui fait rejeter le POST par
+    # nginx en HTTP 400 lorsqu'on passe par le gate devant la VM (vérifié
+    # empiriquement le 2026-05-16 : curl OK, httpx OK, urllib OK, requests
+    # KO sur le même payload + même header). On évite d'ajouter ``httpx``
+    # comme dépendance juste pour ça — stdlib suffit.
+
+    def _diarize_vm(
+        self,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+    ) -> dict:
+        """POST direct sur ``{DIARIZATION_VM_URL}/v1/audio/diarizations``.
+
+        Auth réutilise ``self.api_key`` comme ``Authorization: Bearer``
+        (l'nginx-gate devant la VM accepte le token kevent). Erreurs
+        classées dans les mêmes familles que les appels gateway.
+        """
+        url = f"{self.diarization_vm_url}/v1/audio/diarizations"
+        boundary = uuid.uuid4().hex
+        crlf = b"\r\n"
+        body = (
+            b"--" + boundary.encode() + crlf
+            + (
+                f'Content-Disposition: form-data; name="file"; filename="{filename}"'
+            ).encode() + crlf
+            + f"Content-Type: {content_type}".encode() + crlf + crlf
+            + audio_bytes + crlf
+            + b"--" + boundary.encode() + b"--" + crlf
+        )
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        }
+        headers.update(self._auth_header())
+        request = urllib.request.Request(
+            url, data=body, method="POST", headers=headers
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            payload = (exc.read() or b"")[:200].decode(errors="replace")
+            if exc.code in (401, 403):
+                raise KeventAuthError(
+                    f"POST {url} → {exc.code} (Authorization rejected by VM gate)"
+                ) from exc
+            if exc.code >= 500:
+                raise KeventTransientError(
+                    f"POST {url} → {exc.code}: {payload}"
+                ) from exc
+            raise KeventApplicativeError(
+                f"POST {url} → {exc.code}: {payload}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise KeventTransientError(
+                f"VM diarization unreachable at {url}: {exc.reason}"
+            ) from exc
+        try:
+            return _json.loads(raw)
+        except Exception as exc:
+            raise KeventApplicativeError(
+                f"VM diarization returned non-JSON: {exc}"
+            ) from exc

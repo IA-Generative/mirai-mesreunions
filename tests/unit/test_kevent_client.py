@@ -82,12 +82,12 @@ def test_constructor_rejects_empty_key():
 
 def test_auth_header_adds_bearer_prefix_when_missing():
     c = MOD.KeventClient(gateway_url="https://x", api_key="raw-token")
-    assert c._auth_header() == {"apikey": "Bearer raw-token"}
+    assert c._auth_header() == {"Authorization": "Bearer raw-token"}
 
 
 def test_auth_header_preserves_bearer_prefix_when_present():
     c = MOD.KeventClient(gateway_url="https://x", api_key="Bearer raw-token")
-    assert c._auth_header() == {"apikey": "Bearer raw-token"}
+    assert c._auth_header() == {"Authorization": "Bearer raw-token"}
 
 
 # --- transcribe -----------------------------------------------------------
@@ -183,14 +183,14 @@ def test_diarize_success_returns_full_json():
     assert kwargs["data"]["model"] == "pyannote-diarization"
 
 
-def test_diarize_uses_apikey_header():
+def test_diarize_uses_authorization_bearer_header():
+    # Le gateway Mirai a migré 2026-05-11 : Authorization: Bearer <token>
+    # remplace l'ancien header non-standard apikey: Bearer <token>.
     _REQ.post.return_value = _resp(200, json_data={"segments": []})
     _client().diarize(b"audio", "x.mp4", "audio/mp4")
     _, kwargs = _REQ.post.call_args
-    assert "apikey" in kwargs["headers"]
-    assert "Bearer" in kwargs["headers"]["apikey"]
-    # Standard Authorization header NOT used (this gateway is non-standard).
-    assert "Authorization" not in kwargs["headers"]
+    assert kwargs["headers"]["Authorization"] == "Bearer testkey-deadbeef"
+    assert "apikey" not in kwargs["headers"]
 
 
 def test_diarize_401_raises_auth_error():

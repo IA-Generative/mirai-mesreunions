@@ -212,6 +212,21 @@ KEVENT_API_KEY = _str("KEVENT_API_KEY", "")
 KEVENT_TRANSCRIPTION_MODEL = _str("KEVENT_TRANSCRIPTION_MODEL", "faster-whisper-large-v3-turbo")
 KEVENT_DIARIZATION_MODEL = _str("KEVENT_DIARIZATION_MODEL", "pyannote-diarization")
 KEVENT_DIARIZATION_ENABLED = _bool("KEVENT_DIARIZATION_ENABLED", False)
+
+# Diarization backend selector (cf docs/DIARIZATION_BACKEND.md).
+#   "kevent"    (défaut) : passe par le gateway Mirai (sync ou async selon
+#                          KEVENT_ASYNC_MODE), comme la transcription.
+#   "vm-direct" : tape directement un container diarization-api (image
+#                 ≥2.5-gpu, DIARIZATION_PRELOAD_WAVEFORM=true) via
+#                 DIARIZATION_VM_URL. Utile quand le gateway Kevent n'a
+#                 pas encore intégré la build qui résout les timeouts
+#                 long-audio (cf kevent-ai#53). Auth réutilise
+#                 KEVENT_API_KEY comme Authorization: Bearer (l'nginx-gate
+#                 devant la VM accepte le token kevent).
+# Le toggle ne s'applique QU'À la diarisation. La transcription reste sur
+# le gateway Kevent quel que soit le backend choisi.
+DIARIZATION_BACKEND = _str("DIARIZATION_BACKEND", "kevent")
+DIARIZATION_VM_URL = _str("DIARIZATION_VM_URL", "")
 # Format envoyé au gateway pour la diarisation. Workaround pour le bug
 # "samples mismatch" côté pyannote-audio 3.1 (encoder delay AAC fait que la
 # durée décodée par leur preprocessing ne matche pas la durée du header MP4,
