@@ -1623,8 +1623,7 @@ async function _openRegenerateModal(fileId, scope) {
         return;
     }
     // Désactive le bouton + change son label pendant la requête (la
-    // chaîne LLM tourne synchrone et peut prendre 30s-5min). Affiche
-    // aussi un overlay non-bloquant fixé en bas-droite avec spinner.
+    // chaîne LLM tourne synchrone et peut prendre 30s-5min).
     const btn = document.querySelector(
         `[data-feedback-regen="${scope}"][data-feedback-file="${fileId}"]`
     );
@@ -1635,7 +1634,24 @@ async function _openRegenerateModal(fileId, scope) {
         btn.style.opacity = '0.7';
         btn.style.cursor = 'wait';
     }
-    const overlay = _showRegenInProgressOverlay(scope);
+    // Active immédiatement le pulse sur le bouton (i) "Détails techniques"
+    // de la fiche pour signaler le traitement en cours, sans attendre le
+    // prochain poll de transcript-status (qui mettrait jusqu'à 15s).
+    // Le pulse sera re-confirmé puis retiré naturellement par
+    // loadTranscriptStatus selon le polling status réel.
+    const infoBtnEl = document.querySelector(`[data-file-info-btn="${CSS.escape(fileId)}"]`);
+    if (infoBtnEl) {
+        infoBtnEl.classList.add('file-detail-info-btn--pulse');
+        infoBtnEl.setAttribute('title', `Régénération en cours — cliquer pour voir les détails`);
+    }
+    // Force aussi un refresh transcript-status immédiat puis re-poll
+    // serré (3s) pendant la phase active pour mettre à jour le rail.
+    const persistentCt = document.querySelector(
+        `.transcript-section[data-transcript-file-id="${CSS.escape(fileId)}"]`
+    );
+    if (persistentCt && typeof loadTranscriptStatus === 'function') {
+        setTimeout(() => loadTranscriptStatus(fileId, persistentCt), 1500);
+    }
     try {
         const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/regenerate`, {
             method: 'POST',
@@ -1644,19 +1660,16 @@ async function _openRegenerateModal(fileId, scope) {
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.status === 202) {
-            overlay.dismiss();
             alert(data.message || 'Demande enregistrée — traitement admin en attente.');
         } else if (resp.ok) {
-            overlay.dismiss();
-            alert('Régénération terminée. La fiche va se rafraîchir avec les nouveaux contenus.');
+            // Pas d'alert intrusif : la fiche se rafraîchit toute seule.
             clearPendingCorrections(fileId);
             if (typeof loadSessions === 'function') loadSessions({ force: true });
+            showToast && showToast('✓ Régénération terminée', 'success');
         } else {
-            overlay.dismiss();
             alert(`Échec de la régénération : HTTP ${resp.status} — ${data.error || ''}`);
         }
     } catch (e) {
-        overlay.dismiss();
         alert(`Échec de la régénération : ${e.message}`);
     } finally {
         if (btn) {
@@ -1665,63 +1678,12 @@ async function _openRegenerateModal(fileId, scope) {
             btn.style.opacity = '';
             btn.style.cursor = '';
         }
+        // Re-fetch le statut pour soit retirer le pulse (si terminé) soit
+        // le garder (si polling continue côté serveur).
+        if (persistentCt && typeof loadTranscriptStatus === 'function') {
+            loadTranscriptStatus(fileId, persistentCt);
+        }
     }
-}
-
-// Overlay non-bloquant fixé en bas-droite avec spinner + minuteur
-// "Régénération en cours… 0:15". Renvoie un objet avec dismiss().
-function _showRegenInProgressOverlay(scope) {
-    const id = 'regen-progress-overlay';
-    document.querySelectorAll(`#${id}`).forEach((el) => el.remove());
-    const el = document.createElement('div');
-    el.id = id;
-    el.style.cssText = 'position:fixed;bottom:1rem;right:1rem;'
-        + 'background:#fff;border:1px solid #1d4ed8;border-left:4px solid #1d4ed8;'
-        + 'border-radius:6px;padding:0.7rem 1rem;box-shadow:0 4px 18px rgba(0,0,0,0.18);'
-        + 'z-index:11000;display:flex;align-items:center;gap:0.7rem;'
-        + 'font-size:0.85rem;color:#1e293b;max-width:360px;';
-    const label = scope === 'full'
-        ? 'Transcription + diarisation + CR'
-        : 'Comptes-rendus (chaîne LLM)';
-    el.innerHTML = `
-      <div style="width:1.2rem;height:1.2rem;border:2px solid #cbd5e1;
-                  border-top-color:#1d4ed8;border-radius:50%;
-                  animation:regen-spin 0.9s linear infinite;"></div>
-      <div>
-        <div style="font-weight:600;color:#0c4498;">🔄 Régénération en cours…</div>
-        <div style="font-size:0.74rem;color:#64748b;">
-          ${label} · <span data-regen-elapsed>0:00</span>
-        </div>
-        <div style="font-size:0.7rem;color:#94a3b8;margin-top:0.15rem;">
-          ${scope === 'full'
-            ? 'Compte 3-15 min selon la longueur audio.'
-            : 'Compte 30s à 5 min selon la chaîne LLM.'}
-        </div>
-      </div>
-    `;
-    // CSS animation injectée une fois.
-    if (!document.getElementById('regen-spin-style')) {
-        const st = document.createElement('style');
-        st.id = 'regen-spin-style';
-        st.textContent = '@keyframes regen-spin { to { transform: rotate(360deg); } }';
-        document.head.appendChild(st);
-    }
-    document.body.appendChild(el);
-    const startedAt = Date.now();
-    const elapsedEl = el.querySelector('[data-regen-elapsed]');
-    const tick = setInterval(() => {
-        const s = Math.floor((Date.now() - startedAt) / 1000);
-        const m = Math.floor(s / 60);
-        elapsedEl.textContent = `${m}:${String(s % 60).padStart(2, '0')}`;
-    }, 1000);
-    return {
-        dismiss() {
-            clearInterval(tick);
-            el.style.transition = 'opacity 280ms';
-            el.style.opacity = '0';
-            setTimeout(() => el.remove(), 300);
-        },
-    };
 }
 
 // MutationObserver : mount tout nouveau bloc feedback inséré dans le DOM.

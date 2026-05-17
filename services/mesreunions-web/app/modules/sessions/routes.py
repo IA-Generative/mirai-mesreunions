@@ -570,12 +570,11 @@ def api_file_transcript_status(file_id):
             "meeting_analysis_json": audio.get("meeting_analysis_json"),
             # Compteur + horodatage des régénérations (pour affichage du
             # numéro de version dans le bandeau de statut + statistiques
-            # côté admin).
+            # côté admin). `last_reprocessed_at` arrive déjà sérialisé en
+            # string ISO depuis l'ingester (cf puller.py audio_lookup),
+            # on ne re-isoformat pas.
             "reprocess_version": audio.get("reprocess_version") or 0,
-            "last_reprocessed_at": (
-                audio.get("last_reprocessed_at").isoformat()
-                if audio.get("last_reprocessed_at") else None
-            ),
+            "last_reprocessed_at": audio.get("last_reprocessed_at"),
         })
     finally:
         db.close()
