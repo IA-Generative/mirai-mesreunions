@@ -313,13 +313,17 @@ def _fmt_date_fr(iso: str | None) -> str:
 # Libellés humains pour la nature du document (rappelés dans l'en-tête
 # en sous-titre, sous "Mes Réunions IA"). Source de vérité unique :
 # évite d'avoir à mapper côté routes.
+#
+# Règle : auto-porteur pour un néophyte. Pas de jargon ("brute",
+# "nettoyée", "corrigée" sans contexte) — on dit explicitement ce
+# qui a été fait au texte.
 DOCUMENT_KIND_LABELS = {
-    "transcript":              "Transcription brute",
-    "transcript-tagged":       "Transcription avec interlocuteurs",
-    "transcript-corrected":    "Transcription corrigée (glossaire)",
-    "transcript-cleaned":      "Transcription nettoyée",
+    "transcript":              "Transcription mot-à-mot",
+    "transcript-tagged":       "Transcription avec identification des interlocuteurs",
+    "transcript-corrected":    "Transcription avec sigles corrigés",
+    "transcript-cleaned":      "Transcription sans hésitations ni redites",
     "transcript-reformulated": "Reformulation au discours indirect",
-    "meeting-cr":              "Compte-rendu structuré",
+    "meeting-cr":              "Compte-rendu de réunion structuré",
 }
 
 
