@@ -918,10 +918,9 @@
             grid-template-columns:
                 0                          /* checkbox (révélée en bulk mode) */
                 32px                       /* status icône */
-                minmax(0, 1fr)             /* titre */
+                minmax(0, 1fr)             /* titre + chevron */
                 auto                       /* date */
-                4.5em                      /* durée alignée à droite */
-                32px;                      /* chevron */
+                4.5em;                     /* durée alignée à droite */
             align-items: center; gap: 0.55rem;
             padding: 0.55rem 1rem;
             min-height: 40px;
@@ -931,10 +930,18 @@
             grid-template-columns:
                 24px                       /* checkbox visible */
                 32px                       /* status */
-                minmax(0, 1fr)             /* titre */
+                minmax(0, 1fr)             /* titre + chevron */
                 auto                       /* date */
-                4.5em                      /* durée */
-                32px;                      /* chevron */
+                4.5em;                     /* durée */
+        }
+        /* Wrap titre + chevron : flex pour que le chevron reste collé à
+           la fin du titre tronqué (au lieu d'être à la fin de la row). */
+        .meeting-row-title-wrap {
+            display: flex; align-items: center; gap: 0.3rem;
+            min-width: 0;
+        }
+        .meeting-row-title-wrap .meeting-row-title-btn {
+            flex: 1; min-width: 0;
         }
         .meeting-row-check {
             display: inline-flex; align-items: center; justify-content: center;

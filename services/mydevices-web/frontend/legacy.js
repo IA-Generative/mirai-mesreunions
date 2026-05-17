@@ -1352,7 +1352,11 @@ async function loadSessions(opts) {
         // de loadSessions (transferBox, activityRail, file count global)
         // est conservé pour compat — il pourra être déplacé dans le
         // module en suite.
-        if (window.__meetingsTab && typeof window.__meetingsTab.renderList === 'function') {
+        // EXCEPTION : en mode "fiche détail" (showFileDetail a posé la
+        // classe .detail-active sur le pane), on laisse passer le rendu
+        // legacy qui sait afficher la vue page-détail (lines ~1577+).
+        const _inDetailView = !!(container && container.closest('.tab-pane.detail-active'));
+        if (!_inDetailView && window.__meetingsTab && typeof window.__meetingsTab.renderList === 'function') {
             try {
                 window.__meetingsTab.renderList(sessions);
                 // L'en-tête de table legacy est obsolète avec le nouveau

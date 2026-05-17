@@ -26,18 +26,31 @@ import { formatDuration, formatDate } from '../utils/format.js';
 // ── Constantes ────────────────────────────────────────────────────────
 
 // Mapping statut pipeline upload → kind UI + % approximatif.
-// L'utilisateur n'a pas besoin du % exact des sous-étapes Kevent (chaque
-// LLM step est court devant le whisper). On affiche un anneau plein quand
-// l'étape s'achève, animé pendant.
+// 5 kinds visuels (spec utilisateur 2026-05-17) :
+//   queued     : nouveau / en attente (gris, pas d'animation)
+//   processing : en cours réel (bleu, anneau qui tourne)
+//   success    : fini OK (vert plein, pas d'animation)
+//   partial    : partiellement prête (orange, pas d'animation)
+//   error      : échec (rouge, pas d'animation)
+//
+// Pour `transferred` (= pipeline pré-transcription terminé, transcription
+// Kevent à venir/en cours/déjà finie), on N'A PAS l'info — on l'affiche
+// en kind=queued ("Prête à transcrire") tant qu'un fetch transcript-status
+// n'a pas confirmé le vrai état. Le pré-fetch parallèle au render
+// (cf. _prefetchTranscriptStatus) corrige rapidement vers success ou
+// processing selon le retour Kevent.
 const UPLOAD_PIPELINE = {
-  pending:              { kind: 'queued',     pct:   0, label: 'En file d\'attente' },
-  scanning:             { kind: 'processing', pct:  15, label: 'Antivirus' },
-  scan_clean:           { kind: 'processing', pct:  30, label: 'Antivirus OK' },
-  transcoding:          { kind: 'processing', pct:  45, label: 'Conversion audio' },
-  transcoded:           { kind: 'processing', pct:  60, label: 'Audio normalisé' },
-  ready_for_transfer:   { kind: 'processing', pct:  65, label: 'Prêt pour transfert' },
-  transferring:         { kind: 'processing', pct:  75, label: 'Transfert interne' },
-  transferred:          { kind: 'processing', pct:  80, label: 'Transcription IA' },
+  pending:              { kind: 'queued',     pct:   0, label: 'En attente' },
+  scanning:             { kind: 'processing', pct:  20, label: 'Antivirus' },
+  scan_clean:           { kind: 'processing', pct:  35, label: 'Antivirus OK' },
+  transcoding:          { kind: 'processing', pct:  50, label: 'Conversion audio' },
+  transcoded:           { kind: 'processing', pct:  65, label: 'Audio normalisé' },
+  ready_for_transfer:   { kind: 'processing', pct:  70, label: 'Prêt pour transfert' },
+  transferring:         { kind: 'processing', pct:  80, label: 'Transfert interne' },
+  // transferred = pré-transcription OK. Sans transcript-status, on assume
+  // "prête à transcrire" en kind=queued (gris). Le pré-fetch corrige vers
+  // success/partial/error/processing une fois la réponse Kevent connue.
+  transferred:          { kind: 'queued',     pct:  85, label: 'Prête à transcrire' },
   scan_infected:        { kind: 'error',      pct: 100, label: 'Virus détecté' },
   quarantined:          { kind: 'error',      pct: 100, label: 'Mis en quarantaine' },
   transcode_failed:     { kind: 'error',      pct: 100, label: 'Échec conversion audio' },
@@ -195,6 +208,21 @@ function renderHeader(fileCount, hasSelection) {
   </div>`;
 }
 
+// Tooltip détaillé du pipeline pour rollover sur la pastille status.
+// Donne l'étape courante + status_message backend si disponible + l'engine
+// transcription si le transcript-status est connu.
+function _buildStatusTooltip(file, status) {
+  const lines = [status.label];
+  if (file.status_message) lines.push('— ' + file.status_message);
+  const cached = _transcriptCache.get(file.id);
+  if (cached && cached.engine) lines.push('Moteur : ' + cached.engine);
+  if (cached && cached.status) lines.push('État transcription : ' + cached.status);
+  lines.push('');
+  lines.push('Clic = ouvrir la fiche complète');
+  lines.push('▾ = afficher le résumé inline');
+  return lines.join('\n');
+}
+
 function renderRow(file, session) {
   const status = resolveStatus(file);
   const animated = status.kind === 'processing';
@@ -204,9 +232,7 @@ function renderRow(file, session) {
   const isExpanded = _expandedIds.has(file.id);
   const isSelected = _selectedIds.has(file.id);
   const isLocal = !!session.is_local_upload;
-  // Tooltip status détaillé (rollover sur la pastille).
-  const statusTooltip = `${status.label}${file.status_message ? ' — ' + file.status_message : ''}`;
-  // Source tooltip : nom device ou "Upload local" + simple_code.
+  const statusTooltip = _buildStatusTooltip(file, status);
   const sourceLabel = session.device_label || (isLocal ? 'Upload local' : 'Appareil enrôlé');
   const sourceTooltip = `${sourceLabel}${session.simple_code ? ' — code ' + session.simple_code : ''}`;
 
@@ -215,27 +241,32 @@ function renderRow(file, session) {
       <label class="meeting-row-check" title="Sélectionner (Alt)">
         <input type="checkbox" data-meeting-check="${escapeHtml(file.id)}" ${isSelected ? 'checked' : ''} />
       </label>
-      <div class="meeting-row-status"
-           role="status"
-           aria-label="Statut : ${escapeHtml(status.label)}"
-           title="${escapeHtml(statusTooltip)}">
-        ${statusIcon(status.kind, status.pct, animated)}
-      </div>
-      <button type="button" class="meeting-row-title-btn"
-              data-action="meetings-new:toggle-expand"
+      <button type="button" class="meeting-row-status"
+              data-action="meetings-new:open-detail"
               data-file-id="${escapeHtml(file.id)}"
-              title="${escapeHtml(title)}">
-        <span class="meeting-row-title-text">${escapeHtml(title)}</span>
+              data-status-host="${escapeHtml(file.id)}"
+              aria-label="Statut : ${escapeHtml(status.label)} — clic pour ouvrir la fiche"
+              title="${escapeHtml(statusTooltip)}">
+        ${statusIcon(status.kind, status.pct, animated)}
       </button>
+      <div class="meeting-row-title-wrap">
+        <button type="button" class="meeting-row-title-btn"
+                data-action="meetings-new:open-detail"
+                data-file-id="${escapeHtml(file.id)}"
+                title="${escapeHtml(title)} — clic pour ouvrir la fiche complète">
+          <span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
+        </button>
+        <button type="button" class="meeting-row-chevron"
+                data-action="meetings-new:toggle-expand"
+                data-file-id="${escapeHtml(file.id)}"
+                aria-expanded="${isExpanded}"
+                aria-label="${isExpanded ? 'Masquer le résumé inline' : 'Afficher le résumé inline'}"
+                title="${isExpanded ? 'Masquer le résumé' : 'Afficher le résumé inline'}">
+          ${chevronIcon()}
+        </button>
+      </div>
       <span class="meeting-row-date" title="Date de la réunion">${escapeHtml(dateLabel)}</span>
       <span class="meeting-row-dur" title="Durée du fichier audio">${escapeHtml(durLabel || '—')}</span>
-      <button type="button" class="meeting-row-chevron"
-              data-action="meetings-new:toggle-expand"
-              data-file-id="${escapeHtml(file.id)}"
-              aria-expanded="${isExpanded}"
-              aria-label="${isExpanded ? 'Masquer le détail' : 'Voir le détail'}">
-        ${chevronIcon()}
-      </button>
     </div>
     ${isExpanded ? `<div class="meeting-row-expanded" data-expanded-for="${escapeHtml(file.id)}">
       <div class="meeting-row-expanded-row">
@@ -303,9 +334,65 @@ export function renderList(sessions) {
   // Toggle classe body pour CSS bulk-mode (révèle checkboxes).
   document.body.classList.toggle('meetings-bulk-active', _selectedIds.size > 0 || _altPressed);
 
+  // Pré-fetch transcript-status pour TOUS les fichiers `transferred` sans
+  // cache. Permet d'afficher rapidement le bon kind visuel (success/partial/
+  // error/processing) au lieu de laisser kind=queued par défaut. Le call
+  // updateRowStatus() update juste la pastille + tooltip de la row
+  // concernée, pas tout le DOM.
+  for (const { f } of entries) {
+    if (f.status === 'transferred' && !_transcriptCache.has(f.id)) {
+      _prefetchTranscriptStatus(f.id);
+    }
+  }
+
   // Pour chaque row dépliée, fetch+render le résumé asynchrone.
   for (const id of _expandedIds) {
     _fetchAndRenderSummary(id);
+  }
+}
+
+// Fetch transcript-status d'un fichier `transferred`, met en cache,
+// et update SEULEMENT la pastille status + le titre de la row concernée.
+// N'altère pas le reste de la row (pas de re-render complet).
+async function _prefetchTranscriptStatus(fileId) {
+  try {
+    const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data || !data.available) return;
+    _transcriptCache.set(fileId, {
+      status: (data.transcription_status || '').toLowerCase(),
+      engine: data.transcription_engine || '',
+      suggested: data.suggested_filename || '',
+      kp: data.key_points_summary || '',
+      fetchedAt: Date.now(),
+    });
+    updateRowStatus(fileId);
+  } catch (e) {
+    // Silencieux — un échec de pre-fetch n'est pas critique (la pastille
+    // restera en kind=queued au lieu de success, mais reste utilisable).
+  }
+}
+
+// Met à jour SEULEMENT la pastille status + tooltip + titre d'une row
+// donnée, sans replaceWith() qui casse les listeners. Appelé après un
+// pre-fetch de transcript-status.
+function updateRowStatus(fileId) {
+  const file = _findFile(fileId);
+  if (!file) return;
+  const status = resolveStatus(file);
+  const animated = status.kind === 'processing';
+  // Remplace le contenu SVG de la pastille (innerHTML léger).
+  const statusBtn = document.querySelector(`[data-status-host="${cssEscape(fileId)}"]`);
+  if (statusBtn) {
+    statusBtn.innerHTML = statusIcon(status.kind, status.pct, animated);
+    statusBtn.setAttribute('title', _buildStatusTooltip(file, status));
+    statusBtn.setAttribute('aria-label', `Statut : ${status.label} — clic pour ouvrir la fiche`);
+  }
+  // Update le titre si suggested_filename est devenu disponible.
+  const titleEl = document.querySelector(`[data-title-for="${cssEscape(fileId)}"]`);
+  if (titleEl) {
+    titleEl.textContent = resolveTitle(file);
   }
 }
 
@@ -322,11 +409,11 @@ async function _fetchAndRenderSummary(fileId) {
     }
     const data = await resp.json();
     if (!data || !data.available) {
-      summaryEl.innerHTML = `<em class="meeting-row-summary-empty">La transcription n'est pas encore disponible.</em>`;
+      summaryEl.innerHTML = `<em class="meeting-row-summary-empty">La transcription n'est pas encore disponible (le pipeline Kevent peut prendre quelques minutes).</em>`;
       return;
     }
     // Mémorise pour le titre + status (utilisé par resolveTitle/resolveStatus
-    // lors du prochain render).
+    // sur prochain render via loadSessions polling).
     _transcriptCache.set(fileId, {
       status: (data.transcription_status || '').toLowerCase(),
       engine: data.transcription_engine || '',
@@ -338,22 +425,11 @@ async function _fetchAndRenderSummary(fileId) {
     summaryEl.innerHTML = kp
       ? `<pre class="meeting-row-summary-kp">${escapeHtml(kp)}</pre>`
       : `<em class="meeting-row-summary-empty">Pas de résumé clé disponible.</em>`;
-    // Re-rend le titre + status de la row si les valeurs ont changé (le
-    // resolveTitle/resolveStatus relit le cache).
-    const row = document.querySelector(`.meeting-row[data-file-id="${cssEscape(fileId)}"]`);
-    if (row) {
-      const file = _findFile(fileId);
-      const session = _findSession(fileId);
-      if (file && session) {
-        const newHtml = renderRow(file, session);
-        const tmp = document.createElement('div');
-        tmp.innerHTML = newHtml;
-        const fresh = tmp.firstElementChild;
-        if (fresh) row.replaceWith(fresh);
-      }
-    }
+    // Update juste la pastille + titre de la row (in-place, sans casser
+    // les listeners ni la sélection bulk).
+    updateRowStatus(fileId);
   } catch (e) {
-    summaryEl.innerHTML = `<em class="meeting-row-summary-empty">Erreur de chargement du résumé.</em>`;
+    summaryEl.innerHTML = `<em class="meeting-row-summary-empty">Erreur de chargement du résumé : ${escapeHtml(e.message || e)}.</em>`;
   }
 }
 
