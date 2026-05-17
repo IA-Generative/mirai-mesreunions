@@ -1532,6 +1532,8 @@ async function mountTranscriptCorrector(container) {
     const fileId = container.getAttribute('data-corrector-for') || '';
     if (!fileId) return;
     container.dataset.correctorMounted = '1';
+    const audioUrl = container.getAttribute('data-audio-url') || '';
+    const audioPurged = container.getAttribute('data-audio-purged') === '1';
     container.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Chargement de la transcription…</p>`;
 
     let data;
@@ -1562,23 +1564,49 @@ async function mountTranscriptCorrector(container) {
         `;
         return;
     }
+    // Player audio sticky en haut : visible dès qu'on déplie le <details>.
+    // Source : transferred (interne, persistant) ou rien si purgé.
+    const playerHtml = audioPurged || !audioUrl
+        ? `<div class="tc-audio-purged" title="L'audio a été purgé du stockage interne (rétention dépassée).">
+             ⚠️ Audio purgé — ré-écoute indisponible. Les corrections par texte restent possibles.
+           </div>`
+        : `<audio class="transcript-corrector-audio" controls preload="metadata"
+                  src="${escapeHtml(audioUrl)}"></audio>`;
+    // Notice d'utilisation (visible quand le details est ouvert).
+    const noticeHtml = `
+      <div class="tc-notice">
+        <strong>Mode d'emploi.</strong>
+        Cliquez <span class="tc-notice-play">▶</span> pour écouter un passage.
+        <strong>Sélectionnez un mot</strong> mal transcrit pour le corriger
+        (avec ré-écoute du contexte 🔊).
+        Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
+        interlocuteur (« SPEAKER_03 », etc.) pour le renommer.
+        ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio.'}
+      </div>
+    `;
     container.innerHTML = `
-      <details class="transcript-corrector" open>
+      <details class="transcript-corrector">
         <summary class="transcript-corrector-summary">
-          📜 Transcription par interlocuteur ·
+          📜 Transcription par interlocuteur
           <span style="font-weight:400;font-size:0.78rem;color:#64748b;">
-            Sélectionnez un mot mal transcrit, click <em>Corriger</em>.
-            Bouton ▶ pour ré-écouter un passage.
+            (${blocks.length} bloc${blocks.length > 1 ? 's' : ''})
           </span>
         </summary>
-        <audio class="transcript-corrector-audio" preload="metadata"
-               src="/api/file/stream-transcoded/${encodeURIComponent(fileId)}"></audio>
+        <div class="transcript-corrector-sticky">
+          ${playerHtml}
+        </div>
+        ${noticeHtml}
         <div class="transcript-corrector-blocks">
           ${blocks.map((b, i) => `
             <div class="tc-block" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
               <button type="button" class="tc-play" data-tc-play="${b.start}"
-                      title="Écouter ce passage (${_fmtTimecode(b.start)})">▶</button>
-              <span class="tc-speaker">${escapeHtml(b.speaker)}</span>
+                      title="${audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')'}"
+                      ${audioPurged ? 'disabled' : ''}>▶</button>
+              <span class="tc-speaker" data-tc-speaker-idx="${i}">${escapeHtml(b.speaker)}</span>
+              <button type="button" class="tc-speaker-rename"
+                      data-tc-speaker-rename="${escapeHtml(b.speaker)}"
+                      data-tc-file="${escapeHtml(fileId)}"
+                      title="Renommer cet interlocuteur partout">✏️</button>
               <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
               <span class="tc-text" data-tc-text="${i}">${escapeHtml(b.text)}</span>
             </div>
@@ -1590,11 +1618,14 @@ async function mountTranscriptCorrector(container) {
       </details>
     `;
 
-    // Délégations locales au container.
     const audio = container.querySelector('.transcript-corrector-audio');
+    const blocksEls = Array.from(container.querySelectorAll('.tc-block'));
+
+    // Click ▶ → seek + play. Click sur texte d'un bloc → seek (sans play
+    // forcé pour pas démarrer si l'user voulait juste sélectionner).
     container.addEventListener('click', (ev) => {
         const playBtn = ev.target.closest && ev.target.closest('[data-tc-play]');
-        if (playBtn) {
+        if (playBtn && !playBtn.disabled) {
             ev.preventDefault();
             const t = parseFloat(playBtn.getAttribute('data-tc-play')) || 0;
             if (audio) {
@@ -1602,11 +1633,105 @@ async function mountTranscriptCorrector(container) {
             }
             return;
         }
+        // Click sur le texte d'un bloc (mais pas pendant une sélection !) :
+        // seek audio sans play. On détecte "click sans sélection" via
+        // window.getSelection().isCollapsed après un petit délai.
+        const textEl = ev.target.closest && ev.target.closest('.tc-text');
+        if (textEl && audio) {
+            setTimeout(() => {
+                const sel = window.getSelection();
+                if (!sel || sel.isCollapsed) {
+                    const blockEl = textEl.closest('.tc-block');
+                    const start = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
+                    try { audio.currentTime = Math.max(0, start); } catch (e) { /* ignore */ }
+                }
+            }, 50);
+        }
     });
+
+    // Sync audio → text : pendant la lecture, highlight le bloc courant
+    // + scroll dans le viewport du container blocks si hors-vue.
+    if (audio) {
+        audio.addEventListener('timeupdate', () => {
+            const t = audio.currentTime || 0;
+            let activeIdx = -1;
+            for (let i = 0; i < blocks.length; i++) {
+                if (blocks[i].start <= t && t < blocks[i].end) {
+                    activeIdx = i;
+                    break;
+                }
+            }
+            // Pas trouvé dans une plage exacte (silence entre 2 blocs) →
+            // garde le précédent en cours pour pas perdre le highlight.
+            if (activeIdx < 0) {
+                for (let i = blocks.length - 1; i >= 0; i--) {
+                    if (blocks[i].start <= t) { activeIdx = i; break; }
+                }
+            }
+            blocksEls.forEach((el, i) => {
+                el.classList.toggle('is-playing', i === activeIdx);
+            });
+            // Auto-scroll dans le container blocks si l'élément actif sort
+            // du viewport visible.
+            if (activeIdx >= 0) {
+                const el = blocksEls[activeIdx];
+                const containerEl = el.closest('.transcript-corrector-blocks');
+                if (containerEl && el) {
+                    const cRect = containerEl.getBoundingClientRect();
+                    const eRect = el.getBoundingClientRect();
+                    if (eRect.top < cRect.top || eRect.bottom > cRect.bottom) {
+                        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                    }
+                }
+            }
+        });
+    }
 
     // Sélection texte → afficher le footer correction.
     container.addEventListener('mouseup', () => _onTranscriptSelection(container, fileId, audio, blocks));
     container.addEventListener('touchend', () => _onTranscriptSelection(container, fileId, audio, blocks));
+
+    // Renommage interlocuteur (déléguée au container pour éviter de
+    // rebrancher sur chaque ✏️).
+    container.addEventListener('click', async (ev) => {
+        const renameBtn = ev.target.closest && ev.target.closest('[data-tc-speaker-rename]');
+        if (!renameBtn) return;
+        ev.preventDefault();
+        const oldName = renameBtn.getAttribute('data-tc-speaker-rename') || '';
+        const newName = window.prompt(
+            `Renommer l'interlocuteur « ${oldName} » :\n\n` +
+            "Cela remplacera ce nom dans toutes les transcriptions de cette réunion " +
+            "(brute, par-interlocuteur, glossaire, nettoyée, reformulation).",
+            oldName
+        );
+        if (newName === null) return;
+        const trimmed = (newName || '').trim();
+        if (!trimmed || trimmed === oldName) return;
+        // Le marker dans les colonnes texte est `**<NOM>**` (markdown bold).
+        // On remplace en bloc.
+        const oldMarker = `**${oldName}**`;
+        const newMarker = `**${trimmed}**`;
+        try {
+            const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/correct-term`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    old: oldMarker, new: newMarker,
+                    add_to_glossary: false,
+                    patch_text: true,
+                    reprocess_llm: false,
+                }),
+            });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                alert(`Échec renommage : ${data.error || resp.status}`);
+                return;
+            }
+            // Refresh la fiche pour voir le nouveau nom partout.
+            if (typeof loadSessions === 'function') loadSessions({ force: true });
+        } catch (e) {
+            alert(`Erreur réseau : ${e.message}`);
+        }
+    });
 }
 
 function _onTranscriptSelection(container, fileId, audio, blocks) {
@@ -2283,8 +2408,16 @@ async function loadSessions(opts) {
                          joue l'audio à ce timecode, et permet de
                          sélectionner un mot/expression pour le corriger
                          (audit dans user_feedback type='correction'). Mount
-                         délégué à mountTranscriptCorrector(). -->
-                    <div class="file-detail-corrector-block" data-corrector-for="${f.id}"></div>
+                         délégué à mountTranscriptCorrector().
+                         data-audio-url : URL audio prioritaire (transferred
+                         interne survit le plus longtemps, puis transcoded
+                         DMZ purgé ~7j) ; vide si tout est purgé → boutons
+                         ▶ grisés + bandeau. -->
+                    <div class="file-detail-corrector-block"
+                         data-corrector-for="${f.id}"
+                         data-audio-url="${escapeHtml(f.transferred_stream_url || f.transcoded_stream_url || f.source_stream_url || '')}"
+                         data-audio-duration="${f.audio_duration_seconds || ''}"
+                         data-audio-purged="${(!f.transferred_available && !f.transcoded_available && !f.source_available) ? '1' : '0'}"></div>
                     <!-- Bloc feedback (en bas de fiche, après la lecture du
                          contenu) : Régénérer + pouce ↑/↓ "utile?". Voir
                          services/mydevices-web/app/modules/feedback/routes.py
