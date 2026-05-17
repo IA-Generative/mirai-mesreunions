@@ -1462,6 +1462,100 @@ async function _submitUsefulnessFeedback(fileId) {
     }
 }
 
+// Modale custom pour la raison de régénération (remplace window.prompt).
+// Permet une liste de raisons préremplies cliquables sous le textarea.
+// Retourne une Promise<string|null> : string = raison, null = annulé.
+function _promptRegenReason(scopeLabel, presets, opts) {
+    return new Promise((resolve) => {
+        opts = opts || {};
+        const initialReason = opts.initialReason || '';
+        const initialChip   = opts.initialChip || '';
+        const id = 'regen-reason-modal';
+        document.querySelectorAll(`#${id}`).forEach((el) => el.remove());
+        const wrap = document.createElement('div');
+        wrap.id = id;
+        wrap.setAttribute('role', 'dialog');
+        wrap.setAttribute('aria-modal', 'true');
+        wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);' +
+            'display:flex;align-items:center;justify-content:center;z-index:10000;';
+        const presetsHtml = presets.map((p) => `
+          <button type="button" class="regen-preset-chip"
+                  data-regen-preset="${escapeHtml(p)}"
+                  style="font-size:0.78rem;padding:0.25rem 0.6rem;
+                         border:1px solid #cbd5e1;border-radius:999px;
+                         background:#fff;cursor:pointer;color:#1e293b;
+                         ${p === initialChip ? 'background:#dbeafe;border-color:#1d4ed8;color:#0c4498;font-weight:600;' : ''}">
+            ${escapeHtml(p)}
+          </button>
+        `).join(' ');
+        wrap.innerHTML = `
+          <div style="background:#fff;border-radius:0.5rem;max-width:560px;width:92%;
+                      padding:1.1rem 1.3rem;box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+            <h2 style="margin:0 0 0.4rem;font-size:1.05rem;color:#0c4498;">Régénérer ${escapeHtml(scopeLabel)}</h2>
+            <p style="margin:0 0 0.6rem;font-size:0.82rem;color:#64748b;">
+              Indiquez la raison (pour traçabilité et amélioration). Vous pouvez taper
+              librement ou cliquer une suggestion ci-dessous.
+            </p>
+            <textarea class="regen-reason-input" rows="3" maxlength="500"
+                      style="width:100%;padding:0.5rem 0.6rem;font-size:0.88rem;
+                             border:1px solid #cbd5e1;border-radius:4px;
+                             resize:vertical;font-family:inherit;"
+                      placeholder="Pourquoi régénérer ?">${escapeHtml(initialReason)}</textarea>
+            ${opts.contextHint ? `<div style="font-size:0.74rem;color:#0c4498;background:#eff6ff;padding:0.35rem 0.55rem;border-radius:3px;margin-top:0.4rem;">💡 ${escapeHtml(opts.contextHint)}</div>` : ''}
+            <div style="display:flex;flex-wrap:wrap;gap:0.3rem;margin-top:0.6rem;">
+              ${presetsHtml}
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:0.9rem;">
+              <button type="button" class="regen-cancel"
+                      style="padding:0.4rem 0.9rem;border:1px solid #cbd5e1;background:#fff;
+                             border-radius:3px;cursor:pointer;">Annuler</button>
+              <button type="button" class="regen-confirm"
+                      style="padding:0.4rem 0.9rem;border:1px solid #1d4ed8;background:#1d4ed8;
+                             color:#fff;font-weight:600;border-radius:3px;cursor:pointer;">Régénérer</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(wrap);
+        const ta = wrap.querySelector('.regen-reason-input');
+        const close = (val) => { wrap.remove(); resolve(val); };
+        if (ta) { ta.focus(); ta.selectionStart = ta.selectionEnd = ta.value.length; }
+        // Click sur préset : remplace le contenu du textarea (sauf si déjà
+        // identique = toggle vers vide). Les chips ne s'accumulent pas pour
+        // garder une raison concise et claire.
+        wrap.querySelectorAll('[data-regen-preset]').forEach((btn) => {
+            btn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                const v = btn.getAttribute('data-regen-preset') || '';
+                if ((ta.value || '').trim() === v) {
+                    ta.value = '';
+                } else {
+                    ta.value = v;
+                }
+                ta.focus();
+                // Re-style l'état actif visuel des chips.
+                wrap.querySelectorAll('[data-regen-preset]').forEach((b) => {
+                    const active = (b.getAttribute('data-regen-preset') || '') === (ta.value || '').trim();
+                    b.style.background = active ? '#dbeafe' : '#fff';
+                    b.style.borderColor = active ? '#1d4ed8' : '#cbd5e1';
+                    b.style.color = active ? '#0c4498' : '#1e293b';
+                    b.style.fontWeight = active ? '600' : 'normal';
+                });
+            });
+        });
+        wrap.querySelector('.regen-cancel').addEventListener('click', () => close(null));
+        wrap.querySelector('.regen-confirm').addEventListener('click', () => close(ta.value || ''));
+        // Escape annule, Ctrl/Cmd+Enter confirme.
+        wrap.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape') { ev.preventDefault(); close(null); }
+            else if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
+                ev.preventDefault(); close(ta.value || '');
+            }
+        });
+        // Click backdrop ferme aussi.
+        wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(null); });
+    });
+}
+
 async function _openRegenerateModal(fileId, scope) {
     // Garde-fou explicite pour la régen full (re-Whisper + re-diarisation) :
     // c'est lourd en compute (GPU L4 + LLM downstream), ne doit être lancé
@@ -1487,10 +1581,41 @@ async function _openRegenerateModal(fileId, scope) {
     const scopeLabel = scope === 'full'
         ? 'transcription + diarisation (refonte complète du pipeline)'
         : 'comptes-rendus (étapes LLM seulement, instantané)';
-    const reason = window.prompt(
-        `Régénérer ${scopeLabel} ?\n\nMerci d'indiquer la raison (pour traçabilité et amélioration) :`,
-        ''
-    );
+    // Raisons préremplies cliquables : remplissent le textarea (un clic).
+    // Differencie par scope : les raisons LLM-only concernent le CR/glossaire/
+    // mise en forme aval ; les raisons full concernent la qualité audio /
+    // diarisation / Whisper.
+    const presets = scope === 'full' ? [
+        'Transcription totalement à côté',
+        'Diarisation cassée (locuteurs mal séparés)',
+        'Audio multi-langues mal détecté',
+        'Speakers mal identifiés',
+        'Trop de mots manquants',
+    ] : [
+        'Termes corrigés à répercuter dans le CR',
+        'Glossaire mis à jour',
+        'CR confus ou hors-sujet',
+        'Manque de détails sur une décision',
+        'Reformulation à améliorer',
+        'Locuteurs renommés',
+    ];
+    // Pré-remplissage automatique : si l'utilisateur a corrigé des termes
+    // sur ce fichier (pending corrections > 0), c'est très probablement
+    // pour ça qu'il régénère. On pré-sélectionne le preset correspondant
+    // et on affiche un hint contextuel "N corrections en attente".
+    let initialReason = '', initialChip = '', contextHint = '';
+    if (scope === 'llm-only') {
+        const pending = (typeof getPendingCorrectionsCount === 'function')
+            ? getPendingCorrectionsCount(fileId) : 0;
+        if (pending > 0) {
+            initialChip = 'Termes corrigés à répercuter dans le CR';
+            initialReason = initialChip;
+            contextHint = `${pending} correction${pending > 1 ? 's' : ''} de transcription en attente sur ce fichier.`;
+        }
+    }
+    const reason = await _promptRegenReason(scopeLabel, presets, {
+        initialReason, initialChip, contextHint,
+    });
     if (reason === null) return;  // user clicked Cancel
     const trimmed = (reason || '').trim();
     if (!trimmed) {
@@ -2143,6 +2268,9 @@ function _attachCrInline(container, fileId, data) {
         if (correctedTerms && correctedTerms.length > 0) {
             _markCorrectedTermsInBody(body, correctedTerms);
         }
+        // Décore chaque ligne CR (<li>, <p>, <h2/h3>) avec un bouton 🔍
+        // au survol : trouve la source brute via query fuzzy multi-mots.
+        _decorateCrLinesWithFindButtons(body, fileId);
     };
 
     tabs.forEach((t) => {
@@ -2337,21 +2465,68 @@ function _markCorrectedTermsInBody(body, correctedTerms) {
     });
 }
 
-function _openSourceDrawer(fileId, term) {
+function _decorateCrLinesWithFindButtons(body, fileId) {
+    // Cible : tout li / p / h2 / h3 qui contient assez de texte (> 12 chars)
+    // pour valoir une recherche fuzzy en source. On évite les titres mono-mot.
+    const selectors = ['li', 'p', 'h2', 'h3'];
+    body.querySelectorAll(selectors.join(',')).forEach((el) => {
+        const txt = (el.textContent || '').trim();
+        if (txt.length < 12) return;
+        if (el.querySelector('.cr-find-source-btn')) return; // déjà décoré
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'cr-find-source-btn';
+        btn.textContent = '🔍';
+        btn.setAttribute('title', 'Retrouver la source brute (audio + texte)');
+        btn.style.cssText =
+            'opacity:0;margin-left:0.4rem;font-size:0.7rem;line-height:1;'
+            + 'padding:0.1rem 0.3rem;border:1px solid #cbd5e1;background:#fff;'
+            + 'border-radius:3px;cursor:pointer;transition:opacity 120ms;'
+            + 'vertical-align:middle;';
+        el.appendChild(document.createTextNode(' '));
+        el.appendChild(btn);
+        el.addEventListener('mouseenter', () => { btn.style.opacity = '0.75'; });
+        el.addEventListener('mouseleave', () => { btn.style.opacity = '0'; });
+        btn.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
+        btn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            // On extrait le texte sans le bouton lui-même pour la requête.
+            const query = (el.textContent || '').replace('🔍', '').trim();
+            _openSourceDrawer(fileId, query, { mode: 'query' });
+        });
+    });
+}
+
+function _openSourceDrawer(fileId, termOrQuery, opts) {
+    opts = opts || {};
+    const mode = opts.mode === 'query' ? 'query' : 'term';
+    const isQuery = (mode === 'query');
+    // Tronque l'affichage si requête longue (lignes CR peuvent faire 200+ chars).
+    const headerLabel = isQuery
+        ? (termOrQuery.length > 80 ? termOrQuery.slice(0, 77) + '…' : termOrQuery)
+        : termOrQuery;
+    const headerTitle = isQuery
+        ? `🔍 Source brute de la ligne CR`
+        : `🔍 Sources brutes de « ${escapeHtml(termOrQuery)} »`;
     // Supprime drawer existant si présent.
     document.querySelectorAll('.cr-drawer-backdrop, .cr-drawer').forEach((el) => el.remove());
     const backdrop = document.createElement('div');
     backdrop.className = 'cr-drawer-backdrop';
     const drawer = document.createElement('div');
     drawer.className = 'cr-drawer';
+    // En mode query, on ne propose pas la propagation (l'user explore une
+    // source, il ne corrige pas un terme). Footer caché par défaut.
     drawer.innerHTML = `
       <div class="cr-drawer-head">
-        <div class="cr-drawer-title">🔍 Sources brutes de « ${escapeHtml(term)} »</div>
+        <div class="cr-drawer-title">${headerTitle}</div>
         <button type="button" class="cr-drawer-close" aria-label="Fermer">×</button>
       </div>
       <div class="cr-drawer-body">
+        ${isQuery ? `<div style="font-size:0.75rem;color:#64748b;padding:0 0 0.5rem;font-style:italic;">« ${escapeHtml(headerLabel)} »</div>` : ''}
         <p style="color:#94a3b8;font-size:0.85rem;text-align:center;padding:1rem;">Chargement…</p>
       </div>
+      ${isQuery ? '' : `
       <div class="cr-drawer-foot" style="display:none;">
         <label><input type="checkbox" data-cr-target="raw" checked /> Propager dans la transcription brute</label>
         <label><input type="checkbox" data-cr-target="clean" /> Propager dans la nettoyée</label>
@@ -2359,7 +2534,7 @@ function _openSourceDrawer(fileId, term) {
           <span class="status" data-cr-drawer-status></span>
           <button type="button" class="primary" data-cr-drawer-apply>Appliquer aux segments cochés</button>
         </div>
-      </div>
+      </div>`}
     `;
     document.body.appendChild(backdrop);
     document.body.appendChild(drawer);
@@ -2372,8 +2547,9 @@ function _openSourceDrawer(fileId, term) {
     backdrop.addEventListener('click', close);
     drawer.querySelector('.cr-drawer-close').addEventListener('click', close);
 
-    // Fetch sources.
-    fetch(`/api/file/${encodeURIComponent(fileId)}/term-sources?term=${encodeURIComponent(term)}`)
+    // Fetch sources (paramètre term ou query selon le mode).
+    const qParam = isQuery ? `query=${encodeURIComponent(termOrQuery)}` : `term=${encodeURIComponent(termOrQuery)}`;
+    fetch(`/api/file/${encodeURIComponent(fileId)}/term-sources?${qParam}`)
         .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
         .then(({ ok, data }) => {
             const bodyEl = drawer.querySelector('.cr-drawer-body');
@@ -2384,25 +2560,36 @@ function _openSourceDrawer(fileId, term) {
             }
             const sources = data.sources || [];
             if (sources.length === 0) {
-                bodyEl.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;padding:1rem;text-align:center;">Aucune source brute trouvée pour « ${escapeHtml(term)} » (le LLM a peut-être reformulé).</p>`;
+                const msg = isQuery
+                    ? `Aucune source brute n'a un recouvrement suffisant avec cette ligne (le LLM a beaucoup reformulé).`
+                    : `Aucune source brute trouvée pour « ${escapeHtml(termOrQuery)} » (le LLM a peut-être reformulé).`;
+                bodyEl.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;padding:1rem;text-align:center;">${msg}</p>`;
                 return;
             }
             const audio = document.querySelector(`.transcript-corrector-audio`);
-            const items = sources.map((s) => `
+            const items = sources.map((s) => {
+                const scoreLabel = (s.score && isQuery) ? ` <span style="font-size:0.65rem;color:#94a3b8;">(${s.score} mot${s.score > 1 ? 's' : ''})</span>` : '';
+                return `
               <div class="cr-drawer-source" data-cr-src-idx="${s.idx}">
-                <input type="checkbox" class="cr-drawer-source-check" checked />
+                ${isQuery ? '' : '<input type="checkbox" class="cr-drawer-source-check" checked />'}
                 ${s.start != null
                     ? `<button type="button" class="cr-drawer-source-play" data-cr-play="${s.start}"
                                title="Écouter ce passage">▶ ${_fmtTimecode(s.start)}</button>`
                     : `<span style="font-size:0.7rem;color:#94a3b8;">—</span>`}
                 <div class="cr-drawer-source-content">
-                  <div class="cr-drawer-source-meta">${escapeHtml(s.speaker || '')}</div>
+                  <div class="cr-drawer-source-meta">${escapeHtml(s.speaker || '')}${scoreLabel}</div>
                   <div class="cr-drawer-source-snippet">${escapeHtml(s.snippet || '')}</div>
                 </div>
-              </div>
-            `).join('');
-            bodyEl.innerHTML = `<div style="font-size:0.78rem;color:#64748b;padding:0 0 0.5rem;">${sources.length} occurrence${sources.length > 1 ? 's' : ''} trouvée${sources.length > 1 ? 's' : ''} dans la brute.</div>${items}`;
-            footEl.style.display = 'flex';
+              </div>`;
+            }).join('');
+            const header = isQuery
+                ? `${sources.length} segment${sources.length > 1 ? 's' : ''} probable${sources.length > 1 ? 's' : ''} (triés par recouvrement de mots).`
+                : `${sources.length} occurrence${sources.length > 1 ? 's' : ''} trouvée${sources.length > 1 ? 's' : ''} dans la brute.`;
+            const queryPreview = isQuery
+                ? `<div style="font-size:0.75rem;color:#64748b;padding:0 0 0.5rem;font-style:italic;">« ${escapeHtml(headerLabel)} »</div>`
+                : '';
+            bodyEl.innerHTML = `${queryPreview}<div style="font-size:0.78rem;color:#64748b;padding:0 0 0.5rem;">${header}</div>${items}`;
+            if (footEl) footEl.style.display = 'flex';
 
             // Click ▶ : seek audio (utilise le lecteur sticky du corrector
             // si présent dans la page).
@@ -2415,7 +2602,10 @@ function _openSourceDrawer(fileId, term) {
                     }
                 });
             });
-            // Apply propagation.
+            // En mode query, pas de propagation : l'user explore seulement.
+            if (isQuery) return;
+
+            // Apply propagation (mode term seulement).
             const applyBtn = drawer.querySelector('[data-cr-drawer-apply]');
             const statusEl = drawer.querySelector('[data-cr-drawer-status]');
             applyBtn.addEventListener('click', async (ev) => {
@@ -2441,8 +2631,8 @@ function _openSourceDrawer(fileId, term) {
                     const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/correct-term`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            old: oldTerm, new: term,
-                            add_to_glossary: false, // déjà ajouté lors de la 1ère correction
+                            old: oldTerm, new: termOrQuery,
+                            add_to_glossary: false,
                             patch_text: true,
                             reprocess_llm: false,
                         }),

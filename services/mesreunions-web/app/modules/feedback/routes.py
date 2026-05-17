@@ -436,16 +436,21 @@ def file_term_sources(file_id: str):
     if not user_sub:
         return jsonify({"error": "unauthenticated"}), 401
     term = (request.args.get("term") or "").strip()
-    if not term:
-        return jsonify({"error": "term required"}), 400
+    query = (request.args.get("query") or "").strip()
+    if not term and not query:
+        return jsonify({"error": "term or query required"}), 400
     internal_id = _resolve_internal_audio_id(user_sub, file_id)
     if not internal_id:
         return jsonify({"error": "audio_not_found_or_not_ready"}), 404
+    params = {"user_sub": user_sub}
+    if term:
+        params["term"] = term
+    if query:
+        params["query"] = query
     try:
         resp = _call_ingester(
             "GET", f"/api/v1/audio/{internal_id}/term-sources",
-            params={"term": term, "user_sub": user_sub},
-            timeout=10,
+            params=params, timeout=10,
         )
     except req.RequestException:
         return jsonify({"error": "ingester_unavailable"}), 502

@@ -2561,33 +2561,43 @@ def correct_audio_term(audio_id: str):
 
 @app.route("/api/v1/audio/<audio_id>/term-sources", methods=["GET"])
 def term_sources(audio_id: str):
-    """Retourne les segments speaker-tagged contenant un terme donné.
+    """Retourne les segments speaker-tagged correspondant à un terme/requête.
 
-    Query params : ``term`` (str, requis), ``user_sub`` (str, requis).
-    Réponse : ``{sources: [{idx, start, end, speaker, snippet}]}`` triée
-    par ordre d'apparition. Le ``snippet`` inclut ~60 chars de contexte
-    de part et d'autre du terme avec mise en évidence par les markers
-    `«` `»`.
+    **Deux modes** :
 
-    Utilisé par le drawer "Sources brutes" du corrector CR (option C
-    drawer source on-demand) : depuis le CR, l'utilisateur clique 🔍
-    sur un terme corrigé → drawer affiche les segments d'origine pour
-    propagation éventuelle dans la transcription brute/nettoyée.
+    - ``term=<str>`` : recherche par sous-chaîne exacte (1 mot ou expression).
+      Tous les segments contenant la sous-chaîne (case-insensitive) sont
+      retournés, triés par ordre d'apparition. Utilisé par le drawer "Sources"
+      depuis une pastille 🔍 sur un terme corrigé.
 
-    Cherche dans ``speaker_tagged_text`` en priorité (avec timecodes
-    par bloc, parsable). Fallback ``transcription_text`` si pas de
-    diarisation (1 seul "bloc" sans timing).
+    - ``query=<str>`` : recherche fuzzy multi-mots (phrase). Tokenise la
+      requête en mots ≥ 3 caractères (stopwords FR filtrés), calcule pour
+      chaque segment un score = nombre de mots distinctifs trouvés
+      (insensible à la casse). Retourne les top 8 segments par score
+      décroissant. Utilisé par le bouton 🔍 par ligne CR (option C : trouver
+      la source brute d'une ligne du compte-rendu, qui peut avoir été
+      reformulée par l'LLM).
+
+    Query params : ``user_sub`` (requis) + l'un de ``term`` ou ``query``.
+    Réponse : ``{sources: [{idx, start, end, speaker, snippet, score?}]}``.
+
+    Cherche dans ``speaker_tagged_text`` en priorité (avec timecodes par
+    bloc, parsable). Fallback ``transcription_text`` si pas de diarisation
+    (1 seul "bloc" sans timing).
     """
     if not verify_token():
         return jsonify({"error": "Unauthorized"}), 401
     term = (request.args.get("term") or "").strip()
+    query = (request.args.get("query") or "").strip()
     user_sub = (request.args.get("user_sub") or "").strip()
-    if not term:
-        return jsonify({"error": "term required"}), 400
+    if not term and not query:
+        return jsonify({"error": "term or query required"}), 400
     if not user_sub:
         return jsonify({"error": "user_sub required"}), 400
-    if len(term) > 200:
+    if term and len(term) > 200:
         return jsonify({"error": "term too long"}), 400
+    if query and len(query) > 1000:
+        return jsonify({"error": "query too long"}), 400
     if SessionLocal is None:
         return jsonify({"error": "db_unavailable"}), 503
 
@@ -2604,76 +2614,157 @@ def term_sources(audio_id: str):
             return jsonify({"error": "not_found"}), 404
         st = uaf.speaker_tagged_text or ""
         sources = []
-        term_lower = term.lower()
-        if st:
-            # Parse même format que frontend _parseSpeakerTagged :
-            # "**SPEAKER** _(M:SS.s → M:SS.s)_" puis lignes "> texte".
-            import re as _re
-            head_re = _re.compile(
-                r"^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*[→>-]+\s*(\d+):(\d+(?:\.\d+)?)\)_"
-            )
-            blocks = []
-            current = None
-            for raw in st.split("\n"):
-                line = raw.rstrip()
-                m = head_re.match(line)
-                if m:
-                    if current is not None:
-                        blocks.append(current)
-                    current = {
-                        "speaker": m.group(1).strip(),
-                        "start": int(m.group(2)) * 60 + float(m.group(3)),
-                        "end":   int(m.group(4)) * 60 + float(m.group(5)),
-                        "text": "",
-                    }
-                elif current is not None and line.startswith(">"):
-                    t = line.lstrip(">").strip()
-                    current["text"] = (current["text"] + " " + t) if current["text"] else t
-            if current is not None:
-                blocks.append(current)
 
-            for idx, b in enumerate(blocks):
-                hit = b["text"].lower().find(term_lower)
-                if hit < 0:
+        # Parse blocs depuis speaker_tagged_text (format frontend identique).
+        import re as _re
+        head_re = _re.compile(
+            r"^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*[→>-]+\s*(\d+):(\d+(?:\.\d+)?)\)_"
+        )
+        blocks = []
+        current = None
+        for raw in st.split("\n"):
+            line = raw.rstrip()
+            m = head_re.match(line)
+            if m:
+                if current is not None:
+                    blocks.append(current)
+                current = {
+                    "speaker": m.group(1).strip(),
+                    "start": int(m.group(2)) * 60 + float(m.group(3)),
+                    "end":   int(m.group(4)) * 60 + float(m.group(5)),
+                    "text": "",
+                }
+            elif current is not None and line.startswith(">"):
+                t = line.lstrip(">").strip()
+                current["text"] = (current["text"] + " " + t) if current["text"] else t
+        if current is not None:
+            blocks.append(current)
+
+        if term:
+            # Mode "term" : substring exact, retour ordre d'apparition.
+            term_lower = term.lower()
+            if blocks:
+                for idx, b in enumerate(blocks):
+                    hit = b["text"].lower().find(term_lower)
+                    if hit < 0:
+                        continue
+                    w = 60
+                    left = max(0, hit - w)
+                    right = min(len(b["text"]), hit + len(term) + w)
+                    snippet = (
+                        ("…" if left > 0 else "")
+                        + b["text"][left:hit]
+                        + "«" + b["text"][hit:hit + len(term)] + "»"
+                        + b["text"][hit + len(term):right]
+                        + ("…" if right < len(b["text"]) else "")
+                    )
+                    sources.append({
+                        "idx": idx,
+                        "start": b["start"],
+                        "end": b["end"],
+                        "speaker": b["speaker"],
+                        "snippet": snippet,
+                    })
+            elif uaf.transcription_text:
+                hit = uaf.transcription_text.lower().find(term_lower)
+                if hit >= 0:
+                    w = 60
+                    left = max(0, hit - w)
+                    right = min(len(uaf.transcription_text), hit + len(term) + w)
+                    snippet = (
+                        ("…" if left > 0 else "")
+                        + uaf.transcription_text[left:hit]
+                        + "«" + uaf.transcription_text[hit:hit + len(term)] + "»"
+                        + uaf.transcription_text[hit + len(term):right]
+                        + ("…" if right < len(uaf.transcription_text) else "")
+                    )
+                    sources.append({
+                        "idx": 0, "start": None, "end": None,
+                        "speaker": "(transcription brute)", "snippet": snippet,
+                    })
+        else:
+            # Mode "query" : tokenise + word-overlap score, top 8 par score
+            # décroissant. Stopwords FR de base pour ne pas matcher sur
+            # "le", "la", "de", etc. qui sont partout.
+            STOPWORDS_FR = {
+                "le", "la", "les", "un", "une", "des", "de", "du", "et", "ou",
+                "est", "sont", "que", "qui", "quoi", "ce", "cette", "ces",
+                "se", "sa", "son", "ses", "leur", "leurs", "pour", "par",
+                "sur", "dans", "avec", "sans", "vers", "plus", "moins",
+                "tout", "tous", "toute", "toutes", "il", "ils", "elle",
+                "elles", "on", "nous", "vous", "je", "tu", "me", "te", "y",
+                "en", "au", "aux", "comme", "mais", "donc", "car", "alors",
+                "puis", "ne", "pas", "non", "oui", "si", "déjà", "encore",
+                "très", "bien", "fait", "être", "avoir", "avait", "etait",
+                "été", "faire", "peut", "doit", "il", "elle", "cela", "ça",
+                "ceci", "celui", "celle", "ils", "elles",
+            }
+            # Tokens du query : ≥ 3 chars, hors stopwords, dédupliqués.
+            raw_tokens = _re.findall(r"\b[\wÀ-ÿ-]+\b", query.lower())
+            q_tokens = []
+            seen_q = set()
+            for t in raw_tokens:
+                if len(t) < 3 or t in STOPWORDS_FR:
                     continue
-                w = 60
+                if t in seen_q:
+                    continue
+                seen_q.add(t)
+                q_tokens.append(t)
+            if not q_tokens:
+                return jsonify({
+                    "query": query, "audio_id": audio_id,
+                    "sources_count": 0, "sources": [],
+                    "warning": "query trop générique (aucun mot distinctif)",
+                }), 200
+
+            scored = []
+            target_blocks = blocks if blocks else (
+                [{
+                    "idx": 0, "speaker": "(transcription brute)",
+                    "start": None, "end": None,
+                    "text": uaf.transcription_text or "",
+                }] if uaf.transcription_text else []
+            )
+            for idx, b in enumerate(target_blocks):
+                text_lower = b["text"].lower()
+                if not text_lower:
+                    continue
+                matched = [t for t in q_tokens if t in text_lower]
+                score = len(matched)
+                if score == 0:
+                    continue
+                # Snippet : on cible la 1ère occurrence du mot matché le
+                # plus rare (= le plus long, heuristique). Sinon début.
+                pivot_word = sorted(matched, key=len, reverse=True)[0] if matched else ""
+                hit = text_lower.find(pivot_word) if pivot_word else 0
+                if hit < 0:
+                    hit = 0
+                w = 80
                 left = max(0, hit - w)
-                right = min(len(b["text"]), hit + len(term) + w)
+                right = min(len(b["text"]), hit + len(pivot_word) + w)
                 pre = b["text"][left:hit]
-                mid = b["text"][hit:hit + len(term)]
-                post = b["text"][hit + len(term):right]
+                mid = b["text"][hit:hit + len(pivot_word)]
+                post = b["text"][hit + len(pivot_word):right]
                 snippet = (
                     ("…" if left > 0 else "")
                     + pre + "«" + mid + "»" + post
                     + ("…" if right < len(b["text"]) else "")
                 )
-                sources.append({
-                    "idx": idx,
-                    "start": b["start"],
-                    "end": b["end"],
+                scored.append({
+                    "idx": idx if blocks else 0,
+                    "start": b.get("start"),
+                    "end": b.get("end"),
                     "speaker": b["speaker"],
                     "snippet": snippet,
+                    "score": score,
+                    "matched_words": matched,
                 })
-        elif uaf.transcription_text:
-            # Fallback sans diarisation : on indique juste si présent.
-            hit = uaf.transcription_text.lower().find(term_lower)
-            if hit >= 0:
-                w = 60
-                left = max(0, hit - w)
-                right = min(len(uaf.transcription_text), hit + len(term) + w)
-                snippet = (
-                    ("…" if left > 0 else "")
-                    + uaf.transcription_text[left:hit]
-                    + "«" + uaf.transcription_text[hit:hit + len(term)] + "»"
-                    + uaf.transcription_text[hit + len(term):right]
-                    + ("…" if right < len(uaf.transcription_text) else "")
-                )
-                sources.append({
-                    "idx": 0, "start": None, "end": None,
-                    "speaker": "(transcription brute)", "snippet": snippet,
-                })
+            scored.sort(key=lambda x: (-x["score"], x.get("start") or 0))
+            sources = scored[:8]
+
         return jsonify({
-            "term": term,
+            "term": term or None,
+            "query": query or None,
             "audio_id": audio_id,
             "sources_count": len(sources),
             "sources": sources,
