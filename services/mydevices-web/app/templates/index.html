@@ -484,19 +484,6 @@
            fiche détaillée, la classe is-overridden retire l'italique. */
         .file-row-meta-date.is-default { font-style: italic; color: #64748b; }
         .file-row-meta-date.is-overridden { font-style: normal; color: #1e293b; font-weight: 500; }
-        /* Pastille "device" inline à droite du titre dans la liste à plat.
-           Reste très discrète — sa raison d'être : remplacer le wrapping
-           par session qui groupait visuellement les fichiers par device. */
-        .file-row-device {
-            font-size: 0.7rem; color: #64748b;
-            background: #f1f5f9; border-radius: 6px;
-            padding: 0.02rem 0.4rem;
-            white-space: nowrap;
-            margin-left: 0.3rem;
-        }
-        .file-row-device.is-local {
-            background: #dbeafe; color: #1d4ed8;
-        }
         /* Zone d'upload local : 2 boutons côte à côte + un overlay
            drag&drop sur l'ensemble du header pour rester accessible
            tactile (clic) et drag desktop. La progression batch s'affiche
@@ -843,21 +830,42 @@
         /* ── Vue LISTE COMPACTE — une ligne par fichier ───────────── */
         .file-row-compact-wrapper { border-bottom: 1px solid #f1f5f9; }
         .file-row-compact-wrapper:hover { background: #f8fafc; }
+        /* Colonnes explicites, plus de débordement quand un libellé est long.
+           Ordre HTML : transcript-section(display:none) | status | titre |
+           source | queue-hint | détails | meta | delete.
+           La section cachée prend bien une colonne dans la grille (auto), donc
+           on a 8 colonnes en tout. */
         .file-row-compact {
             display: grid;
-            grid-template-columns: auto auto minmax(0,1fr) auto auto auto;
+            grid-template-columns:
+                0                                /* transcript-section (display:none, taille 0) */
+                28px                             /* status icône */
+                minmax(0, 1fr)                   /* titre (fr) */
+                24px                             /* source icône */
+                auto                             /* queue-hint (vide → 0) */
+                auto                             /* bouton détails */
+                auto                             /* meta date+durée */
+                32px;                            /* bouton delete */
             align-items: center; gap: 0.55rem;
             padding: 0.45rem 0.55rem;
             min-height: 32px;
         }
-        /* TKT-101 : tag DSFR de statut (fr-tag fr-tag--sm + icône DSFR)
-           remplace l'ancienne pastille ● 6 px. Les variantes couleur sont
-           portées par .file-row-status-tag--<kind>, l'animation pulse
-           uniquement par --processing (en cours actif). */
+        /* TKT-101 + finition liste compacte : le statut est rendu en
+           icône-only (taille fixe 24×24), libellé via aria-label + title.
+           Les variantes --<kind> portent les couleurs. L'animation pulse
+           opacity est conservée pour --processing. */
         .file-row-status-tag {
-            line-height: 1.1;
+            display: inline-flex;
+            align-items: center; justify-content: center;
+            width: 24px; height: 24px; flex-shrink: 0;
+            border-radius: 50%;
+            font-size: 1rem; line-height: 1;
             vertical-align: middle;
-            white-space: nowrap;
+        }
+        /* La classe DSFR fr-icon-*-line ajoute déjà le picto via ::before.
+           On s'assure que le ::before est centré dans le rond coloré. */
+        .file-row-status-tag::before {
+            margin: 0;
         }
         .file-row-status-tag--success {
             background-color: #dcfce7; color: #15803d;
@@ -878,6 +886,17 @@
         .file-row-status-tag--neutral {
             background-color: #f3f4f6; color: #475569;
         }
+        /* Source : icône smartphone (device enrôlé) ou upload (fichier local),
+           taille fixe 22 px, tooltip donne le détail. Remplace l'ancien chip
+           texte qui débordait. */
+        .file-row-source {
+            width: 22px; height: 22px; flex-shrink: 0;
+            display: inline-flex; align-items: center; justify-content: center;
+            color: #64748b; font-size: 1.05rem; line-height: 1;
+        }
+        .file-row-source::before { margin: 0; }
+        .file-row-source--local { color: #94a3b8; }
+        .file-row-source--device { color: #475569; }
         /* Pulse opacity uniquement — scale aurait été disgracieux sur un
            tag (plus large que le dot d'origine). */
         @keyframes filerowStatusTagPulse {
@@ -896,11 +915,17 @@
         }
         .file-row-meta {
             font-size: 0.75rem; color: #64748b; white-space: nowrap;
-            display: inline-flex; flex-direction: column; align-items: flex-end;
-            line-height: 1.15; gap: 0.05rem;
+            display: inline-flex; flex-direction: row; align-items: baseline;
+            justify-content: flex-end;
+            line-height: 1.15; gap: 0.5rem;
         }
         .file-row-meta .file-row-meta-date { font-weight: 500; color: #475569; }
-        .file-row-meta .file-row-meta-dur { color: #94a3b8; font-variant-numeric: tabular-nums; }
+        .file-row-meta .file-row-meta-dur {
+            color: #94a3b8; font-variant-numeric: tabular-nums;
+            /* Largeur min pour aligner verticalement entre lignes (durées de
+               longueurs très variables : "5 s" vs "1 h 23 min"). */
+            min-width: 5em; text-align: right;
+        }
         /* Hint file d'attente Kevent (liste compacte). Invisible quand vide
            (CSS :empty), discret quand peuplé. */
         .file-row-queue-hint {

@@ -804,12 +804,17 @@ function _renderStatusTag(status, opts) {
     const tech = o.virus ? `Virus détecté — ${statusLabel(status)}` : (o.tooltip || _uploadStateLabel(status));
     const aria = `Statut : ${info.label} — ${tech}`;
     const fileId = o.fileId || '';
-    return `<span class="fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}"
+    // Rendu icône-only (taille fixe ~24 px) : le libellé reste accessible via
+    // aria-label + title pour SR et utilisateurs voyants, mais le tag n'occupe
+    // plus la largeur du texte. Évite les chevauchements sur la liste compacte
+    // quand des libellés longs ("Partiellement prête") cohabitaient avec le
+    // titre tronqué et la source.
+    return `<span class="${info.icon} file-row-status-tag file-row-status-tag--${info.kind}"
                   data-file-status-tag="${escapeHtml(fileId)}"
                   data-status-kind="${info.kind}"
                   role="status"
                   aria-label="${escapeHtml(aria)}"
-                  title="${escapeHtml(tech)}">${escapeHtml(info.label)}</span>`;
+                  title="${escapeHtml(info.label)} — ${escapeHtml(tech)}"></span>`;
 }
 
 function tokenValidityDaysLabel(retentionExpiresAt) {
@@ -1533,14 +1538,15 @@ async function loadSessions(opts) {
                                title="${escapeHtml(f.original_filename)}">
                                 ${escapeHtml(f.original_filename)}
                             </a>
-                            <!-- Chip "device" inline : remplace le wrapping par
-                                 session qu'on avait avant le passage en liste
-                                 à plat. Affiche le nom du device enrôlé (ou
-                                 'Upload local' pour les sessions L-XXXXXXXX). -->
-                            <span class="file-row-device ${s.is_local_upload ? 'is-local' : ''}"
-                                  title="${escapeHtml(s.simple_code || '')}">
-                                ${escapeHtml(deviceLabelForRow)}
-                            </span>
+                            <!-- Source : icône (smartphone pour device enrôlé,
+                                 upload pour fichier local) avec tooltip donnant
+                                 le détail (nom device + simple_code). Remplace
+                                 l'ancien chip texte qui chevauchait le titre
+                                 et la zone détails sur les libellés longs. -->
+                            <span class="${s.is_local_upload ? 'fr-icon-upload-line' : 'fr-icon-smartphone-line'} file-row-source file-row-source--${s.is_local_upload ? 'local' : 'device'}"
+                                  role="img"
+                                  aria-label="Source : ${escapeHtml(deviceLabelForRow || (s.is_local_upload ? 'Upload local' : 'Appareil enrôlé'))}"
+                                  title="${escapeHtml(deviceLabelForRow || (s.is_local_upload ? 'Upload local' : 'Appareil enrôlé'))}${s.simple_code ? ' — code ' + escapeHtml(s.simple_code) : ''}"></span>
                             <!-- Hint file d'attente Kevent (visible uniquement
                                  quand le pipeline est en cours — peuplé par
                                  _pollQueueHintAll via /api/queue-status,
@@ -2217,11 +2223,13 @@ async function loadTranscriptStatus(fileId, container) {
                     const friendly = (TRANSCRIPT_STATUS_LABELS[status] || {}).label || status;
                     const tooltip = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
                     const info = _statusTagInfo(status);
-                    tag.className = `fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}`;
+                    // Icône-only (cf. _renderStatusTag) : la classe DSFR fr-icon-*
+                    // dessine le picto, les couleurs viennent de --<kind>.
+                    tag.className = `${info.icon} file-row-status-tag file-row-status-tag--${info.kind}`;
                     tag.setAttribute('data-status-kind', info.kind);
                     tag.setAttribute('aria-label', `Statut : ${info.label} — ${tooltip}`);
-                    tag.title = tooltip;
-                    tag.textContent = info.label;
+                    tag.title = `${info.label} — ${tooltip}`;
+                    tag.textContent = '';
                 }
                 // Bouton (i) : tooltip multi-ligne avec checklist par étape
                 // (☐/✓/✗). Pulse + bordure bleue si le pipeline tourne.
