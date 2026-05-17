@@ -425,11 +425,35 @@ def api_file_transcript_download(kind, ext, file_id):
         if not text:
             return jsonify({"error": f"{kind}_unavailable"}), 410
         stem = svc.build_download_basename(file_obj, audio, kind)
-        body = svc.maybe_prepend_key_points(text, audio.get("key_points_summary"), ext)
         from app.transcript_formats import (
             text_to_docx_bytes, text_to_odt_bytes,
             text_to_plain_string, text_to_md_string,
+            build_document_header_md,
+            extract_speakers, split_reformulated_by_speaker,
         )
+        # Discours indirect (reformulated) : on insère un retour à la
+        # ligne avant chaque transition de locuteur, en se basant sur la
+        # liste des speakers extraite du speaker-tagged.
+        if kind == "transcript-reformulated":
+            speakers = extract_speakers(audio.get("speaker_tagged_text") or "")
+            text = split_reformulated_by_speaker(text, speakers)
+        # En-tête commun aux 4 formats : titre + 🇫🇷 République Française
+        # + date + durée + points clés (les key_points ne sont plus
+        # prepended séparément, c'est notre header qui les inclut).
+        meeting_dt_iso = None
+        try:
+            meeting_dt_iso = file_obj.meeting_datetime.isoformat() if getattr(file_obj, "meeting_datetime", None) else None
+        except Exception:
+            meeting_dt_iso = None
+        upload_dt_iso = file_obj.created_at.isoformat() if file_obj.created_at else None
+        header_md = build_document_header_md(
+            title=stem,
+            meeting_date_iso=meeting_dt_iso,
+            upload_date_iso=upload_dt_iso,
+            duration_seconds=file_obj.audio_duration_seconds,
+            key_points=audio.get("key_points_summary"),
+        )
+        body = header_md + text
         if ext == "txt":
             # Strip MD inline + normalise blank lines + sépare locuteurs.
             return _send_text_attachment(
@@ -474,9 +498,25 @@ def api_file_meeting_cr_download(ext, file_id):
             return _send_text_attachment(raw, f"{stem}.json", "application/json; charset=utf-8")
         from app.transcript_formats import (
             meeting_analysis_to_markdown, text_to_docx_bytes, text_to_odt_bytes,
-            text_to_md_string,
+            text_to_md_string, build_document_header_md,
         )
         md = meeting_analysis_to_markdown(raw)
+        # Préfixe le contenu meeting-cr par l'en-tête commun
+        # (titre + RF + date + durée + points clés).
+        meeting_dt_iso = None
+        try:
+            meeting_dt_iso = file_obj.meeting_datetime.isoformat() if getattr(file_obj, "meeting_datetime", None) else None
+        except Exception:
+            meeting_dt_iso = None
+        upload_dt_iso = file_obj.created_at.isoformat() if file_obj.created_at else None
+        header_md = build_document_header_md(
+            title=stem,
+            meeting_date_iso=meeting_dt_iso,
+            upload_date_iso=upload_dt_iso,
+            duration_seconds=file_obj.audio_duration_seconds,
+            key_points=audio.get("key_points_summary"),
+        )
+        md = header_md + md
         if ext == "md":
             return _send_text_attachment(
                 text_to_md_string(md), f"{stem}.md",
