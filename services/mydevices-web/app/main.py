@@ -51,6 +51,18 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024
 
+_VITE_DEV = os.getenv("VITE_DEV", "").lower() in {"1", "true", "yes"}
+_VITE_DEV_URL = os.getenv("VITE_DEV_URL", "http://localhost:5173").rstrip("/")
+
+
+@app.context_processor
+def _inject_vite_dev():
+    return {"vite_dev": _VITE_DEV, "vite_dev_url": _VITE_DEV_URL}
+
+
+if _VITE_DEV:
+    logger.warning("VITE_DEV=1 → templates load JS from %s (HMR). DO NOT use in prod.", _VITE_DEV_URL)
+
 
 # ─── Configs boot ───────────────────────────────────────────────────────
 

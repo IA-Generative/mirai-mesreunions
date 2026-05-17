@@ -6,6 +6,13 @@ import { resolve } from 'path';
 // en ES modules importés depuis frontend/shell.js.
 export default defineConfig({
   root: 'frontend',
+  server: {
+    port: 5173,
+    strictPort: true,
+    cors: true,
+    origin: 'http://localhost:5173',
+    hmr: { host: 'localhost', protocol: 'ws', port: 5173 },
+  },
   build: {
     outDir: '../app/static/dist',
     emptyOutDir: true,

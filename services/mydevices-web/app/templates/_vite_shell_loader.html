@@ -1,3 +1,10 @@
-{# Partial à inclure depuis index.html en PR4 pour charger le bundle Vite. #}
-{# Pour l'instant, NON inclus — la PR0 introduit juste la toolchain. #}
+{# Charge le bundle JS frontend.
+   - VITE_DEV=1 → Vite dev server (HMR <100ms, état conservé)
+   - sinon → bundle prébuild dans /static/dist/ (prod & docker standard)
+   Voir docs/DEV_HMR.md pour la boucle d'itération rapide. #}
+{% if vite_dev %}
+<script type="module" src="{{ vite_dev_url }}/@vite/client"></script>
+<script type="module" src="{{ vite_dev_url }}/shell.js"></script>
+{% else %}
 <script type="module" src="{{ url_for('static', filename='dist/shell.js') }}"></script>
+{% endif %}

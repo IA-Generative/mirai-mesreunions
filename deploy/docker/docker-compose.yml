@@ -165,6 +165,8 @@ services:
       ENVIRONMENT: development
       LOG_LEVEL: DEBUG
       SECRET_KEY: dev-secret-key-change-in-prod
+      VITE_DEV: ${VITE_DEV:-}
+      VITE_DEV_URL: ${VITE_DEV_URL:-http://localhost:5173}
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8180/realms/openwebui
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
       OIDC_CLIENT_ID: mes-reunions
