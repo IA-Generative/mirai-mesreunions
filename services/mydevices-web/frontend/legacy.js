@@ -371,6 +371,9 @@ async function renameDetailTitle(fileId, btn) {
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || 'rename_failed');
         input.dataset.originalTitle = newTitle;
+        // Dispatch un événement input pour neutraliser le dirty-state →
+        // les boutons ✓ et ↺ se redésactivent via le listener global.
+        input.dispatchEvent(new Event('input', { bubbles: true }));
         showToast('Titre renommé.', 'success');
         // Force un refresh des sessions pour propager le nouveau titre.
         loadSessions({ force: true });
@@ -379,15 +382,56 @@ async function renameDetailTitle(fileId, btn) {
         showToast(`Renommage échoué : ${e.message}`, 'error');
     }
 }
-// Active le bouton "Renommer" quand le titre est modifié (vs valeur initiale).
+// Active les boutons ✓ enregistrer + ↺ annuler de la ligne titre selon
+// l'état "dirty" (= valeur courante ≠ valeur originale).
 document.addEventListener('input', (ev) => {
     const t = ev.target;
     if (!t || !t.matches('.file-detail-title-input')) return;
     const original = t.dataset.originalTitle || '';
     const current = (t.value || '').trim();
-    const btn = t.parentElement && t.parentElement.querySelector('.file-detail-rename-btn');
-    if (btn) btn.disabled = !current || current === original;
+    const dirty = !!current && current !== original;
+    const row = t.closest('.file-detail-title-row');
+    if (row) {
+        const validateBtn = row.querySelector('.file-detail-rename-btn');
+        if (validateBtn) validateBtn.disabled = !dirty;
+        const revertBtn = row.querySelector('[data-detail-title-revert-for]');
+        if (revertBtn) revertBtn.disabled = !dirty;
+    }
 });
+
+// Active les boutons ✓ enregistrer + ↺ revert/effacer de la ligne date selon
+// l'état "dirty". Si dirty, ↺ revient à la valeur saved. Sinon, le ↺ reste
+// activé pour effacer l'override (mais seulement si une valeur saved
+// existe — sinon nothing to do, disabled).
+document.addEventListener('input', (ev) => {
+    const t = ev.target;
+    if (!t || !t.matches('.file-detail-meeting-input')) return;
+    const fileId = t.getAttribute('data-meeting-dt-for') || '';
+    const original = t.dataset.meetingDtOriginal || '';
+    const current = (t.value || '').trim();
+    const dirty = current !== original;
+    const row = t.closest('.file-detail-meeting-row');
+    if (!row) return;
+    const validateBtn = row.querySelector(`[data-meeting-dt-save-for="${fileId}"]`);
+    if (validateBtn) validateBtn.disabled = !dirty;
+    const revertBtn = row.querySelector(`[data-meeting-dt-reset-for="${fileId}"]`);
+    if (revertBtn) {
+        // Bouton actif si dirty (= revert local possible) OU si une valeur
+        // saved existe (= effacer l'override possible).
+        revertBtn.disabled = !dirty && !original;
+        revertBtn.title = dirty
+            ? 'Annuler la modification non sauvegardée'
+            : (original ? 'Effacer la date saisie (retombe sur la date d\'upload)' : 'Aucune modification à annuler');
+    }
+});
+
+// Revert input du titre vers la valeur originale + désactive les 2 boutons.
+function revertDetailTitle(fileId) {
+    const input = document.querySelector(`[data-detail-title-for="${fileId}"]`);
+    if (!input) return;
+    input.value = input.dataset.originalTitle || '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 function toggleRowExpand(btn) {
     const wrapper = btn.closest('.file-row-compact-wrapper');
@@ -454,6 +498,7 @@ async function saveMeetingDatetime(fileId, inputEl) {
 async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
     const statusEl = document.querySelector(`[data-meeting-dt-status-for="${fileId}"]`);
     const resetBtn = document.querySelector(`[data-meeting-dt-reset-for="${fileId}"]`);
+    const saveBtn = document.querySelector(`[data-meeting-dt-save-for="${fileId}"]`);
     if (statusEl) { statusEl.textContent = 'Enregistrement…'; statusEl.className = 'file-detail-meeting-status'; }
     try {
         const resp = await fetch(`/api/file/${fileId}/meeting-datetime`, {
@@ -468,6 +513,12 @@ async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
             statusEl.className = 'file-detail-meeting-status saved';
             setTimeout(() => { if (statusEl.textContent === '✓ Enregistré') statusEl.textContent = ''; }, 2500);
         }
+        // Met à jour la valeur "original" sur l'input pour neutraliser le
+        // dirty-state (les boutons ✓/↺ se désactivent).
+        if (inputEl) {
+            inputEl.dataset.meetingDtOriginal = inputEl.value || '';
+        }
+        if (saveBtn) saveBtn.disabled = true;
         if (resetBtn) resetBtn.disabled = !data.meeting_datetime_overridden;
         // Re-charge la liste pour refléter le nouveau tri + l'italique mis à
         // jour. Force=true contourne le diff sur snapshot.
@@ -480,9 +531,24 @@ async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
     }
 }
 
+// ↺ Action contextuelle :
+// - si la valeur courante diffère de la valeur saved (dirty), revert local
+//   sans appel serveur (annule la modif non-confirmée) ;
+// - sinon, efface l'override côté serveur (PATCH meeting_datetime=null).
 async function resetMeetingDatetime(fileId) {
     const input = document.querySelector(`[data-meeting-dt-for="${fileId}"]`);
-    if (input) input.value = '';
+    if (!input) return;
+    const original = input.dataset.meetingDtOriginal || '';
+    const current = (input.value || '').trim();
+    if (current !== original) {
+        // Revert local — pas d'appel serveur, juste restore.
+        input.value = original;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return;
+    }
+    // Pas dirty mais l'utilisateur clique ↺ → on efface l'override serveur.
+    input.value = '';
+    input.dataset.meetingDtOriginal = '';
     await _doSaveMeetingDatetime(fileId, null, input);
 }
 
@@ -712,6 +778,10 @@ const ICONS = {
     fmt_docx:   '<svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#dbeafe"/><path d="M14 2v6h6" fill="#bfdbfe"/><text x="12" y="18" font-size="6" font-weight="700" fill="#1e40af" text-anchor="middle" font-family="Arial,sans-serif">W</text></svg>',
     fmt_odt:    '<svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="#dcfce7"/><path d="M14 2v6h6" fill="#bbf7d0"/><text x="12" y="18" font-size="5" font-weight="700" fill="#166534" text-anchor="middle" font-family="Arial,sans-serif">ODT</text></svg>',
     fmt_json:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v3c0 2-2 2-2 2s2 0 2 2v3c0 2 1 3 3 3"/><path d="M16 4c2 0 3 1 3 3v3c0 2 2 2 2 2s-2 0-2 2v3c0 2-1 3-3 3"/></svg>',
+    // Coche de validation pour les boutons "✓ enregistrer" (vert quand actif).
+    check:      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l5 5L19 7"/></svg>',
+    // Flèche reverse pour les boutons "↺ annuler / restaurer".
+    revert:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 1 2 5.3"/><path d="M4 18v-5h5"/></svg>',
 };
 function escapeHtml(v) {
     return (v || '').toString().replace(/[&<>"']/g, (s) => ({
@@ -1630,40 +1700,60 @@ async function loadSessions(opts) {
                             ${ICONS.trash}
                         </button>
                     </div>
+                    <!-- Titre éditable : input flex + 2 boutons d'action
+                         (✓ valider activé si modifié, ↺ annuler activé si
+                         modifié = restore valeur originale) | Uploadé le …
+                         à droite (info immuable côté serveur). -->
                     <div class="file-detail-title-row">
-                        <input class="file-detail-title-input" type="text"
+                        <input class="file-detail-title-input file-detail-edit-input" type="text"
                                value="${escapeHtml(f.original_filename)}"
                                data-original-title="${escapeHtml(f.original_filename)}"
                                data-detail-title-for="${f.id}"
                                placeholder="Titre de la réunion" />
-                        <button class="file-detail-rename-btn fr-btn fr-btn--sm fr-btn--secondary"
-                                onclick="renameDetailTitle('${f.id}', this)" disabled>
-                            Renommer
-                        </button>
+                        <button class="file-detail-action-btn file-detail-action-btn--validate file-detail-rename-btn"
+                                onclick="renameDetailTitle('${f.id}', this)"
+                                title="Enregistrer le nouveau titre"
+                                aria-label="Enregistrer le nouveau titre"
+                                disabled>${ICONS.check}</button>
+                        <button class="file-detail-action-btn file-detail-action-btn--revert"
+                                data-detail-title-revert-for="${f.id}"
+                                onclick="revertDetailTitle('${f.id}')"
+                                title="Annuler les modifications"
+                                aria-label="Annuler les modifications du titre"
+                                disabled>${ICONS.revert}</button>
                         <span class="file-detail-upload-info"
-                              title="Date d'upload du fichier (immuable, technique)">
+                              title="Date d'upload du fichier (immuable)">
                             Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
                         </span>
                     </div>
                     <!-- Date *réelle* de la réunion, surchargée par
                          l'utilisateur. NULL côté serveur = pas d'override,
                          l'UI retombe sur created_at pour l'affichage et
-                         le tri. Le bouton ↺ remet à NULL (clear). -->
+                         le tri. 2 boutons : ✓ valider (activé si la valeur
+                         courante diffère de la valeur initiale) et ↺
+                         annuler (revert à la valeur sauvegardée ; quand
+                         la valeur est inchangée, le ↺ devient "effacer
+                         l'override" pour retomber sur created_at). -->
                     <div class="file-detail-meeting-row">
                         <span class="file-detail-meeting-label">Date de la réunion :</span>
                         <input type="datetime-local"
-                               class="file-detail-meeting-input"
+                               class="file-detail-meeting-input file-detail-edit-input"
                                data-meeting-dt-for="${f.id}"
+                               data-meeting-dt-original="${escapeHtml(_isoToDatetimeLocal(f.meeting_datetime) || '')}"
                                value="${_isoToDatetimeLocal(f.meeting_datetime) || ''}"
-                               placeholder="${_isoToDatetimeLocal(f.created_at) || ''}"
-                               onchange="saveMeetingDatetime('${f.id}', this)"
-                               onblur="saveMeetingDatetime('${f.id}', this)" />
-                        <button class="file-detail-meeting-reset"
+                               placeholder="${_isoToDatetimeLocal(f.created_at) || ''}" />
+                        <button class="file-detail-action-btn file-detail-action-btn--validate"
+                                data-meeting-dt-save-for="${f.id}"
+                                onclick="saveMeetingDatetime('${f.id}', document.querySelector('[data-meeting-dt-for=\\'${f.id}\\']'))"
+                                title="Enregistrer la date de réunion"
+                                aria-label="Enregistrer la date de réunion"
+                                disabled>${ICONS.check}</button>
+                        <button class="file-detail-action-btn file-detail-action-btn--revert"
                                 data-meeting-dt-reset-for="${f.id}"
-                                title="Effacer la date de réunion (retombe sur la date d'upload)"
-                                aria-label="Effacer la date de réunion"
                                 onclick="resetMeetingDatetime('${f.id}')"
-                                ${f.meeting_datetime ? '' : 'disabled'}>↺</button>
+                                title="${f.meeting_datetime ? "Effacer la date saisie (retombe sur la date d'upload)" : 'Aucune modification à annuler'}"
+                                aria-label="Annuler les modifications de la date"
+                                ${f.meeting_datetime ? '' : 'disabled'}>${ICONS.revert}</button>
                         <span class="file-detail-meeting-status"
                               data-meeting-dt-status-for="${f.id}"></span>
                     </div>

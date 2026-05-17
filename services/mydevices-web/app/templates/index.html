@@ -1314,15 +1314,37 @@
         .file-detail-title-input:focus {
             border-color: #cbd5e1; background: #fff; outline: none;
         }
-        .file-detail-rename-btn { white-space: nowrap; }
-        .file-detail-rename-btn:disabled { opacity: 0.4; cursor: default; }
-        /* Info "Uploadé le ..." à droite du titre : rappel discret de la
-           date d'upload (immuable) — utile à côté de la date de réunion
-           éditable juste en dessous. */
+        /* Boutons d'action ronds (✓ valider / ↺ annuler) communs aux 2
+           lignes éditables (titre + date). Cohérent visuellement entre
+           les 2 lignes. */
+        .file-detail-action-btn {
+            width: 1.7rem; height: 1.7rem; padding: 0;
+            border: 1px solid #cbd5e1; border-radius: 50%;
+            background: #fff; cursor: pointer;
+            display: inline-flex; align-items: center; justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .file-detail-action-btn svg {
+            width: 0.95rem; height: 0.95rem; display: block;
+        }
+        .file-detail-action-btn--validate { color: #15803d; }
+        .file-detail-action-btn--validate:hover:not(:disabled) {
+            background: #dcfce7; border-color: #86efac;
+        }
+        .file-detail-action-btn--revert { color: #64748b; }
+        .file-detail-action-btn--revert:hover:not(:disabled) {
+            background: #f1f5f9; border-color: #94a3b8;
+        }
+        .file-detail-action-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+        /* Info "Uploadé le ..." à droite : pousser à l'extrême droite via
+           margin-left:auto pour bien séparer visuellement l'édition (à
+           gauche) de l'info immuable (à droite). */
         .file-detail-upload-info {
             font-size: 0.74rem; color: #64748b;
             white-space: nowrap;
             flex-shrink: 0;
+            margin-left: auto;
         }
         /* Bloc d'édition "Date de la réunion" + bouton reset.
            datetime-local input compact pour rester homogène avec le DSFR. */
@@ -1340,15 +1362,8 @@
             background: #fff; color: #0f172a;
         }
         .file-detail-meeting-input:focus { outline: none; border-color: #94a3b8; }
-        .file-detail-meeting-reset {
-            font-size: 0.85rem; line-height: 1;
-            width: 1.6rem; height: 1.6rem; padding: 0;
-            border: 1px solid #cbd5e1; border-radius: 50%;
-            background: #fff; color: #475569; cursor: pointer;
-            display: inline-flex; align-items: center; justify-content: center;
-        }
-        .file-detail-meeting-reset:hover { background: #f1f5f9; border-color: #94a3b8; }
-        .file-detail-meeting-reset:disabled { opacity: 0.3; cursor: not-allowed; }
+        /* Le .file-detail-meeting-reset historique est désormais rendu via
+           .file-detail-action-btn.file-detail-action-btn--revert (cf. ci-dessus). */
         .file-detail-meeting-status {
             font-size: 0.74rem; color: #64748b;
         }
