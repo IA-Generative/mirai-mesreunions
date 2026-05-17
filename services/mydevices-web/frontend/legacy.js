@@ -14,6 +14,7 @@
 // et préparer la migration PR5.
 
 import './lib/bootstrap.js';  // doit charger avant tout (publie window.ALLOWED_AUDIO_EXTENSIONS etc.)
+import { formatDuration, formatDate } from './utils/format.js';
 
 const impactCache = {};
 const impactLoading = new Set();
@@ -400,21 +401,13 @@ function toggleRowExpand(btn) {
     if (lbl) lbl.textContent = open ? 'détails' : 'replier';
     btn.setAttribute('aria-label', open ? 'Voir le résumé' : 'Masquer le résumé');
 }
-// Format helpers pour la vue liste compacte.
+// Format helpers pour la vue liste compacte — délègue aux utils centralisés
+// (TKT-103) pour produire un rendu français lisible cohérent dans toute l'UI.
 function _formatDateCompact(iso) {
-    if (!iso) return '';
-    try {
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return '';
-        return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
-            + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    } catch (e) { return ''; }
+    return formatDate(iso, { withTime: true });
 }
 function _formatDuration(seconds) {
-    if (!Number.isFinite(seconds) || seconds <= 0) return '';
-    const m = Math.floor(seconds / 60);
-    const s = Math.round(seconds % 60);
-    return m > 0 ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`;
+    return formatDuration(seconds);
 }
 
 // Convertit une ISO 8601 ("2026-05-14T13:42:00+02:00" ou avec Z) au format
@@ -774,16 +767,7 @@ function tokenValidityDaysLabel(retentionExpiresAt) {
 }
 
 function formatDateTimeShort(isoValue) {
-    if (!isoValue) return '-';
-    const d = new Date(isoValue);
-    if (!Number.isFinite(d.getTime())) return '-';
-    return d.toLocaleString('fr-FR', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    });
+    return formatDate(isoValue, { withTime: true }) || '-';
 }
 
 function tokenIdShort(tokenValue) {
@@ -2275,7 +2259,7 @@ async function loadNormalizationImpact(fileId) {
             `Amélioration cible -16 LUFS: ${data.improvement_to_target_lufs}.`;
         impactCache[fileId] = {
             text: msg,
-            at: new Date().toLocaleString('fr-FR'),
+            at: formatDate(new Date().toISOString(), { withTime: true }),
         };
         showToast('Impact de la normalisation calculé.', 'success');
         // Si le modal est ouvert, met aussi à jour son contenu impact
@@ -2285,7 +2269,7 @@ async function loadNormalizationImpact(fileId) {
         const msg = `Erreur: ${e.message}`;
         impactCache[fileId] = {
             text: msg,
-            at: new Date().toLocaleString('fr-FR'),
+            at: formatDate(new Date().toISOString(), { withTime: true }),
         };
         showToast(`Impact normalisation : ${e.message}`, 'error');
     } finally {

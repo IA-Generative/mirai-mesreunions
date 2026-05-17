@@ -18,35 +18,25 @@
 //     count: N
 //   }
 
+import { formatDate } from '../utils/format.js';
+
 function _esc(v) {
   return (v == null ? '' : String(v)).replace(/[&<>"']/g, (s) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[s]);
 }
 
+// Format court (jour + mois abrégé) propre à la timeline — pas factorisable
+// avec formatDate qui produit toujours l'année complète.
 function _shortDate(iso) {
   if (!iso) return 'sans date';
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return 'sans date';
-    return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
-  } catch (_e) {
-    return 'sans date';
-  }
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'sans date';
+  return d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 }
 
 function _fullDate(iso) {
-  if (!iso) return 'date non renseignée';
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return 'date non renseignée';
-    return d.toLocaleString('fr-FR', {
-      day: 'numeric', month: 'long', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
-  } catch (_e) {
-    return 'date non renseignée';
-  }
+  return formatDate(iso, { withTime: true }) || 'date non renseignée';
 }
 
 // Retourne l'id de l'occurrence "active" de la série :
