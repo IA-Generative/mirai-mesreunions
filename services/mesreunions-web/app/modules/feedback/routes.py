@@ -421,6 +421,37 @@ def correct_file_term(file_id: str):
     return jsonify(resp.json() if resp.content else {}), resp.status_code
 
 
+@bp.route("/api/file/<file_id>/term-sources", methods=["GET"])
+@require_auth
+def file_term_sources(file_id: str):
+    """Proxy vers ingester /api/v1/audio/<id>/term-sources?term=...
+
+    Utilisé par le drawer "Sources brutes" du corrector CR (option C).
+    Retourne les segments speaker-tagged qui contiennent le terme,
+    avec timecodes pour permettre la ré-écoute audio et la propagation
+    sélective vers la transcription brute/nettoyée.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    term = (request.args.get("term") or "").strip()
+    if not term:
+        return jsonify({"error": "term required"}), 400
+    internal_id = _resolve_internal_audio_id(user_sub, file_id)
+    if not internal_id:
+        return jsonify({"error": "audio_not_found_or_not_ready"}), 404
+    try:
+        resp = _call_ingester(
+            "GET", f"/api/v1/audio/{internal_id}/term-sources",
+            params={"term": term, "user_sub": user_sub},
+            timeout=10,
+        )
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
 # ─── Export CSV admin ────────────────────────────────────────────────
 
 

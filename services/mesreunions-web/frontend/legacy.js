@@ -1922,6 +1922,449 @@ function _attachLocalSearch(container) {
     btnPrev.addEventListener('click', (ev) => { ev.preventDefault(); inp.focus(); jump(-1); });
 }
 
+// ─── CR inline (option C : rendu CR + corrector + drawer source) ────────
+//
+// Architecture :
+//   1. _renderCrInlineBlock(fileId, data) → HTML d'un <details> avec
+//      onglets (compte-rendu, reformulation, nettoyée, absentee, brute)
+//      et placeholder vide.
+//   2. _attachCrInline(container, fileId, data) → bind tabs, render
+//      markdown via marked.js, hook sélection-pour-corriger, scanne
+//      les "termes corrigés" déjà appliqués pour ajouter pastille 🔍.
+//   3. _openSourceDrawer(fileId, term, audio) → ouvre le drawer slide-in
+//      avec les sources brutes (fetch /api/file/<id>/term-sources),
+//      permet ré-écoute audio + propagation sélective.
+
+const CR_TABS = [
+    { key: 'meeting_cr',    label: '📋 Compte-rendu',  source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json) },
+    { key: 'reformulated',  label: '✍️ Reformulation', source: (d) => d.reformulated_text || '' },
+    { key: 'cleaned',       label: '🧹 Nettoyée',      source: (d) => d.cleaned_text || '' },
+    { key: 'absentee',      label: '🪧 Pour les absents', source: (d) => d.absentee_summary || '' },
+    { key: 'raw',           label: '🎤 Brute (texte)', source: (d) => d.speaker_tagged_text || '' },
+];
+
+function _formatMeetingAnalysisAsMarkdown(jsonText) {
+    // Le meeting_analysis_json contient un objet structuré 5-sections.
+    // Si c'est déjà du markdown stocké en string, on retourne tel quel.
+    // Si c'est un objet JSON, on rend les sections proprement.
+    if (!jsonText) return '';
+    try {
+        const obj = JSON.parse(jsonText);
+        if (!obj || typeof obj !== 'object') return jsonText;
+        const parts = [];
+        const sections = [
+            { key: 'actors',          title: 'Acteurs' },
+            { key: 'themes',          title: 'Thèmes' },
+            { key: 'decisions',       title: 'Décisions' },
+            { key: 'gaps',            title: 'Points en suspens' },
+            { key: 'recommendations', title: 'Recommandations' },
+        ];
+        for (const s of sections) {
+            const v = obj[s.key];
+            if (!v) continue;
+            parts.push(`## ${s.title}`);
+            if (Array.isArray(v)) parts.push(v.map((x) => `- ${typeof x === 'string' ? x : JSON.stringify(x)}`).join('\n'));
+            else if (typeof v === 'string') parts.push(v);
+            else parts.push(JSON.stringify(v, null, 2));
+            parts.push('');
+        }
+        return parts.join('\n');
+    } catch (e) {
+        return jsonText; // déjà markdown
+    }
+}
+
+function _renderCrInlineBlock(fileId, data) {
+    const tabsWithContent = CR_TABS.filter((t) => (t.source(data) || '').trim().length > 0);
+    if (tabsWithContent.length === 0) return '';
+    const tabsHtml = tabsWithContent.map((t, i) => `
+      <button type="button" class="cr-inline-tab ${i === 0 ? 'cr-inline-tab--active' : ''}"
+              data-cr-tab="${t.key}">${t.label}</button>
+    `).join('');
+    return `
+      <details class="cr-inline" data-cr-inline-for="${escapeHtml(fileId)}">
+        <summary>📑 Contenu détaillé (compte-rendu, transcriptions, synthèses)</summary>
+        <div class="cr-inline-tabs">
+          ${tabsHtml}
+          <div class="cr-inline-find">
+            <input type="search" placeholder="Chercher…" autocomplete="off" spellcheck="false" />
+            <button type="button" data-cr-find="prev" title="Précédent (Maj+Entrée)">▲</button>
+            <button type="button" data-cr-find="next" title="Suivant (Entrée)">▼</button>
+            <span data-cr-find-status></span>
+          </div>
+        </div>
+        <div class="cr-inline-body" data-cr-body></div>
+        <div class="cr-inline-foot" style="padding:0.4rem 0.7rem;border-top:1px solid #f1f5f9;font-size:0.7rem;color:#64748b;">
+          Astuce : sélectionnez un mot pour le corriger.
+          🔍 sur les termes corrigés = retrouver les sources dans la brute.
+        </div>
+      </details>
+    `;
+}
+
+function _attachCrInline(container, fileId, data) {
+    const root = container.querySelector(`[data-cr-inline-for="${CSS.escape(fileId)}"]`);
+    if (!root) return;
+    const body = root.querySelector('[data-cr-body]');
+    const tabs = Array.from(root.querySelectorAll('[data-cr-tab]'));
+    const findInp = root.querySelector('.cr-inline-find input');
+    const findPrev = root.querySelector('[data-cr-find="prev"]');
+    const findNext = root.querySelector('[data-cr-find="next"]');
+    const findStatus = root.querySelector('[data-cr-find-status]');
+
+    // Track corrections appliquées par fileId pour pastiller 🔍 sur les
+    // "new" termes ayant été appliqués (récupéré depuis l'historique
+    // sessions/feedback via window. Fallback : juste les pending locales).
+    const correctedTerms = _getAppliedTermsForFile(fileId);
+
+    let activeKey = tabs[0]?.getAttribute('data-cr-tab') || 'meeting_cr';
+
+    const renderBody = (key) => {
+        const tab = CR_TABS.find((t) => t.key === key);
+        const text = tab ? (tab.source(data) || '') : '';
+        if (!text.trim()) {
+            body.innerHTML = `<div class="cr-inline-empty">Pas de contenu pour cet onglet.</div>`;
+            return;
+        }
+        // Rendu markdown via marked.js, fallback escape si lib pas chargée.
+        let html;
+        try {
+            html = window.marked ? window.marked.parse(text) : `<pre>${escapeHtml(text)}</pre>`;
+        } catch (e) {
+            html = `<pre>${escapeHtml(text)}</pre>`;
+        }
+        body.innerHTML = html;
+        // Pastiller 🔍 sur les termes corrigés.
+        if (correctedTerms && correctedTerms.length > 0) {
+            _markCorrectedTermsInBody(body, correctedTerms);
+        }
+    };
+
+    tabs.forEach((t) => {
+        t.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            tabs.forEach((x) => x.classList.remove('cr-inline-tab--active'));
+            t.classList.add('cr-inline-tab--active');
+            activeKey = t.getAttribute('data-cr-tab');
+            renderBody(activeKey);
+            // reset search
+            if (findInp) { findInp.value = ''; if (findStatus) findStatus.textContent = ''; }
+        });
+    });
+
+    // Search locale dans le body actif.
+    let hits = [], cursor = -1;
+    const renderHl = (q) => {
+        if (!body) return;
+        const original = body.getAttribute('data-cr-html-original') || body.innerHTML;
+        if (!body.getAttribute('data-cr-html-original')) body.setAttribute('data-cr-html-original', original);
+        hits = [];
+        if (!q) { body.innerHTML = original; return; }
+        // Recherche substring case-insensitive sur le textContent, avec
+        // re-wrapping via innerHTML. Approche simple : DOM walker.
+        body.innerHTML = original;
+        const ql = q.toLowerCase();
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
+        const nodes = [];
+        let n; while ((n = walker.nextNode())) nodes.push(n);
+        nodes.forEach((tn) => {
+            const txt = tn.nodeValue || '';
+            const lower = txt.toLowerCase();
+            if (lower.indexOf(ql) < 0) return;
+            const frag = document.createDocumentFragment();
+            let i = 0;
+            while (i < txt.length) {
+                const j = lower.indexOf(ql, i);
+                if (j < 0) { frag.appendChild(document.createTextNode(txt.slice(i))); break; }
+                if (j > i) frag.appendChild(document.createTextNode(txt.slice(i, j)));
+                const mk = document.createElement('mark');
+                mk.className = 'tc-find-hit';
+                mk.id = `cr-hit-${hits.length}`;
+                mk.textContent = txt.slice(j, j + ql.length);
+                frag.appendChild(mk);
+                hits.push({ elId: mk.id });
+                i = j + ql.length;
+            }
+            tn.parentNode.replaceChild(frag, tn);
+        });
+    };
+    const setCurrent = (idx) => {
+        body.querySelectorAll('.tc-find-current').forEach((el) => el.classList.remove('tc-find-current'));
+        if (idx < 0 || idx >= hits.length) return;
+        const el = document.getElementById(hits[idx].elId);
+        if (el) { el.classList.add('tc-find-current'); el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    };
+    const updateStat = () => {
+        if (!findInp || !findStatus) return;
+        if (!findInp.value) { findStatus.textContent = ''; return; }
+        if (hits.length === 0) { findStatus.textContent = '0 résultat'; return; }
+        const pos = cursor < 0 ? 0 : cursor + 1;
+        let suf = '';
+        if (cursor === 0 && hits.length > 1) suf = ' — début';
+        else if (cursor === hits.length - 1 && hits.length > 1) suf = ' — fin';
+        else if (hits.length === 1) suf = ' — unique';
+        findStatus.textContent = `${pos}/${hits.length}${suf}`;
+    };
+    const jump = (delta) => {
+        if (hits.length === 0) { updateStat(); return; }
+        if (cursor < 0) cursor = delta > 0 ? 0 : hits.length - 1;
+        else cursor = (cursor + delta + hits.length) % hits.length;
+        setCurrent(cursor);
+        updateStat();
+    };
+    if (findInp) {
+        let debounce;
+        findInp.addEventListener('input', () => {
+            clearTimeout(debounce);
+            debounce = setTimeout(() => {
+                cursor = -1; renderHl(findInp.value);
+                if (hits.length > 0) { cursor = 0; setCurrent(0); }
+                updateStat();
+            }, 120);
+        });
+        findInp.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') { ev.preventDefault(); jump(ev.shiftKey ? -1 : 1); }
+            else if (ev.key === 'Escape') { findInp.value = ''; cursor = -1; renderHl(''); updateStat(); }
+        });
+        findNext.addEventListener('click', (ev) => { ev.preventDefault(); findInp.focus(); jump(1); });
+        findPrev.addEventListener('click', (ev) => { ev.preventDefault(); findInp.focus(); jump(-1); });
+    }
+
+    // Sélection texte pour corriger : on réutilise le _showCorrectionFooter
+    // existant. Le footer est rendu dans le container parent (data-tc-corrector-footer).
+    body.addEventListener('mouseup', () => _onCrInlineSelection(body, fileId, container));
+    body.addEventListener('touchend', () => _onCrInlineSelection(body, fileId, container));
+
+    // Click sur pastille 🔍 → drawer source.
+    body.addEventListener('click', (ev) => {
+        const span = ev.target.closest && ev.target.closest('.cr-corrected-term');
+        if (!span) return;
+        ev.preventDefault();
+        const term = span.getAttribute('data-cr-term') || '';
+        if (term) _openSourceDrawer(fileId, term);
+    });
+
+    renderBody(activeKey);
+}
+
+function _onCrInlineSelection(body, fileId, parentContainer) {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const selected = (sel.toString() || '').trim();
+    if (selected.length < 1 || selected.length > 200) return;
+    const anchor = sel.anchorNode;
+    if (!anchor) return;
+    const node = (anchor.nodeType === 1 ? anchor : anchor.parentElement);
+    if (!body.contains(node)) return;
+    // On rend le footer correction dans le container parent (réutilise
+    // l'infrastructure existante).
+    let footer = parentContainer.querySelector(`[data-tc-corrector-footer="${CSS.escape(fileId)}"]`);
+    if (!footer) {
+        footer = document.createElement('div');
+        footer.className = 'transcript-corrector-footer';
+        footer.setAttribute('data-tc-corrector-footer', fileId);
+        footer.hidden = true;
+        parentContainer.appendChild(footer);
+    }
+    _showCorrectionFooter(parentContainer, fileId, selected, null, null, []);
+}
+
+function _getAppliedTermsForFile(fileId) {
+    // Récupère les termes déjà corrigés sur ce file via localStorage.
+    // Format : Map { fileId -> [{old, new}, ...] }.
+    try {
+        const raw = localStorage.getItem('mesreunions.corrections.applied');
+        if (!raw) return [];
+        const all = JSON.parse(raw);
+        const arr = all && all[fileId];
+        return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+}
+
+function _saveAppliedTermForFile(fileId, oldTerm, newTerm) {
+    try {
+        const raw = localStorage.getItem('mesreunions.corrections.applied');
+        const all = raw ? JSON.parse(raw) : {};
+        const arr = all[fileId] || [];
+        // Dédoublonne sur (old, new).
+        if (!arr.some((x) => x.old === oldTerm && x.new === newTerm)) {
+            arr.push({ old: oldTerm, new: newTerm, ts: Date.now() });
+        }
+        all[fileId] = arr.slice(-50); // cap
+        localStorage.setItem('mesreunions.corrections.applied', JSON.stringify(all));
+    } catch (e) {}
+}
+
+function _markCorrectedTermsInBody(body, correctedTerms) {
+    // Pour chaque terme "new", wrap les occurrences dans body avec
+    // <span class="cr-corrected-term" data-cr-term="new">…</span>.
+    correctedTerms.forEach((c) => {
+        const newTerm = (c.new || '').trim();
+        if (!newTerm || newTerm.length < 2) return;
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
+        const nodes = [];
+        let n; while ((n = walker.nextNode())) nodes.push(n);
+        nodes.forEach((tn) => {
+            // Skip si déjà dans un span.cr-corrected-term ou .tc-find-hit.
+            if (tn.parentElement && (
+                tn.parentElement.classList.contains('cr-corrected-term') ||
+                tn.parentElement.classList.contains('tc-find-hit')
+            )) return;
+            const txt = tn.nodeValue || '';
+            const lower = txt.toLowerCase();
+            const ql = newTerm.toLowerCase();
+            const j = lower.indexOf(ql);
+            if (j < 0) return;
+            const before = txt.slice(0, j);
+            const hit = txt.slice(j, j + newTerm.length);
+            const after = txt.slice(j + newTerm.length);
+            const frag = document.createDocumentFragment();
+            if (before) frag.appendChild(document.createTextNode(before));
+            const sp = document.createElement('span');
+            sp.className = 'cr-corrected-term';
+            sp.setAttribute('data-cr-term', newTerm);
+            sp.setAttribute('title', `Terme corrigé — cliquez pour voir les sources brutes`);
+            sp.textContent = hit;
+            frag.appendChild(sp);
+            if (after) frag.appendChild(document.createTextNode(after));
+            tn.parentNode.replaceChild(frag, tn);
+        });
+    });
+}
+
+function _openSourceDrawer(fileId, term) {
+    // Supprime drawer existant si présent.
+    document.querySelectorAll('.cr-drawer-backdrop, .cr-drawer').forEach((el) => el.remove());
+    const backdrop = document.createElement('div');
+    backdrop.className = 'cr-drawer-backdrop';
+    const drawer = document.createElement('div');
+    drawer.className = 'cr-drawer';
+    drawer.innerHTML = `
+      <div class="cr-drawer-head">
+        <div class="cr-drawer-title">🔍 Sources brutes de « ${escapeHtml(term)} »</div>
+        <button type="button" class="cr-drawer-close" aria-label="Fermer">×</button>
+      </div>
+      <div class="cr-drawer-body">
+        <p style="color:#94a3b8;font-size:0.85rem;text-align:center;padding:1rem;">Chargement…</p>
+      </div>
+      <div class="cr-drawer-foot" style="display:none;">
+        <label><input type="checkbox" data-cr-target="raw" checked /> Propager dans la transcription brute</label>
+        <label><input type="checkbox" data-cr-target="clean" /> Propager dans la nettoyée</label>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span class="status" data-cr-drawer-status></span>
+          <button type="button" class="primary" data-cr-drawer-apply>Appliquer aux segments cochés</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    document.body.appendChild(drawer);
+    requestAnimationFrame(() => { backdrop.classList.add('is-open'); drawer.classList.add('is-open'); });
+    const close = () => {
+        backdrop.classList.remove('is-open');
+        drawer.classList.remove('is-open');
+        setTimeout(() => { backdrop.remove(); drawer.remove(); }, 240);
+    };
+    backdrop.addEventListener('click', close);
+    drawer.querySelector('.cr-drawer-close').addEventListener('click', close);
+
+    // Fetch sources.
+    fetch(`/api/file/${encodeURIComponent(fileId)}/term-sources?term=${encodeURIComponent(term)}`)
+        .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
+        .then(({ ok, data }) => {
+            const bodyEl = drawer.querySelector('.cr-drawer-body');
+            const footEl = drawer.querySelector('.cr-drawer-foot');
+            if (!ok) {
+                bodyEl.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur : ${escapeHtml(data.error || 'inconnu')}</p>`;
+                return;
+            }
+            const sources = data.sources || [];
+            if (sources.length === 0) {
+                bodyEl.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;padding:1rem;text-align:center;">Aucune source brute trouvée pour « ${escapeHtml(term)} » (le LLM a peut-être reformulé).</p>`;
+                return;
+            }
+            const audio = document.querySelector(`.transcript-corrector-audio`);
+            const items = sources.map((s) => `
+              <div class="cr-drawer-source" data-cr-src-idx="${s.idx}">
+                <input type="checkbox" class="cr-drawer-source-check" checked />
+                ${s.start != null
+                    ? `<button type="button" class="cr-drawer-source-play" data-cr-play="${s.start}"
+                               title="Écouter ce passage">▶ ${_fmtTimecode(s.start)}</button>`
+                    : `<span style="font-size:0.7rem;color:#94a3b8;">—</span>`}
+                <div class="cr-drawer-source-content">
+                  <div class="cr-drawer-source-meta">${escapeHtml(s.speaker || '')}</div>
+                  <div class="cr-drawer-source-snippet">${escapeHtml(s.snippet || '')}</div>
+                </div>
+              </div>
+            `).join('');
+            bodyEl.innerHTML = `<div style="font-size:0.78rem;color:#64748b;padding:0 0 0.5rem;">${sources.length} occurrence${sources.length > 1 ? 's' : ''} trouvée${sources.length > 1 ? 's' : ''} dans la brute.</div>${items}`;
+            footEl.style.display = 'flex';
+
+            // Click ▶ : seek audio (utilise le lecteur sticky du corrector
+            // si présent dans la page).
+            bodyEl.querySelectorAll('[data-cr-play]').forEach((btn) => {
+                btn.addEventListener('click', (ev) => {
+                    ev.preventDefault();
+                    const t = parseFloat(btn.getAttribute('data-cr-play')) || 0;
+                    if (audio) {
+                        try { audio.pause(); audio.currentTime = Math.max(0, t); audio.play(); } catch (e) {}
+                    }
+                });
+            });
+            // Apply propagation.
+            const applyBtn = drawer.querySelector('[data-cr-drawer-apply]');
+            const statusEl = drawer.querySelector('[data-cr-drawer-status]');
+            applyBtn.addEventListener('click', async (ev) => {
+                ev.preventDefault();
+                applyBtn.disabled = true;
+                statusEl.textContent = 'Application…';
+                statusEl.style.color = '#64748b';
+                // Pour MVP : on propage via correct-term (qui patch tous
+                // les textes contenant l'ancien terme). L'ancien terme est
+                // dérivé du snippet (entre « »).
+                const oldMatch = sources.map((s) => {
+                    const m = (s.snippet || '').match(/«([^»]+)»/);
+                    return m ? m[1] : null;
+                }).filter(Boolean);
+                if (oldMatch.length === 0) {
+                    statusEl.textContent = 'Échec : impossible de déterminer le terme à remplacer.';
+                    statusEl.style.color = '#b91c1c';
+                    applyBtn.disabled = false;
+                    return;
+                }
+                const oldTerm = oldMatch[0]; // tous identiques (case du hit)
+                try {
+                    const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/correct-term`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            old: oldTerm, new: term,
+                            add_to_glossary: false, // déjà ajouté lors de la 1ère correction
+                            patch_text: true,
+                            reprocess_llm: false,
+                        }),
+                    });
+                    const j = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        statusEl.textContent = `Échec : ${j.error || r.status}`;
+                        statusEl.style.color = '#b91c1c';
+                        applyBtn.disabled = false;
+                        return;
+                    }
+                    statusEl.textContent = `✓ Propagé dans la brute & nettoyée`;
+                    statusEl.style.color = '#16a34a';
+                    setTimeout(close, 1400);
+                } catch (e) {
+                    statusEl.textContent = `Erreur réseau : ${e.message}`;
+                    statusEl.style.color = '#b91c1c';
+                    applyBtn.disabled = false;
+                }
+            });
+        })
+        .catch((e) => {
+            const bodyEl = drawer.querySelector('.cr-drawer-body');
+            bodyEl.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur réseau : ${escapeHtml(e.message)}</p>`;
+        });
+}
+
 function _onTranscriptSelection(container, fileId, audio, blocks) {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed) return;
@@ -2025,6 +2468,9 @@ document.addEventListener('click', async (ev) => {
             if (!body.reprocess_llm) {
                 incrementPendingCorrections(fileId);
             }
+            // Persiste le terme corrigé pour faire apparaître la pastille
+            // 🔍 dans le CR inline (option C drawer source).
+            try { _saveAppliedTermForFile(fileId, old, newText); } catch (e) {}
             // Si patch_text actif, on refresh la fiche pour voir la transcription patched.
             if (body.patch_text || body.reprocess_llm) {
                 setTimeout(() => { if (typeof loadSessions === 'function') loadSessions({ force: true }); }, 600);
@@ -3122,7 +3568,20 @@ async function loadTranscriptStatus(fileId, container) {
             dropdownBlock = `<div class="downloads-block">${defaultHtml}${otherSection}</div>`;
         }
 
-        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        // CR inline (option C) : en vue détail (persistent), on affiche
+        // le contenu des CR dans un bloc dépliable, avec onglets pour
+        // basculer entre meeting_analysis / cleaned / reformulated / absentee.
+        // Sélection texte → correction (réutilise la pipe correct-term).
+        // Pastille 🔍 sur les termes déjà corrigés → drawer "Sources brutes".
+        const crInlineHtml = persistent ? _renderCrInlineBlock(fileId, data) : '';
+
+        container.innerHTML = `${statusBadge}${subtitle}${crInlineHtml}${dropdownBlock}`;
+        if (persistent) {
+            // Bind les interactions du CR inline (tabs, search, sélection,
+            // pastilles 🔍). Doit être fait APRÈS l'innerHTML pour avoir
+            // accès aux noeuds DOM.
+            _attachCrInline(container, fileId, data);
+        }
         // Peuple immédiatement les icônes du select "Autres téléchargements"
         // pour la première entrée sélectionnée (sinon la zone reste vide
         // jusqu'au premier change).

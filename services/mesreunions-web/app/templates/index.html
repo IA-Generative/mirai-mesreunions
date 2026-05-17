@@ -2222,7 +2222,144 @@
         .mp-tl-icon { font-size: 0.95rem; line-height: 1; }
         .mp-readonly-banner { margin-bottom: 0.6rem; }
         .mp-readonly-disabled { cursor: not-allowed !important; }
+
+        /* ─── CR inline (option C) ──────────────────────────────────── */
+        .cr-inline {
+            margin: 0.6rem 0;
+            border: 1px solid #e2e8f0; border-radius: 4px;
+            background: #fff;
+        }
+        .cr-inline summary {
+            padding: 0.5rem 0.7rem; cursor: pointer;
+            font-weight: 600; font-size: 0.92rem; color: #0c4498;
+            background: #f0f6ff; border-radius: 4px 4px 0 0;
+        }
+        .cr-inline[open] summary { border-bottom: 1px solid #e2e8f0; }
+        .cr-inline-tabs {
+            display: flex; gap: 0.25rem; padding: 0.5rem 0.7rem;
+            border-bottom: 1px solid #f1f5f9; flex-wrap: wrap;
+            align-items: center;
+        }
+        .cr-inline-tab {
+            font-size: 0.74rem; padding: 0.2rem 0.55rem;
+            border: 1px solid #cbd5e1; background: #fff;
+            border-radius: 3px; cursor: pointer;
+        }
+        .cr-inline-tab--active {
+            background: #1d4ed8; color: #fff; border-color: #1d4ed8;
+        }
+        .cr-inline-find {
+            margin-left: auto; display: flex; gap: 0.25rem; align-items: center;
+        }
+        .cr-inline-find input {
+            font-size: 0.72rem; padding: 0.15rem 0.4rem;
+            border: 1px solid #cbd5e1; border-radius: 3px; width: 8rem;
+        }
+        .cr-inline-find button {
+            font-size: 0.7rem; line-height: 1;
+            padding: 0.15rem 0.35rem;
+            border: 1px solid #cbd5e1; background: #fff;
+            border-radius: 3px; cursor: pointer;
+        }
+        .cr-inline-find span { font-size: 0.7rem; color: #64748b; min-width: 5rem; }
+        .cr-inline-body {
+            padding: 0.7rem 1rem;
+            font-size: 0.88rem; line-height: 1.55;
+            max-height: 32em; overflow-y: auto;
+            user-select: text;
+        }
+        .cr-inline-body h1, .cr-inline-body h2, .cr-inline-body h3 {
+            margin: 0.6em 0 0.3em; color: #0c4498;
+        }
+        .cr-inline-body h2 { font-size: 1.05em; }
+        .cr-inline-body h3 { font-size: 0.95em; }
+        .cr-inline-body ul, .cr-inline-body ol { padding-left: 1.4em; margin: 0.3em 0; }
+        .cr-inline-body p { margin: 0.4em 0; }
+        .cr-inline-body strong { color: #1e293b; }
+        .cr-inline-empty {
+            padding: 1rem; text-align: center; color: #94a3b8; font-style: italic;
+        }
+        /* Pastille loupe : terme corrigé qui a des sources dans la brute. */
+        .cr-corrected-term {
+            background: linear-gradient(180deg, transparent 60%, #fef9c3 60%);
+            cursor: pointer; padding: 0 2px;
+            border-radius: 2px;
+        }
+        .cr-corrected-term::after {
+            content: '🔍'; font-size: 0.7em; margin-left: 0.15em;
+            opacity: 0.6;
+        }
+        .cr-corrected-term:hover { background: linear-gradient(180deg, transparent 60%, #fde047 60%); }
+        .cr-corrected-term:hover::after { opacity: 1; }
+
+        /* Drawer source slide-in depuis la droite. */
+        .cr-drawer-backdrop {
+            position: fixed; inset: 0; background: rgba(15, 23, 42, 0.35);
+            z-index: 9000; opacity: 0; pointer-events: none;
+            transition: opacity 180ms ease;
+        }
+        .cr-drawer-backdrop.is-open { opacity: 1; pointer-events: auto; }
+        .cr-drawer {
+            position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw);
+            background: #fff; box-shadow: -4px 0 18px rgba(0,0,0,0.18);
+            z-index: 9001;
+            transform: translateX(100%);
+            transition: transform 220ms ease;
+            display: flex; flex-direction: column;
+        }
+        .cr-drawer.is-open { transform: translateX(0); }
+        .cr-drawer-head {
+            padding: 0.8rem 1rem; border-bottom: 1px solid #e2e8f0;
+            display: flex; justify-content: space-between; align-items: center;
+            background: #f0f6ff;
+        }
+        .cr-drawer-title { font-size: 0.92rem; font-weight: 600; color: #0c4498; }
+        .cr-drawer-close {
+            background: transparent; border: 0; cursor: pointer;
+            font-size: 1.3rem; line-height: 1; color: #64748b;
+        }
+        .cr-drawer-body { flex: 1 1 auto; overflow-y: auto; padding: 0.6rem 0.9rem; }
+        .cr-drawer-source {
+            display: flex; gap: 0.5rem; align-items: flex-start;
+            padding: 0.5rem 0; border-bottom: 1px dashed #e2e8f0;
+        }
+        .cr-drawer-source:last-child { border-bottom: 0; }
+        .cr-drawer-source-check { margin-top: 0.25rem; }
+        .cr-drawer-source-play {
+            background: #fff; border: 1px solid #cbd5e1; border-radius: 3px;
+            padding: 0.15rem 0.4rem; cursor: pointer; font-size: 0.7rem;
+            min-width: 3.5rem;
+        }
+        .cr-drawer-source-play:hover { background: #eff6ff; }
+        .cr-drawer-source-content { flex: 1 1 auto; min-width: 0; font-size: 0.8rem; }
+        .cr-drawer-source-meta {
+            color: #64748b; font-size: 0.7rem;
+        }
+        .cr-drawer-source-snippet { color: #1e293b; line-height: 1.4; }
+        .cr-drawer-foot {
+            border-top: 1px solid #e2e8f0; padding: 0.8rem 1rem;
+            display: flex; flex-direction: column; gap: 0.5rem;
+            background: #fafbfc;
+        }
+        .cr-drawer-foot label {
+            font-size: 0.78rem; color: #1e293b;
+            display: flex; gap: 0.4rem; align-items: center;
+        }
+        .cr-drawer-foot button.primary {
+            padding: 0.4rem 0.8rem; font-weight: 600;
+            border: 1px solid #1d4ed8; background: #1d4ed8; color: #fff;
+            border-radius: 3px; cursor: pointer;
+        }
+        .cr-drawer-foot button.primary:disabled {
+            background: #94a3b8; border-color: #94a3b8; cursor: not-allowed;
+        }
+        .cr-drawer-foot .status { font-size: 0.72rem; color: #16a34a; }
     </style>
+    <!-- marked.js : markdown → HTML pour rendu inline des CR (option C).
+         CDN cdnjs (CSP-allowed, déjà whitelisted pour DSFR). 11kb gzip. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"
+            integrity="sha512-AwLD5L1xVGRYzhxLLvrdjvR9PUKwwsx0nrybT2dB7uy/EMG5QXNqd6lLT2qNvA4nFvfMRSCAUDFW2vQiwM9DOQ=="
+            crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </head>
 <body>
 <header role="banner" class="fr-header">

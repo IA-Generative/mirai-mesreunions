@@ -562,6 +562,12 @@ def api_file_transcript_status(file_id):
             # Texte speaker-tagged (avec timecodes par bloc) exposé pour
             # la correction inline + ré-écoute audio par bloc speaker.
             "speaker_tagged_text": audio.get("speaker_tagged_text"),
+            # Textes CR pour rendu inline (markdown via marked.js côté
+            # frontend) + corrector C avec drawer source-segments.
+            "cleaned_text": audio.get("cleaned_text"),
+            "reformulated_text": audio.get("reformulated_text"),
+            "absentee_summary": audio.get("absentee_summary"),
+            "meeting_analysis_json": audio.get("meeting_analysis_json"),
         })
     finally:
         db.close()
