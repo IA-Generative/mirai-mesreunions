@@ -559,6 +559,9 @@ def api_file_transcript_status(file_id):
             "key_points_summary": audio.get("key_points_summary"),
             "meeting_datetime": audio.get("meeting_datetime"),
             "kevent_job_id": audio.get("kevent_job_id"),
+            # Texte speaker-tagged (avec timecodes par bloc) exposé pour
+            # la correction inline + ré-écoute audio par bloc speaker.
+            "speaker_tagged_text": audio.get("speaker_tagged_text"),
         })
     finally:
         db.close()

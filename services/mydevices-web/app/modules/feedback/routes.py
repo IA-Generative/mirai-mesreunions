@@ -269,6 +269,110 @@ def regenerate_file(file_id: str):
     }), 202
 
 
+# ─── User glossary (édition manuelle) ─────────────────────────────
+
+
+@bp.route("/api/my-glossary", methods=["GET"])
+@require_auth
+def list_my_glossary():
+    """Liste paginée des termes du glossaire personnel de l'utilisateur."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    params = {
+        "user_sub": user_sub,
+        "limit": request.args.get("limit", 500),
+        "offset": request.args.get("offset", 0),
+    }
+    try:
+        resp = _call_ingester("GET", "/api/v1/user-glossary", params=params)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    if resp.status_code >= 400:
+        return jsonify(resp.json() if resp.content else {"error": "ingester_error"}), resp.status_code
+    return jsonify(resp.json())
+
+
+@bp.route("/api/my-glossary", methods=["POST"])
+@require_auth
+def add_my_glossary_term():
+    """Body : {term}. Ajoute un terme curaté pour l'utilisateur courant."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    term = (body.get("term") or "").strip()
+    if not term:
+        return jsonify({"error": "term required"}), 400
+    try:
+        resp = _call_ingester("POST", "/api/v1/user-glossary",
+                              json_body={"user_sub": user_sub, "term": term})
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
+@bp.route("/api/my-glossary", methods=["PATCH"])
+@require_auth
+def patch_my_glossary_term():
+    """Body : {term, curated_by_user?, blacklisted?}. Toggle d'un état."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    body["user_sub"] = user_sub
+    try:
+        resp = _call_ingester("PATCH", "/api/v1/user-glossary", json_body=body)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
+@bp.route("/api/my-glossary", methods=["DELETE"])
+@require_auth
+def delete_my_glossary_term():
+    """Body : {term}. Supprime un terme du glossaire utilisateur."""
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    body["user_sub"] = user_sub
+    try:
+        resp = _call_ingester("DELETE", "/api/v1/user-glossary", json_body=body)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
+# ─── Correction inline d'un terme sur une transcription ──────────
+
+
+@bp.route("/api/file/<file_id>/correct-term", methods=["POST"])
+@require_auth
+def correct_file_term(file_id: str):
+    """Body : {old, new, add_to_glossary?, patch_text?, reprocess_llm?}.
+
+    Délègue à l'ingester qui applique les 3 actions et trace l'audit
+    dans user_feedback (type='correction').
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    body["user_sub"] = user_sub
+    try:
+        resp = _call_ingester("POST", f"/api/v1/audio/{file_id}/correct-term",
+                              json_body=body, timeout=30)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
 # ─── Export CSV admin ────────────────────────────────────────────────
 
 

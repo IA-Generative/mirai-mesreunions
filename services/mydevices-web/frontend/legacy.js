@@ -1473,14 +1473,244 @@ async function _openRegenerateModal(fileId, scope) {
                 if (node.matches && node.matches('.file-detail-feedback-block')) {
                     mountFeedbackBlock(node);
                 }
+                if (node.matches && node.matches('.file-detail-corrector-block')) {
+                    mountTranscriptCorrector(node);
+                }
                 if (node.querySelectorAll) {
                     node.querySelectorAll('.file-detail-feedback-block').forEach(mountFeedbackBlock);
+                    node.querySelectorAll('.file-detail-corrector-block').forEach(mountTranscriptCorrector);
                 }
             }
         }
     });
     obs.observe(document.body, { childList: true, subtree: true });
 })();
+
+// ─── Transcript corrector (Phase B + B3) ──────────────────────────
+//
+// Parse speaker_tagged_text en blocs {speaker, start, end, text}, affiche
+// chaque bloc avec un bouton ▶ qui joue l'audio à ce timecode. L'user
+// sélectionne du texte → popup "Corriger" avec input + 3 cases + bouton
+// 🔊 (rejoue le bloc). POST /api/file/<id>/correct-term.
+
+function _fmtTimecode(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function _parseSpeakerTagged(text) {
+    if (!text || typeof text !== 'string') return [];
+    const lines = text.split('\n');
+    const blocks = [];
+    let current = null;
+    const headRe = /^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*→\s*(\d+):(\d+(?:\.\d+)?)\)_/;
+    for (const raw of lines) {
+        const line = raw.trimEnd();
+        const m = line.match(headRe);
+        if (m) {
+            if (current) blocks.push(current);
+            current = {
+                speaker: m[1].trim(),
+                start: parseInt(m[2], 10) * 60 + parseFloat(m[3]),
+                end:   parseInt(m[4], 10) * 60 + parseFloat(m[5]),
+                text: '',
+            };
+        } else if (current && line.startsWith('>')) {
+            const t = line.replace(/^>\s?/, '').trim();
+            current.text = current.text ? current.text + ' ' + t : t;
+        }
+        // Lignes vides : on les ignore, on garde le bloc courant ouvert.
+    }
+    if (current) blocks.push(current);
+    return blocks;
+}
+
+async function mountTranscriptCorrector(container) {
+    if (!container || container.dataset.correctorMounted === '1') return;
+    const fileId = container.getAttribute('data-corrector-for') || '';
+    if (!fileId) return;
+    container.dataset.correctorMounted = '1';
+    container.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Chargement de la transcription…</p>`;
+
+    let data;
+    try {
+        const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+        if (!resp.ok) {
+            container.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Transcription indisponible (HTTP ${resp.status}).</p>`;
+            return;
+        }
+        data = await resp.json();
+    } catch (e) {
+        container.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur chargement : ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    if (!data || !data.available) {
+        container.innerHTML = '';   // pas encore prêt — on attend que le pipeline finisse
+        return;
+    }
+    const blocks = _parseSpeakerTagged(data.speaker_tagged_text || '');
+    if (!blocks.length) {
+        // Fallback : pas de speaker-tagged (échec diarisation) — afficher juste
+        // la transcription brute non-éditable.
+        container.innerHTML = `
+          <details class="transcript-corrector-fallback">
+            <summary>📜 Transcription complète (sans blocs interlocuteur)</summary>
+            <pre class="transcript-corrector-raw">${escapeHtml(data.transcription_text || data.speaker_tagged_text || '(vide)')}</pre>
+          </details>
+        `;
+        return;
+    }
+    container.innerHTML = `
+      <details class="transcript-corrector" open>
+        <summary class="transcript-corrector-summary">
+          📜 Transcription par interlocuteur ·
+          <span style="font-weight:400;font-size:0.78rem;color:#64748b;">
+            Sélectionnez un mot mal transcrit, click <em>Corriger</em>.
+            Bouton ▶ pour ré-écouter un passage.
+          </span>
+        </summary>
+        <audio class="transcript-corrector-audio" preload="metadata"
+               src="/api/file/stream-transcoded/${encodeURIComponent(fileId)}"></audio>
+        <div class="transcript-corrector-blocks">
+          ${blocks.map((b, i) => `
+            <div class="tc-block" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
+              <button type="button" class="tc-play" data-tc-play="${b.start}"
+                      title="Écouter ce passage (${_fmtTimecode(b.start)})">▶</button>
+              <span class="tc-speaker">${escapeHtml(b.speaker)}</span>
+              <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
+              <span class="tc-text" data-tc-text="${i}">${escapeHtml(b.text)}</span>
+            </div>
+          `).join('')}
+        </div>
+        <div class="transcript-corrector-footer"
+             data-tc-corrector-footer="${escapeHtml(fileId)}"
+             hidden></div>
+      </details>
+    `;
+
+    // Délégations locales au container.
+    const audio = container.querySelector('.transcript-corrector-audio');
+    container.addEventListener('click', (ev) => {
+        const playBtn = ev.target.closest && ev.target.closest('[data-tc-play]');
+        if (playBtn) {
+            ev.preventDefault();
+            const t = parseFloat(playBtn.getAttribute('data-tc-play')) || 0;
+            if (audio) {
+                try { audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
+            }
+            return;
+        }
+    });
+
+    // Sélection texte → afficher le footer correction.
+    container.addEventListener('mouseup', () => _onTranscriptSelection(container, fileId, audio, blocks));
+    container.addEventListener('touchend', () => _onTranscriptSelection(container, fileId, audio, blocks));
+}
+
+function _onTranscriptSelection(container, fileId, audio, blocks) {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    const selected = (sel.toString() || '').trim();
+    if (selected.length < 1 || selected.length > 200) return;
+    // Vérifie que la sélection est bien à l'intérieur d'un .tc-text de NOTRE container.
+    const anchor = sel.anchorNode;
+    if (!anchor) return;
+    const parentTc = (anchor.nodeType === 1 ? anchor : anchor.parentElement).closest('.tc-text');
+    if (!parentTc || !container.contains(parentTc)) return;
+    const blockEl = parentTc.closest('.tc-block');
+    const blockIdx = blockEl ? parseInt(blockEl.getAttribute('data-tc-idx'), 10) : null;
+    _showCorrectionFooter(container, fileId, selected, blockIdx, audio, blocks);
+}
+
+function _showCorrectionFooter(container, fileId, selectedText, blockIdx, audio, blocks) {
+    const footer = container.querySelector(`[data-tc-corrector-footer="${fileId}"]`);
+    if (!footer) return;
+    const block = (blockIdx != null && blocks[blockIdx]) ? blocks[blockIdx] : null;
+    const playStart = block ? block.start : 0;
+    footer.innerHTML = `
+      <div class="tc-correct-form">
+        <div class="tc-correct-head">
+          <span class="tc-correct-label">Corriger&nbsp;:</span>
+          <code class="tc-correct-old">${escapeHtml(selectedText)}</code>
+          ${block ? `<button type="button" class="tc-correct-listen" data-tc-play="${playStart}"
+                              title="Réécouter ce passage">🔊 ${_fmtTimecode(playStart)}</button>` : ''}
+          <button type="button" class="tc-correct-close"
+                  onclick="document.querySelector('[data-tc-corrector-footer=\\'${fileId}\\']').hidden=true; document.querySelector('[data-tc-corrector-footer=\\'${fileId}\\']').innerHTML='';">×</button>
+        </div>
+        <div class="tc-correct-row">
+          <input type="text" class="tc-correct-new"
+                 placeholder="Remplacer par…"
+                 maxlength="200" />
+        </div>
+        <div class="tc-correct-opts">
+          <label><input type="checkbox" class="tc-opt-glossary" checked /> Ajouter au glossaire personnel</label>
+          <label><input type="checkbox" class="tc-opt-patch" checked /> Remplacer dans cette transcription</label>
+          <label><input type="checkbox" class="tc-opt-reprocess" /> Relancer les étapes LLM (∼2 min)</label>
+        </div>
+        <div class="tc-correct-actions">
+          <button type="button" class="tc-correct-apply"
+                  data-tc-apply="${escapeHtml(fileId)}"
+                  data-tc-old="${escapeHtml(selectedText)}">Appliquer</button>
+          <span class="tc-correct-status" data-tc-status></span>
+        </div>
+      </div>
+    `;
+    footer.hidden = false;
+    const inp = footer.querySelector('.tc-correct-new');
+    if (inp) inp.focus();
+}
+
+// Délégation click APPLIQUE/Listen au niveau document (le footer est rendu
+// dans des containers existants, on évite de rebrancher à chaque rendu).
+document.addEventListener('click', async (ev) => {
+    const applyBtn = ev.target.closest && ev.target.closest('[data-tc-apply]');
+    if (applyBtn) {
+        ev.preventDefault();
+        const fileId = applyBtn.getAttribute('data-tc-apply');
+        const old = applyBtn.getAttribute('data-tc-old') || '';
+        const footer = applyBtn.closest('.transcript-corrector-footer');
+        if (!footer) return;
+        const newText = (footer.querySelector('.tc-correct-new')?.value || '').trim();
+        if (!newText) {
+            alert('Indiquez le terme de remplacement.');
+            return;
+        }
+        const body = {
+            old, new: newText,
+            add_to_glossary: footer.querySelector('.tc-opt-glossary')?.checked,
+            patch_text:     footer.querySelector('.tc-opt-patch')?.checked,
+            reprocess_llm:  footer.querySelector('.tc-opt-reprocess')?.checked,
+        };
+        const status = footer.querySelector('[data-tc-status]');
+        applyBtn.disabled = true;
+        if (status) status.textContent = 'Application…';
+        try {
+            const resp = await fetch(`/api/file/${encodeURIComponent(fileId)}/correct-term`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                if (status) status.textContent = `Échec : ${data.error || resp.status}`;
+                applyBtn.disabled = false;
+                return;
+            }
+            const applied = (data.applied || []).join(', ') || 'rien';
+            if (status) status.textContent = `✓ ${applied}`;
+            // Si patch_text actif, on refresh la fiche pour voir la transcription patched.
+            if (body.patch_text || body.reprocess_llm) {
+                setTimeout(() => { if (typeof loadSessions === 'function') loadSessions({ force: true }); }, 600);
+            }
+            // Auto-close footer après 1.2s.
+            setTimeout(() => { footer.hidden = true; footer.innerHTML = ''; }, 1400);
+        } catch (e) {
+            if (status) status.textContent = `Erreur : ${e.message}`;
+            applyBtn.disabled = false;
+        }
+    }
+});
 
 window.loadSessions = function(opts) { return loadSessions(opts); };
 async function loadSessions(opts) {
@@ -2047,6 +2277,14 @@ async function loadSessions(opts) {
                          data-transcript-file-id="${f.id}"
                          data-audio-downloads="${audioDownloadsAttr}"
                          data-persistent-summary="1"></div>
+                    <!-- Bloc correction inline (Phase B+B3) : parse le
+                         speaker_tagged_text en blocs {speaker, start, end,
+                         text}, affiche chaque bloc avec un bouton ▶ qui
+                         joue l'audio à ce timecode, et permet de
+                         sélectionner un mot/expression pour le corriger
+                         (audit dans user_feedback type='correction'). Mount
+                         délégué à mountTranscriptCorrector(). -->
+                    <div class="file-detail-corrector-block" data-corrector-for="${f.id}"></div>
                     <!-- Bloc feedback (en bas de fiche, après la lecture du
                          contenu) : Régénérer + pouce ↑/↓ "utile?". Voir
                          services/mydevices-web/app/modules/feedback/routes.py

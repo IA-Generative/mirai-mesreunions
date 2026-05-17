@@ -82,20 +82,21 @@ export function mount(container /*, ctx */) {
           </button>
         </h3>
         <div class="fr-collapse" id="ud-acc-glossary">
-          <p>
-            Votre <strong>glossaire utilisateur</strong> agrège automatiquement
-            les termes métier extraits de tous vos briefs de préparation
-            (noms propres, sigles, expressions). Il est utilisé en amont de
-            chaque transcription pour améliorer la reconnaissance vocale
-            (initial-prompt Whisper) puis en aval pour la correction
-            terminologique LLM.
+          <p class="subtitle" style="margin:0 0 0.6rem 0;">
+            Agrégé depuis vos briefs <strong>et</strong> éditable
+            directement ci-dessous. Les termes ⭐ favoris sont passés en
+            priorité à Whisper. Les termes 🚫 ignorés ne sont plus suggérés.
+            <em>Tapez Entrée pour ajouter un terme, click sur les
+            icônes pour basculer leur statut.</em>
           </p>
-          <p style="margin-top:0.4rem;">
-            Le fichier est synchronisé en temps réel dans votre Drive
-            (<em>Préparations de réunion/glossaire-utilisateur.txt</em>).
-            Limites en vigueur : 50 termes prioritaires par brief,
-            200 termes secondaires, 300 termes au total dans le glossaire global.
-          </p>
+          <div class="glossary-add-row">
+            <input type="text" class="glossary-add-input"
+                   placeholder="Ajouter un terme (ex: « EFS », « Mathieu Veil »…) puis Entrée"
+                   maxlength="200" />
+          </div>
+          <div data-my-glossary-list>
+            <p style="color:#94a3b8;font-size:0.85rem;">Chargement…</p>
+          </div>
         </div>
       </section>
 
@@ -190,6 +191,123 @@ export function mount(container /*, ctx */) {
 
   // Charge les feedbacks utilisateur (asynchrone, ne bloque pas le rendu).
   _loadMyFeedback(root);
+  // Charge le glossaire utilisateur + ajout inline via Enter.
+  _loadMyGlossary(root);
+  _bindGlossaryAddInput(root);
+}
+
+// ─── Glossaire personnel — vue éditable inline ────────────────────
+
+async function _loadMyGlossary(root) {
+  const list = root.querySelector('[data-my-glossary-list]');
+  if (!list) return;
+  try {
+    const resp = await fetch('/api/my-glossary?limit=500');
+    if (!resp.ok) {
+      list.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Erreur de chargement (HTTP ${resp.status}).</p>`;
+      return;
+    }
+    const data = await resp.json();
+    const items = data.items || [];
+    if (!items.length) {
+      list.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Aucun terme dans votre glossaire. Ajoutez-en un via le champ ci-dessus, ou ils s'ajouteront automatiquement quand vous créerez des préparations.</p>`;
+      return;
+    }
+    list.innerHTML = `
+      <p style="color:#64748b;font-size:0.75rem;margin:0 0 0.3rem 0;">${items.length} terme(s)</p>
+      <div class="glossary-grid">
+        ${items.map(_renderGlossaryRow).join('')}
+      </div>
+    `;
+  } catch (e) {
+    list.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur réseau : ${_esc(e.message)}</p>`;
+  }
+}
+
+function _renderGlossaryRow(g) {
+  const curated = !!g.curated_by_user;
+  const blocked = !!g.blacklisted;
+  const occ = g.occurrence_count || 0;
+  return `
+    <div class="glossary-row${blocked ? ' is-blocked' : ''}${curated ? ' is-curated' : ''}" data-term="${_esc(g.term)}">
+      <span class="glossary-term">${_esc(g.term)}</span>
+      <span class="glossary-meta">${occ}×</span>
+      <button type="button" class="glossary-toggle glossary-toggle--star ${curated ? 'is-on' : ''}"
+              data-glossary-action="toggle-curated" data-term="${_esc(g.term)}"
+              title="${curated ? 'Retirer des favoris (passe en auto)' : 'Marquer favori (priorité Whisper)'}">
+        ${curated ? '⭐' : '☆'}
+      </button>
+      <button type="button" class="glossary-toggle glossary-toggle--block ${blocked ? 'is-on' : ''}"
+              data-glossary-action="toggle-blacklisted" data-term="${_esc(g.term)}"
+              title="${blocked ? 'Réactiver le terme' : "Ignorer ce terme (ne plus l'utiliser)"}">
+        ${blocked ? '🚫' : '○'}
+      </button>
+      <button type="button" class="glossary-toggle glossary-toggle--del"
+              data-glossary-action="delete" data-term="${_esc(g.term)}"
+              title="Supprimer">×</button>
+    </div>
+  `;
+}
+
+function _bindGlossaryAddInput(root) {
+  const input = root.querySelector('.glossary-add-input');
+  if (!input) return;
+  input.addEventListener('keydown', async (ev) => {
+    if (ev.key !== 'Enter') return;
+    ev.preventDefault();
+    const term = (input.value || '').trim();
+    if (!term) return;
+    input.disabled = true;
+    try {
+      const resp = await fetch('/api/my-glossary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ term }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert(`Ajout impossible : ${data.error || ('HTTP ' + resp.status)}`);
+      } else {
+        input.value = '';
+        _loadMyGlossary(root);
+      }
+    } catch (e) {
+      alert(`Erreur réseau : ${e.message}`);
+    } finally {
+      input.disabled = false;
+      input.focus();
+    }
+  });
+
+  // Délégation click pour toggle / delete sur chaque row.
+  root.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest && ev.target.closest('[data-glossary-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-glossary-action');
+    const term = btn.getAttribute('data-term');
+    if (!term) return;
+    try {
+      if (action === 'delete') {
+        const ok = window.confirm(`Supprimer « ${term} » de votre glossaire ?`);
+        if (!ok) return;
+        await fetch('/api/my-glossary', {
+          method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term }),
+        });
+      } else if (action === 'toggle-curated' || action === 'toggle-blacklisted') {
+        const row = btn.closest('.glossary-row');
+        const isOn = btn.classList.contains('is-on');
+        const field = action === 'toggle-curated' ? 'curated_by_user' : 'blacklisted';
+        await fetch('/api/my-glossary', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ term, [field]: !isOn }),
+        });
+      }
+      _loadMyGlossary(root);
+    } catch (e) {
+      alert(`Erreur réseau : ${e.message}`);
+    }
+  });
 }
 
 async function _loadMyFeedback(root) {

@@ -2269,6 +2269,296 @@ def update_feedback(feedback_id: str):
         db.close()
 
 
+# ─── User glossary CRUD (édition manuelle) ────────────────────────
+#
+# Permet à l'utilisateur d'éditer son glossaire personnel sans passer
+# par une préparation de réunion : ajouter un sigle, blacklister un
+# faux terme, marquer un terme comme "curated" (priorité whisper
+# initial_prompt). La table user_glossary_terms existe depuis
+# migration 011 mais n'était utilisée qu'en lecture jusqu'ici.
+#
+# Endpoints (tous Bearer INTERNAL_API_TOKEN) :
+#   GET    /api/v1/user-glossary?user_sub=…&limit=&offset=
+#   POST   /api/v1/user-glossary  body {user_sub, term}  (add manuel curated)
+#   PATCH  /api/v1/user-glossary  body {user_sub, term, curated_by_user?, blacklisted?}
+#   DELETE /api/v1/user-glossary  body {user_sub, term}
+
+
+def _glossary_to_dict(g):
+    return {
+        "user_sub": g.user_sub,
+        "term": g.term,
+        "first_seen_at": g.first_seen_at.isoformat() if g.first_seen_at else None,
+        "last_seen_at": g.last_seen_at.isoformat() if g.last_seen_at else None,
+        "occurrence_count": int(g.occurrence_count or 0),
+        "last_source_meeting_id": str(g.last_source_meeting_id) if g.last_source_meeting_id else None,
+        "curated_by_user": bool(g.curated_by_user),
+        "blacklisted": bool(g.blacklisted),
+    }
+
+
+@app.route("/api/v1/user-glossary", methods=["GET"])
+def list_user_glossary():
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    limit = max(1, min(int(request.args.get("limit", 500)), 1000))
+    offset = max(0, int(request.args.get("offset", 0)))
+
+    from libs.shared.app.models import UserGlossaryTerm
+    db = SessionLocal()
+    try:
+        q = db.query(UserGlossaryTerm).filter(UserGlossaryTerm.user_sub == user_sub)
+        total = q.count()
+        items = q.order_by(
+            UserGlossaryTerm.curated_by_user.desc(),
+            UserGlossaryTerm.occurrence_count.desc(),
+            UserGlossaryTerm.term,
+        ).offset(offset).limit(limit).all()
+        return jsonify({
+            "items": [_glossary_to_dict(g) for g in items],
+            "total": total, "limit": limit, "offset": offset,
+        })
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/user-glossary", methods=["POST"])
+def add_user_glossary_term():
+    """Body : {user_sub, term}. Ajoute un terme curaté (priorité whisper)."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    term = (data.get("term") or "").strip()
+    if not user_sub or not term:
+        return jsonify({"error": "user_sub and term required"}), 400
+    if len(term) > 255:
+        return jsonify({"error": "term too long (max 255)"}), 400
+
+    from libs.shared.app.models import UserGlossaryTerm
+    db = SessionLocal()
+    try:
+        existing = db.query(UserGlossaryTerm).filter_by(
+            user_sub=user_sub, term=term,
+        ).first()
+        if existing:
+            # Idempotent : si déjà présent on le marque juste curated + déblackliste.
+            existing.curated_by_user = True
+            existing.blacklisted = False
+            existing.last_seen_at = datetime.now(timezone.utc)
+            db.commit()
+            db.refresh(existing)
+            return jsonify(_glossary_to_dict(existing)), 200
+        g = UserGlossaryTerm(
+            user_sub=user_sub, term=term,
+            first_seen_at=datetime.now(timezone.utc),
+            last_seen_at=datetime.now(timezone.utc),
+            occurrence_count=1,
+            curated_by_user=True,
+            blacklisted=False,
+        )
+        db.add(g)
+        db.commit()
+        db.refresh(g)
+        return jsonify(_glossary_to_dict(g)), 201
+    except Exception:
+        db.rollback()
+        logger.exception("user-glossary add failed")
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/user-glossary", methods=["PATCH"])
+def patch_user_glossary_term():
+    """Body : {user_sub, term, curated_by_user?, blacklisted?}.
+
+    Toggle d'un état sans recréer la row. Si term inexistant → 404.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    term = (data.get("term") or "").strip()
+    if not user_sub or not term:
+        return jsonify({"error": "user_sub and term required"}), 400
+
+    from libs.shared.app.models import UserGlossaryTerm
+    db = SessionLocal()
+    try:
+        g = db.query(UserGlossaryTerm).filter_by(user_sub=user_sub, term=term).first()
+        if not g:
+            return jsonify({"error": "not_found"}), 404
+        if "curated_by_user" in data:
+            g.curated_by_user = bool(data.get("curated_by_user"))
+        if "blacklisted" in data:
+            g.blacklisted = bool(data.get("blacklisted"))
+        db.commit()
+        db.refresh(g)
+        return jsonify(_glossary_to_dict(g))
+    except Exception:
+        db.rollback()
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/user-glossary", methods=["DELETE"])
+def delete_user_glossary_term():
+    """Body : {user_sub, term}. Suppression définitive."""
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    term = (data.get("term") or "").strip()
+    if not user_sub or not term:
+        return jsonify({"error": "user_sub and term required"}), 400
+
+    from libs.shared.app.models import UserGlossaryTerm
+    db = SessionLocal()
+    try:
+        n = db.query(UserGlossaryTerm).filter_by(user_sub=user_sub, term=term).delete()
+        db.commit()
+        if n == 0:
+            return jsonify({"error": "not_found"}), 404
+        return jsonify({"deleted": 1})
+    except Exception:
+        db.rollback()
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
+# ─── Correction inline d'un terme sur une transcription existante ─────
+#
+# 3-en-1 : ajout au glossaire / patch texte / reprocess LLM. Le caller
+# choisit quelles actions appliquer via flags booléens.
+
+
+@app.route("/api/v1/audio/<audio_id>/correct-term", methods=["POST"])
+def correct_audio_term(audio_id: str):
+    """Body : {user_sub, old, new, add_to_glossary?, patch_text?, reprocess_llm?}.
+
+    Trace systématiquement la correction dans user_feedback
+    (type='correction') quels que soient les flags.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    old = (data.get("old") or "").strip()
+    new = (data.get("new") or "").strip()
+    add_to_glossary = bool(data.get("add_to_glossary"))
+    patch_text = bool(data.get("patch_text"))
+    reprocess_llm = bool(data.get("reprocess_llm"))
+    if not user_sub or not old or not new:
+        return jsonify({"error": "user_sub, old, new required"}), 400
+
+    from libs.shared.app.models import UserAudioFile, UserGlossaryTerm, UserFeedback
+    db = SessionLocal()
+    applied = []
+    try:
+        uaf = db.query(UserAudioFile).filter(
+            UserAudioFile.id == audio_id,
+            UserAudioFile.user_sub == user_sub,
+        ).first()
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+
+        # 1) Glossaire — ajoute/curated le terme cible (new).
+        if add_to_glossary:
+            g = db.query(UserGlossaryTerm).filter_by(user_sub=user_sub, term=new).first()
+            if g:
+                g.curated_by_user = True
+                g.blacklisted = False
+                g.last_seen_at = datetime.now(timezone.utc)
+            else:
+                g = UserGlossaryTerm(
+                    user_sub=user_sub, term=new,
+                    first_seen_at=datetime.now(timezone.utc),
+                    last_seen_at=datetime.now(timezone.utc),
+                    occurrence_count=1,
+                    curated_by_user=True, blacklisted=False,
+                )
+                db.add(g)
+            applied.append("glossary")
+
+        # 2) Patch text — remplace `old` par `new` dans les 4 colonnes
+        # de texte (transcription / speaker-tagged / cleaned / reformulated).
+        # str.replace est case-sensitive → OK : on garde la forme exacte
+        # de l'utilisateur. Limite implicite : pas de regex (= match exact).
+        if patch_text and old:
+            cols = (
+                "transcription_text", "speaker_tagged_text",
+                "glossary_corrected_text", "cleaned_text", "reformulated_text",
+            )
+            for c in cols:
+                v = getattr(uaf, c, None)
+                if isinstance(v, str) and old in v:
+                    setattr(uaf, c, v.replace(old, new))
+            applied.append("patch_text")
+
+        db.commit()
+
+        # 3) Reprocess LLM — délègue à l'endpoint existant.
+        reprocess_status = None
+        if reprocess_llm:
+            try:
+                # Appel HTTP local (l'endpoint est dans le même process).
+                import urllib.request as _ur, json as _json
+                req2 = _ur.Request(
+                    f"http://localhost:{int(os.getenv('FILE_PULLER_PORT', 8090))}/api/v1/audio/{audio_id}/reprocess",
+                    data=_json.dumps({"user_sub": user_sub, "force": True}).encode(),
+                    headers={"Authorization": request.headers.get("Authorization", ""),
+                             "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with _ur.urlopen(req2, timeout=15) as r:
+                    reprocess_status = {"code": r.status, "body": _json.loads(r.read() or b"{}")}
+                    applied.append("reprocess_llm")
+            except Exception as e:
+                reprocess_status = {"error": str(e)}
+
+        # Trace audit dans user_feedback (type='correction').
+        try:
+            fb = UserFeedback(
+                user_sub=user_sub, file_id=audio_id,
+                type="correction",
+                payload={"old": old, "new": new, "applied": applied},
+                status="new",
+            )
+            db.add(fb)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("correct-term: feedback trace failed (non-fatal)")
+
+        return jsonify({
+            "applied": applied,
+            "reprocess": reprocess_status,
+            "old": old, "new": new,
+        })
+    except Exception:
+        db.rollback()
+        logger.exception("correct-term failed")
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
 def create_app():
     global SessionLocal, _purge_thread_started, _pull_loop_thread_started, _orphan_resume_started, _orphan_watchdog_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
