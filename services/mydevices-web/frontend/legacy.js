@@ -1702,8 +1702,11 @@ async function loadSessions(opts) {
                     </div>
                     <!-- Titre éditable : input flex + 2 boutons d'action
                          (✓ valider activé si modifié, ↺ annuler activé si
-                         modifié = restore valeur originale) | Uploadé le …
-                         à droite (info immuable côté serveur). -->
+                         modifié = restore valeur originale) | bouton (i)
+                         info pipeline à l'extrême droite (cale à droite via
+                         margin-left:auto sur le (i)). La date d'upload est
+                         dans la techline ci-dessous (à droite du nom du
+                         fichier source). -->
                     <div class="file-detail-title-row">
                         <input class="file-detail-title-input file-detail-edit-input" type="text"
                                value="${escapeHtml(f.original_filename)}"
@@ -1721,10 +1724,12 @@ async function loadSessions(opts) {
                                 title="Annuler les modifications"
                                 aria-label="Annuler les modifications du titre"
                                 disabled>${ICONS.revert}</button>
-                        <span class="file-detail-upload-info"
-                              title="Date d'upload du fichier (immuable)">
-                            Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
-                        </span>
+                        <button class="file-detail-info-btn file-detail-info-btn--inline"
+                                type="button"
+                                data-file-info-btn="${f.id}"
+                                onclick="openFileInfoModal('${f.id}')"
+                                title="Détails techniques (statut, qualité, étapes IA, normalisation)"
+                                aria-label="Voir les détails techniques">i</button>
                     </div>
                     <!-- Date *réelle* de la réunion, surchargée par
                          l'utilisateur. NULL côté serveur = pas d'override,
@@ -1757,10 +1762,11 @@ async function loadSessions(opts) {
                         <span class="file-detail-meeting-status"
                               data-meeting-dt-status-for="${f.id}"></span>
                     </div>
-                    <!-- Ligne sous le titre : juste date+durée à gauche +
-                         bouton (i) coloré à droite. Les infos techniques
-                         (qualité, statut, étapes, normalisation) sont
-                         derrière le bouton (i) qui ouvre un modal. -->
+                    <!-- Ligne sous le titre : date+durée à gauche, nom du
+                         fichier source au milieu, "Uploadé le ..." à droite
+                         (info immuable). Le bouton (i) info pipeline a
+                         migré sur la title row (à droite du nom de la
+                         réunion). -->
                     <div class="file-detail-techline">
                         <span class="file-row-meta">
                             <span class="file-row-meta-date ${dateClass}">${escapeHtml(fileDateLabel)}</span>
@@ -1770,12 +1776,10 @@ async function loadSessions(opts) {
                               title="Nom d'origine du fichier audio">
                             ${escapeHtml(f.original_filename)}
                         </span>
-                        <button class="file-detail-info-btn"
-                                type="button"
-                                data-file-info-btn="${f.id}"
-                                onclick="openFileInfoModal('${f.id}')"
-                                title="Détails techniques (statut, qualité, étapes IA, normalisation)"
-                                aria-label="Voir les détails techniques">i</button>
+                        <span class="file-detail-upload-info"
+                              title="Date d'upload du fichier (immuable)">
+                            Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
+                        </span>
                     </div>
                     <!-- transcript-section caché pour déclencher
                          loadTranscriptStatus qui met à jour la couleur du

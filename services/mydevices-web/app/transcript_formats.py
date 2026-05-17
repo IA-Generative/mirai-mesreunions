@@ -189,12 +189,52 @@ def meeting_analysis_to_markdown(analysis: dict | str) -> str:
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _BULLET_RE = re.compile(r"^[-*]\s+(.*)$")
+_BLOCKQUOTE_RE = re.compile(r"^>\s?(.*)$")
+_SPEAKER_RE = re.compile(r"^\*\*([^*]+)\*\*\s*(_\([^)]+\)_)?\s*$")
+
+# Inline runs : **bold** | _italic_ | *italic*. On parse en passe linéaire
+# pour produire des segments (text, bold, italic) qu'on rejoue ensuite côté
+# docx (Run) ou odt (Span). Pas de gestion imbriquée (rare en pratique sur
+# nos transcriptions Whisper + LLM).
+_INLINE_RE = re.compile(
+    r"(\*\*([^*]+)\*\*)"      # **bold**
+    r"|(\*([^*]+)\*)"          # *italic*
+    r"|(_([^_]+)_)"            # _italic_
+)
+
+
+def _parse_inline_runs(text: str):
+    """Yield (segment, bold, italic) tuples covering the whole `text`.
+
+    Naïf : pas d'imbrication (le pipeline whisper/LLM ne produit pas de
+    ``**_truc_**``). Les marqueurs non appariés sont laissés tels quels.
+    """
+    pos = 0
+    for m in _INLINE_RE.finditer(text):
+        if m.start() > pos:
+            yield (text[pos:m.start()], False, False)
+        if m.group(2) is not None:
+            yield (m.group(2), True, False)
+        elif m.group(4) is not None:
+            yield (m.group(4), False, True)
+        elif m.group(6) is not None:
+            yield (m.group(6), False, True)
+        pos = m.end()
+    if pos < len(text):
+        yield (text[pos:], False, False)
 
 
 def _iter_blocks(text: str):
-    """Yield (kind, level, content) tuples — kind ∈ {heading, bullet, para, blank}.
+    """Yield (kind, level, content) tuples — kind ∈ {heading, bullet,
+    blockquote, speaker, para, blank}.
 
-    Naive Markdown subset: # headings, - bullets, blank lines, paragraphs.
+    Markdown subset reconnu :
+      • ``# heading``  → (heading, level, content)
+      • ``- bullet``   → (bullet, 0, content)
+      • ``> quote``    → (blockquote, 0, content) — utilisé par speaker-tagged
+      • ``**Nom** _(0:00 → 1:09)_`` → (speaker, 0, content) — speaker line
+      • ligne vide     → (blank, 0, "")
+      • autre          → (para, 0, content) — rendu avec runs inline
     """
     for raw in text.splitlines():
         line = raw.rstrip()
@@ -209,11 +249,36 @@ def _iter_blocks(text: str):
         if m:
             yield ("bullet", 0, m.group(1).strip())
             continue
+        m = _BLOCKQUOTE_RE.match(line)
+        if m:
+            yield ("blockquote", 0, m.group(1).strip())
+            continue
+        if _SPEAKER_RE.match(line):
+            yield ("speaker", 0, line)
+            continue
         yield ("para", 0, line)
 
 
+def _docx_add_runs(paragraph, text: str):
+    """Helper : ajoute les runs bold/italic dans un paragraphe DOCX."""
+    for seg, bold, italic in _parse_inline_runs(text):
+        if not seg:
+            continue
+        run = paragraph.add_run(seg)
+        if bold:
+            run.bold = True
+        if italic:
+            run.italic = True
+
+
 def text_to_docx_bytes(text: str, title: str | None = None) -> bytes:
-    """Render a Markdown-ish string as a .docx blob."""
+    """Render a Markdown-ish string as a .docx blob.
+
+    Reconnaît bold (**...**), italic (_..._ / *...*), blockquote (>),
+    speaker lines (**Nom** _(timecodes)_). Le speaker-tagged donne donc
+    bien un bloc nom-en-gras + temps-en-italique + contenu en blockquote
+    visuellement distinct.
+    """
     from docx import Document  # python-docx
     doc = Document()
     if title:
@@ -223,9 +288,26 @@ def text_to_docx_bytes(text: str, title: str | None = None) -> bytes:
         if kind == "heading":
             doc.add_heading(content, level=min(level, 4))
         elif kind == "bullet":
-            doc.add_paragraph(content, style="List Bullet")
+            p = doc.add_paragraph(style="List Bullet")
+            _docx_add_runs(p, content)
+        elif kind == "blockquote":
+            # Indenté visuellement via style "Quote" (présent dans tous
+            # les templates DOCX par défaut). Garde l'inline parsing
+            # (italique / gras dans une citation possible).
+            p = doc.add_paragraph(style="Quote")
+            _docx_add_runs(p, content)
+        elif kind == "speaker":
+            # Force un saut entre 2 locuteurs (1 blank avant si pas déjà
+            # le cas). Le nom est en gras, le timecode entre parenthèses
+            # en italique (les runs sont déjà produits par
+            # _parse_inline_runs depuis **Nom** _(time)_).
+            if last_kind not in ("blank", "speaker"):
+                doc.add_paragraph()
+            p = doc.add_paragraph()
+            _docx_add_runs(p, content)
         elif kind == "para":
-            doc.add_paragraph(content)
+            p = doc.add_paragraph()
+            _docx_add_runs(p, content)
         # blank lines just reset the join, they don't add an empty para
         last_kind = kind
     buf = io.BytesIO()
@@ -233,30 +315,195 @@ def text_to_docx_bytes(text: str, title: str | None = None) -> bytes:
     return buf.getvalue()
 
 
+def _odt_add_spans(parent_el, text: str):
+    """Helper : ajoute les spans bold/italic dans un élément ODT (P, H, …)."""
+    from odf.text import Span
+    for seg, bold, italic in _parse_inline_runs(text):
+        if not seg:
+            continue
+        if bold or italic:
+            style_name = _odt_inline_style(bold, italic)
+            sp = Span(stylename=style_name, text=seg)
+            parent_el.addElement(sp)
+        else:
+            # Texte sans style → utilise addText pour rester compatible
+            # avec le rendu LibreOffice par défaut.
+            parent_el.addText(seg)
+
+
+def _odt_inline_style(bold: bool, italic: bool) -> str:
+    """Retourne le nom d'un style ODT inline (créé à la volée si besoin)."""
+    parts = []
+    if bold:
+        parts.append("Bold")
+    if italic:
+        parts.append("Italic")
+    return "".join(parts) if parts else "Default"
+
+
+def _ensure_odt_inline_styles(doc):
+    """Ajoute les styles Bold / Italic / BoldItalic au document s'ils
+    n'existent pas déjà. Idempotent (re-appel = no-op)."""
+    from odf.style import Style, TextProperties
+    needed = [
+        ("Bold", {"fontweight": "bold"}),
+        ("Italic", {"fontstyle": "italic"}),
+        ("BoldItalic", {"fontweight": "bold", "fontstyle": "italic"}),
+    ]
+    for name, props in needed:
+        existing = [s for s in doc.automaticstyles.childNodes
+                    if hasattr(s, "getAttribute") and s.getAttribute("name") == name]
+        if existing:
+            continue
+        s = Style(name=name, family="text")
+        s.addElement(TextProperties(**props))
+        doc.automaticstyles.addElement(s)
+
+
 def text_to_odt_bytes(text: str, title: str | None = None) -> bytes:
-    """Render a Markdown-ish string as a .odt blob."""
+    """Render a Markdown-ish string as a .odt blob.
+
+    Reconnaît les mêmes formes que ``text_to_docx_bytes``. Les spans
+    bold/italic utilisent des styles inline injectés dans automaticstyles.
+    """
     from odf.opendocument import OpenDocumentText  # odfpy
-    from odf.style import Style, TextProperties, ParagraphProperties
     from odf.text import H, P, List, ListItem
 
     doc = OpenDocumentText()
     if title:
         doc.meta.addElement(_odt_meta_title(title))
+    _ensure_odt_inline_styles(doc)
+    last_kind = "blank"
     for kind, level, content in _iter_blocks(text):
         if kind == "heading":
-            doc.text.addElement(H(outlinelevel=min(level, 4), text=content))
+            h = H(outlinelevel=min(level, 4))
+            _odt_add_spans(h, content)
+            doc.text.addElement(h)
         elif kind == "bullet":
             lst = List()
             item = ListItem()
-            item.addElement(P(text=content))
+            p = P()
+            _odt_add_spans(p, content)
+            item.addElement(p)
             lst.addElement(item)
             doc.text.addElement(lst)
+        elif kind == "blockquote":
+            # ODT n'a pas de style "Quote" standardisé ; on indente via
+            # un préfixe "« » " pour rester lisible, et on garde inline.
+            p = P()
+            _odt_add_spans(p, "« " + content + " »")
+            doc.text.addElement(p)
+        elif kind == "speaker":
+            if last_kind not in ("blank", "speaker"):
+                doc.text.addElement(P())   # blank line avant un nouveau locuteur
+            p = P()
+            _odt_add_spans(p, content)
+            doc.text.addElement(p)
         elif kind == "para":
-            doc.text.addElement(P(text=content))
-        # blank → skip
+            p = P()
+            _odt_add_spans(p, content)
+            doc.text.addElement(p)
+        # blank → skip (les sauts de paragraphes sont gérés au cas par cas)
+        last_kind = kind
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ─── Plain text / Markdown normalizer (B3) ──────────────────────────────────
+
+def text_to_plain_string(text: str) -> str:
+    """Convertit une chaîne Markdown-ish en plain text propre.
+
+    - Retire les marqueurs inline ``**``, ``_``, ``*`` (le contenu est gardé).
+    - Convertit ``>`` (blockquote) en ligne indentée + paragraphe séparé.
+    - Garantit 1 ligne vide entre chaque bloc + entre 2 speaker-lines.
+    - Pour les bullets ``-`` : conserve le tiret (lisible en .txt).
+    """
+    out: list[str] = []
+    last_kind = "blank"
+    for kind, level, content in _iter_blocks(text):
+        if kind == "blank":
+            if out and out[-1] != "":
+                out.append("")
+            last_kind = "blank"
+            continue
+        # Strip MD inline pour garder uniquement le contenu textuel.
+        clean = "".join(seg for seg, _b, _i in _parse_inline_runs(content))
+        if kind == "heading":
+            if out and out[-1] != "":
+                out.append("")
+            out.append(clean)
+            # Soulignement ASCII discret sous le heading.
+            out.append("─" * min(40, max(8, len(clean))))
+        elif kind == "bullet":
+            out.append(f"  • {clean}")
+        elif kind == "blockquote":
+            out.append(f"  {clean}")
+        elif kind == "speaker":
+            # Force blank avant un nouveau locuteur (sauf si déjà blank).
+            if out and out[-1] != "":
+                out.append("")
+            out.append(clean)
+        else:  # para
+            out.append(clean)
+        last_kind = kind
+    # Normalise les blank lines consécutifs (max 1).
+    norm: list[str] = []
+    prev_blank = False
+    for line in out:
+        if line == "":
+            if not prev_blank:
+                norm.append(line)
+            prev_blank = True
+        else:
+            norm.append(line)
+            prev_blank = False
+    # Trim trailing blank.
+    while norm and norm[-1] == "":
+        norm.pop()
+    return "\n".join(norm) + "\n"
+
+
+def text_to_md_string(text: str) -> str:
+    """Normalise une chaîne Markdown-ish : garantit 1 ligne vide entre les
+    blocs, sépare bien les speaker-lines. Conserve les marqueurs inline."""
+    out: list[str] = []
+    last_kind = "blank"
+    for kind, level, content in _iter_blocks(text):
+        if kind == "blank":
+            if out and out[-1] != "":
+                out.append("")
+            last_kind = "blank"
+            continue
+        if kind == "heading":
+            if out and out[-1] != "":
+                out.append("")
+            out.append(f"{'#' * level} {content}")
+        elif kind == "bullet":
+            out.append(f"- {content}")
+        elif kind == "blockquote":
+            out.append(f"> {content}")
+        elif kind == "speaker":
+            if out and out[-1] != "":
+                out.append("")
+            out.append(content)
+        else:
+            out.append(content)
+        last_kind = kind
+    norm: list[str] = []
+    prev_blank = False
+    for line in out:
+        if line == "":
+            if not prev_blank:
+                norm.append(line)
+            prev_blank = True
+        else:
+            norm.append(line)
+            prev_blank = False
+    while norm and norm[-1] == "":
+        norm.pop()
+    return "\n".join(norm) + "\n"
 
 
 def _odt_meta_title(title: str):

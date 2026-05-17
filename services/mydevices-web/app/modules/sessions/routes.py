@@ -426,11 +426,21 @@ def api_file_transcript_download(kind, ext, file_id):
             return jsonify({"error": f"{kind}_unavailable"}), 410
         stem = svc.build_download_basename(file_obj, audio, kind)
         body = svc.maybe_prepend_key_points(text, audio.get("key_points_summary"), ext)
+        from app.transcript_formats import (
+            text_to_docx_bytes, text_to_odt_bytes,
+            text_to_plain_string, text_to_md_string,
+        )
         if ext == "txt":
-            return _send_text_attachment(body, f"{stem}.txt", "text/plain; charset=utf-8")
+            # Strip MD inline + normalise blank lines + sépare locuteurs.
+            return _send_text_attachment(
+                text_to_plain_string(body), f"{stem}.txt",
+                "text/plain; charset=utf-8",
+            )
         if ext == "md":
-            return _send_text_attachment(body, f"{stem}.md", "text/markdown; charset=utf-8")
-        from app.transcript_formats import text_to_docx_bytes, text_to_odt_bytes
+            return _send_text_attachment(
+                text_to_md_string(body), f"{stem}.md",
+                "text/markdown; charset=utf-8",
+            )
         if ext == "docx":
             blob = text_to_docx_bytes(body, title=stem)
             return send_file(BytesIO(blob),
@@ -464,10 +474,14 @@ def api_file_meeting_cr_download(ext, file_id):
             return _send_text_attachment(raw, f"{stem}.json", "application/json; charset=utf-8")
         from app.transcript_formats import (
             meeting_analysis_to_markdown, text_to_docx_bytes, text_to_odt_bytes,
+            text_to_md_string,
         )
         md = meeting_analysis_to_markdown(raw)
         if ext == "md":
-            return _send_text_attachment(md, f"{stem}.md", "text/markdown; charset=utf-8")
+            return _send_text_attachment(
+                text_to_md_string(md), f"{stem}.md",
+                "text/markdown; charset=utf-8",
+            )
         if ext == "docx":
             blob = text_to_docx_bytes(md, title=stem)
             return send_file(BytesIO(blob),

@@ -1337,13 +1337,19 @@
             background: #f1f5f9; border-color: #94a3b8;
         }
         .file-detail-action-btn:disabled { opacity: 0.25; cursor: not-allowed; }
-        /* Info "Uploadé le ..." à droite : pousser à l'extrême droite via
-           margin-left:auto pour bien séparer visuellement l'édition (à
-           gauche) de l'info immuable (à droite). */
+        /* Info "Uploadé le ..." dans la techline — collée à l'extrême droite
+           (séparation visuelle de date+durée à gauche et nom fichier au
+           milieu). */
         .file-detail-upload-info {
             font-size: 0.74rem; color: #64748b;
             white-space: nowrap;
             flex-shrink: 0;
+            margin-left: auto;
+        }
+        /* Variante inline du bouton (i) info pipeline quand il est dans
+           la title row : margin-left:auto pour caler à l'extrême droite,
+           taille cohérente avec les autres boutons d'action. */
+        .file-detail-info-btn--inline {
             margin-left: auto;
         }
         /* Bloc d'édition "Date de la réunion" + bouton reset.
