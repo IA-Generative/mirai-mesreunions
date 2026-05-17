@@ -14,6 +14,7 @@
 // et préparer la migration PR5.
 
 import './lib/bootstrap.js';  // doit charger avant tout (publie window.ALLOWED_AUDIO_EXTENSIONS etc.)
+import { formatDuration, formatDate } from './utils/format.js';
 
 const impactCache = {};
 const impactLoading = new Set();
@@ -400,21 +401,13 @@ function toggleRowExpand(btn) {
     if (lbl) lbl.textContent = open ? 'détails' : 'replier';
     btn.setAttribute('aria-label', open ? 'Voir le résumé' : 'Masquer le résumé');
 }
-// Format helpers pour la vue liste compacte.
+// Format helpers pour la vue liste compacte — délègue aux utils centralisés
+// (TKT-103) pour produire un rendu français lisible cohérent dans toute l'UI.
 function _formatDateCompact(iso) {
-    if (!iso) return '';
-    try {
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return '';
-        return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' })
-            + ' ' + d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    } catch (e) { return ''; }
+    return formatDate(iso, { withTime: true });
 }
 function _formatDuration(seconds) {
-    if (!Number.isFinite(seconds) || seconds <= 0) return '';
-    const m = Math.floor(seconds / 60);
-    const s = Math.round(seconds % 60);
-    return m > 0 ? `${m}m${String(s).padStart(2,'0')}s` : `${s}s`;
+    return formatDuration(seconds);
 }
 
 // Convertit une ISO 8601 ("2026-05-14T13:42:00+02:00" ou avec Z) au format
@@ -749,7 +742,7 @@ function statusLabel(status) {
 }
 
 // Phases d'upload où le pipeline tourne encore (avant que la transcription
-// ne prenne le relais). Utilisé pour animer le dot dès le départ.
+// ne prenne le relais). Utilisé pour animer le tag dès le départ.
 const UPLOAD_IN_PROGRESS_STATES = new Set([
     'pending', 'scanning', 'scan_clean',
     'transcoding', 'ready_for_transfer', 'transferring',
@@ -760,6 +753,63 @@ function _uploadStateLabel(status) {
         return `Étape en cours : ${statusLabel(status)}`;
     }
     return statusLabel(status);
+}
+
+// ── TKT-101 : tag de statut DSFR (remplace l'ancienne pastille ●) ─────────
+// Renvoie { label, icon, kind, srLabel } pour rendu en `fr-tag fr-tag--sm`
+// + classe sémantique `file-row-status-tag--<kind>` (success/processing/
+// queued/partial/error/neutral). On accepte indifféremment les statuts du
+// pipeline d'upload (file.status) et de transcription (Kevent/MCR).
+const _TRANSCRIPT_SUCCESS = new Set(['completed', 'kevent_completed', 'mcr_pushed']);
+const _TRANSCRIPT_PROCESSING = new Set(['processing', 'kevent_transcribing', 'kevent_processing']);
+const _TRANSCRIPT_QUEUED = new Set(['pending', 'kevent_queued']);
+const _TRANSCRIPT_PARTIAL = new Set(['kevent_partially_completed']);
+const _TRANSCRIPT_FAILED = new Set([
+    'failed', 'kevent_failed',
+    'mcr_auth_failed', 'mcr_rejected', 'mcr_push_failed',
+]);
+const _UPLOAD_FAILED = new Set(['transcode_failed', 'error']);
+
+function _statusTagInfo(status, opts) {
+    const o = opts || {};
+    if (o.virus) {
+        return { label: 'Quarantaine', icon: 'fr-icon-error-warning-line', kind: 'error' };
+    }
+    if (_TRANSCRIPT_SUCCESS.has(status)) {
+        return { label: 'Prête', icon: 'fr-icon-success-line', kind: 'success' };
+    }
+    if (_TRANSCRIPT_PARTIAL.has(status)) {
+        return { label: 'Partiellement prête', icon: 'fr-icon-warning-line', kind: 'partial' };
+    }
+    if (_TRANSCRIPT_FAILED.has(status) || _UPLOAD_FAILED.has(status)) {
+        return { label: 'Erreur', icon: 'fr-icon-error-warning-line', kind: 'error' };
+    }
+    if (_TRANSCRIPT_PROCESSING.has(status) || UPLOAD_IN_PROGRESS_STATES.has(status)) {
+        return { label: 'En traitement', icon: 'fr-icon-time-line', kind: 'processing' };
+    }
+    if (_TRANSCRIPT_QUEUED.has(status) || status === 'transferred') {
+        return { label: 'En file d\'attente', icon: 'fr-icon-time-line', kind: 'queued' };
+    }
+    if (status === 'disabled') {
+        return { label: 'Désactivée', icon: 'fr-icon-information-line', kind: 'neutral' };
+    }
+    return { label: 'En attente', icon: 'fr-icon-time-line', kind: 'queued' };
+}
+
+function _renderStatusTag(status, opts) {
+    const o = opts || {};
+    const info = _statusTagInfo(status, o);
+    // aria-label détaillé : libellé court + statut technique (utile au screen
+    // reader pour distinguer "kevent_partially_completed" d'une vraie erreur).
+    const tech = o.virus ? `Virus détecté — ${statusLabel(status)}` : (o.tooltip || _uploadStateLabel(status));
+    const aria = `Statut : ${info.label} — ${tech}`;
+    const fileId = o.fileId || '';
+    return `<span class="fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}"
+                  data-file-status-tag="${escapeHtml(fileId)}"
+                  data-status-kind="${info.kind}"
+                  role="status"
+                  aria-label="${escapeHtml(aria)}"
+                  title="${escapeHtml(tech)}">${escapeHtml(info.label)}</span>`;
 }
 
 function tokenValidityDaysLabel(retentionExpiresAt) {
@@ -774,16 +824,7 @@ function tokenValidityDaysLabel(retentionExpiresAt) {
 }
 
 function formatDateTimeShort(isoValue) {
-    if (!isoValue) return '-';
-    const d = new Date(isoValue);
-    if (!Number.isFinite(d.getTime())) return '-';
-    return d.toLocaleString('fr-FR', {
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-    });
+    return formatDate(isoValue, { withTime: true }) || '-';
 }
 
 function tokenIdShort(tokenValue) {
@@ -935,9 +976,10 @@ async function purgeSessions() {
     try {
         const resp = await fetch('/api/purge-my-sessions', { method: 'POST' });
         const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'Erreur purge');
+        // TKT-211 : libellés user-facing débarrassés du terme "purge".
+        if (!resp.ok) throw new Error(data.error || 'Erreur lors de la mise à la corbeille');
         alert(`Mis à la corbeille: ${data.deleted_sessions || 0} session(s), ${data.deleted_files || 0} fichier(s).\n` +
-              `Purge définitive automatique au bout de 30 jours.`);
+              `Suppression définitive automatique au bout de 30 jours.`);
         loadSessions();
         loadDevices();
     } catch (e) {
@@ -1479,18 +1521,13 @@ async function loadSessions(opts) {
                                  data-audio-downloads="${audioDownloadsAttr}"
                                  data-compact="1"
                                  style="display:none;"></div>
-                            <!-- Dot inline (caractère unicode) : aligné comme
-                                 un caractère sur la baseline du titre. Sa
-                                 couleur+animation est ajustée par
-                                 loadTranscriptStatus via la classe
-                                 file-row-dot-<status>. À l'init, on pose
-                                 file-row-dot-upload-in-progress tant que
-                                 l'upload n'est pas TRANSFERRED — ça suffit à
-                                 animer "il se passe un truc" avant même que
-                                 la transcription démarre. -->
-                            <span class="file-row-dot ${UPLOAD_IN_PROGRESS_STATES.has(f.status) ? 'file-row-dot-upload-in-progress' : ''} ${isVirusBlocked ? `file-row-dot-${f.status}` : ''}"
-                                  data-file-dot="${f.id}"
-                                  title="${escapeHtml(isVirusBlocked ? `Virus détecté — ${statusLabel(f.status)}` : _uploadStateLabel(f.status))}">●</span>
+                            <!-- TKT-101 : tag DSFR de statut (remplace l'ancienne
+                                 pastille ● 6px par un libellé textuel + icône
+                                 fr-icon-*). Le rendu initial s'appuie sur
+                                 file.status ; loadTranscriptStatus remplacera
+                                 ensuite le tag par le statut transcription dès
+                                 que celui-ci est disponible. -->
+                            ${_renderStatusTag(f.status, { fileId: f.id, virus: isVirusBlocked })}
                             <a href="#" class="file-row-title" data-file-id="${f.id}"
                                onclick="event.preventDefault();showFileDetail('${f.id}');"
                                title="${escapeHtml(f.original_filename)}">
@@ -1523,7 +1560,7 @@ async function loadSessions(opts) {
                             </span>
                             <button type="button" class="icon-btn file-row-delete"
                                     onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                    title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                    title="Mettre à la corbeille (supprimée automatiquement après 30 jours)"
                                     aria-label="Mettre à la corbeille">
                                 ${ICONS.trash}
                             </button>
@@ -1554,7 +1591,7 @@ async function loadSessions(opts) {
                                 aria-label="Retour à la liste">← Liste</button>
                         <button type="button" class="icon-btn"
                                 onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                title="Mettre à la corbeille (purgée définitivement après 30 jours)"
+                                title="Mettre à la corbeille (supprimée automatiquement après 30 jours)"
                                 aria-label="Mettre à la corbeille">
                             ${ICONS.trash}
                         </button>
@@ -2171,16 +2208,20 @@ async function loadTranscriptStatus(fileId, container) {
                 }
             }
             if (container.getAttribute('data-compact') === '1') {
-                // Met à jour le dot caractère unicode "●" inline dans la
-                // file-row (aligné naturellement avec le titre). La couleur
-                // dépend du statut via la classe file-row-dot-<status>,
-                // l'animation pulse aussi (les classes in-progress portent
-                // l'animation CSS — cf. @keyframes filerowDotPulse).
-                const dot = document.querySelector(`[data-file-dot="${fileId}"]`);
-                if (dot) {
-                    dot.className = `file-row-dot file-row-dot-${status}`;
+                // TKT-101 : remplace le tag de statut (rendu initial basé sur
+                // file.status) par celui qui reflète le statut transcription
+                // dès qu'il est connu. L'animation pulse est portée par la
+                // classe file-row-status-tag--processing (cf. CSS).
+                const tag = document.querySelector(`[data-file-status-tag="${fileId}"]`);
+                if (tag) {
                     const friendly = (TRANSCRIPT_STATUS_LABELS[status] || {}).label || status;
-                    dot.title = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
+                    const tooltip = `Étape en cours : ${friendly}${engine ? ' (' + engine + ')' : ''}`;
+                    const info = _statusTagInfo(status);
+                    tag.className = `fr-tag fr-tag--sm fr-tag--icon-left ${info.icon} file-row-status-tag file-row-status-tag--${info.kind}`;
+                    tag.setAttribute('data-status-kind', info.kind);
+                    tag.setAttribute('aria-label', `Statut : ${info.label} — ${tooltip}`);
+                    tag.title = tooltip;
+                    tag.textContent = info.label;
                 }
                 // Bouton (i) : tooltip multi-ligne avec checklist par étape
                 // (☐/✓/✗). Pulse + bordure bleue si le pipeline tourne.
@@ -2275,7 +2316,7 @@ async function loadNormalizationImpact(fileId) {
             `Amélioration cible -16 LUFS: ${data.improvement_to_target_lufs}.`;
         impactCache[fileId] = {
             text: msg,
-            at: new Date().toLocaleString('fr-FR'),
+            at: formatDate(new Date().toISOString(), { withTime: true }),
         };
         showToast('Impact de la normalisation calculé.', 'success');
         // Si le modal est ouvert, met aussi à jour son contenu impact
@@ -2285,7 +2326,7 @@ async function loadNormalizationImpact(fileId) {
         const msg = `Erreur: ${e.message}`;
         impactCache[fileId] = {
             text: msg,
-            at: new Date().toLocaleString('fr-FR'),
+            at: formatDate(new Date().toISOString(), { withTime: true }),
         };
         showToast(`Impact normalisation : ${e.message}`, 'error');
     } finally {
@@ -2358,11 +2399,19 @@ async function loadTrash() {
             </p>`;
             return;
         }
+        // TKT-211 : bannir le terme "purge" côté user-facing au profit de
+        // "Sera supprimé automatiquement dans N jour(s)" (libellé explicite).
+        const autoDeleteLabel = (daysLeft) => {
+            if (daysLeft == null) return 'Sera supprimé automatiquement prochainement';
+            const n = Number(daysLeft);
+            if (!Number.isFinite(n) || n <= 0) return 'Sera supprimé automatiquement aujourd\'hui';
+            return `Sera supprimé automatiquement dans ${n} ${n > 1 ? 'jours' : 'jour'}`;
+        };
         const sessionsHtml = sessions.map(s => `
             <div class="trash-item">
                 <span class="trash-item-type">Session</span>
                 <span class="trash-item-name"><strong>${escapeHtml(s.simple_code)}</strong> · ${s.files_count} fichier(s)</span>
-                <span class="trash-item-meta">reste ${s.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(s.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreSession('${s.simple_code}')">Restaurer</button>
             </div>
@@ -2371,7 +2420,7 @@ async function loadTrash() {
             <div class="trash-item">
                 <span class="trash-item-type">Fichier</span>
                 <span class="trash-item-name">${escapeHtml(f.original_filename)} <small style="color:#94a3b8;">(${escapeHtml(f.simple_code || '?')})</small></span>
-                <span class="trash-item-meta">reste ${f.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(f.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreFile('${f.id}')">Restaurer</button>
                 <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
@@ -2384,7 +2433,7 @@ async function loadTrash() {
             <div class="trash-item" data-trash-kind="brief">
                 <span class="trash-item-type">[Brief]</span>
                 <span class="trash-item-name">${escapeHtml(b.title || '(sans titre)')}</span>
-                <span class="trash-item-meta">reste ${b.days_left == null ? '?' : b.days_left} j avant purge</span>
+                <span class="trash-item-meta">${escapeHtml(autoDeleteLabel(b.days_left))}</span>
                 <button class="btn-primary fr-btn fr-btn--sm fr-btn--secondary"
                         onclick="restoreBrief('${b.id}')">Restaurer</button>
                 <button class="btn-primary btn-danger-mini fr-btn fr-btn--sm fr-btn--tertiary-no-outline"

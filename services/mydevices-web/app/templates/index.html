@@ -850,46 +850,39 @@
             padding: 0.45rem 0.55rem;
             min-height: 32px;
         }
-        /* Dot caractère unicode "●" : aligné naturellement sur la
-           baseline du texte (pas de div/flex contournant). Sa couleur
-           est ajustée par loadTranscriptStatus selon le statut.
-           Approche cleanup : on s'appuie sur la métrique font, pas
-           sur un cercle CSS qui retombait toujours plus bas que le
-           texte (les techniques flex/inline-flex ne fixent pas). */
-        .file-row-dot {
-            font-size: 0.7rem; line-height: 1; color: #cbd5e1;
-            user-select: none;
+        /* TKT-101 : tag DSFR de statut (fr-tag fr-tag--sm + icône DSFR)
+           remplace l'ancienne pastille ● 6 px. Les variantes couleur sont
+           portées par .file-row-status-tag--<kind>, l'animation pulse
+           uniquement par --processing (en cours actif). */
+        .file-row-status-tag {
+            line-height: 1.1;
+            vertical-align: middle;
+            white-space: nowrap;
         }
-        .file-row-dot-completed,
-        .file-row-dot-kevent_completed,
-        .file-row-dot-mcr_pushed { color: #10b981; }
-        .file-row-dot-kevent_partially_completed { color: #f59e0b; }
-        .file-row-dot-failed,
-        .file-row-dot-kevent_failed,
-        .file-row-dot-mcr_auth_failed,
-        .file-row-dot-mcr_rejected,
-        .file-row-dot-mcr_push_failed { color: #b91c1c; }
-        .file-row-dot-pending,
-        .file-row-dot-processing,
-        .file-row-dot-kevent_queued,
-        .file-row-dot-kevent_transcribing,
-        .file-row-dot-kevent_processing,
-        .file-row-dot-upload-in-progress { color: #3b82f6; }
-        .file-row-dot-disabled { color: #94a3b8; }
-        /* Animation "il se passe un truc" : pulse opacity+scale tant que
-           le pipeline (upload + transcription) n'est pas terminal. */
-        @keyframes filerowDotPulse {
-            0%, 100% { opacity: 1;   transform: scale(1);    }
-            50%      { opacity: 0.4; transform: scale(1.35); }
+        .file-row-status-tag--success {
+            background-color: #dcfce7; color: #15803d;
         }
-        .file-row-dot-pending,
-        .file-row-dot-processing,
-        .file-row-dot-kevent_queued,
-        .file-row-dot-kevent_transcribing,
-        .file-row-dot-kevent_processing,
-        .file-row-dot-upload-in-progress {
-            animation: filerowDotPulse 1.4s ease-in-out infinite;
-            display: inline-block; /* nécessaire pour que transform: scale prenne effet */
+        .file-row-status-tag--processing {
+            background-color: #dbeafe; color: #1d4ed8;
+            animation: filerowStatusTagPulse 1.4s ease-in-out infinite;
+        }
+        .file-row-status-tag--queued {
+            background-color: #f1f5f9; color: #475569;
+        }
+        .file-row-status-tag--partial {
+            background-color: #fef3c7; color: #92400e;
+        }
+        .file-row-status-tag--error {
+            background-color: #fee2e2; color: #b91c1c;
+        }
+        .file-row-status-tag--neutral {
+            background-color: #f3f4f6; color: #475569;
+        }
+        /* Pulse opacity uniquement — scale aurait été disgracieux sur un
+           tag (plus large que le dot d'origine). */
+        @keyframes filerowStatusTagPulse {
+            0%, 100% { opacity: 1;   }
+            50%      { opacity: 0.55; }
         }
         .file-row-title {
             font-weight: 600; color: #1d4ed8;
@@ -939,9 +932,6 @@
             text-decoration: line-through !important;
         }
         .file-detail-virus { background: #fef2f2; padding: 0.4rem; border-radius: 8px; }
-        /* Dot couleur virus (rouge fixe, pas d'animation pulse). */
-        .file-row-dot-scan_infected,
-        .file-row-dot-quarantined { color: #b91c1c !important; animation: none !important; }
         /* En vue détail (queue-hint au-dessus du rail), le widget partage
            la classe queue-hint. On garde son style existant intact. */
         .queue-hint:empty { display: none; }
@@ -2277,7 +2267,7 @@
                 <button type="button" id="purge-btn" class="icon-btn icon-btn-purge advanced-only" disabled
                         data-action="meetings:purge-all"
                         onclick="purgeSessions()"
-                        title="Mettre toute la liste à la corbeille (purgée définitivement après 30 jours)"
+                        title="Mettre toute la liste à la corbeille (supprimée automatiquement après 30 jours)"
                         aria-label="Tout mettre à la corbeille">
                     <svg viewBox="0 0 32 24" fill="none" stroke="currentColor"
                          stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
@@ -2598,8 +2588,11 @@
                 </div>
 
                 {# Lot 9 — Thématiques additionnelles (chips libres). #}
+                {# TKT-107 : force fr-h6 sur le h3 pour cohérence avec les
+                   autres sous-titres du wizard (sans classe, h3 héritait
+                   du dimensionnement DSFR par défaut, démesuré). #}
                 <div class="wizard-question" style="margin-top:1.2rem;">
-                    <h3 style="margin-bottom:0.3rem;">Thématiques additionnelles</h3>
+                    <h3 class="fr-h6" style="margin-bottom:0.3rem;">Thématiques additionnelles</h3>
                     <div class="hint">
                         Ajoutez des sujets ou mots-clés spécifiques à votre contexte
                         (ex. « Budget 2026 », « Plan de continuité »). Ces thématiques

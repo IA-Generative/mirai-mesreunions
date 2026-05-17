@@ -7,18 +7,10 @@
 // Si une seule adresse → uniquement "to". Si aucune → pas de "to" du tout
 // (l'utilisateur les remplira manuellement dans son client mail).
 
+import { formatDate } from '../utils/format.js';
+
 function _formatDateFR(iso) {
-  if (!iso) return '';
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString('fr-FR', {
-      weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
-  } catch (e) {
-    return iso;
-  }
+  return formatDate(iso, { withTime: true });
 }
 
 function _validEmails(participants) {

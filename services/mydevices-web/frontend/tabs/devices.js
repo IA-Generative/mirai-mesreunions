@@ -22,6 +22,8 @@
 //     → orchestration cross-onglet (legacy.js).
 //   - window.DEVICE_RETENTION_DAYS → bootstrap (lib/bootstrap.js).
 
+import { formatDate } from '../utils/format.js';
+
 const _esc = (v) => (window.escapeHtml ? window.escapeHtml(v) : String(v == null ? '' : v));
 
 // ── État local du tab devices ──────────────────────────────────────────
@@ -362,7 +364,7 @@ export async function generateCode() {
     if (_$('qr-img')) _$('qr-img').src = '/api/qr-image/' + data.qr_token;
     if (_$('display-expires')) {
       _$('display-expires').textContent =
-        'Valide jusqu\'au ' + new Date(data.expires_at).toLocaleString('fr-FR');
+        'Valide jusqu\'au ' + formatDate(data.expires_at, { withTime: true });
     }
     if (_$('display-remaining')) {
       _$('display-remaining').textContent = `Téléchargements restants : ${data.max_uploads}`;

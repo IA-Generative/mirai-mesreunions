@@ -121,27 +121,24 @@ export function mount(container /*, ctx */) {
         </div>
       </section>
 
-      <section class="fr-accordion">
-        <h3 class="fr-accordion__title">
-          <button type="button" class="fr-accordion__btn"
-                  aria-expanded="false" aria-controls="ud-acc-trash">
-            Corbeille
-          </button>
-        </h3>
-        <div class="fr-collapse" id="ud-acc-trash">
-          <p>
-            Les fichiers et briefs supprimés sont conservés
-            <strong>30 jours</strong> dans la corbeille avant suppression
-            définitive (soft-delete). Vous pouvez les restaurer à tout moment
-            depuis l'onglet dédié.
-          </p>
-          <button type="button" class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-delete-line"
-                  data-action="open-trash">
-            Aller à la corbeille
-          </button>
-        </div>
-      </section>
+    </div>
 
+    <!-- TKT-115 : l'accordéon "Corbeille" doublonnait l'onglet de premier
+         niveau du même nom. Remplacé par un callout DSFR simple qui
+         pointe vers l'onglet, pour garder la mention dans la rubrique
+         "Mes données utiles" sans dupliquer le contenu. -->
+    <div class="fr-callout fr-mt-3w" style="margin-top:1rem;">
+      <h3 class="fr-callout__title fr-h6">Corbeille</h3>
+      <p class="fr-callout__text">
+        Les fichiers et briefs supprimés sont conservés
+        <strong>30 jours</strong> dans la corbeille avant suppression
+        définitive (soft-delete). Restauration possible à tout moment.
+      </p>
+      <button type="button"
+              class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-delete-line"
+              data-action="open-trash">
+        Aller à la corbeille
+      </button>
     </div>
 
     <h2 style="font-size:1rem;margin-top:1.6rem;margin-bottom:0.6rem;">
