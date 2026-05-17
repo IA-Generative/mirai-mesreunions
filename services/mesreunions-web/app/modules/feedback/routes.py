@@ -418,7 +418,14 @@ def correct_file_term(file_id: str):
                               json_body=body, timeout=30)
     except req.RequestException:
         return jsonify({"error": "ingester_unavailable"}), 502
-    return jsonify(resp.json() if resp.content else {}), resp.status_code
+    # Parse JSON défensivement : si l'ingester renvoie une 500 HTML (e.g.
+    # unhandled exception → Flask debug page), .json() raise et le proxy
+    # crashe en 500 silencieux. Fallback : retourner le raw text en error.
+    try:
+        body_out = resp.json() if resp.content else {}
+    except ValueError:
+        body_out = {"error": "ingester_invalid_response", "raw": (resp.text or '')[:500]}
+    return jsonify(body_out), resp.status_code
 
 
 @bp.route("/api/file/<file_id>/term-sources", methods=["GET"])

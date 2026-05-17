@@ -2114,50 +2114,84 @@ const CR_TABS = [
 ];
 
 function _formatMeetingAnalysisAsMarkdown(jsonText) {
-    // Le meeting_analysis_json est un objet 5-sections produit par LLM :
-    //   { actors: [{name, role}],
-    //     themes: [{title, summary}],
-    //     decisions: [{decision, owner?, deadline?}|string],
-    //     gaps: [{question|gap, raised_by?}|string],
-    //     recommendations: [{recommendation, why?}|string] }
-    // Si c'est déjà du markdown stocké en string, on retourne tel quel.
+    // Le meeting_analysis_json est un objet 5-sections produit par LLM.
+    // Format observé : objets typés par section avec champs variés selon
+    // les versions du prompt. On extrait les champs connus, on garde le
+    // reste (champs additionnels comme `context`, `details`, `priority`,
+    // etc) en suffixe italique pour ne pas perdre d'info utile, mais on
+    // évite d'afficher du JSON brut.
     if (!jsonText) return '';
     let obj;
     try { obj = JSON.parse(jsonText); }
     catch (e) { return jsonText; }
     if (!obj || typeof obj !== 'object') return String(jsonText);
 
+    // Helpers : extrait le premier champ non-vide parmi une liste, et
+    // formate les champs restants en "clé: valeur · ..." pour suffix.
+    const pick = (o, keys) => {
+        for (const k of keys) {
+            if (o && o[k] != null && String(o[k]).trim()) return String(o[k]).trim();
+        }
+        return '';
+    };
+    const SKIP_KEYS = new Set([
+        // Champs déjà extraits par section (vide = on les enlève des extras).
+    ]);
+    const fmtExtras = (o, consumedKeys) => {
+        if (!o || typeof o !== 'object') return '';
+        const consumed = new Set([...(consumedKeys || []), ...SKIP_KEYS]);
+        const extras = Object.entries(o)
+            .filter(([k, v]) => !consumed.has(k) && v != null && String(v).trim())
+            .map(([k, v]) => {
+                if (Array.isArray(v)) v = v.join(', ');
+                else if (typeof v === 'object') v = JSON.stringify(v);
+                return `${k}: ${v}`;
+            });
+        if (extras.length === 0) return '';
+        return ` _(${extras.join(' · ')})_`;
+    };
+
     const fmtActor = (a) => {
         if (typeof a === 'string') return `- ${a}`;
-        const name = a.name || a.speaker || a.label || '';
-        const role = a.role || a.title || '';
-        return role ? `- **${name}** — ${role}` : `- **${name}**`;
+        const name = pick(a, ['name', 'speaker', 'label']);
+        const role = pick(a, ['role', 'title']);
+        const consumed = ['name','speaker','label','role','title'];
+        const main = role ? `**${name}** — ${role}` : `**${name}**`;
+        return `- ${main}${fmtExtras(a, consumed)}`;
     };
     const fmtTheme = (t) => {
         if (typeof t === 'string') return `- ${t}`;
-        const title = t.title || t.label || '';
-        const summary = t.summary || t.description || '';
-        return summary ? `- **${title}** : ${summary}` : `- **${title}**`;
+        const title = pick(t, ['title', 'label', 'theme']);
+        const summary = pick(t, ['summary', 'description']);
+        const consumed = ['title','label','theme','summary','description'];
+        const main = summary ? `**${title}** : ${summary}` : `**${title}**`;
+        return `- ${main}${fmtExtras(t, consumed)}`;
     };
     const fmtDecision = (d) => {
         if (typeof d === 'string') return `- ${d}`;
-        const text = d.decision || d.text || d.title || '';
-        const owner = d.owner || d.assignee || '';
-        const deadline = d.deadline || d.due || d.date || '';
-        const extra = [owner && `_porteur :_ ${owner}`, deadline && `_échéance :_ ${deadline}`].filter(Boolean).join(' · ');
-        return extra ? `- ${text} (${extra})` : `- ${text}`;
+        const text = pick(d, ['decision', 'text', 'title', 'statement']);
+        const owner = pick(d, ['owner', 'assignee', 'responsible']);
+        const deadline = pick(d, ['deadline', 'due', 'date', 'when']);
+        const consumed = ['decision','text','title','statement','owner','assignee','responsible','deadline','due','date','when'];
+        const meta = [owner && `porteur : ${owner}`, deadline && `échéance : ${deadline}`].filter(Boolean).join(' · ');
+        const main = meta ? `${text} _(${meta})_` : text;
+        return `- ${main}${fmtExtras(d, consumed)}`;
     };
     const fmtGap = (g) => {
         if (typeof g === 'string') return `- ${g}`;
-        const text = g.question || g.gap || g.text || g.title || '';
-        const raised = g.raised_by || g.asked_by || '';
-        return raised ? `- ${text} _(soulevé par ${raised})_` : `- ${text}`;
+        const text = pick(g, ['question', 'gap', 'text', 'title', 'issue']);
+        const raised = pick(g, ['raised_by', 'asked_by', 'speaker']);
+        const consumed = ['question','gap','text','title','issue','raised_by','asked_by','speaker'];
+        const main = raised ? `${text} _(soulevé par ${raised})_` : text;
+        return `- ${main}${fmtExtras(g, consumed)}`;
     };
     const fmtReco = (r) => {
         if (typeof r === 'string') return `- ${r}`;
-        const text = r.recommendation || r.text || r.title || '';
-        const why = r.why || r.reason || '';
-        return why ? `- ${text} _— ${why}_` : `- ${text}`;
+        const text = pick(r, ['recommendation', 'text', 'title', 'action']);
+        const why = pick(r, ['why', 'reason', 'rationale']);
+        const consumed = ['recommendation','text','title','action','why','reason','rationale'];
+        const main = why ? `${text} _— ${why}_` : text;
+        return `- ${main}${fmtExtras(r, consumed)}`;
     };
     const sections = [
         { key: 'actors',          title: 'Acteurs',           fmt: fmtActor },
@@ -2265,18 +2299,24 @@ function _openCrEditorModal(fileId, data) {
             body.innerHTML = `<div class="cr-inline-empty">Pas de contenu pour cet onglet.</div>`;
             return;
         }
+        // Heuristique : si le texte contient des marqueurs markdown
+        // structurels (titres ##, listes -, gras **), on le passe par
+        // marked.js. Sinon (typiquement la reformulation = texte continu
+        // avec retours à la ligne), on le rend en <pre.cr-plain> pour
+        // préserver les sauts de ligne sans transformation.
+        const looksLikeMarkdown = /^(\s*#{1,6}\s|\s*[-*]\s|\s*\d+\.\s)/m.test(text)
+            || /\*\*[^*]+\*\*/.test(text);
         let html;
-        try {
-            html = window.marked ? window.marked.parse(text) : `<pre>${escapeHtml(text)}</pre>`;
-        } catch (e) {
-            html = `<pre>${escapeHtml(text)}</pre>`;
+        if (looksLikeMarkdown && window.marked) {
+            try { html = window.marked.parse(text); }
+            catch (e) { html = `<pre class="cr-plain">${escapeHtml(text)}</pre>`; }
+        } else {
+            html = `<pre class="cr-plain">${escapeHtml(text)}</pre>`;
         }
         body.innerHTML = html;
         if (correctedTerms && correctedTerms.length > 0) {
             _markCorrectedTermsInBody(body, correctedTerms);
         }
-        // Décore chaque ligne CR (<li>, <p>, <h2/h3>) avec un bouton 🔍
-        // au survol : trouve la source brute via query fuzzy multi-mots.
         _decorateCrLinesWithFindButtons(body, fileId);
     };
 
@@ -3791,12 +3831,15 @@ async function loadTranscriptStatus(fileId, container) {
             const rows = Object.keys(STEP_INFO).map(k => {
                 const info = STEP_INFO[k];
                 const ok = !!outputs[k];
-                let icon, color;
+                let icon, color, labelSuffix = '';
                 if (isReprocessing && k !== 'transcript' && k !== 'transcript-tagged') {
-                    // En reprocess : étapes LLM en train d'être rejouées
-                    // (glossary/cleaned/reformulated/meeting-cr). Whisper et
-                    // diarisation NE sont PAS rejoués (reprocess = LLM only).
-                    icon = '🔄'; color = '#1d4ed8';
+                    // En reprocess LLM : les 4 étapes glossary/cleaned/
+                    // reformulated/meeting-cr sont rejouées. On les affiche
+                    // explicitement "à refaire" plutôt que ✓ (les anciens
+                    // outputs sont stales et vont être écrasés).
+                    icon = '⏳';
+                    color = '#1d4ed8';
+                    labelSuffix = ' <small style="color:#1d4ed8;font-weight:600;">— en cours de régénération</small>';
                 } else {
                     icon = ok ? '✓' : '✗';
                     color = ok ? '#10b981' : '#b91c1c';
@@ -3806,7 +3849,7 @@ async function loadTranscriptStatus(fileId, container) {
                     : '';
                 return `<div class="status-step">
                     <span style="color:${color};font-weight:700;">${icon}</span>
-                    <span class="status-step-label">${escapeHtml(info.label)}</span>
+                    <span class="status-step-label">${escapeHtml(info.label)}${labelSuffix}</span>
                     <span class="status-step-desc">${escapeHtml(info.desc)}${note}</span>
                 </div>`;
             }).join('');

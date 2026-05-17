@@ -2277,18 +2277,29 @@
         .cr-inline-find span { font-size: 0.7rem; color: #64748b; min-width: 5rem; }
         .cr-inline-body {
             padding: 0.7rem 1rem;
-            font-size: 0.88rem; line-height: 1.55;
+            /* Aligné sur .tc-block (transcription par interlocuteur) pour
+               cohérence visuelle entre les surfaces lecture/édition. */
+            font-size: 0.82rem; line-height: 1.45;
+            color: #334155;
             max-height: 32em; overflow-y: auto;
             user-select: text;
         }
         .cr-inline-body h1, .cr-inline-body h2, .cr-inline-body h3 {
-            margin: 0.6em 0 0.3em; color: #0c4498;
+            margin: 0.7em 0 0.25em; color: #0c4498;
         }
-        .cr-inline-body h2 { font-size: 1.05em; }
-        .cr-inline-body h3 { font-size: 0.95em; }
-        .cr-inline-body ul, .cr-inline-body ol { padding-left: 1.4em; margin: 0.3em 0; }
-        .cr-inline-body p { margin: 0.4em 0; }
+        .cr-inline-body h1 { font-size: 1.05em; }
+        .cr-inline-body h2 { font-size: 0.98em; }
+        .cr-inline-body h3 { font-size: 0.9em; }
+        .cr-inline-body ul, .cr-inline-body ol { padding-left: 1.2em; margin: 0.25em 0; }
+        .cr-inline-body li { margin: 0.15em 0; }
+        .cr-inline-body p { margin: 0.35em 0; }
         .cr-inline-body strong { color: #1e293b; }
+        /* Reformulation (texte plain souvent sans markdown structurel) :
+           garde les retours à la ligne single pour la lisibilité. */
+        .cr-inline-body pre.cr-plain {
+            font-family: inherit; white-space: pre-wrap; word-wrap: break-word;
+            margin: 0; padding: 0; color: #334155;
+        }
         .cr-inline-empty {
             padding: 1rem; text-align: center; color: #94a3b8; font-style: italic;
         }
