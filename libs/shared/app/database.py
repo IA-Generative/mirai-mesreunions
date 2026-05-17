@@ -43,12 +43,42 @@ def create_session_factory(db_cfg: DatabaseConfig) -> sessionmaker:
             # toutes les 10s, jusqu'à 3 fois avant de déclarer la socket
             # morte. Bien en dessous des idle timeouts NAT/LB Scaleway.
             "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
+            "keepalives_idle": 10,
+            "keepalives_interval": 5,
             "keepalives_count": 3,
         },
     )
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def with_db_retry(fn, max_attempts: int = 2):
+    """Wrap une fonction qui utilise la DB pour retry sur OperationalError.
+
+    Cas d'usage : Scaleway managed PG ferme parfois la connexion entre le
+    pool_pre_ping et la query réelle (race condition). Le retry invalide
+    la session pourrie et en demande une fraîche au pool — le 2e essai
+    obtient une connexion valide.
+
+    Usage :
+        result = with_db_retry(lambda: my_db_function(args))
+
+    Ne pas wrapper les opérations qui écrivent : un retry après commit
+    partiel peut doublonner. Réservé aux endpoints de lecture ou aux
+    rollback explicites avant retry.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except OperationalError as e:
+            last_err = e
+            if attempt >= max_attempts:
+                break
+            logger.warning(
+                "DB OperationalError on attempt %d/%d, retrying: %s",
+                attempt, max_attempts, str(e)[:200],
+            )
+    raise last_err  # type: ignore[misc]
 
 
 def init_tables(db_cfg: DatabaseConfig, base, max_attempts: int = None, backoff_seconds: float = None):
