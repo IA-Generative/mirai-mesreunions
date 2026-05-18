@@ -65,10 +65,16 @@ function _applyEnrollmentFormVisibility(/* devices */) {
   // form si un device est enrôlé" perturbait l'utilisateur qui ne trouvait
   // plus le bouton "Générer". Le bloc #enrollment-collapsed n'est plus
   // utilisé activement mais reste pour compatibilité éventuelle.
+  // EXCEPTION : si un QR vient d'être généré (#result.active), generateCode()
+  // a explicitement caché le form pour montrer seulement le QR ; ne pas
+  // réécraser sinon le form ré-apparaît au-dessus du QR (cf bug user 2026-05-18).
   const form = _$('generate-form');
+  const result = _$('result');
   const collapsed = _$('enrollment-collapsed');
-  if (form) form.style.display = '';
   if (collapsed) collapsed.style.display = 'none';
+  if (form && !(result && result.classList.contains('active'))) {
+    form.style.display = '';
+  }
 }
 
 export function showEnrollmentForm() {

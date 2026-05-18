@@ -2990,15 +2990,14 @@
                  simplification). Reste en hidden pour que le JS lise la valeur sans
                  casser le flow. Default 299 = MAX_UPLOADS_PER_SESSION côté serveur. -->
             <input type="hidden" id="max-uploads" value="299">
-            <div class="fr-checkbox-group">
-                <input type="checkbox" id="auto-transcribe" checked>
-                <label class="fr-label" for="auto-transcribe">
-                    Lancer la retranscription automatique et l'ajouter dans MirAI Compte-rendu
-                    <span class="fr-hint-text">
-                        Dans tous les cas, les fichiers d'enregistrement seront optimisés pour la voix.
-                    </span>
-                </label>
-            </div>
+            <!-- auto_transcribe : checkbox cachée (toujours true par défaut).
+                 L'option "uploader sans transcription IA" n'a pas de cas
+                 d'usage utile dans Mes Réunions (l'IA EST la valeur ajoutée
+                 du produit). On garde l'input pour que generateCode().JS
+                 puisse continuer de lire .checked sans modification, mais
+                 il n'est plus exposé à l'utilisateur. Pour skip la
+                 transcription (cas admin/debug), passer par l'API directement. -->
+            <input type="checkbox" id="auto-transcribe" checked style="display:none;">
             <button type="button" class="fr-btn fr-btn--sm" id="btn-generate"
                     data-action="generate-code">
                 Générer un code
