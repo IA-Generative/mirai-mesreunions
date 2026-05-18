@@ -4452,6 +4452,11 @@ async function deleteFilePermanently(fileId, filenameRaw) {
 // au 1er chargement pour choisir entre "transfers" et "generate" selon
 // la présence d'un device enrôlé).
 window.pickDefaultTab = function(hasActiveDevice) { return pickDefaultTab(hasActiveDevice); };
+// Publié sur window pour permettre aux boutons inline (onclick=…) de
+// switcher d'onglet (notamment "Enrôler un nouvel appareil" qui ouvre
+// l'onglet `generate`). Sans ça, `window.activateTab && ...` faisait
+// short-circuit en undefined silencieusement = bouton sans effet.
+window.activateTab = activateTab;
 function pickDefaultTab(hasActiveDevice) {
     if (_tabsInitialised) return;
     _tabsInitialised = true;
