@@ -338,15 +338,21 @@ flowchart LR
   requêtes consécutives doit être persistée (DB ou Redis) ou bien le
   Service doit activer `sessionAffinity: ClientIP`.
 
-- **SCW LB inter-cluster ~50 % TCP RST** : depuis `internal-gw`, les
-  connexions vers `postgres-external-lb` (IP `51.158.77.251`) échouent
-  ~50 % du temps en `server closed the connection unexpectedly`. Bug
-  routing inter-cluster via SCW Private Network (asymétrie subnet
-  source-IP), non résolu côté SCW au 2026-05-18. **Workaround** :
-  `with_db_retry(fn, max_attempts=3)` dans `libs/shared/app/database.py`
-  appliqué sur les paths critiques (`_resolve_internal_audio_id`,
-  `api_file_transcript_status`). Diagnostic complet et pistes
-  d'investigation dans [docs/BUG_SCW_LB_INTER_CLUSTER.md](BUG_SCW_LB_INTER_CLUSTER.md).
+- **SCW LB inter-cluster — résolu 2026-05-18 03:30**. Avant ce fix, les
+  connexions depuis `internal-gw` vers `postgres-external-lb` et
+  `rabbitmq-lb` échouaient ~50 % du temps en `server closed the
+  connection unexpectedly`. **Cause** : la whitelist ACL
+  `cds-allow-internal-cluster-only` sur ces LBs ne contenait que
+  `51.158.65.198` (l'IP du Public Gateway dédié au cluster
+  **external-gw**, `pgw-k8s-cluster-1`) — manquait `51.15.244.216` (l'IP
+  du Public Gateway dédié au cluster **internal-gw**,
+  `pgw-k8s-cluster-2`). Quand internal-gw sortait via son propre PGW
+  (push_default_route=true), l'ACL deniait. **Fix** : ajout de
+  `51.15.244.216` aux 2 whitelists ACL. Sécurité maintenue : les 2 LBs
+  ont une IP publique mais l'ACL les protège (laptop hors VPC ne peut
+  pas se connecter — TCP RST). Doc complète : [docs/BUG_SCW_LB_INTER_CLUSTER.md](BUG_SCW_LB_INTER_CLUSTER.md).
+  Filet applicatif `with_db_retry` toujours en place dans
+  `libs/shared/app/database.py` (safety net défensif).
 
 
 ### Pattern CNAME delegation cert-manager
