@@ -4309,9 +4309,24 @@ function activateTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
         const on = b.getAttribute('data-tab') === tabName;
         b.setAttribute('aria-selected', on ? 'true' : 'false');
+        b.setAttribute('tabindex', on ? '0' : '-1');
     });
+    // Pour chaque panel : toggle is-active + classes DSFR + attribut hidden.
+    // Triple-belt-and-suspenders parce que le JS DSFR `dsfr.module.min.js`
+    // gère les fr-tabs__panel--selected en autonome et peut écraser
+    // notre is-active si on ne synchronise pas avec lui. Cas particulier :
+    // panel-generate n'a pas de tab-btn correspondant dans la barre, donc
+    // DSFR ne le révèle JAMAIS par défaut → le seul moyen propre est de
+    // forcer la classe DSFR + retirer hidden + neutraliser style.
     document.querySelectorAll('.tab-pane').forEach((p) => {
-        p.classList.toggle('is-active', p.getAttribute('data-tab') === tabName);
+        const isThis = p.getAttribute('data-tab') === tabName;
+        p.classList.toggle('is-active', isThis);
+        p.classList.toggle('fr-tabs__panel--selected', isThis);
+        if (isThis) {
+            p.removeAttribute('hidden');
+            // Si un style inline display:none traîne (posé par DSFR JS), le retirer.
+            if (p.style.display === 'none') p.style.display = '';
+        }
     });
     const headerLabel = document.getElementById('header-tab-label');
     if (headerLabel) {
