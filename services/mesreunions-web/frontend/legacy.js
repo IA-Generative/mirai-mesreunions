@@ -4309,24 +4309,9 @@ function activateTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
         const on = b.getAttribute('data-tab') === tabName;
         b.setAttribute('aria-selected', on ? 'true' : 'false');
-        b.setAttribute('tabindex', on ? '0' : '-1');
     });
-    // Pour chaque panel : toggle is-active + classes DSFR + attribut hidden.
-    // Triple-belt-and-suspenders parce que le JS DSFR `dsfr.module.min.js`
-    // gère les fr-tabs__panel--selected en autonome et peut écraser
-    // notre is-active si on ne synchronise pas avec lui. Cas particulier :
-    // panel-generate n'a pas de tab-btn correspondant dans la barre, donc
-    // DSFR ne le révèle JAMAIS par défaut → le seul moyen propre est de
-    // forcer la classe DSFR + retirer hidden + neutraliser style.
     document.querySelectorAll('.tab-pane').forEach((p) => {
-        const isThis = p.getAttribute('data-tab') === tabName;
-        p.classList.toggle('is-active', isThis);
-        p.classList.toggle('fr-tabs__panel--selected', isThis);
-        if (isThis) {
-            p.removeAttribute('hidden');
-            // Si un style inline display:none traîne (posé par DSFR JS), le retirer.
-            if (p.style.display === 'none') p.style.display = '';
-        }
+        p.classList.toggle('is-active', p.getAttribute('data-tab') === tabName);
     });
     const headerLabel = document.getElementById('header-tab-label');
     if (headerLabel) {
@@ -4467,11 +4452,87 @@ async function deleteFilePermanently(fileId, filenameRaw) {
 // au 1er chargement pour choisir entre "transfers" et "generate" selon
 // la présence d'un device enrôlé).
 window.pickDefaultTab = function(hasActiveDevice) { return pickDefaultTab(hasActiveDevice); };
-// Publié sur window pour permettre aux boutons inline (onclick=…) de
-// switcher d'onglet (notamment "Enrôler un nouvel appareil" qui ouvre
-// l'onglet `generate`). Sans ça, `window.activateTab && ...` faisait
-// short-circuit en undefined silencieusement = bouton sans effet.
 window.activateTab = activateTab;
+
+// Modal "Enrôler un nouvel appareil".
+//
+// Pourquoi un modal au lieu d'un switch de tab :
+// le panel-generate n'avait pas de tab-btn associé dans la barre, et
+// DSFR/CSS interférait avec son affichage en mode "tab fantôme". Plus
+// simple et plus propre : ouvrir le formulaire dans un overlay
+// plein-écran, fermer à la fin. L'user ne quitte pas l'onglet devices.
+//
+// Approche portal : on déplace temporairement le DOM du panel-generate
+// dans un container modal. À la fermeture, on remet le DOM à sa place
+// originale (panel-generate vide caché). Préserve tous les event
+// handlers JS déjà bindés (mountPanel devices.js sur panel-generate).
+window.openEnrollModal = function openEnrollModal() {
+    const panel = document.getElementById('panel-generate');
+    if (!panel) { alert('Formulaire d\'enrôlement indisponible.'); return; }
+    document.querySelectorAll('.enroll-modal-wrap').forEach((el) => el.remove());
+
+    const wrap = document.createElement('div');
+    wrap.className = 'enroll-modal-wrap';
+    wrap.setAttribute('role', 'dialog');
+    wrap.setAttribute('aria-modal', 'true');
+    wrap.setAttribute('aria-labelledby', 'enroll-modal-title');
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);'
+        + 'display:flex;align-items:center;justify-content:center;z-index:10000;'
+        + 'padding:2rem;';
+    wrap.innerHTML = `
+      <div class="enroll-modal-inner" style="background:#fff;border-radius:0.5rem;
+                   max-width:780px;width:100%;max-height:92vh;display:flex;
+                   flex-direction:column;box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+        <div style="display:flex;justify-content:space-between;align-items:center;
+                    padding:0.7rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
+          <div id="enroll-modal-title" style="font-weight:600;color:#0c4498;font-size:1rem;">
+            ➕ Enrôler un nouvel appareil
+          </div>
+          <button type="button" class="enroll-modal-close" aria-label="Fermer"
+                  style="background:transparent;border:0;font-size:1.3rem;cursor:pointer;color:#64748b;">×</button>
+        </div>
+        <div class="enroll-modal-body" style="flex:1 1 auto;overflow-y:auto;padding:0.6rem 1rem;">
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+
+    // Déplace panel-generate dans le modal-body (préserve handlers).
+    const originalParent = panel.parentNode;
+    const originalNextSibling = panel.nextSibling;
+    const body = wrap.querySelector('.enroll-modal-body');
+    panel.classList.add('is-active'); // visible dans le modal
+    panel.classList.add('fr-tabs__panel--selected');
+    panel.style.display = 'block';
+    body.appendChild(panel);
+
+    // Masque le bouton "Retour à mes appareils" dans le modal (on a déjà la croix).
+    const backBtn = panel.querySelector('[data-action="back-to-devices"]');
+    let backBtnParent = null;
+    if (backBtn && backBtn.parentNode) {
+        backBtnParent = backBtn.parentNode;
+        backBtnParent.style.display = 'none';
+    }
+
+    const close = () => {
+        // Restaure le panel à sa place d'origine + classes initiales.
+        panel.classList.remove('is-active');
+        panel.classList.remove('fr-tabs__panel--selected');
+        panel.style.display = '';
+        if (backBtnParent) backBtnParent.style.display = '';
+        if (originalParent) {
+            if (originalNextSibling) originalParent.insertBefore(panel, originalNextSibling);
+            else originalParent.appendChild(panel);
+        }
+        wrap.remove();
+    };
+    wrap.querySelector('.enroll-modal-close').addEventListener('click', close);
+    wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
+    wrap.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+    // Focus la modal pour Escape.
+    wrap.tabIndex = -1;
+    wrap.focus();
+};
 function pickDefaultTab(hasActiveDevice) {
     if (_tabsInitialised) return;
     _tabsInitialised = true;
