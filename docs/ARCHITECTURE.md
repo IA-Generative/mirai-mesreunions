@@ -331,12 +331,23 @@ flowchart LR
 
 ### Pièges connus
 
-- **State in-memory + multi-replicas** : `mydevices-web` tourne en
+- **State in-memory + multi-replicas** : `mesreunions-web` tourne en
   2+ replicas en prod-bêta. Tout state stocké en mémoire de processus
   (dict Python, cache local, etc.) est perdu ~50 % des polls à cause
   du round-robin ClusterIP. Toute donnée qui doit survivre à plusieurs
   requêtes consécutives doit être persistée (DB ou Redis) ou bien le
   Service doit activer `sessionAffinity: ClientIP`.
+
+- **SCW LB inter-cluster ~50 % TCP RST** : depuis `internal-gw`, les
+  connexions vers `postgres-external-lb` (IP `51.158.77.251`) échouent
+  ~50 % du temps en `server closed the connection unexpectedly`. Bug
+  routing inter-cluster via SCW Private Network (asymétrie subnet
+  source-IP), non résolu côté SCW au 2026-05-18. **Workaround** :
+  `with_db_retry(fn, max_attempts=3)` dans `libs/shared/app/database.py`
+  appliqué sur les paths critiques (`_resolve_internal_audio_id`,
+  `api_file_transcript_status`). Diagnostic complet et pistes
+  d'investigation dans [docs/BUG_SCW_LB_INTER_CLUSTER.md](BUG_SCW_LB_INTER_CLUSTER.md).
+
 
 ### Pattern CNAME delegation cert-manager
 
