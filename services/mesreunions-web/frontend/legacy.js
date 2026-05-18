@@ -4512,7 +4512,17 @@ window.openEnrollModal = function openEnrollModal() {
     panel.removeAttribute('hidden');
     body.appendChild(panel);
 
-    // Masque le bouton "Retour à mes appareils" dans le modal (on a déjà la croix).
+    // Simplification du contenu dans la modale :
+    //  - on cache le H1 + sous-titre (redondants avec le header modal).
+    //  - on cache le bouton "Retour à mes appareils" (la croix fait l'affaire).
+    //  - on cache l'alerte warning (info conservée mais on l'allège dans le
+    //    contexte modal pour ne montrer que l'essentiel).
+    // À la fermeture, tout est restauré (le reset des styles inline).
+    const hideEls = [];
+    panel.querySelectorAll('h1, .subtitle, .fr-alert').forEach((el) => {
+        hideEls.push({ el, prev: el.style.display });
+        el.style.display = 'none';
+    });
     const backBtn = panel.querySelector('[data-action="back-to-devices"]');
     let backBtnParent = null;
     if (backBtn && backBtn.parentNode) {
@@ -4522,9 +4532,11 @@ window.openEnrollModal = function openEnrollModal() {
 
     const close = () => {
         // Restaure le panel à sa place d'origine + classes DSFR initiales
-        // (sinon DSFR ne peut plus le gérer après).
+        // (sinon DSFR ne peut plus le gérer après) + visibilités initiales
+        // des H1/subtitle/alert cachés pendant le modal.
         panel.className = originalClasses;
         panel.style.display = '';
+        hideEls.forEach(({ el, prev }) => { el.style.display = prev; });
         if (backBtnParent) backBtnParent.style.display = '';
         if (originalParent) {
             if (originalNextSibling) originalParent.insertBefore(panel, originalNextSibling);
