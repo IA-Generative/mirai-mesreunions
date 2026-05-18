@@ -14,40 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 def create_session_factory(db_cfg: DatabaseConfig) -> sessionmaker:
-    """Create a SQLAlchemy session factory.
-
-    Robustesse aux fermetures de connexion côté Scaleway managed PG
-    (pgbouncer + postgres en LB), 3 couches empilées :
-
-    1. `pool_pre_ping=True` envoie un SELECT 1 avant de servir la
-       connexion (détecte les sockets dead).
-    2. `pool_recycle=60` force le recyclage de toute connexion plus
-       vieille que 60s AVANT que pgbouncer ne la kill (idle timeout
-       typique 90-120s en transaction mode).
-    3. TCP keepalives au niveau psycopg2 : envoie des paquets ACK
-       toutes les 30s pour empêcher le NAT/firewall de couper la socket
-       (Scaleway LB peut couper les TCP idle après ~30s).
-
-    Si malgré tout ça une connexion meurt entre pre_ping et query, le
-    caller doit handler `OperationalError` et retry (impossible en lib
-    générique sans casser la sémantique transactionnelle).
-    """
-    engine = create_engine(
-        db_cfg.sync_url,
-        pool_pre_ping=True,
-        pool_recycle=int(os.getenv("DB_POOL_RECYCLE_SECONDS", "60")),
-        pool_size=10,
-        max_overflow=20,
-        connect_args={
-            # TCP keepalives : envoie un probe après 30s d'inactivité,
-            # toutes les 10s, jusqu'à 3 fois avant de déclarer la socket
-            # morte. Bien en dessous des idle timeouts NAT/LB Scaleway.
-            "keepalives": 1,
-            "keepalives_idle": 10,
-            "keepalives_interval": 5,
-            "keepalives_count": 3,
-        },
-    )
+    """Create a SQLAlchemy session factory."""
+    engine = create_engine(db_cfg.sync_url, pool_pre_ping=True, pool_size=10, max_overflow=20)
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 

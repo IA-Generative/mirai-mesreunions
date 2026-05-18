@@ -30,6 +30,7 @@ from libs.shared.app.models import (  # noqa: E402
 )
 from libs.shared.app.s3_helper import download_fileobj, delete_object, object_exists  # noqa: E402
 from libs.shared.app.security import verify_bearer_token  # noqa: E402
+from libs.shared.app.database import with_db_retry  # noqa: E402
 from libs.shared.app.upload_helpers import (  # noqa: E402
     build_stored_filename, is_allowed_audio_filename, publish_av_scan_message,
     store_audio_to_s3,
@@ -542,9 +543,19 @@ def api_file_meeting_cr_download(ext, file_id):
 @require_auth
 def api_file_transcript_status(file_id):
     user = get_current_user()
-    db = session_scope()
+    # Lookup wrapped in with_db_retry pour absorber les "server closed the
+    # connection unexpectedly" sporadiques (bug routing inter-cluster SCW
+    # LB postgres-external-lb depuis internal-gw — cf with_db_retry doc).
+    def _lookup():
+        db = session_scope()
+        try:
+            return _audio_or_404(db, user["sub"], file_id), db
+        except Exception:
+            try: db.close()
+            except Exception: pass
+            raise
+    (file_obj, audio), db = with_db_retry(_lookup, max_attempts=3)
     try:
-        file_obj, audio = _audio_or_404(db, user["sub"], file_id)
         if audio is None:
             return jsonify({"available": False, "reason": "not_ready"})
         flags = {k: bool(audio.get(col)) for k, col in svc.TRANSCRIPT_KIND_TO_COLUMN.items()}

@@ -20,6 +20,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from libs.shared.app.config import INTERNAL_API_TOKEN  # noqa: E402
+from libs.shared.app.database import with_db_retry  # noqa: E402
 
 from app.shared import get_current_user, require_auth  # noqa: E402
 from app.runtime import session_scope  # noqa: E402
@@ -84,18 +85,28 @@ def _resolve_internal_audio_id(user_sub: str, external_file_id: str) -> str | No
 
     Retourne None si le fichier n'existe pas ou n'a pas encore d'audio
     associé (transcription pas encore démarrée).
+
+    Wrapped in with_db_retry pour absorber les "server closed the
+    connection unexpectedly" sporadiques causés par un routing
+    inter-cluster SCW LB déficient (~50% fail rate depuis internal-gw
+    vers postgres-external-lb via PN, alors que 0% depuis external-gw).
+    3 essais suffisent à ramener le taux d'échec utilisateur à <0.5%
+    (= cas où les 3 essais consécutifs touchent une mauvaise route).
     """
-    db = session_scope()
-    try:
-        file_obj = sess_svc.get_owned_file(db, user_sub, external_file_id)
-        if not file_obj:
-            return None
-        audio = sess_svc.lookup_audio_outputs(db, file_obj)
-        if not audio:
-            return None
-        return audio.get("id")
-    finally:
-        db.close()
+    def _do_lookup():
+        db = session_scope()
+        try:
+            file_obj = sess_svc.get_owned_file(db, user_sub, external_file_id)
+            if not file_obj:
+                return None
+            audio = sess_svc.lookup_audio_outputs(db, file_obj)
+            if not audio:
+                return None
+            return audio.get("id")
+        finally:
+            try: db.close()
+            except Exception: pass
+    return with_db_retry(_do_lookup, max_attempts=3)
 
 
 # ─── POST feedback (utilisateur lambda) ─────────────────────────────
