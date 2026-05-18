@@ -4498,12 +4498,18 @@ window.openEnrollModal = function openEnrollModal() {
     document.body.appendChild(wrap);
 
     // Déplace panel-generate dans le modal-body (préserve handlers).
+    // CRITIQUE : on RETIRE les classes DSFR (`fr-tabs__panel`, `tab-pane`)
+    // sinon le JS DSFR continue de gérer ce panel et le rebascule en
+    // hidden parce qu'aucun tab-btn n'a aria-selected="true" qui pointe
+    // dessus. Sans ces classes, DSFR ignore le panel et notre inline
+    // style:display:block s'applique.
     const originalParent = panel.parentNode;
     const originalNextSibling = panel.nextSibling;
+    const originalClasses = panel.className;
     const body = wrap.querySelector('.enroll-modal-body');
-    panel.classList.add('is-active'); // visible dans le modal
-    panel.classList.add('fr-tabs__panel--selected');
+    panel.className = 'enroll-modal-form-container';
     panel.style.display = 'block';
+    panel.removeAttribute('hidden');
     body.appendChild(panel);
 
     // Masque le bouton "Retour à mes appareils" dans le modal (on a déjà la croix).
@@ -4515,9 +4521,9 @@ window.openEnrollModal = function openEnrollModal() {
     }
 
     const close = () => {
-        // Restaure le panel à sa place d'origine + classes initiales.
-        panel.classList.remove('is-active');
-        panel.classList.remove('fr-tabs__panel--selected');
+        // Restaure le panel à sa place d'origine + classes DSFR initiales
+        // (sinon DSFR ne peut plus le gérer après).
+        panel.className = originalClasses;
         panel.style.display = '';
         if (backBtnParent) backBtnParent.style.display = '';
         if (originalParent) {
