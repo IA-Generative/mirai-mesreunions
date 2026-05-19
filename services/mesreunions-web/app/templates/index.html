@@ -200,6 +200,7 @@
             border-radius: 0 0.35rem 0.35rem 0; margin-bottom: 0.5rem;
             counter-increment: agenda;
         }
+        .brief-rendered .brief-agenda-item::marker { content: none; }
         .brief-rendered .brief-agenda-item::before {
             content: counter(agenda); position: absolute; left: 0.55rem; top: 0.55rem;
             width: 1.3rem; height: 1.3rem; border-radius: 50%;
@@ -2599,7 +2600,7 @@
             <!-- Lot 3 — 5 actions en barre d'icônes compacte. Icon-only + tooltip rollover
                  (title=) pour éviter le wrap multi-lignes des labels longs. -->
             <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
-                 style="margin:0.6rem 0;display:flex;flex-wrap:nowrap;overflow-x:auto;gap:0.3rem;">
+                 style="margin:0.6rem 0;display:flex;flex-wrap:wrap;gap:0.3rem;overflow:visible;">
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line"
                         id="brief-detail-glossary-btn"
                         data-action="open-glossary-modal"
