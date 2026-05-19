@@ -12,7 +12,17 @@
        build npm). Remplace le CDN jsdelivr (CSP-friendly + intégrité +
        perf : pas de DNS lookup tiers, cache long contrôlé localement). #}
     <link rel="stylesheet" href="/static/dsfr/dsfr/dsfr.min.css">
-    <link rel="stylesheet" href="/static/dsfr/utility/icons/icons-system/icons-system.min.css">
+    <!-- icons.min.css charge les 18 sous-feuilles d'icônes DSFR (arrows,
+         buildings, business, communication, device, document, editor,
+         finance, health, logo, map, media, others, system, user,
+         weather…). Avant on chargeait juste icons-system → carrés bleus
+         vides sur tous les boutons qui utilisent fr-icon-book-2-line,
+         fr-icon-arrow-left-line, fr-icon-calendar-event-line, etc.
+         (404 sur le SVG car le CSS system pointe sur /icons/system/X.svg
+         alors que les vrais SVG sont dans /icons/document/ /icons/arrows/
+         /icons/business/ etc). icons.min.css référence chaque SVG dans
+         son bon sous-dossier. ~10KB de + au lieu de 41KB, négligeable. -->
+    <link rel="stylesheet" href="/static/dsfr/utility/icons/icons.min.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {

@@ -135,31 +135,46 @@ async function loadBriefs() {
         </tr>`;
     }).join('');
     const briefRows = briefs.map(b => {
-      const date = (b.created_at || '').slice(0, 16).replace('T', ' ');
+      // Date compacte : jj/mm hh:mm (au lieu de 16 chars ISO)
+      let dateShort = '';
+      try {
+        if (b.created_at) {
+          const d = new Date(b.created_at);
+          dateShort = d.toLocaleString('fr-FR', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+        }
+      } catch (e) { dateShort = (b.created_at || '').slice(0, 10); }
       const title = b.title || b.subject || '(sans titre)';
       const tEsc = _esc(title);
+      // Icône récurrence si applicable (b.recurrence_rrule présent ou similar)
+      const isRecurring = !!(b.recurrence_rrule || b.is_recurring || b.recurring);
+      const recIcon = isRecurring
+        ? ` <span title="Réunion récurrente" aria-label="Récurrente" style="color:#1d4ed8;font-size:0.85rem;">🔁</span>`
+        : '';
+      // Bouton "préparer la prochaine" inline (visible uniquement si récurrence)
+      const prepareNextBtn = isRecurring
+        ? `<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary fr-icon-calendar-event-line fr-btn--icon-left"
+                   data-action="open-prepare-next-modal-from-list" data-brief-id="${_esc(b.id)}"
+                   title="Préparer la prochaine occurrence"
+                   style="padding:0.15rem 0.5rem;">Suivante</button>`
+        : '';
       return `
         <tr data-brief-id="${_esc(b.id)}" data-brief-title="${tEsc}">
           <td>
-            <a href="#" class="fr-link" data-action="open-brief" data-brief-id="${_esc(b.id)}">${tEsc}</a>
+            <a href="#" class="fr-link" data-action="open-brief" data-brief-id="${_esc(b.id)}">${tEsc}</a>${recIcon}
           </td>
-          <td>
+          <td style="white-space:nowrap;">
             <span style="background:#dcfce7;color:#15803d;padding:0.1rem 0.45rem;
                          border-radius:8px;font-size:0.72rem;font-weight:600;">
               ✓ Généré
             </span>
           </td>
-          <td style="color:#94a3b8;font-size:0.78rem;white-space:nowrap;">${_esc(date)}</td>
+          <td style="color:#94a3b8;font-size:0.75rem;white-space:nowrap;width:1%;">${_esc(dateShort)}</td>
           <td style="text-align:right;white-space:nowrap;">
-            <button type="button"
-                    class="fr-btn fr-btn--sm fr-btn--secondary"
-                    data-action="open-brief" data-brief-id="${_esc(b.id)}">
-              Ouvrir
-            </button>
+            ${prepareNextBtn}
             <button type="button"
                     class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
                     data-action="delete-brief" data-brief-id="${_esc(b.id)}" data-brief-title="${tEsc}"
-                    aria-label="Supprimer">
+                    aria-label="Supprimer" style="padding:0.15rem 0.5rem;">
               Supprimer
             </button>
           </td>
@@ -170,11 +185,11 @@ async function loadBriefs() {
         <table>
           <caption class="fr-sr-only">Liste de vos préparations de réunion</caption>
           <thead>
-            <tr>
-              <th scope="col">Titre</th>
-              <th scope="col">Statut</th>
-              <th scope="col">Date</th>
-              <th scope="col" style="text-align:right;">Actions</th>
+            <tr style="font-size:0.78rem;">
+              <th scope="col" style="padding:0.35rem 0.6rem;">Titre</th>
+              <th scope="col" style="padding:0.35rem 0.6rem;width:1%;white-space:nowrap;">Statut</th>
+              <th scope="col" style="padding:0.35rem 0.6rem;width:1%;white-space:nowrap;">Date</th>
+              <th scope="col" style="padding:0.35rem 0.6rem;text-align:right;width:1%;white-space:nowrap;">Actions</th>
             </tr>
           </thead>
           <tbody>${draftRows}${briefRows}</tbody>
@@ -1723,6 +1738,16 @@ function _onPanelClick(ev) {
       const did = actionEl.getAttribute('data-draft-id');
       try { if (did && typeof window.reopenPrepDraft === 'function') window.reopenPrepDraft(did); }
       catch (e) {}
+      return;
+    }
+    case 'open-prepare-next-modal-from-list': {
+      ev.preventDefault();
+      const id = actionEl.getAttribute('data-brief-id');
+      if (!id) return;
+      // Bascule en fiche détail puis ouvre le modal (le modal lit
+      // _currentBrief qui n'est rempli qu'après showBriefDetail).
+      showBriefDetail(id);
+      setTimeout(() => { try { _openPrepareNextModal(); } catch (e) {} }, 300);
       return;
     }
     case 'delete-draft': {
