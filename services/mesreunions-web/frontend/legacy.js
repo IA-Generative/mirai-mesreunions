@@ -1930,6 +1930,33 @@ async function mountTranscriptCorrector(container) {
     }
     blocks.length = 0;
     blocks.push(...splitBlocks);
+
+    // Redistribution linéaire des timestamps des words DANS chaque bloc.
+    // Pourquoi : les timestamps Whisper sont précis aux frontières de
+    // bloc (les bornes viennent de pyannote, ground-truth de diarisation)
+    // mais bruités au sein d'un bloc (~±200ms d'erreur cumulée par mot
+    // sur les longs blocs → "flottement" du surlignage). On réécrit
+    // s/e de chaque word proportionnellement à sa longueur (en chars,
+    // proxy raisonnable de la durée parlée d'un mot — plus précis qu'une
+    // distribution uniforme). Garantit que le dernier mot d'un bloc se
+    // déhighlighte EXACTEMENT à block.end, donc synchro parfaite avec
+    // le bloc suivant. Idée user (2026-05-20).
+    for (const b of blocks) {
+        if (!b.words || !b.words.length) continue;
+        if (typeof b.start !== 'number' || typeof b.end !== 'number') continue;
+        const dur = b.end - b.start;
+        if (dur <= 0) continue;
+        // Poids = len(mot) + 1 (espace). Borne mini 1 pour mots vides.
+        const weights = b.words.map(w => Math.max(1, (w.w || '').length + 1));
+        const total = weights.reduce((a, c) => a + c, 0);
+        let cumul = 0;
+        for (let i = 0; i < b.words.length; i++) {
+            b.words[i].s = b.start + (cumul / total) * dur;
+            cumul += weights[i];
+            b.words[i].e = b.start + (cumul / total) * dur;
+        }
+    }
+
     if (!blocks.length && !data.transcription_text) {
         // Fallback nécessaire : on tire la transcription brute uniquement
         // si pas de blocs (typique d'un échec diarisation).
@@ -2082,16 +2109,17 @@ async function mountTranscriptCorrector(container) {
     let lastActiveWordEl = null;
 
     // Compensation latence audio output : ``audio.currentTime`` reflète la
-    // position DÉCODÉE par le navigateur, pas l'instant exact où le son
-    // sort des haut-parleurs (buffering matériel ~100-250ms selon plateforme,
-    // ~50-100ms casque filaire, jusqu'à 400ms Bluetooth). Le highlight
-    // suivait currentTime → apparaissait visiblement en avance par rapport
-    // à l'audio entendu. On décale la recherche en arrière de cette valeur.
-    // Tunable via localStorage.tc_karaoke_lag pour différentes configs
-    // matérielles (ex: "0" pour désactiver, "0.3" pour casque BT lent).
+    // position DÉCODÉE par le navigateur, pas l'instant où le son sort
+    // des haut-parleurs (buffer matériel : ~50ms jack, ~250-400ms Bluetooth).
+    // Default 0.05s — la redistribution linéaire ci-dessus (par char-count
+    // dans la durée du bloc) a déjà aligné les words sur les bornes
+    // ground-truth pyannote, donc seul le buffer matériel reste à
+    // compenser. Tunable via ``localStorage.tc_karaoke_lag`` (sec, float)
+    // pour s'adapter à la config matérielle : "0" jack rapide, "0.2"
+    // casque BT moyen, "0.4" BT A2DP non low-latency.
     const KARAOKE_LAG_SEC = (() => {
-        const v = parseFloat(localStorage.getItem('tc_karaoke_lag') || '0.15');
-        return Number.isFinite(v) && v >= 0 ? v : 0.15;
+        const v = parseFloat(localStorage.getItem('tc_karaoke_lag') || '0.05');
+        return Number.isFinite(v) && v >= 0 ? v : 0.05;
     })();
 
     // Sync audio → text : pendant la lecture, highlight le bloc courant
