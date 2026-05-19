@@ -2081,12 +2081,28 @@ async function mountTranscriptCorrector(container) {
     });
     let lastActiveWordEl = null;
 
+    // Compensation latence audio output : ``audio.currentTime`` reflète la
+    // position DÉCODÉE par le navigateur, pas l'instant exact où le son
+    // sort des haut-parleurs (buffering matériel ~100-250ms selon plateforme,
+    // ~50-100ms casque filaire, jusqu'à 400ms Bluetooth). Le highlight
+    // suivait currentTime → apparaissait visiblement en avance par rapport
+    // à l'audio entendu. On décale la recherche en arrière de cette valeur.
+    // Tunable via localStorage.tc_karaoke_lag pour différentes configs
+    // matérielles (ex: "0" pour désactiver, "0.3" pour casque BT lent).
+    const KARAOKE_LAG_SEC = (() => {
+        const v = parseFloat(localStorage.getItem('tc_karaoke_lag') || '0.15');
+        return Number.isFinite(v) && v >= 0 ? v : 0.15;
+    })();
+
     // Sync audio → text : pendant la lecture, highlight le bloc courant
     // + scroll dans le viewport du container blocks si hors-vue.
     // Si word-level timestamps dispo, highlight aussi le mot prononcé.
     if (audio) {
         audio.addEventListener('timeupdate', () => {
-            const t = audio.currentTime || 0;
+            // ``t`` = position perçue par l'oreille (décalée pour
+            // compenser le buffer de sortie audio). Utilisée pour les
+            // 2 niveaux de highlight (bloc + mot).
+            const t = Math.max(0, (audio.currentTime || 0) - KARAOKE_LAG_SEC);
             let activeIdx = -1;
             for (let i = 0; i < blocks.length; i++) {
                 if (blocks[i].start <= t && t < blocks[i].end) {
