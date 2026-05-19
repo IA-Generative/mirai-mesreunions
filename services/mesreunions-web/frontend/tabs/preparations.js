@@ -87,21 +87,54 @@ function _toast(msg, kind) {
 async function loadBriefs() {
   const container = document.getElementById('brief-list');
   if (!container) return;
+  // Drafts locaux (brouillons non générés, persistés dans localStorage
+  // par wizard.js). On les affiche en tête de liste avec badge jaune
+  // "Brouillon" + bouton "Reprendre" / "Supprimer".
+  const drafts = (typeof window.listPrepDrafts === 'function')
+    ? (window.listPrepDrafts() || [])
+    : [];
   try {
     const resp = await fetch('/api/preparations?with_counts=true');
     const data = await resp.json();
     const briefs = (data && (data.preparations || data.briefs)) || [];
     try { renderOlderThan90dBanner(data && data.older_than_90d_unlinked_count); }
     catch (e) { /* non-fatal */ }
-    if (briefs.length === 0) {
+    if (briefs.length === 0 && drafts.length === 0) {
       container.innerHTML = `<p style="color:#94a3b8;">
         Aucun brief pour le moment.
         <a href="#" class="fr-link" data-action="open-wizard">Préparation de réunion ?</a>
       </p>`;
       return;
     }
-    // DSFR fr-table compact + actions inline par ligne (data-action delegation).
-    const rows = briefs.map(b => {
+    const draftRows = drafts.map(d => {
+      const title = d.title || '(brouillon sans titre)';
+      const tEsc = _esc(title);
+      const date = d.updatedAt ? new Date(d.updatedAt).toLocaleString('fr-FR', {
+        day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit',
+      }) : '';
+      const idEsc = _esc(d.id || '');
+      return `
+        <tr data-draft-id="${idEsc}">
+          <td>
+            <a href="#" class="fr-link" data-action="reopen-draft" data-draft-id="${idEsc}">${tEsc}</a>
+          </td>
+          <td>
+            <span style="background:#fef3c7;color:#92400e;padding:0.1rem 0.45rem;
+                         border-radius:8px;font-size:0.72rem;font-weight:600;">
+              🟡 Brouillon
+            </span>
+          </td>
+          <td style="color:#94a3b8;font-size:0.78rem;white-space:nowrap;">modifié ${_esc(date)}</td>
+          <td style="text-align:right;white-space:nowrap;">
+            <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                    data-action="reopen-draft" data-draft-id="${idEsc}">Reprendre</button>
+            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                    data-action="delete-draft" data-draft-id="${idEsc}" data-draft-title="${tEsc}"
+                    aria-label="Supprimer brouillon">Supprimer</button>
+          </td>
+        </tr>`;
+    }).join('');
+    const briefRows = briefs.map(b => {
       const date = (b.created_at || '').slice(0, 16).replace('T', ' ');
       const title = b.title || b.subject || '(sans titre)';
       const tEsc = _esc(title);
@@ -109,6 +142,12 @@ async function loadBriefs() {
         <tr data-brief-id="${_esc(b.id)}" data-brief-title="${tEsc}">
           <td>
             <a href="#" class="fr-link" data-action="open-brief" data-brief-id="${_esc(b.id)}">${tEsc}</a>
+          </td>
+          <td>
+            <span style="background:#dcfce7;color:#15803d;padding:0.1rem 0.45rem;
+                         border-radius:8px;font-size:0.72rem;font-weight:600;">
+              ✓ Généré
+            </span>
           </td>
           <td style="color:#94a3b8;font-size:0.78rem;white-space:nowrap;">${_esc(date)}</td>
           <td style="text-align:right;white-space:nowrap;">
@@ -133,11 +172,12 @@ async function loadBriefs() {
           <thead>
             <tr>
               <th scope="col">Titre</th>
-              <th scope="col">Créé le</th>
+              <th scope="col">Statut</th>
+              <th scope="col">Date</th>
               <th scope="col" style="text-align:right;">Actions</th>
             </tr>
           </thead>
-          <tbody>${rows}</tbody>
+          <tbody>${draftRows}${briefRows}</tbody>
         </table>
       </div>
     `;
@@ -1676,6 +1716,23 @@ function _onPanelClick(ev) {
       const id = actionEl.getAttribute('data-brief-id');
       const title = actionEl.getAttribute('data-brief-title') || '';
       if (id) deleteBrief(id, title);
+      return;
+    }
+    case 'reopen-draft': {
+      ev.preventDefault();
+      const did = actionEl.getAttribute('data-draft-id');
+      try { if (did && typeof window.reopenPrepDraft === 'function') window.reopenPrepDraft(did); }
+      catch (e) {}
+      return;
+    }
+    case 'delete-draft': {
+      ev.preventDefault();
+      const did = actionEl.getAttribute('data-draft-id');
+      const dtitle = actionEl.getAttribute('data-draft-title') || 'ce brouillon';
+      if (did && confirm(`Supprimer définitivement « ${dtitle} » ?`)) {
+        try { if (typeof window.deletePrepDraft === 'function') window.deletePrepDraft(did); } catch (e) {}
+        try { loadBriefs(); } catch (e) {}
+      }
       return;
     }
     case 'show-list': {

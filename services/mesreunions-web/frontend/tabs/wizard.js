@@ -291,6 +291,8 @@ async function _pollJob(jobId, opts) {
       _stopPolling();
       _setStatus('Brief généré.', 'info');
       const newId = d.preparation_id;
+      // Brouillon validé -> retire de la liste localStorage.
+      if (_currentDraftId) { try { deleteDraft(_currentDraftId); } catch (e) {} }
       closeWizard();
       try {
         if (typeof window.loadBriefs === 'function') window.loadBriefs();
@@ -486,6 +488,9 @@ export function openWizard(opts) {
   // Reset state
   _currentStep = 0;
   _clearStatus();
+  // Draft tracking : reprise d'un brouillon (depuis la liste) ou nouveau.
+  // Stocké tôt pour que _scheduleSave fire dès le 1er keystroke.
+  _currentDraftId = opts.draftId || _newDraftId();
   // Optionnel : series_parent_id depuis l'URL ou opts
   const seriesEl = _qs('#wizard-series-parent');
   const params = new URLSearchParams(window.location.search || '');
@@ -541,6 +546,11 @@ export function openWizard(opts) {
       .catch(() => { /* non-fatal */ });
   }
   _showStep(0);
+  // Restaure le snapshot si on reprend un brouillon (après _showStep
+  // pour que les conditionnels d'affichage step soient déjà appliqués).
+  if (opts.restoreSnapshot) {
+    try { _applySnapshot(opts.restoreSnapshot); } catch (e) {}
+  }
   // Focus le 1er input
   setTimeout(() => {
     const first = _qs('#wizard-subject');
@@ -557,6 +567,13 @@ export function closeWizard() {
   document.body.style.overflow = '';
   _stopPolling();
   _hideGenerationStepper();
+  // Flush save final + clear pointer (le draft reste en localStorage
+  // si non terminé — on le retrouvera dans la liste).
+  if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
+  if (_currentDraftId) {
+    try { _saveDraft(_currentDraftId, _collectSnapshot()); } catch (e) {}
+  }
+  _currentDraftId = null;
   const driveTestResult = _qs('#wizard-drive-test-result');
   if (driveTestResult) driveTestResult.innerHTML = '';
   // Nettoie ?action=new de l'URL pour éviter de réouvrir si reload.
@@ -640,6 +657,7 @@ function _autoOpenFromQuery() {
 
 function _boot() {
   _bindEvents();
+  _bindAutosave();
   _autoOpenFromQuery();
 }
 
@@ -649,8 +667,161 @@ if (document.readyState === 'loading') {
   _boot();
 }
 
+// ─── Drafts (autosave localStorage) ──────────────────────────────────
+//
+// Persiste l'état du wizard à chaque keystroke (debounced 400 ms) sous
+// `mesreunions.prep-wizard.drafts`. Permet à l'utilisateur de fermer le
+// wizard sans rien perdre, et à preparations.js d'afficher les brouillons
+// non générés dans la liste à côté des briefs DB (A2). Suppression au
+// `phase=done` (générer = valider le brouillon).
+//
+// Format : { [draftId]: { step, fields, participants, recurring, themes,
+//                         updatedAt, title } }
+
+const _DRAFTS_KEY = 'mesreunions.prep-wizard.drafts';
+let _currentDraftId = null;
+let _saveTimer = null;
+
+function _newDraftId() {
+  return 'draft_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+}
+
+function _readAllDrafts() {
+  try { return JSON.parse(localStorage.getItem(_DRAFTS_KEY) || '{}') || {}; }
+  catch (e) { return {}; }
+}
+
+function _writeAllDrafts(obj) {
+  try { localStorage.setItem(_DRAFTS_KEY, JSON.stringify(obj)); } catch (e) {}
+}
+
+// Exposé pour preparations.js (rendu liste).
+export function listDrafts() {
+  const all = _readAllDrafts();
+  return Object.values(all).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+export function deleteDraft(id) {
+  if (!id) return;
+  const all = _readAllDrafts();
+  delete all[id];
+  _writeAllDrafts(all);
+}
+function _saveDraft(id, snap) {
+  if (!id || !snap) return;
+  const all = _readAllDrafts();
+  all[id] = snap;
+  _writeAllDrafts(all);
+}
+
+function _collectSnapshot() {
+  // Inputs natifs du wizard
+  const fields = {};
+  const NATIVE_IDS = [
+    'wizard-subject', 'wizard-role', 'wizard-expectation',
+    'wizard-meeting-type', 'wizard-duration', 'wizard-drive-folder',
+    'wizard-target-date', 'wizard-series-parent',
+    'wizard-recurring-toggle', 'wizard-rrule-freq', 'wizard-rrule-interval',
+    'wizard-rrule-time', 'wizard-rrule-until', 'wizard-send-cr-email',
+  ];
+  NATIVE_IDS.forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.type === 'checkbox') fields[id] = !!el.checked;
+    else fields[id] = el.value || '';
+  });
+  // Participants (composant lib/participants.js)
+  let participants = [];
+  try {
+    const c = document.getElementById('wizard-participants-list');
+    if (c) participants = serializeParticipantsContainer(c) || [];
+  } catch (e) {}
+  // Thèmes (composant mountThemesChips)
+  let themes = [];
+  try {
+    const tc = document.getElementById('wizard-themes-container');
+    if (tc && tc._themesChipsGetValues) themes = tc._themesChipsGetValues() || [];
+  } catch (e) {}
+  return {
+    step: _currentStep || 0,
+    fields, participants, themes,
+    title: fields['wizard-subject'] || '(brouillon sans titre)',
+    updatedAt: Date.now(),
+  };
+}
+
+function _applySnapshot(snap) {
+  if (!snap || !snap.fields) return;
+  Object.entries(snap.fields).forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = !!val;
+    else el.value = (val == null ? '' : val);
+    // Trigger éventuels listeners (ex: toggle récurrence -> reveal form)
+    try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+  });
+  // Participants
+  try {
+    const list = document.getElementById('wizard-participants-list');
+    if (list && Array.isArray(snap.participants) && snap.participants.length > 0) {
+      list.innerHTML = '';
+      const onChange = () => _scheduleSave();
+      snap.participants.forEach((p) => {
+        list.appendChild(createParticipantRow(p || {}, onChange));
+      });
+    }
+  } catch (e) {}
+  // Thèmes
+  try {
+    const tc = document.getElementById('wizard-themes-container');
+    if (tc && tc._themesChipsSetValues && Array.isArray(snap.themes)) {
+      tc._themesChipsSetValues(snap.themes);
+    }
+  } catch (e) {}
+  // Step
+  if (typeof snap.step === 'number') _showStep(snap.step);
+}
+
+function _scheduleSave() {
+  if (!_currentDraftId) return;
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    try { _saveDraft(_currentDraftId, _collectSnapshot()); } catch (e) {}
+  }, 400);
+}
+
+function _bindAutosave() {
+  const backdrop = document.getElementById('wizard-modal-backdrop');
+  if (!backdrop) return;
+  // Délégation : tout input/change/click(bouton+/-/checkbox) déclenche un save.
+  ['input', 'change', 'click'].forEach((evt) => {
+    backdrop.addEventListener(evt, (ev) => {
+      // ignore les clics sur les boutons de navigation (prev/next/submit/cancel/close)
+      const t = ev.target;
+      if (!t) return;
+      if (t.id === 'wizard-next-btn' || t.id === 'wizard-prev-btn'
+          || t.id === 'wizard-submit-btn' || t.id === 'wizard-cancel-btn'
+          || t.id === 'wizard-close-btn') return;
+      if (!_currentDraftId) return; // wizard non ouvert
+      _scheduleSave();
+    });
+  });
+}
+
+// Publié pour preparations.js (réouverture d'un brouillon depuis la liste).
+export function reopenDraft(draftId) {
+  const all = _readAllDrafts();
+  const snap = all[draftId];
+  if (!snap) return false;
+  openWizard({ draftId, restoreSnapshot: snap });
+  return true;
+}
+
 // Publié sur window pour data-action="open-wizard" + tests.
 if (typeof window !== 'undefined') {
   window.openWizard = openWizard;
   window.closeWizard = closeWizard;
+  window.listPrepDrafts = listDrafts;
+  window.deletePrepDraft = deleteDraft;
+  window.reopenPrepDraft = reopenDraft;
 }
