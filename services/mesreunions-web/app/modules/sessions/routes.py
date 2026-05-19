@@ -247,14 +247,22 @@ def api_my_sessions():
                     transferred_storage_cache[f.id] = (None, None)
             return transferred_storage_cache[f.id]
 
+        # On ne probe QUE les emplacements utilisés par l'UI principale :
+        # ``transferred`` (bouton "Écouter audio interne", la version
+        # canonique) + ``reconcile`` (rattrapage de statut transitoire).
+        # Les variantes ``source`` (brut DMZ) et ``transcoded`` (normalisé
+        # DMZ) sont des artefacts de debug exposés uniquement en mode
+        # avancé du menu "Autres" ; elles sont sondées à la demande via
+        # /api/file/<id>/audio-availability quand l'utilisateur déplie
+        # ce menu. Côté ``/api/my-sessions`` on retourne donc une
+        # présomption basée sur la présence du filename en DB — c'est
+        # suffisant pour griser le bouton si l'enregistrement DB n'a
+        # jamais eu cette variante, et acceptable côté UX si un fichier
+        # purgé S3 mais encore en DB renvoie un 404 au clic (cas rare).
         for s in sessions:
             for f in s.uploads:
                 if f.trashed_at is not None:
                     continue
-                if f.stored_filename:
-                    probe_specs[("source", f.id)] = (s3_upload_cfg, f.stored_filename)
-                if f.transcoded_filename:
-                    probe_specs[("transcoded", f.id)] = (s3_processed_cfg, f.transcoded_filename)
                 if f.status == UploadStatus.TRANSFERRED and f.transcoded_filename:
                     t_cfg, t_key = _transferred_storage(f)
                     if t_cfg and t_key:
@@ -294,8 +302,12 @@ def api_my_sessions():
                             f.transferred_at = datetime.now(timezone.utc)
                         reconciled += 1
 
-                source_available = bool(probe_results.get(("source", f.id)))
-                transcoded_available = bool(probe_results.get(("transcoded", f.id)))
+                # Présomption optimiste pour les variantes secondaires :
+                # tant que le filename existe en DB, on présume que le
+                # blob S3 est encore là. Le HEAD réel n'est fait qu'à la
+                # demande (audio-availability) ou implicitement au clic.
+                source_available = bool(f.stored_filename)
+                transcoded_available = bool(f.transcoded_filename)
                 transferred_available = False
                 if f.status == UploadStatus.TRANSFERRED and f.transcoded_filename:
                     transferred_available = bool(probe_results.get(("transferred", f.id)))
@@ -765,6 +777,61 @@ def api_file_transcript_text(file_id, kind):
             "available": True,
             "kind": kind,
             "text": audio.get(column),
+        })
+    finally:
+        db.close()
+
+
+# ─── Audio availability (lazy probe pour source/transcoded) ────────────
+
+
+@bp.route("/api/file/<file_id>/audio-availability")
+@require_auth
+def api_file_audio_availability(file_id):
+    """Sonde S3 à la demande pour les 3 variantes audio d'un fichier.
+
+    Pas appelé sur /api/my-sessions (qui ne probe que ``transferred`` pour
+    rester rapide) — utilisé par le front quand l'utilisateur déplie le
+    menu "Autres" en mode avancé et qu'on veut savoir si les boutons
+    ``source`` / ``transcoded`` doivent être grisés. Coût : 1-3 HEAD S3
+    en parallèle, équivalent au plus à ~50ms avec le client boto3 caché.
+    """
+    user = get_current_user()
+    db = session_scope()
+    s3_upload_cfg = get_s3_upload_cfg()
+    s3_processed_cfg = get_s3_processed_cfg()
+    try:
+        file_obj = svc.get_owned_file(db, user["sub"], file_id)
+        if not file_obj:
+            abort(404, "File not found")
+
+        def _safe_exists(cfg, key):
+            try: return object_exists(cfg, key)
+            except Exception: return False
+
+        probes = {}
+        if file_obj.stored_filename:
+            probes["source"] = (s3_upload_cfg, file_obj.stored_filename)
+        if file_obj.transcoded_filename:
+            probes["transcoded"] = (s3_processed_cfg, file_obj.transcoded_filename)
+        if file_obj.status == UploadStatus.TRANSFERRED and file_obj.transcoded_filename:
+            try:
+                t_cfg, t_key = svc.resolve_transferred_storage(db, file_obj)
+                if t_cfg and t_key:
+                    probes["transferred"] = (t_cfg, t_key)
+            except Exception:
+                logger.debug("resolve_transferred_storage failed for %s", file_id, exc_info=True)
+
+        results = {}
+        if probes:
+            with ThreadPoolExecutor(max_workers=len(probes)) as _pool:
+                futures = {_pool.submit(_safe_exists, cfg, key): kind for kind, (cfg, key) in probes.items()}
+                for fut in futures:
+                    results[futures[fut]] = fut.result()
+        return jsonify({
+            "source_available": bool(results.get("source", False)),
+            "transcoded_available": bool(results.get("transcoded", False)),
+            "transferred_available": bool(results.get("transferred", False)),
         })
     finally:
         db.close()
