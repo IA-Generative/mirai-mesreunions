@@ -948,7 +948,13 @@ function toggleAmendBrief() {
   if (!pane) return;
   const opening = pane.style.display === 'none';
   pane.style.display = opening ? '' : 'none';
-  if (opening) restoreAmendSectionsState();
+  if (opening) {
+    restoreAmendSectionsState();
+    // Le panneau est tout en bas de la fiche — scroll dans le viewport
+    // pour que l'utilisateur voie qu'il s'est ouvert.
+    try { pane.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    catch (_e) { /* ignore browsers sans options */ }
+  }
 }
 
 function _amendInputRow(value, placeholder) {
