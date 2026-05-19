@@ -1857,7 +1857,25 @@ async function mountTranscriptCorrector(container) {
         _fetchTranscriptWords(fileId),
     ]);
     data.speaker_tagged_text = speakerTaggedText;
-    const blocks = _parseSpeakerTagged(data.speaker_tagged_text || '');
+    const rawBlocks = _parseSpeakerTagged(data.speaker_tagged_text || '');
+    // Fusion blocs consécutifs MÊME speaker avec gap court (< 2s) :
+    // pyannote tend à sur-segmenter (pause de respiration → bloc séparé)
+    // → l'UI rend des blocs distincts pour le même interlocuteur. On les
+    // recompose comme un seul bloc pour avoir un highlight continu. Le
+    // cap 60s plus bas re-découpera proprement si la fusion produit
+    // un bloc trop long. Pattern inspiré de dictaphone `groupTranscriptSegments`.
+    const MERGE_GAP_SEC = 2.0;
+    const blocks = [];
+    for (const b of rawBlocks) {
+        const prev = blocks[blocks.length - 1];
+        if (prev && prev.speaker === b.speaker &&
+            (b.start - prev.end) < MERGE_GAP_SEC) {
+            prev.end = b.end;
+            prev.text = (prev.text + ' ' + b.text).trim();
+        } else {
+            blocks.push({ ...b });
+        }
+    }
     // Pour chaque bloc, on tente l'alignement words-Whisper ↔ tokens-texte
     // (split whitespace). Si les counts correspondent (±10 % tolérance),
     // on garde l'alignement positionnel → karaoke word-level pour ce bloc.
@@ -1931,29 +1949,49 @@ async function mountTranscriptCorrector(container) {
     blocks.length = 0;
     blocks.push(...splitBlocks);
 
-    // Redistribution linéaire des timestamps des words DANS chaque bloc.
-    // Pourquoi : les timestamps Whisper sont précis aux frontières de
-    // bloc (les bornes viennent de pyannote, ground-truth de diarisation)
-    // mais bruités au sein d'un bloc (~±200ms d'erreur cumulée par mot
-    // sur les longs blocs → "flottement" du surlignage). On réécrit
-    // s/e de chaque word proportionnellement à sa longueur (en chars,
-    // proxy raisonnable de la durée parlée d'un mot — plus précis qu'une
-    // distribution uniforme). Garantit que le dernier mot d'un bloc se
-    // déhighlighte EXACTEMENT à block.end, donc synchro parfaite avec
-    // le bloc suivant. Idée user (2026-05-20).
+    // Rescale AFFINE des timestamps Whisper dans la durée du bloc.
+    // Pourquoi : les timestamps Whisper sont précis aux frontières de bloc
+    // (qui viennent de pyannote, ground-truth de diarisation) mais peuvent
+    // avoir un biais cumulé au sein d'un bloc. On garde la **forme**
+    // (= rythme de parole : silences, accélérations, hésitations) des
+    // timestamps Whisper mais on les recale linéairement pour qu'ils
+    // démarrent pile à block.start et finissent pile à block.end.
+    // Plus naturel qu'une distribution char-count rigide qui ignore le
+    // débit réel. Fallback char-count seulement si Whisper n'a fourni
+    // aucun timestamp valide pour ce bloc.
     for (const b of blocks) {
         if (!b.words || !b.words.length) continue;
         if (typeof b.start !== 'number' || typeof b.end !== 'number') continue;
-        const dur = b.end - b.start;
-        if (dur <= 0) continue;
-        // Poids = len(mot) + 1 (espace). Borne mini 1 pour mots vides.
+        const blockDur = b.end - b.start;
+        if (blockDur <= 0) continue;
+        const withTs = b.words.filter(
+            w => typeof w.s === 'number' && typeof w.e === 'number'
+        );
+        if (withTs.length >= 2) {
+            // Rescale affine : preserve la forme relative des s/e Whisper.
+            const wsFirst = withTs[0].s;
+            const weLast = withTs[withTs.length - 1].e;
+            const whisperDur = weLast - wsFirst;
+            if (whisperDur > 0) {
+                for (const w of b.words) {
+                    if (typeof w.s === 'number') {
+                        w.s = b.start + ((w.s - wsFirst) / whisperDur) * blockDur;
+                    }
+                    if (typeof w.e === 'number') {
+                        w.e = b.start + ((w.e - wsFirst) / whisperDur) * blockDur;
+                    }
+                }
+                continue;
+            }
+        }
+        // Fallback char-count : aucun timestamp Whisper exploitable.
         const weights = b.words.map(w => Math.max(1, (w.w || '').length + 1));
         const total = weights.reduce((a, c) => a + c, 0);
         let cumul = 0;
         for (let i = 0; i < b.words.length; i++) {
-            b.words[i].s = b.start + (cumul / total) * dur;
+            b.words[i].s = b.start + (cumul / total) * blockDur;
             cumul += weights[i];
-            b.words[i].e = b.start + (cumul / total) * dur;
+            b.words[i].e = b.start + (cumul / total) * blockDur;
         }
     }
 
