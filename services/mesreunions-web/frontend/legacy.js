@@ -1685,6 +1685,18 @@ async function _openRegenerateModal(fileId, scope) {
         } else if (resp.ok) {
             // Pas d'alert intrusif : la fiche se rafraîchit toute seule.
             clearPendingCorrections(fileId);
+            // Cache lazy de blobs texte invalidé : le reprocess a réécrit
+            // cleaned/reformulated/absentee côté DB, les prochaines
+            // ouvertures d'onglet doivent refetcher.
+            if (typeof _invalidateTranscriptTextCache === 'function') {
+                _invalidateTranscriptTextCache(fileId);
+            }
+            if (persistentCt && persistentCt._mesreunionsCrData) {
+                ['speaker_tagged_text', 'cleaned_text', 'reformulated_text',
+                 'absentee_summary', 'meeting_analysis_json'].forEach((c) => {
+                    delete persistentCt._mesreunionsCrData[c];
+                });
+            }
             if (typeof loadSessions === 'function') loadSessions({ force: true });
             showToast && showToast('✓ Régénération terminée', 'success');
         } else {
@@ -1782,7 +1794,11 @@ async function mountTranscriptCorrector(container) {
 
     let data;
     try {
-        const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+        // Mode summary : on n'a besoin que de ``available`` + ``outputs``
+        // pour décider quoi rendre. Le speaker_tagged_text (parfois
+        // plusieurs Mo) est ensuite tiré via le endpoint lazy dédié pour
+        // ne pas bloquer le render initial de la fiche.
+        const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}?summary=1`);
         if (!resp.ok) {
             container.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Transcription indisponible (HTTP ${resp.status}).</p>`;
             return;
@@ -1796,7 +1812,15 @@ async function mountTranscriptCorrector(container) {
         container.innerHTML = '';   // pas encore prêt — on attend que le pipeline finisse
         return;
     }
+    // Lazy-load des deux textes utiles : speaker_tagged (priorité) +
+    // transcription brute (fallback). En parallèle via Promise.all.
+    data.speaker_tagged_text = await _fetchTranscriptText(fileId, 'speaker_tagged');
     const blocks = _parseSpeakerTagged(data.speaker_tagged_text || '');
+    if (!blocks.length && !data.transcription_text) {
+        // Fallback nécessaire : on tire la transcription brute uniquement
+        // si pas de blocs (typique d'un échec diarisation).
+        data.transcription_text = await _fetchTranscriptText(fileId, 'transcription');
+    }
     if (!blocks.length) {
         // Fallback : pas de speaker-tagged (échec diarisation) — afficher juste
         // la transcription brute non-éditable.
@@ -1825,7 +1849,7 @@ async function mountTranscriptCorrector(container) {
           <strong>Sélectionnez un mot</strong> mal transcrit pour le corriger
           (avec ré-écoute du contexte 🔊).
           Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
-          interlocuteur (« SPEAKER_03 », etc.) pour le renommer.
+          interlocuteur (« Intervenant_03 », etc.) pour le renommer.
           ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio.'}
         </div>
         <div class="tc-find" data-tc-find>
@@ -2127,12 +2151,59 @@ function _attachLocalSearch(container) {
 // 4 onglets de la modale d'édition du CR. La section "Transcription de
 // la réunion" (corrector audio par interlocuteur + ▶ par segment + sync
 // audio) reste séparée et inchangée — c'est la surface audio dédiée.
+// Chaque onglet du modal CR : ``source`` lit le texte depuis l'objet
+// ``data`` déjà en cache (renvoyé par transcript-status). ``flagKey``
+// pointe vers l'entrée correspondante dans ``data.outputs`` pour
+// décider de la visibilité de l'onglet AVANT que le texte ne soit
+// chargé (le mode summary n'embarque que meeting_analysis_json, les
+// autres textes arrivent en arrière-plan). ``lazyKind`` est l'argument
+// pour /api/file/transcript-text/<id>/<kind> ; ``column`` la propriété
+// dans laquelle on stocke le résultat pour ne pas refetch.
 const CR_TABS = [
-    { key: 'meeting_cr',    label: '📋 Compte-rendu',     source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json) },
-    { key: 'reformulated',  label: '✍️ Reformulation',    source: (d) => d.reformulated_text || '' },
-    { key: 'cleaned',       label: '🧹 Nettoyée',         source: (d) => d.cleaned_text || '' },
-    { key: 'absentee',      label: '🪧 Pour les absents', source: (d) => d.absentee_summary || '' },
+    { key: 'meeting_cr',    label: '📋 Compte-rendu',     flagKey: 'meeting-cr',
+      source: (d) => _formatMeetingAnalysisAsMarkdown(d.meeting_analysis_json),
+      lazyKind: 'meeting_analysis', column: 'meeting_analysis_json',
+      hasRawText: (d) => !!d.meeting_analysis_json },
+    { key: 'reformulated',  label: '✍️ Reformulation',    flagKey: 'transcript-reformulated',
+      source: (d) => d.reformulated_text || '',
+      lazyKind: 'reformulated', column: 'reformulated_text',
+      hasRawText: (d) => typeof d.reformulated_text === 'string' },
+    { key: 'cleaned',       label: '🧹 Nettoyée',         flagKey: 'transcript-cleaned',
+      source: (d) => d.cleaned_text || '',
+      lazyKind: 'cleaned', column: 'cleaned_text',
+      hasRawText: (d) => typeof d.cleaned_text === 'string' },
+    { key: 'absentee',      label: '🪧 Pour les absents', flagKey: 'absentee',
+      source: (d) => d.absentee_summary || '',
+      lazyKind: 'absentee', column: 'absentee_summary',
+      hasRawText: (d) => typeof d.absentee_summary === 'string' },
 ];
+
+// Cache des fetches lazy d'un blob texte : clé `${fileId}|${kind}`,
+// valeur = Promise résolvant à la string (ou '' en cas d'échec).
+// Partagée entre le prefetch d'arrière-plan déclenché par
+// loadTranscriptStatus et les clics sur les onglets — un seul GET par
+// (file, kind) quelle que soit l'ordre des évènements.
+const _transcriptTextCache = new Map();
+function _fetchTranscriptText(fileId, kind) {
+    const k = `${fileId}|${kind}`;
+    if (_transcriptTextCache.has(k)) return _transcriptTextCache.get(k);
+    const p = fetch(`/api/file/transcript-text/${encodeURIComponent(fileId)}/${encodeURIComponent(kind)}`)
+        .then((r) => r.ok ? r.json() : { available: false })
+        .then((j) => (j && j.available && typeof j.text === 'string') ? j.text : '')
+        .catch(() => '');
+    _transcriptTextCache.set(k, p);
+    return p;
+}
+// Invalide le cache lazy pour un fichier (à appeler après reprocess,
+// correction ou tout évènement qui peut modifier un blob texte côté
+// serveur). Sans ça, la prochaine ouverture de la fiche ré-affiche
+// l'ancien texte mis en cache.
+function _invalidateTranscriptTextCache(fileId) {
+    const prefix = `${fileId}|`;
+    Array.from(_transcriptTextCache.keys())
+        .filter((k) => k.startsWith(prefix))
+        .forEach((k) => _transcriptTextCache.delete(k));
+}
 
 function _formatMeetingAnalysisAsMarkdown(jsonText) {
     // Le meeting_analysis_json est un objet 5-sections produit par LLM.
@@ -2265,7 +2336,17 @@ function _openCrEditorModal(fileId, data) {
     // les termes corrigés (→ drawer sources), et bouton 🔍 par ligne
     // (→ drawer query fuzzy). La section "Transcription de la réunion"
     // reste séparée et n'apparaît pas dans cette modale.
-    const tabsWithContent = CR_TABS.filter((t) => (t.source(data) || '').trim().length > 0);
+    // Visibilité des onglets décidée par les drapeaux ``outputs`` (renvoyés
+    // par transcript-status même en mode summary) plutôt que par la
+    // présence du texte — sinon les onglets dont le texte n'est pas
+    // encore arrivé en arrière-plan seraient masqués à tort.
+    const outputsFlags = (data && data.outputs) || {};
+    const tabsWithContent = CR_TABS.filter((t) => {
+        if (t.flagKey && outputsFlags[t.flagKey]) return true;
+        // Fallback (cas du payload "full" sans flag absentee historique) :
+        // on retombe sur la détection texte.
+        return (t.source(data) || '').trim().length > 0;
+    });
     if (tabsWithContent.length === 0) {
         alert('Aucun contenu à afficher (le compte-rendu n\'a pas encore été généré).');
         return;
@@ -2351,13 +2432,12 @@ function _openCrEditorModal(fileId, data) {
 
     let activeKey = tabs[0]?.getAttribute('data-cr-tab') || 'meeting_cr';
 
-    const renderBody = (key) => {
-        const tab = CR_TABS.find((t) => t.key === key);
-        if (!tab) {
-            body.innerHTML = `<div class="cr-inline-empty">Onglet inconnu.</div>`;
-            return;
-        }
-        const text = tab.source(data) || '';
+    // Marqueur monotone : si l'utilisateur clique un autre onglet avant
+    // que la promesse de lazy-load ne se résolve, on jette le résultat
+    // pour ne pas écrire dans body après qu'un autre onglet a déjà rendu.
+    let renderToken = 0;
+
+    const _renderText = (text) => {
         if (!text.trim()) {
             body.innerHTML = `<div class="cr-inline-empty">Pas de contenu pour cet onglet.</div>`;
             return;
@@ -2381,6 +2461,37 @@ function _openCrEditorModal(fileId, data) {
             _markCorrectedTermsInBody(body, correctedTerms);
         }
         _decorateCrLinesWithFindButtons(body, fileId);
+    };
+
+    const renderBody = (key) => {
+        const tab = CR_TABS.find((t) => t.key === key);
+        if (!tab) {
+            body.innerHTML = `<div class="cr-inline-empty">Onglet inconnu.</div>`;
+            return;
+        }
+        const myToken = ++renderToken;
+        // Cas synchrone : on a déjà le texte en mémoire (CR toujours
+        // présent en mode summary, autres textes après prefetch).
+        if (tab.hasRawText(data)) {
+            _renderText(tab.source(data) || '');
+            return;
+        }
+        // Cas lazy : on affiche un état de chargement pendant le fetch.
+        // Le placeholder reste compatible avec _renderText au moment où
+        // la promesse aboutit (renderToken garantit la cohérence si
+        // l'utilisateur a changé d'onglet entre-temps).
+        body.innerHTML = `<div class="cr-inline-empty">⏳ Chargement de l'onglet…</div>`;
+        if (!tab.lazyKind) {
+            _renderText('');
+            return;
+        }
+        _fetchTranscriptText(fileId, tab.lazyKind).then((text) => {
+            if (renderToken !== myToken) return;  // user passé à un autre onglet
+            if (typeof text === 'string' && tab.column) {
+                data[tab.column] = text;
+            }
+            _renderText(tab.source(data) || '');
+        });
     };
 
     tabs.forEach((t) => {
@@ -2503,7 +2614,11 @@ document.addEventListener('click', async (ev) => {
     let data = persistentCt && persistentCt._mesreunionsCrData;
     if (!data) {
         try {
-            const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+            // Le modal CR est lazy : il fetch chaque onglet à la demande
+            // via _fetchTranscriptText. On peut donc se contenter du
+            // mode summary (le meeting_analysis_json y est inclus, donc
+            // le premier onglet rend immédiatement).
+            const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}?summary=1`);
             data = await resp.json();
         } catch (e) {
             alert(`Chargement impossible : ${e.message}`);
@@ -3831,7 +3946,13 @@ function _buildInfoTooltip(status, engine, outputs, meta) {
 
 async function loadTranscriptStatus(fileId, container) {
     try {
-        const resp = await fetch(`/api/file/transcript-status/${fileId}`);
+        // Mode summary : on tire le statut + flags + key_points + le CR
+        // (meeting_analysis_json) qui sert au premier clic. Les autres
+        // textes lourds (speaker_tagged / cleaned / reformulated /
+        // absentee) sont chargés en arrière-plan ci-dessous et à la
+        // demande à l'ouverture du tab correspondant. Gain typique :
+        // payload divisé par 5-10 sur les longues réunions.
+        const resp = await fetch(`/api/file/transcript-status/${fileId}?summary=1`);
         if (!resp.ok) {
             container.innerHTML = '';
             return;
@@ -4118,6 +4239,28 @@ async function loadTranscriptStatus(fileId, container) {
         container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
         if (persistent && data) {
             container._mesreunionsCrData = data;
+            // Prefetch en arrière-plan des textes non-CR qui n'ont PAS été
+            // embarqués (mode summary). Chaque promesse est partagée via
+            // _transcriptTextCache : si l'utilisateur clique un onglet
+            // avant la fin du prefetch, le clic réutilise la même promesse
+            // au lieu d'en lancer une seconde. Les onglets dont le flag
+            // outputs est false sont ignorés pour ne pas générer des 200
+            // avec text=null.
+            const _outputs = data.outputs || {};
+            const _bg = [
+                { lazyKind: 'cleaned',      column: 'cleaned_text',         flag: 'transcript-cleaned' },
+                { lazyKind: 'reformulated', column: 'reformulated_text',    flag: 'transcript-reformulated' },
+                { lazyKind: 'absentee',     column: 'absentee_summary',     flag: 'absentee' },
+            ];
+            _bg.forEach((spec) => {
+                if (!_outputs[spec.flag]) return;
+                if (typeof data[spec.column] === 'string') return;
+                _fetchTranscriptText(fileId, spec.lazyKind).then((text) => {
+                    if (container._mesreunionsCrData && typeof text === 'string') {
+                        container._mesreunionsCrData[spec.column] = text;
+                    }
+                });
+            });
         }
         // Peuple immédiatement les icônes du select "Autres téléchargements"
         // pour la première entrée sélectionnée (sinon la zone reste vide

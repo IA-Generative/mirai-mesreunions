@@ -361,7 +361,10 @@ export function renderList(sessions) {
 // N'altère pas le reste de la row (pas de re-render complet).
 async function _prefetchTranscriptStatus(fileId) {
   try {
-    const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+    // ?summary=1 → on n'a besoin que de status/engine/suggested/key_points,
+    // pas des blobs texte (speaker_tagged/cleaned/reformulated/absentee).
+    // Évite de tirer ~plusieurs Mo inutiles à chaque tick de polling.
+    const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}?summary=1`);
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data || !data.available) return;
@@ -407,7 +410,9 @@ async function _fetchAndRenderSummary(fileId) {
   const summaryEl = document.querySelector(`[data-summary-for="${cssEscape(fileId)}"]`);
   if (!summaryEl) return;
   try {
-    const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}`);
+    // Liste : on n'utilise que key_points_summary + suggested_filename →
+    // mode summary.
+    const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(fileId)}?summary=1`);
     if (!resp.ok) {
       summaryEl.innerHTML = `<em class="meeting-row-summary-empty">Résumé indisponible (HTTP ${resp.status}).</em>`;
       return;

@@ -12,6 +12,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -115,49 +116,117 @@ def api_my_sessions():
             UploadSession.trashed_at.is_(None),
         ).order_by(UploadSession.created_at.desc()).limit(20).all()
 
+        # Les deux appels internes ingester+device sont parallélisés : ils
+        # sont indépendants, chacun coûte un round-trip réseau, et ils
+        # étaient le plancher latence du endpoint (10s timeout chacun).
+        def _fetch_meeting_dt():
+            try:
+                return _request_internal_ingester_api(
+                    "/api/v1/audio/meeting-datetimes",
+                    method="GET", params={"user_sub": user["sub"]},
+                )
+            except Exception:
+                logger.debug("meeting-datetimes bulk fetch failed (non-fatal)", exc_info=True)
+                return None
+
+        def _fetch_devices():
+            try:
+                return request_internal_device_api(
+                    "GET", "/api/v1/devices",
+                    params={"user_sub": user.get("sub", "")},
+                )
+            except Exception:
+                logger.debug("Could not fetch devices for lifecycle enrichment", exc_info=True)
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _bulk_future = _pool.submit(_fetch_meeting_dt)
+            _devices_future = _pool.submit(_fetch_devices)
+            bulk = _bulk_future.result()
+            devices = _devices_future.result()
+
         meeting_dt_overrides = {}
-        try:
-            bulk = _request_internal_ingester_api(
-                "/api/v1/audio/meeting-datetimes",
-                method="GET", params={"user_sub": user["sub"]},
-            )
-            if isinstance(bulk, dict):
-                for it in (bulk.get("items") or []):
-                    code = (it.get("simple_code") or "").strip()
-                    name = (it.get("original_filename") or "").strip()
-                    dt = it.get("meeting_datetime")
-                    if code and name and dt:
-                        meeting_dt_overrides[(code, name)] = dt
-        except Exception:
-            logger.debug("meeting-datetimes bulk fetch failed (non-fatal)", exc_info=True)
+        if isinstance(bulk, dict):
+            for it in (bulk.get("items") or []):
+                code = (it.get("simple_code") or "").strip()
+                name = (it.get("original_filename") or "").strip()
+                dt = it.get("meeting_datetime")
+                if code and name and dt:
+                    meeting_dt_overrides[(code, name)] = dt
 
         active_qr_tokens = set()
-        try:
-            devices = request_internal_device_api(
-                "GET", "/api/v1/devices",
-                params={"user_sub": user.get("sub", "")},
-            )
-            now = datetime.now(timezone.utc)
-            for d in (devices if isinstance(devices, list) else []):
-                if not isinstance(d, dict):
+        now = datetime.now(timezone.utc)
+        for d in (devices if isinstance(devices, list) else []):
+            if not isinstance(d, dict):
+                continue
+            if (d.get("status") or "").lower() != "active":
+                continue
+            retention_raw = d.get("retention_expires_at")
+            if retention_raw:
+                try:
+                    retention = datetime.fromisoformat(retention_raw.replace("Z", "+00:00"))
+                    if retention.tzinfo is None:
+                        retention = retention.replace(tzinfo=timezone.utc)
+                    if retention <= now:
+                        continue
+                except Exception:
+                    pass
+            qr = (d.get("qr_token") or "").strip()
+            if qr:
+                active_qr_tokens.add(qr)
+
+        # ── Batch S3 HEAD probes ────────────────────────────────────────
+        # Auparavant on enchaînait 1 à 4 ``object_exists`` synchrones par
+        # fichier : pour ~20 sessions × 5 fichiers × 3 probes c'était
+        # ~300 HEAD séquentiels. On précalcule la liste de probes puis on
+        # tape S3 en parallèle (un seul ThreadPoolExecutor borné).
+        def _safe_exists(cfg, key):
+            try:
+                return object_exists(cfg, key)
+            except Exception:
+                logger.debug("object_exists failed for %s", key, exc_info=True)
+                return False
+
+        probe_specs = {}  # marker → (cfg, key)
+        transferred_storage_cache = {}  # file_id → (cfg, key) or (None, None)
+
+        def _transferred_storage(f):
+            if f.id not in transferred_storage_cache:
+                try:
+                    transferred_storage_cache[f.id] = svc.resolve_transferred_storage(db, f)
+                except Exception:
+                    transferred_storage_cache[f.id] = (None, None)
+            return transferred_storage_cache[f.id]
+
+        for s in sessions:
+            for f in s.uploads:
+                if f.trashed_at is not None:
                     continue
-                if (d.get("status") or "").lower() != "active":
-                    continue
-                retention_raw = d.get("retention_expires_at")
-                if retention_raw:
-                    try:
-                        retention = datetime.fromisoformat(retention_raw.replace("Z", "+00:00"))
-                        if retention.tzinfo is None:
-                            retention = retention.replace(tzinfo=timezone.utc)
-                        if retention <= now:
-                            continue
-                    except Exception:
-                        pass
-                qr = (d.get("qr_token") or "").strip()
-                if qr:
-                    active_qr_tokens.add(qr)
-        except Exception:
-            logger.debug("Could not fetch devices for lifecycle enrichment", exc_info=True)
+                if f.stored_filename:
+                    probe_specs[("source", f.id)] = (s3_upload_cfg, f.stored_filename)
+                if f.transcoded_filename:
+                    probe_specs[("transcoded", f.id)] = (s3_processed_cfg, f.transcoded_filename)
+                if f.status == UploadStatus.TRANSFERRED and f.transcoded_filename:
+                    t_cfg, t_key = _transferred_storage(f)
+                    if t_cfg and t_key:
+                        probe_specs[("transferred", f.id)] = (t_cfg, t_key)
+                # Rattrapage de statut : on a besoin du résultat aussi.
+                if f.status in {UploadStatus.READY_FOR_TRANSFER, UploadStatus.TRANSFERRING} and f.transcoded_filename:
+                    t_cfg, t_key = _transferred_storage(f)
+                    if t_cfg and t_key:
+                        probe_specs[("reconcile", f.id)] = (t_cfg, t_key)
+
+        probe_results = {}
+        if probe_specs:
+            # max_workers borné pour ne pas saturer le pool S3 si un user
+            # a beaucoup de fichiers ; 32 ≈ ~10× speed-up sans risque.
+            with ThreadPoolExecutor(max_workers=min(32, len(probe_specs))) as _pool:
+                futures = {
+                    _pool.submit(_safe_exists, cfg, key): marker
+                    for marker, (cfg, key) in probe_specs.items()
+                }
+                for fut in futures:
+                    probe_results[futures[fut]] = fut.result()
 
         reconciled = 0
         result = []
@@ -167,38 +236,18 @@ def api_my_sessions():
                 if f.trashed_at is not None:
                     continue
                 if f.status in {UploadStatus.READY_FOR_TRANSFER, UploadStatus.TRANSFERRING} and f.transcoded_filename:
-                    try:
-                        t_cfg, t_key = svc.resolve_transferred_storage(db, f)
-                        if t_cfg and t_key and object_exists(t_cfg, t_key):
-                            f.status = UploadStatus.TRANSFERRED
-                            f.status_message = "Fichier intégré à votre compte. Transcription en cours... (rattrapage auto)"
-                            if not f.transferred_at:
-                                f.transferred_at = datetime.now(timezone.utc)
-                            reconciled += 1
-                    except Exception:
-                        logger.debug("Unable to reconcile transfer status for %s", f.id, exc_info=True)
+                    if probe_results.get(("reconcile", f.id)):
+                        f.status = UploadStatus.TRANSFERRED
+                        f.status_message = "Fichier intégré à votre compte. Transcription en cours... (rattrapage auto)"
+                        if not f.transferred_at:
+                            f.transferred_at = datetime.now(timezone.utc)
+                        reconciled += 1
 
-                source_available = False
-                if f.stored_filename:
-                    try:
-                        source_available = object_exists(s3_upload_cfg, f.stored_filename)
-                    except Exception:
-                        logger.debug("Unable to verify source object presence for %s", f.id, exc_info=True)
-
-                transcoded_available = False
-                if f.transcoded_filename:
-                    try:
-                        transcoded_available = object_exists(s3_processed_cfg, f.transcoded_filename)
-                    except Exception:
-                        logger.debug("Unable to verify transcoded object presence for %s", f.id, exc_info=True)
-
+                source_available = bool(probe_results.get(("source", f.id)))
+                transcoded_available = bool(probe_results.get(("transcoded", f.id)))
                 transferred_available = False
                 if f.status == UploadStatus.TRANSFERRED and f.transcoded_filename:
-                    try:
-                        t_cfg, t_key = svc.resolve_transferred_storage(db, f)
-                        transferred_available = bool(t_cfg and t_key and object_exists(t_cfg, t_key))
-                    except Exception:
-                        logger.debug("Unable to verify transferred object presence for %s", f.id, exc_info=True)
+                    transferred_available = bool(probe_results.get(("transferred", f.id)))
 
                 override_dt = meeting_dt_overrides.get((s.simple_code, f.original_filename))
                 uploads.append({
@@ -539,10 +588,24 @@ def api_file_meeting_cr_download(ext, file_id):
         db.close()
 
 
+# Champs texte volumineux qu'on omet du payload "fiche détaillée initiale"
+# (mode ``?summary=1``) pour rendre la page rapide. On garde
+# ``meeting_analysis_json`` car le premier clic ouvre le compte-rendu, et
+# les autres textes sont chargés en arrière-plan ou à la demande via
+# ``/api/file/transcript-text``.
+_HEAVY_TRANSCRIPT_FIELDS = (
+    "speaker_tagged_text",
+    "cleaned_text",
+    "reformulated_text",
+    "absentee_summary",
+)
+
+
 @bp.route("/api/file/transcript-status/<file_id>")
 @require_auth
 def api_file_transcript_status(file_id):
     user = get_current_user()
+    summary_only = (request.args.get("summary") or "").strip() in ("1", "true", "yes")
     # Lookup wrapped in with_db_retry pour absorber les "server closed the
     # connection unexpectedly" sporadiques (bug routing inter-cluster SCW
     # LB postgres-external-lb depuis internal-gw — cf with_db_retry doc).
@@ -560,8 +623,13 @@ def api_file_transcript_status(file_id):
             return jsonify({"available": False, "reason": "not_ready"})
         flags = {k: bool(audio.get(col)) for k, col in svc.TRANSCRIPT_KIND_TO_COLUMN.items()}
         flags["meeting-cr"] = bool(audio.get("meeting_analysis_json"))
-        return jsonify({
+        # Indique au front si l'absentee_summary existe sans avoir à le
+        # télécharger (mode summary). Permet de décider la visibilité de
+        # l'onglet « Pour les absents » avant le lazy-load.
+        flags["absentee"] = bool(audio.get("absentee_summary"))
+        payload = {
             "available": True,
+            "summary_only": summary_only,
             "transcription_status": audio.get("transcription_status"),
             "transcription_engine": audio.get("transcription_engine"),
             "transcription_language": audio.get("transcription_language"),
@@ -570,22 +638,72 @@ def api_file_transcript_status(file_id):
             "key_points_summary": audio.get("key_points_summary"),
             "meeting_datetime": audio.get("meeting_datetime"),
             "kevent_job_id": audio.get("kevent_job_id"),
-            # Texte speaker-tagged (avec timecodes par bloc) exposé pour
-            # la correction inline + ré-écoute audio par bloc speaker.
-            "speaker_tagged_text": audio.get("speaker_tagged_text"),
-            # Textes CR pour rendu inline (markdown via marked.js côté
-            # frontend) + corrector C avec drawer source-segments.
-            "cleaned_text": audio.get("cleaned_text"),
-            "reformulated_text": audio.get("reformulated_text"),
-            "absentee_summary": audio.get("absentee_summary"),
+            # Le CR (meeting_analysis_json) reste exposé même en mode
+            # summary : c'est le premier onglet, on veut éviter un round-trip
+            # supplémentaire pour l'afficher.
             "meeting_analysis_json": audio.get("meeting_analysis_json"),
-            # Compteur + horodatage des régénérations (pour affichage du
-            # numéro de version dans le bandeau de statut + statistiques
-            # côté admin). `last_reprocessed_at` arrive déjà sérialisé en
-            # string ISO depuis l'ingester (cf puller.py audio_lookup),
-            # on ne re-isoformat pas.
             "reprocess_version": audio.get("reprocess_version") or 0,
             "last_reprocessed_at": audio.get("last_reprocessed_at"),
+        }
+        if not summary_only:
+            # Texte speaker-tagged (avec timecodes par bloc) exposé pour
+            # la correction inline + ré-écoute audio par bloc speaker.
+            payload["speaker_tagged_text"] = audio.get("speaker_tagged_text")
+            # Textes CR pour rendu inline (markdown via marked.js côté
+            # frontend) + corrector C avec drawer source-segments.
+            payload["cleaned_text"] = audio.get("cleaned_text")
+            payload["reformulated_text"] = audio.get("reformulated_text")
+            payload["absentee_summary"] = audio.get("absentee_summary")
+        return jsonify(payload)
+    finally:
+        db.close()
+
+
+# Mapping kind exposé côté frontend → colonne UserAudioFile renvoyée par
+# l'ingester. Volontairement restreint aux textes que les onglets / le
+# corrector consomment, pour ne pas exposer plus que nécessaire.
+_TRANSCRIPT_TEXT_KINDS = {
+    "speaker_tagged": "speaker_tagged_text",
+    "cleaned": "cleaned_text",
+    "reformulated": "reformulated_text",
+    "absentee": "absentee_summary",
+    "meeting_analysis": "meeting_analysis_json",
+    # Whisper brut sans diarisation — fallback du corrector quand le
+    # speaker_tagged est vide (échec pyannote).
+    "transcription": "transcription_text",
+}
+
+
+@bp.route("/api/file/transcript-text/<file_id>/<kind>")
+@require_auth
+def api_file_transcript_text(file_id, kind):
+    """Charge un seul blob texte à la demande.
+
+    Sert le lazy-load des onglets non-CR (reformulation / nettoyée /
+    absentee) et du corrector (speaker_tagged). Tous les onglets de la
+    fiche détaillée peuvent ainsi se charger en arrière-plan après le
+    premier render, ou à la demande au moment du clic.
+    """
+    column = _TRANSCRIPT_TEXT_KINDS.get(kind)
+    if not column:
+        abort(404, "Unknown transcript kind")
+    user = get_current_user()
+    def _lookup():
+        db = session_scope()
+        try:
+            return _audio_or_404(db, user["sub"], file_id), db
+        except Exception:
+            try: db.close()
+            except Exception: pass
+            raise
+    (file_obj, audio), db = with_db_retry(_lookup, max_attempts=3)
+    try:
+        if audio is None:
+            return jsonify({"available": False, "reason": "not_ready"})
+        return jsonify({
+            "available": True,
+            "kind": kind,
+            "text": audio.get(column),
         })
     finally:
         db.close()
