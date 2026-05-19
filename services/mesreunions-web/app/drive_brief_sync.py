@@ -211,19 +211,10 @@ def brief_json_to_markdown(brief_json: dict) -> str:
                 out.append(f"- {it}")
         out.append("")
 
-    participants = brief_json.get("participants_notes") or []
-    if participants:
-        _h("Notes participants")
-        for p in participants:
-            if isinstance(p, dict):
-                name = p.get("name") or "(anonyme)"
-                role = p.get("role")
-                ctx = p.get("context")
-                line = f"- **{name}**" + (f" ({role})" if role else "")
-                if ctx:
-                    line += f" — {ctx}"
-                out.append(line)
-        out.append("")
+    # NOTE : brief_json.participants_notes (LLM) volontairement ignoré.
+    # La vraie liste participants vit dans la colonne JSONB `participants`
+    # éditable côté UI et n'est pas passée à ce helper aujourd'hui.
+    # Pour l'inclure ici, étendre schedule_drive_brief_sync(participants=...).
 
     risks = brief_json.get("risks") or []
     if risks:

@@ -225,7 +225,8 @@ def create_preparation():
             name = (raw.get("name") or "").strip()
             email = (raw.get("email") or "").strip()
             role_ = (raw.get("role") or "").strip()
-            if not (name or email):
+            note = (raw.get("note") or "").strip()
+            if not (name or email or note):
                 continue
             entry: dict = {}
             if name:
@@ -234,6 +235,8 @@ def create_preparation():
                 entry["email"] = email[:320]
             if role_:
                 entry["role"] = role_[:120]
+            if note:
+                entry["note"] = note[:500]
             participants_clean.append(entry)
         if len(participants_clean) > 100:
             participants_clean = participants_clean[:100]
@@ -806,7 +809,8 @@ def update_preparation_participants(preparation_id: str):
         name = (raw.get("name") or "").strip()
         email = (raw.get("email") or "").strip()
         role = (raw.get("role") or "").strip()
-        if not (name or email):
+        note = (raw.get("note") or "").strip()
+        if not (name or email or note):
             continue
         entry: dict = {}
         if name:
@@ -815,6 +819,8 @@ def update_preparation_participants(preparation_id: str):
             entry["email"] = email[:320]
         if role:
             entry["role"] = role[:120]
+        if note:
+            entry["note"] = note[:500]
         cleaned.append(entry)
 
     if len(cleaned) > 100:

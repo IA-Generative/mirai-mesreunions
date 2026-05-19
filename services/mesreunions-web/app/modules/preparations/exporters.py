@@ -8,7 +8,7 @@ l'écran :
 
   1. Objectif & contexte           (objective_reformulated + context_recap)
   2. Ordre du jour                 (agenda[] : title + duration + objective + key_questions)
-  3. Participants                  (participants_notes[] : name + note)
+  3. Participants                  (prep.participants[] : name + email + role + note)
   4. Points en suspens             (open_threads[] : item + source)
   5. Questions d'ouverture         (opening_questions[])
   6. Points de vigilance           (risk_points[])
@@ -48,13 +48,19 @@ def slugify(value: str, *, max_len: int = 60) -> str:
     return s or "preparation"
 
 
-def _sections(content: dict[str, Any]) -> list[tuple[str, str, Any]]:
+def _sections(prep: dict[str, Any]) -> list[tuple[str, str, Any]]:
     """Renvoie ``[(emoji, titre, payload), ...]`` non-vide.
 
     ``payload`` est laissé brut (str ou list) — les renderers DOCX/ODT
     et le front interprètent selon le type.
+
+    La section Participants est sourcée depuis ``prep.participants`` (la
+    liste éditable saisie par l'utilisateur, avec email + note libre),
+    PAS depuis ``brief_json.participants_notes`` (champ LLM ignoré au
+    rendu).
     """
-    bj = content or {}
+    prep = prep or {}
+    bj = prep.get("content") or {}
     out: list[tuple[str, str, Any]] = []
 
     objective = (bj.get("objective_reformulated") or "").strip()
@@ -67,11 +73,11 @@ def _sections(content: dict[str, Any]) -> list[tuple[str, str, Any]]:
     if agenda:
         out.append(("📋", "Ordre du jour", agenda))
 
-    participants_notes = [
-        p for p in (bj.get("participants_notes") or []) if isinstance(p, dict)
+    participants = [
+        p for p in (prep.get("participants") or []) if isinstance(p, dict)
     ]
-    if participants_notes:
-        out.append(("👥", "Participants", participants_notes))
+    if participants:
+        out.append(("👥", "Participants", participants))
 
     threads = [t for t in (bj.get("open_threads") or []) if isinstance(t, dict)]
     if threads:
@@ -146,7 +152,7 @@ def render_docx(prep: dict) -> bytes:
 
     doc.add_paragraph()  # spacer
 
-    for emoji, section_title, payload in _sections(prep.get("content") or {}):
+    for emoji, section_title, payload in _sections(prep):
         hp = doc.add_paragraph()
         hr = hp.add_run(f"{emoji}  {section_title}")
         hr.bold = True
@@ -182,10 +188,17 @@ def render_docx(prep: dict) -> bytes:
         elif section_title == "Participants":
             for p_dict in payload:
                 name = (p_dict.get("name") or "—").strip()
+                email = (p_dict.get("email") or "").strip()
+                role = (p_dict.get("role") or "").strip()
                 note = (p_dict.get("note") or "").strip()
                 bp = doc.add_paragraph(style="List Bullet")
                 br = bp.add_run(name)
                 br.bold = True
+                meta_bits = [b for b in (role, email) if b]
+                if meta_bits:
+                    mr = bp.add_run(f" ({' · '.join(meta_bits)})")
+                    mr.font.size = Pt(9)
+                    mr.font.color.rgb = RGBColor(0x4B, 0x55, 0x63)
                 if note:
                     bp.add_run(f" — {note}")
 
@@ -269,7 +282,7 @@ def render_odt(prep: dict) -> bytes:
     if meta:
         doc.text.addElement(P(stylename=meta_style, text=" · ".join(meta)))
 
-    for emoji, section_title, payload in _sections(prep.get("content") or {}):
+    for emoji, section_title, payload in _sections(prep):
         doc.text.addElement(H(outlinelevel=2, stylename=h2_style,
                               text=f"{emoji}  {section_title}"))
 
@@ -307,10 +320,16 @@ def render_odt(prep: dict) -> bytes:
             lst = List()
             for p_dict in payload:
                 name = (p_dict.get("name") or "—").strip()
+                email = (p_dict.get("email") or "").strip()
+                role = (p_dict.get("role") or "").strip()
                 note = (p_dict.get("note") or "").strip()
                 li = ListItem()
                 p = P(stylename=body_style)
                 p.addElement(Span(stylename=bold_style, text=name))
+                meta_bits = [b for b in (role, email) if b]
+                if meta_bits:
+                    p.addElement(Span(stylename=small_style,
+                                      text=f" ({' · '.join(meta_bits)})"))
                 if note:
                     p.addText(f" — {note}")
                 li.addElement(p)

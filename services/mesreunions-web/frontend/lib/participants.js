@@ -2,8 +2,9 @@
 // brief (Lot 5). Une seule source de vérité pour le rendu + validation
 // email + serialize/deserialize.
 //
-// Structure participant : {name: string, email: string|null, role: string|null}
-// L'UI affiche 1 ligne par participant avec 3 inputs + bouton suppr.
+// Structure participant : {name, email, role, note} (tous strings optionnels)
+// L'UI affiche 1 ligne par participant avec name/email/role + bouton suppr,
+// et une 2e ligne pour la note libre (full-width).
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,7 +30,7 @@ export function createParticipantRow(data, onChange) {
   const row = document.createElement('div');
   row.className = 'participant-row';
   row.style.cssText = 'display:grid;grid-template-columns:1.2fr 1.6fr 1fr auto;'
-    + 'gap:0.35rem;align-items:center;';
+    + 'gap:0.35rem;align-items:center;row-gap:0.3rem;';
 
   const mk = (type, cls, value, placeholder) => {
     const i = document.createElement('input');
@@ -74,6 +75,21 @@ export function createParticipantRow(data, onChange) {
   row.appendChild(emailI);
   row.appendChild(roleI);
   row.appendChild(rm);
+
+  // Note libre — sur la ligne suivante, full-width.
+  const noteI = document.createElement('input');
+  noteI.type = 'text';
+  noteI.className = 'pa-note';
+  noteI.value = data.note || '';
+  noteI.placeholder = 'Note libre (positionnement, contexte, attendus…)';
+  noteI.maxLength = 500;
+  noteI.setAttribute('aria-label', 'Note');
+  noteI.style.cssText = 'border:1px solid #cbd5e1;border-radius:0.3rem;'
+    + 'padding:0.3rem 0.4rem;font-size:0.82rem;width:100%;'
+    + 'grid-column:1 / -1;color:#475569;background:#fcfcfd;';
+  if (onChange) noteI.addEventListener('input', onChange);
+  row.appendChild(noteI);
+
   return row;
 }
 
@@ -89,11 +105,13 @@ export function serializeParticipantsContainer(container) {
     const name = (r.querySelector('.pa-name')?.value || '').trim();
     const email = (r.querySelector('.pa-email')?.value || '').trim();
     const role = (r.querySelector('.pa-role')?.value || '').trim();
-    if (!name && !email && !role) return;
+    const note = (r.querySelector('.pa-note')?.value || '').trim();
+    if (!name && !email && !role && !note) return;
     const entry = {};
     if (name) entry.name = name;
     if (email) entry.email = email;
     if (role) entry.role = role;
+    if (note) entry.note = note;
     out.push(entry);
   });
   return out;

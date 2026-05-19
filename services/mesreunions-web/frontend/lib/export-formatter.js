@@ -18,8 +18,9 @@ function _slugify(s, maxLen = 60) {
   return (str || 'preparation').slice(0, maxLen).replace(/-+$/, '');
 }
 
-function _sections(content) {
-  const bj = content || {};
+function _sections(prep) {
+  const p = prep || {};
+  const bj = p.content || {};
   const out = [];
   const objective = (bj.objective_reformulated || '').trim();
   const context = (bj.context_recap || '').trim();
@@ -29,7 +30,9 @@ function _sections(content) {
   }
   const agenda = Array.isArray(bj.agenda) ? bj.agenda.filter(x => x && typeof x === 'object') : [];
   if (agenda.length) out.push({ emoji: '📋', title: 'Ordre du jour', kind: 'agenda', payload: agenda });
-  const pn = Array.isArray(bj.participants_notes) ? bj.participants_notes.filter(x => x && typeof x === 'object') : [];
+  // Participants sourcés depuis prep.participants (liste éditable), pas
+  // depuis brief_json.participants_notes (champ LLM ignoré).
+  const pn = Array.isArray(p.participants) ? p.participants.filter(x => x && typeof x === 'object') : [];
   if (pn.length) out.push({ emoji: '👥', title: 'Participants', kind: 'participants', payload: pn });
   const threads = Array.isArray(bj.open_threads) ? bj.open_threads.filter(x => x && typeof x === 'object') : [];
   if (threads.length) out.push({ emoji: '🧵', title: 'Points en suspens', kind: 'threads', payload: threads });
@@ -60,7 +63,7 @@ export function renderTxt(prep) {
   out.push('='.repeat(Math.min(title.length, 80)));
   if (meta.length) out.push(meta.join(' · '));
   out.push('');
-  for (const sec of _sections(prep.content || {})) {
+  for (const sec of _sections(prep)) {
     out.push(`${sec.emoji}  ${sec.title}`);
     out.push('-'.repeat(Math.min(sec.title.length + 4, 80)));
     if (sec.kind === 'objective') {
@@ -78,8 +81,14 @@ export function renderTxt(prep) {
     } else if (sec.kind === 'participants') {
       sec.payload.forEach(p => {
         const name = (p.name || '—').trim();
+        const email = (p.email || '').trim();
+        const role = (p.role || '').trim();
         const note = (p.note || '').trim();
-        out.push(note ? `- ${name} — ${note}` : `- ${name}`);
+        const meta = [role, email].filter(Boolean).join(' · ');
+        let line = `- ${name}`;
+        if (meta) line += ` (${meta})`;
+        if (note) line += ` — ${note}`;
+        out.push(line);
       });
     } else if (sec.kind === 'threads') {
       sec.payload.forEach(t => {
@@ -103,7 +112,7 @@ export function renderMd(prep) {
   out.push(`# ${title}`);
   if (meta.length) out.push(`\n_${meta.join(' · ')}_`);
   out.push('');
-  for (const sec of _sections(prep.content || {})) {
+  for (const sec of _sections(prep)) {
     out.push(`## ${sec.emoji} ${sec.title}`);
     out.push('');
     if (sec.kind === 'objective') {
@@ -121,8 +130,14 @@ export function renderMd(prep) {
     } else if (sec.kind === 'participants') {
       sec.payload.forEach(p => {
         const name = (p.name || '—').trim();
+        const email = (p.email || '').trim();
+        const role = (p.role || '').trim();
         const note = (p.note || '').trim();
-        out.push(note ? `- **${name}** — ${note}` : `- **${name}**`);
+        const meta = [role, email].filter(Boolean).join(' · ');
+        let line = `- **${name}**`;
+        if (meta) line += ` _(${meta})_`;
+        if (note) line += ` — ${note}`;
+        out.push(line);
       });
     } else if (sec.kind === 'threads') {
       sec.payload.forEach(t => {

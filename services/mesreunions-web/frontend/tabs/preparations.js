@@ -247,19 +247,10 @@ function renderBriefBody(brief_json) {
     html += '</ol></section>';
     parts.push(html);
   }
-  const participants = Array.isArray(bj.participants_notes) ? bj.participants_notes : [];
-  if (participants.length) {
-    let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">👥</span>Participants</h3><div class="brief-participants">';
-    participants.forEach((p) => {
-      if (!p || typeof p !== 'object') return;
-      const name = esc(p.name || '');
-      const note = esc(p.note || '');
-      if (!name && !note) return;
-      html += `<div class="brief-participant"><div class="brief-participant-name">${name || '—'}</div><div class="brief-participant-note">${note}</div></div>`;
-    });
-    html += '</div></section>';
-    parts.push(html);
-  }
+  // Note : les participants ne sont PAS rendus ici ; la fiche détail
+  // affiche déjà la liste éditable inline (section #brief-detail-participants
+  // ci-dessus dans index.html), seule source de vérité. Le champ LLM
+  // brief_json.participants_notes est ignoré au rendu (était fantaisiste).
   const threads = Array.isArray(bj.open_threads) ? bj.open_threads : [];
   if (threads.length) {
     let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">🧵</span>Points en suspens</h3><ul class="brief-list brief-list-threads">';
