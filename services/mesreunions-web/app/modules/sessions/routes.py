@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -97,6 +100,45 @@ def _send_text_attachment(text, filename, mime="text/plain"):
 # ─── /api/my-sessions ────────────────────────────────────────────────────
 
 
+_PURGE_TRASH_PROBABILITY = float(os.getenv("MY_SESSIONS_PURGE_PROBABILITY", "0.1"))
+_purge_inflight_users = set()
+_purge_inflight_lock = threading.Lock()
+
+
+def _async_purge_expired_trash(user_sub: str):
+    """Lance la purge corbeille en arrière-plan, dans sa propre session DB.
+
+    Lock par user_sub pour qu'on ne fasse pas tourner deux purges du même
+    user en parallèle si deux requêtes arrivent ensemble. La purge est
+    déclenchée probabilistiquement (cf MY_SESSIONS_PURGE_PROBABILITY)
+    pour ne pas saturer les ressources sur un user qui fait du polling
+    serré — un crons ou un déclenchement 1 fois sur 10 suffit largement
+    pour un seuil de 30 jours.
+    """
+    with _purge_inflight_lock:
+        if user_sub in _purge_inflight_users:
+            return
+        _purge_inflight_users.add(user_sub)
+
+    def _run():
+        db2 = session_scope()
+        try:
+            svc.purge_expired_trash(db2, user_sub)
+            db2.commit()
+        except Exception:
+            try: db2.rollback()
+            except Exception: pass
+            logger.debug("background trash purge failed for %s", user_sub, exc_info=True)
+        finally:
+            try: db2.close()
+            except Exception: pass
+            with _purge_inflight_lock:
+                _purge_inflight_users.discard(user_sub)
+
+    t = threading.Thread(target=_run, name=f"trash-purge-{user_sub[:8]}", daemon=True)
+    t.start()
+
+
 @bp.route("/api/my-sessions")
 @require_auth
 def api_my_sessions():
@@ -104,21 +146,19 @@ def api_my_sessions():
     db = session_scope()
     s3_upload_cfg = get_s3_upload_cfg()
     s3_processed_cfg = get_s3_processed_cfg()
+    timings = {}
+    _t0 = time.monotonic()
     try:
-        try:
-            svc.purge_expired_trash(db, user["sub"])
-        except Exception:
-            db.rollback()
-            logger.debug("trash purge skipped (non-fatal)", exc_info=True)
+        # Purge corbeille → hors hot path : déclenchée probabilistiquement
+        # dans un thread background avec sa propre session DB. Auparavant
+        # synchronisée elle pesait 300-1000ms (2 calls cross-cluster +
+        # S3 deletes inline) sur CHAQUE chargement de la liste.
+        if random.random() < _PURGE_TRASH_PROBABILITY:
+            _async_purge_expired_trash(user["sub"])
 
-        sessions = db.query(UploadSession).filter(
-            UploadSession.user_sub == user["sub"],
-            UploadSession.trashed_at.is_(None),
-        ).order_by(UploadSession.created_at.desc()).limit(20).all()
-
-        # Les deux appels internes ingester+device sont parallélisés : ils
-        # sont indépendants, chacun coûte un round-trip réseau, et ils
-        # étaient le plancher latence du endpoint (10s timeout chacun).
+        # Les deux appels internes (ingester + device) + la query DB sont
+        # tous indépendants. On les lance en parallèle pour éliminer la
+        # séquentialité résiduelle (gain ~100-150ms en typique).
         def _fetch_meeting_dt():
             try:
                 return _request_internal_ingester_api(
@@ -142,8 +182,17 @@ def api_my_sessions():
         with ThreadPoolExecutor(max_workers=2) as _pool:
             _bulk_future = _pool.submit(_fetch_meeting_dt)
             _devices_future = _pool.submit(_fetch_devices)
+            # En parallèle des appels externes, on lance la query DB
+            # principale. SQLAlchemy n'est pas thread-safe sur une même
+            # session : on garde donc la query dans le thread Flask et
+            # on n'attend les futures qu'après.
+            sessions = db.query(UploadSession).filter(
+                UploadSession.user_sub == user["sub"],
+                UploadSession.trashed_at.is_(None),
+            ).order_by(UploadSession.created_at.desc()).limit(20).all()
             bulk = _bulk_future.result()
             devices = _devices_future.result()
+        timings["t1_parallel_fetch"] = round((time.monotonic() - _t0) * 1000)
 
         meeting_dt_overrides = {}
         if isinstance(bulk, dict):
@@ -227,6 +276,8 @@ def api_my_sessions():
                 }
                 for fut in futures:
                     probe_results[futures[fut]] = fut.result()
+        timings["t2_s3_probes"] = round((time.monotonic() - _t0) * 1000)
+        timings["_probe_count"] = len(probe_specs)
 
         reconciled = 0
         result = []
@@ -294,6 +345,16 @@ def api_my_sessions():
         if reconciled:
             db.commit()
             logger.info("Auto-reconciled %s transfer status entries for user %s", reconciled, user.get("sub"))
+        timings["t3_total"] = round((time.monotonic() - _t0) * 1000)
+        timings["_session_count"] = len(sessions)
+        # Log timing pour identifier les régressions de perf sur le hot
+        # path. INFO car la fiche de bord du backend en a besoin pour
+        # alerter sur les SLO dégradés ; reste lisible côté Loki.
+        logger.info(
+            "my-sessions timing user=%s sessions=%s probes=%s parallel=%sms s3=%sms total=%sms",
+            user.get("sub", "?")[:12], timings["_session_count"], timings["_probe_count"],
+            timings["t1_parallel_fetch"], timings["t2_s3_probes"], timings["t3_total"],
+        )
         return jsonify(result)
     finally:
         db.close()
