@@ -77,7 +77,7 @@ def test_render_contains_expected_landmarks(rendered_html):
     """Le rendu doit contenir les ancres UX clés du sprint."""
     must_have = [
         "Mes réunions (IA)",        # onglet principal
-        "file-row-dot",             # animation dot (référencée dans CSS)
+        "transcript-status-spinner",  # animation dot post-rebrand (anc. file-row-dot)
         "downloads-icon-btn",       # icônes formats (référencée dans CSS)
         "Mode avancé",              # toggle power-user (label visible)
         "file-detail-source-filename",  # nom de fichier audio bleuté (CSS)
@@ -156,12 +156,13 @@ def test_dsfr_fr_tabs_nav_structure(rendered_html):
     assert 'class="fr-tabs__list"' in rendered_html, (
         "fr-tabs__list (ul) est requis par la structure DSFR fr-tabs."
     )
-    # 7 onglets : transfers, brief, devices, generate, useful-data, trash, admin
+    # 6 onglets : transfers, brief, devices, useful-data, trash, admin
+    # (l'onglet "generate" a été retiré du template, le QR est généré
+    # depuis le wizard d'enregistrement device et non plus un onglet dédié)
     expected_tab_ids = [
         "tab-btn-transfers",
         "tab-btn-brief",
         "tab-btn-devices",
-        "tab-btn-generate",
         "tab-btn-useful-data",
         "tab-btn-trash",
         "tab-btn-admin",
@@ -170,12 +171,11 @@ def test_dsfr_fr_tabs_nav_structure(rendered_html):
         assert f'id="{tid}"' in rendered_html, (
             f"Bouton d'onglet {tid} attendu dans la nav fr-tabs."
         )
-    # 7 panneaux correspondants
+    # 6 panneaux correspondants (cf. expected_tab_ids ci-dessus)
     expected_panel_ids = [
         "panel-transfers",
         "panel-brief",
         "panel-devices",
-        "panel-generate",
         "panel-useful-data",
         "panel-trash",
         "panel-admin",

@@ -57,16 +57,24 @@ def _install_stubs(trigger_token: str, ip_allowlist: str = ""):
     cfg_stub.RabbitMQConfig = _RMQ
     cfg_stub.INTERNAL_API_TOKEN = "x" * 48
     cfg_stub.INTERNAL_PULL_QUEUE_INTERVAL_SECONDS = 30
+    # Symboles config additionnels (TRANSCRIPTION_BACKEND, KEVENT_*, etc.)
+    # importés au top de puller — résolvent à None par défaut.
+    cfg_stub.__all__ = []
+    cfg_stub.__getattr__ = lambda name: None
     sys.modules["libs.shared.app.config"] = cfg_stub
 
     models_stub = types.ModuleType("libs.shared.app.models")
     models_stub.InternalBase = MagicMock()
     models_stub.UserAudioFile = MagicMock()
+    models_stub.__all__ = []
+    models_stub.__getattr__ = lambda name: MagicMock()
     sys.modules["libs.shared.app.models"] = models_stub
 
     db_stub = types.ModuleType("libs.shared.app.database")
     db_stub.create_session_factory = lambda *_a, **_kw: MagicMock()
     db_stub.init_tables = MagicMock()
+    db_stub.__all__ = []
+    db_stub.__getattr__ = lambda name: MagicMock()
     sys.modules["libs.shared.app.database"] = db_stub
 
     s3_stub = types.ModuleType("libs.shared.app.s3_helper")
@@ -74,6 +82,7 @@ def _install_stubs(trigger_token: str, ip_allowlist: str = ""):
     s3_stub.upload_fileobj = MagicMock()
     s3_stub.ensure_bucket = MagicMock()
     s3_stub.delete_object = MagicMock()
+    s3_stub.object_exists = MagicMock(return_value=True)
     sys.modules["libs.shared.app.s3_helper"] = s3_stub
 
     sec_stub = types.ModuleType("libs.shared.app.security")
@@ -87,6 +96,19 @@ def _install_stubs(trigger_token: str, ip_allowlist: str = ""):
         return auth_header[len("Bearer "):] == expected
     sec_stub.verify_bearer_token = _verify_bearer
     sys.modules["libs.shared.app.security"] = sec_stub
+
+    # Sous-modules ``app.*`` importés par puller — stub MagicMock.
+    app_pkg = types.ModuleType("app")
+    app_pkg.__path__ = []
+    sys.modules["app"] = app_pkg
+    for sub in ("mcr_client", "kevent_client", "llm_client",
+                "diarization_merger", "glossary_loader", "audio_format",
+                "meeting_intelligence"):
+        m = types.ModuleType(f"app.{sub}")
+        m.__all__ = []
+        m.__getattr__ = lambda name: MagicMock()
+        sys.modules[f"app.{sub}"] = m
+        setattr(app_pkg, sub, m)
 
 
 def _load_puller():

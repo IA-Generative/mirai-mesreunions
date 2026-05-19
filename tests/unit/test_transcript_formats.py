@@ -35,7 +35,10 @@ def test_md_renders_all_5_sections():
         "recommendations": ["Faire un brief COMEX"],
     }
     md = TF.meeting_analysis_to_markdown(analysis)
-    assert "# Compte-rendu de réunion" in md
+    # NB : le H1 "# Compte-rendu de réunion" n'est plus émis par
+    # meeting_analysis_to_markdown — il est désormais fourni par
+    # build_document_header_md côté route (factorisé entre les 4
+    # formats md/docx/odt/txt). On valide seulement les sections H2.
     assert "## Acteurs présents" in md
     assert "## Thématiques abordées" in md
     assert "## Décisions et points en action" in md

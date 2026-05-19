@@ -116,6 +116,9 @@ def _load_mesreunions_web():
     db_stub = types.ModuleType("libs.shared.app.database")
     db_stub.create_session_factory = lambda *_a, **_kw: MagicMock()
     db_stub.init_tables = MagicMock()
+    # with_db_retry est utilisé par sessions/routes.py depuis le commit
+    # perf(my-sessions) 1ddf7fb. Stub minimal : exécute la fn sans retry.
+    db_stub.with_db_retry = lambda fn, **_kw: fn()
     db_stub.__file__ = "<stub>"  # Survives the _purge_libs_shared_stubs() above.
     sys.modules["libs.shared.app.database"] = db_stub
 

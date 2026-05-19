@@ -54,23 +54,47 @@ def _install_stubs():
     cfg_stub.RabbitMQConfig = _RMQ
     cfg_stub.INTERNAL_API_TOKEN = "x" * 48
     cfg_stub.INTERNAL_PULL_QUEUE_INTERVAL_SECONDS = 30
+    # Fallback : tout autre symbole importé depuis config (TRANSCRIPTION_BACKEND,
+    # KEVENT_*, DIARIZATION_*, LITELLM_*, etc.) résout à None plutôt que de
+    # casser l'import du puller. Les tests qui ont besoin d'une valeur
+    # précise patcheront le module après l'import.
+    # __all__=[] est explicite : libs/shared/app/__init__.py fait
+    # `from .config import *`, ce qui consulte __all__ avant __getattr__.
+    cfg_stub.__all__ = []
+    cfg_stub.__getattr__ = lambda name: None
     sys.modules["libs.shared.app.config"] = cfg_stub
 
     # models stub
     models_stub = types.ModuleType("libs.shared.app.models")
     models_stub.InternalBase = MagicMock()
     # UserAudioFile must be a constructable class with attributes preserved.
+    # Les attributs au niveau classe (descripteurs SQLAlchemy en prod) sont
+    # accédés directement par puller pour les filtres ORM
+    # (``UserAudioFile.stored_filename == x``) — on les expose comme
+    # MagicMock pour que les comparaisons ne lèvent pas AttributeError.
     class _UAF:
+        for _attr in ("id", "user_sub", "stored_filename",
+                      "original_filename", "original_session_code",
+                      "transcription_status", "transcription_started_at",
+                      "kevent_job_id", "meeting_datetime", "created_at"):
+            locals()[_attr] = MagicMock()
+        del _attr
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
     models_stub.UserAudioFile = _UAF
+    # Autres classes ORM importées par puller (Preparation, Meeting, ...) :
+    # MagicMock() suffit, on ne les instancie pas dans ces tests.
+    models_stub.__all__ = []
+    models_stub.__getattr__ = lambda name: MagicMock()
     sys.modules["libs.shared.app.models"] = models_stub
 
     # database stub
     db_stub = types.ModuleType("libs.shared.app.database")
     db_stub.create_session_factory = lambda *_a, **_kw: MagicMock()
     db_stub.init_tables = MagicMock()
+    db_stub.__all__ = []
+    db_stub.__getattr__ = lambda name: MagicMock()
     sys.modules["libs.shared.app.database"] = db_stub
 
     # s3_helper stub
@@ -79,6 +103,7 @@ def _install_stubs():
     s3_stub.upload_fileobj = MagicMock()
     s3_stub.ensure_bucket = MagicMock()
     s3_stub.delete_object = MagicMock()
+    s3_stub.object_exists = MagicMock(return_value=True)
     sys.modules["libs.shared.app.s3_helper"] = s3_stub
 
     # security stub
@@ -86,6 +111,24 @@ def _install_stubs():
     sec_stub.require_strong_shared_secret = lambda *_a, **_kw: None
     sec_stub.verify_bearer_token = lambda h, t: False
     sys.modules["libs.shared.app.security"] = sec_stub
+
+    # ``app.*`` sibling modules importés par puller (mcr_client, kevent_client,
+    # llm_client, diarization_merger, glossary_loader, audio_format). On les
+    # stub avec MagicMock — les tests qui ont besoin de comportements précis
+    # patcheront ``mod.<symbol>`` après le _load_puller.
+    app_pkg = types.ModuleType("app")
+    app_pkg.__path__ = []  # marquer comme package
+    sys.modules["app"] = app_pkg
+    for sub in ("mcr_client", "kevent_client", "llm_client",
+                "diarization_merger", "glossary_loader", "audio_format",
+                "meeting_intelligence"):
+        m = types.ModuleType(f"app.{sub}")
+        m.__all__ = []
+        m.__getattr__ = lambda name: MagicMock()
+        sys.modules[f"app.{sub}"] = m
+        # `from app import meeting_intelligence as mi` consulte
+        # l'attribut sur le package — l'attacher explicitement.
+        setattr(app_pkg, sub, m)
 
 
 def _load_puller():
@@ -148,7 +191,10 @@ def test_happy_path_downloads_uploads_inserts_publishes_in_order():
     # Order of side effects.
     assert mod.download_fileobj.called
     assert mod.upload_fileobj.called
-    db_session.add.assert_called_once()
+    # PR2d : 2 inserts attendus par upload — UserAudioFile + Meeting
+    # (la Meeting est créée d'office à l'arrivée, preparation_id NULL
+    # tant que l'auto-link n'a pas matché côté kevent).
+    assert db_session.add.call_count == 2
     db_session.commit.assert_called()
     mod.publish_message.assert_called_once()
     args, _ = mod.publish_message.call_args
