@@ -1766,6 +1766,16 @@ function _fmtTimecode(sec) {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+// Rendu d'affichage du nom de speaker : "Intervenant_03" → "Intervenant 3"
+// (sans underscore, sans zero-padding). Les vrais noms LLM (Jean Dupont,
+// etc.) qui ne matchent pas le pattern restent tels quels. Vise juste à
+// alléger visuellement le label, le speaker DB n'est pas modifié.
+function _displaySpeaker(speaker) {
+    if (!speaker || typeof speaker !== 'string') return speaker || '';
+    const m = speaker.match(/^Intervenant_0*(\d+)$/);
+    return m ? `Intervenant ${m[1]}` : speaker;
+}
+
 // Rend le texte d'un bloc en spans `.tc-word` si on a des timestamps
 // alignés (b.words rempli par mountTranscriptCorrector). Sinon, fallback
 // au texte échappé (pas de karaoke pour ce bloc, mais lisibilité intacte).
@@ -1879,6 +1889,47 @@ async function mountTranscriptCorrector(container) {
             b.words.push({ w: tokens[i] });
         }
     }
+    // Cap 60s par bloc (pattern dictaphone) : un Intervenant qui monologue
+    // 5 min produit un bloc unique de plusieurs centaines de lignes ; le
+    // surlignage bloc-level reste actif tout du long et le scroll perd
+    // toute utilité. On découpe à la frontière de mot la plus proche de
+    // 60s. Seuls les blocs avec words alignés (b.words) sont splittables ;
+    // les autres restent tels quels (fallback).
+    const CAP_SEC = 60;
+    const splitBlocks = [];
+    for (const b of blocks) {
+        const dur = (b.end || 0) - (b.start || 0);
+        if (dur <= CAP_SEC || !b.words || b.words.length < 2) {
+            splitBlocks.push(b);
+            continue;
+        }
+        // On découpe en sous-blocs de ≤ CAP_SEC, en conservant le speaker.
+        // Chaque sous-bloc démarre au premier mot et ferme dès qu'on
+        // dépasse CAP_SEC. text = concat des w (déjà LLM-corrigé via
+        // l'alignement positionnel ci-dessus).
+        let chunk = { speaker: b.speaker, text: '', start: b.start, end: b.start, words: [] };
+        for (const w of b.words) {
+            const wEnd = (typeof w.e === 'number') ? w.e : chunk.end;
+            if (wEnd - chunk.start > CAP_SEC && chunk.words.length > 0) {
+                chunk.text = chunk.words.map(x => x.w).join(' ');
+                chunk.end = chunk.words[chunk.words.length - 1].e ?? chunk.end;
+                splitBlocks.push(chunk);
+                chunk = {
+                    speaker: b.speaker, text: '',
+                    start: (typeof w.s === 'number' ? w.s : chunk.end),
+                    end: wEnd, words: [],
+                };
+            }
+            chunk.words.push(w);
+            if (typeof wEnd === 'number') chunk.end = wEnd;
+        }
+        if (chunk.words.length > 0) {
+            chunk.text = chunk.words.map(x => x.w).join(' ');
+            splitBlocks.push(chunk);
+        }
+    }
+    blocks.length = 0;
+    blocks.push(...splitBlocks);
     if (!blocks.length && !data.transcription_text) {
         // Fallback nécessaire : on tire la transcription brute uniquement
         // si pas de blocs (typique d'un échec diarisation).
@@ -1913,7 +1964,7 @@ async function mountTranscriptCorrector(container) {
           (avec ré-écoute du contexte 🔊).
           Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
           interlocuteur (« Intervenant_03 », etc.) pour le renommer.
-          ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio.'}
+          ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio. <strong>Double-cliquez un mot</strong> pour le ré-écouter.'}
         </div>
         <div class="tc-find" data-tc-find>
           <input type="search" class="tc-find-input" placeholder="Chercher…"
@@ -1942,7 +1993,7 @@ async function mountTranscriptCorrector(container) {
               <button type="button" class="tc-play" data-tc-play="${b.start}"
                       title="${audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')'}"
                       ${audioPurged ? 'disabled' : ''}>▶</button>
-              <span class="tc-speaker" data-tc-speaker-idx="${i}">${escapeHtml(b.speaker)}</span>
+              <span class="tc-speaker" data-tc-speaker-idx="${i}">${escapeHtml(_displaySpeaker(b.speaker))}</span>
               <button type="button" class="tc-speaker-rename"
                       data-tc-speaker-rename="${escapeHtml(b.speaker)}"
                       data-tc-file="${escapeHtml(fileId)}"
@@ -1961,10 +2012,32 @@ async function mountTranscriptCorrector(container) {
     const audio = container.querySelector('.transcript-corrector-audio');
     const blocksEls = Array.from(container.querySelectorAll('.tc-block'));
 
+    // Double-click sur un mot précis (.tc-word) : seek + play avec petit
+    // contexte. Pattern inspiré dictaphone (suitenumerique) — double-click
+    // préserve naturellement la sélection texte (un user qui sélectionne
+    // un mot pour le copier ne déclenche pas un seek). Si le bloc contenant
+    // le mot est court (<5s) on rejoue tout le bloc, sinon on rewind de 2s
+    // avant le mot (borné au début du bloc) pour avoir un peu de contexte.
+    container.addEventListener('dblclick', (ev) => {
+        const wordEl = ev.target.closest && ev.target.closest('.tc-word');
+        if (!wordEl || !audio) return;
+        ev.preventDefault();
+        // Clean la sélection de texte induite par le double-click navigateur
+        // (sinon le mot reste sélectionné pendant la lecture, distrayant).
+        try { window.getSelection()?.removeAllRanges(); } catch (e) {}
+        const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
+        const blockEl = wordEl.closest('.tc-block');
+        const bStart = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
+        const bEnd = blockEl ? parseFloat(blockEl.getAttribute('data-tc-end')) : wStart;
+        const blockDur = Math.max(0, bEnd - bStart);
+        const target = (blockDur < 5)
+            ? bStart                              // bloc court : on rejoue tout
+            : Math.max(bStart, wStart - 2);        // bloc long : 2s de contexte
+        try { audio.pause(); audio.currentTime = Math.max(0, target); audio.play(); } catch (e) {}
+    });
+
     // Click ▶ → seek + play. Click sur texte d'un bloc → seek (sans play
     // forcé pour pas démarrer si l'user voulait juste sélectionner).
-    // Click sur un mot (.tc-word) : seek + play avec rewind si le bloc
-    // est long (>5s = trop loin du contexte si on seek pile sur le mot).
     container.addEventListener('click', (ev) => {
         const playBtn = ev.target.closest && ev.target.closest('[data-tc-play]');
         if (playBtn && !playBtn.disabled) {
@@ -1976,30 +2049,6 @@ async function mountTranscriptCorrector(container) {
                 // et on entend la bande son 2× désynchronisée.
                 try { audio.pause(); audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
             }
-            return;
-        }
-        // Click sur un mot précis (.tc-word) : seek avec petit contexte
-        // pour donner le temps de raccrocher à l'oreille. Si le bloc
-        // contenant le mot est court (<5s) on rejoue tout le bloc.
-        // Sinon on rewind de 2s avant le mot (borné au début du bloc).
-        const wordEl = ev.target.closest && ev.target.closest('.tc-word');
-        if (wordEl && audio) {
-            // setTimeout 50ms : si l'user était en train de sélectionner
-            // du texte, getSelection().isCollapsed sera false et on
-            // n'interrompt pas la sélection (cohérence avec .tc-text).
-            setTimeout(() => {
-                const sel = window.getSelection();
-                if (sel && !sel.isCollapsed) return;
-                const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
-                const blockEl = wordEl.closest('.tc-block');
-                const bStart = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
-                const bEnd = blockEl ? parseFloat(blockEl.getAttribute('data-tc-end')) : wStart;
-                const blockDur = Math.max(0, bEnd - bStart);
-                const target = (blockDur < 5)
-                    ? bStart                              // bloc court : on rejoue tout
-                    : Math.max(bStart, wStart - 2);        // bloc long : 2s de contexte
-                try { audio.pause(); audio.currentTime = Math.max(0, target); audio.play(); } catch (e) {}
-            }, 50);
             return;
         }
         // Click sur le texte d'un bloc (mais pas pendant une sélection !) :
@@ -2055,23 +2104,11 @@ async function mountTranscriptCorrector(container) {
             blocksEls.forEach((el, i) => {
                 el.classList.toggle('is-playing', i === activeIdx);
             });
-            // Auto-scroll dans le container blocks si l'élément actif sort
-            // du viewport visible.
-            if (activeIdx >= 0) {
-                const el = blocksEls[activeIdx];
-                const containerEl = el.closest('.transcript-corrector-blocks');
-                if (containerEl && el) {
-                    const cRect = containerEl.getBoundingClientRect();
-                    const eRect = el.getBoundingClientRect();
-                    if (eRect.top < cRect.top || eRect.bottom > cRect.bottom) {
-                        el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-                    }
-                }
-            }
 
             // Word-level karaoke : binary search du word actif dans wordsFlat
             // (ordonné par s). On retient le dernier mot actif pour pouvoir
             // le déhighlighter sans rebalayer tout le DOM.
+            let activeWordEl = null;
             if (wordsFlat.length) {
                 let lo = 0, hi = wordsFlat.length - 1, found = -1;
                 while (lo <= hi) {
@@ -2080,19 +2117,41 @@ async function mountTranscriptCorrector(container) {
                     else if (t > wordsFlat[mid].e) lo = mid + 1;
                     else { found = mid; break; }
                 }
-                let targetEl = null;
                 if (found >= 0) {
                     const ref = wordsFlat[found];
                     const blockEl = blocksEls[ref.blockIdx];
                     if (blockEl) {
                         const spans = blockEl.querySelectorAll('.tc-word');
-                        targetEl = spans[ref.wIdx] || null;
+                        activeWordEl = spans[ref.wIdx] || null;
                     }
                 }
-                if (targetEl !== lastActiveWordEl) {
+                if (activeWordEl !== lastActiveWordEl) {
                     if (lastActiveWordEl) lastActiveWordEl.classList.remove('tc-word-active');
-                    if (targetEl) targetEl.classList.add('tc-word-active');
-                    lastActiveWordEl = targetEl;
+                    if (activeWordEl) activeWordEl.classList.add('tc-word-active');
+                    lastActiveWordEl = activeWordEl;
+                }
+            }
+
+            // Auto-scroll dans le container blocks : priorité au mot actif
+            // (un monologue de 5 min produit un bloc de plusieurs centaines
+            // de lignes — le bloc reste "visible" mais le mot actif sort
+            // de l'écran). Fallback bloc si pas de word-level dispo.
+            const scrollTarget = activeWordEl ||
+                (activeIdx >= 0 ? blocksEls[activeIdx] : null);
+            if (scrollTarget) {
+                const containerEl = scrollTarget.closest('.transcript-corrector-blocks');
+                if (containerEl) {
+                    const cRect = containerEl.getBoundingClientRect();
+                    const eRect = scrollTarget.getBoundingClientRect();
+                    // Marge 24px haut/bas (cf. dictaphone) pour éviter le
+                    // saute-scroll au moindre pixel près du bord.
+                    const margin = 24;
+                    if (eRect.top < cRect.top + margin ||
+                        eRect.bottom > cRect.bottom - margin) {
+                        scrollTarget.scrollIntoView({
+                            block: 'nearest', behavior: 'smooth',
+                        });
+                    }
                 }
             }
         });
