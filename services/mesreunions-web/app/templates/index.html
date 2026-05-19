@@ -2536,50 +2536,91 @@
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-arrow-left-line fr-btn--icon-left"
                         data-action="show-list">Retour à la liste</button>
             </div>
-            <!-- Lot 3a — Titre éditable inline. Click sur le titre → bascule en input + validation. -->
-            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
-                <h1 id="brief-detail-title" style="font-size:1.1rem;cursor:text;"
+            <!-- Lot 3a — Titre éditable inline + date cible à droite. -->
+            <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+                <h1 id="brief-detail-title" style="font-size:1.1rem;cursor:text;margin:0;flex:1 1 auto;min-width:0;"
                     data-action="start-rename-inline" title="Cliquer pour renommer">Brief</h1>
                 <!-- Lot 6 — badge affiché par _renderRecurrenceBlock() si récurrente -->
                 <span id="brief-detail-recurrence-badge"
                       class="fr-badge fr-badge--info fr-badge--sm"
                       style="display:none;">🔁 Récurrente</span>
-                <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;">
+                <!-- Date cible (target_meeting_date) éditable inline. PATCH /api/preparations/<id>. -->
+                <span id="brief-detail-target-date-wrap"
+                      style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;color:#475569;">
+                    <span style="font-weight:600;">Date cible&nbsp;:</span>
+                    <input type="datetime-local" id="brief-detail-target-date-input"
+                           style="border:1px solid #cbd5e1;border-radius:0.3rem;
+                                  padding:0.2rem 0.4rem;font-size:0.82rem;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line"
+                            id="brief-detail-target-date-save-btn"
+                            data-action="commit-target-date"
+                            title="Enregistrer la date cible"
+                            aria-label="Enregistrer la date cible"
+                            disabled
+                            style="padding:0.2rem 0.4rem;"></button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-refresh-line"
+                            id="brief-detail-target-date-reset-btn"
+                            data-action="reset-target-date"
+                            title="Annuler la modification (revenir à la valeur précédente)"
+                            aria-label="Annuler la modification"
+                            disabled
+                            style="padding:0.2rem 0.4rem;"></button>
+                </span>
+                <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;flex:1 1 100%;">
                     <input type="text" id="brief-detail-title-input" maxlength="120"
-                           style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;min-width:260px;">
-                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line fr-btn--icon-left"
-                            data-action="commit-rename-inline">Valider</button>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                            data-action="cancel-rename-inline">Annuler</button>
+                           style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;flex:1 1 auto;width:100%;">
+                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line"
+                            data-action="commit-rename-inline"
+                            title="Valider le nouveau nom"
+                            aria-label="Valider"
+                            style="padding:0.2rem 0.4rem;"></button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-close-line"
+                            data-action="cancel-rename-inline"
+                            title="Annuler la modification"
+                            aria-label="Annuler"
+                            style="padding:0.2rem 0.4rem;"></button>
                 </span>
             </div>
             <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
-            <!-- Lot 3 — 4 actions refondues : glossaire(N), lier audio, suivante, menu "Plus d'actions" -->
+            <!-- Lot 3 — 5 actions en barre d'icônes compacte. Icon-only + tooltip rollover
+                 (title=) pour éviter le wrap multi-lignes des labels longs. -->
             <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
-                 style="margin:0.6rem 0;">
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line fr-btn--icon-left"
+                 style="margin:0.6rem 0;display:flex;flex-wrap:nowrap;overflow-x:auto;gap:0.3rem;">
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line"
                         id="brief-detail-glossary-btn"
-                        data-action="open-glossary-modal">
-                    Glossaire (<span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span>)
+                        data-action="open-glossary-modal"
+                        aria-label="Glossaire"
+                        title="Glossaire (0 terme)"
+                        style="position:relative;">
+                    <span class="fr-sr-only">Glossaire (<span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span>)</span>
+                    <span id="brief-detail-glossary-count-badge"
+                          style="position:absolute;top:-4px;right:-4px;min-width:1.1rem;height:1.1rem;
+                                 line-height:1.1rem;padding:0 0.25rem;
+                                 background:#1d4ed8;color:#fff;border-radius:999px;
+                                 font-size:0.62rem;font-weight:700;text-align:center;display:none;">0</span>
                 </button>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-link"
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-links-line"
                         data-link-brief-btn id="brief-detail-link-audio-btn"
-                        data-action="open-link-audio-modal" style="display:none;">
-                    Lier un fichier audio
-                </button>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line fr-btn--icon-left"
+                        data-action="open-link-audio-modal"
+                        aria-label="Lier un fichier audio"
+                        title="Lier un fichier audio"
+                        style="display:none;"></button>
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line"
                         data-prepare-next-series-btn id="brief-detail-prepare-next"
-                        data-action="open-prepare-next-modal" style="display:none;">
-                    Préparer la prochaine réunion de cette série
-                </button>
+                        data-action="open-prepare-next-modal"
+                        aria-label="Préparer la prochaine réunion de cette série"
+                        title="Préparer la prochaine réunion de cette série"
+                        style="display:none;"></button>
                 <!-- Lot 4 — Menu "Télécharger" → TXT / MD / DOCX / ODT.
                      TXT et MD générés côté front via lib/export-formatter.js,
                      DOCX et ODT via GET /api/preparations/{id}/export?format=. -->
                 <div style="position:relative;display:inline-block;" data-export-wrap>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-download-line fr-btn--icon-left"
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-download-line"
                             data-action="toggle-export-menu"
                             aria-haspopup="true" aria-expanded="false"
-                            id="brief-detail-export-btn">Télécharger</button>
+                            aria-label="Télécharger le brief"
+                            title="Télécharger (TXT, MD, DOCX, ODT)"
+                            id="brief-detail-export-btn"></button>
                     <ul id="brief-detail-export-menu"
                         style="display:none;position:absolute;right:0;top:100%;z-index:10;
                                background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
@@ -2601,10 +2642,12 @@
                 </div>
                 <!-- Menu "Plus d'actions" → conserve l'accès à l'édition avancée (amend). -->
                 <div style="position:relative;display:inline-block;" data-more-actions-wrap>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line fr-btn--icon-left"
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line"
                             data-action="toggle-more-actions"
                             aria-haspopup="true" aria-expanded="false"
-                            id="brief-detail-more-btn">Plus d'actions</button>
+                            aria-label="Plus d'actions"
+                            title="Plus d'actions (amender, supprimer…)"
+                            id="brief-detail-more-btn"></button>
                     <ul id="brief-detail-more-menu"
                         style="display:none;position:absolute;right:0;top:100%;z-index:10;
                                background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;

@@ -319,6 +319,7 @@ function _applyBriefPayload(briefId, d) {
     if (linkBtn) linkBtn.style.display = '';
     _renderDriveSourcesBlock(b);
     _renderGlossaryCount(b);
+    _renderTargetDateEditor(b);
     _renderParticipantsEditor(b);
     _renderRecurrenceBlock(b);
     _renderThemesBlock(b);
@@ -513,6 +514,86 @@ function _renderGlossaryCount(brief) {
   const pEl = document.getElementById('brief-detail-glossary-plural');
   if (cEl) cEl.textContent = String(n);
   if (pEl) pEl.textContent = (n > 1 ? 's' : '');
+  // Badge compteur visuel sur l'icône (bouton icon-only).
+  const badge = document.getElementById('brief-detail-glossary-count-badge');
+  if (badge) {
+    badge.textContent = String(n);
+    badge.style.display = n > 0 ? '' : 'none';
+  }
+  // Tooltip aussi mis à jour.
+  const btn = document.getElementById('brief-detail-glossary-btn');
+  if (btn) btn.title = `Glossaire (${n} terme${n > 1 ? 's' : ''})`;
+}
+
+// ─── Target meeting date (édition inline en haut de la fiche) ──────────
+function _renderTargetDateEditor(brief) {
+  const input = document.getElementById('brief-detail-target-date-input');
+  const save = document.getElementById('brief-detail-target-date-save-btn');
+  const reset = document.getElementById('brief-detail-target-date-reset-btn');
+  if (!input || !save || !reset) return;
+  const initial = brief.target_meeting_date || '';
+  // datetime-local accepte "YYYY-MM-DDTHH:MM" (sans tz, sans secondes)
+  const toLocalInput = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch (e) { return ''; }
+  };
+  const initialLocal = toLocalInput(initial);
+  input.value = initialLocal;
+  save.disabled = true;
+  reset.disabled = true;
+  input._initialValue = initialLocal;
+  input.oninput = () => {
+    const dirty = (input.value !== input._initialValue);
+    save.disabled = !dirty;
+    reset.disabled = !dirty;
+  };
+}
+
+async function _commitTargetDate() {
+  if (!_briefDetailId) return;
+  const input = document.getElementById('brief-detail-target-date-input');
+  const save = document.getElementById('brief-detail-target-date-save-btn');
+  if (!input || !save) return;
+  // Convertit "YYYY-MM-DDTHH:MM" en ISO complet (laissé local time, le
+  // backend normalise/stocke en UTC en interne).
+  let payloadValue = null;
+  if (input.value) {
+    const d = new Date(input.value);
+    payloadValue = isNaN(d) ? null : d.toISOString();
+  }
+  save.disabled = true;
+  try {
+    const resp = await fetch(`/api/preparations/${encodeURIComponent(_briefDetailId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_meeting_date: payloadValue }),
+    });
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({}));
+      throw new Error(j.error || `HTTP ${resp.status}`);
+    }
+    // Rafraîchit le brief pour relire la valeur normalisée.
+    input._initialValue = input.value;
+    if (typeof showBriefDetail === 'function') showBriefDetail(_briefDetailId);
+  } catch (e) {
+    alert(`Erreur enregistrement date cible : ${e.message}`);
+    save.disabled = false;
+  }
+}
+
+function _resetTargetDate() {
+  const input = document.getElementById('brief-detail-target-date-input');
+  const save = document.getElementById('brief-detail-target-date-save-btn');
+  const reset = document.getElementById('brief-detail-target-date-reset-btn');
+  if (!input) return;
+  input.value = input._initialValue || '';
+  if (save) save.disabled = true;
+  if (reset) reset.disabled = true;
 }
 
 // ─── Lot 5 — Editeur participants sur la fiche ──────────────────────────
@@ -1777,6 +1858,10 @@ function _onPanelClick(ev) {
       ev.preventDefault(); _commitRenameInline(); return;
     case 'cancel-rename-inline':
       ev.preventDefault(); _cancelRenameInline(); return;
+    case 'commit-target-date':
+      ev.preventDefault(); _commitTargetDate(); return;
+    case 'reset-target-date':
+      ev.preventDefault(); _resetTargetDate(); return;
     case 'toggle-more-actions':
       ev.preventDefault(); _toggleMoreActions(); return;
     case 'toggle-export-menu':
