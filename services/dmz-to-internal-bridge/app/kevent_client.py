@@ -208,6 +208,7 @@ class KeventClient:
         data = {
             "model": self.transcription_model,
             "response_format": response_format,
+            "word_timestamps": "true",
         }
         if language:
             data["language"] = language
@@ -414,7 +415,10 @@ class KeventClient:
         de régression dans ce cas, le champ supplémentaire est silently
         dropped. Logger en INFO la longueur pour audit.
         """
-        extra: dict = {"response_format": response_format}
+        extra: dict = {
+            "response_format": response_format,
+            "word_timestamps": "true",
+        }
         if language:
             extra["language"] = language
         if initial_prompt:

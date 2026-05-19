@@ -118,6 +118,16 @@ def test_transcribe_passes_language_when_provided():
     assert kwargs["data"]["language"] == "en"
 
 
+def test_transcribe_sends_word_timestamps_true():
+    """Karaoke UI dépend de words[] dans la réponse Whisper. Le gateway
+    Kevent ne renvoie les ``words`` que si ``word_timestamps=true`` est
+    présent dans le multipart form (cf. whisper-api-openapi.json)."""
+    _REQ.post.return_value = _resp(200, json_data={"text": "x"})
+    _client().transcribe(b"audio", "x.mp4", "audio/mp4")
+    _, kwargs = _REQ.post.call_args
+    assert kwargs["data"].get("word_timestamps") == "true"
+
+
 def test_transcribe_401_raises_auth_error():
     _REQ.post.return_value = _resp(401, text="please check the consumer_group_id")
     with pytest.raises(MOD.KeventAuthError):

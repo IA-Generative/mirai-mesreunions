@@ -6,6 +6,7 @@ canoniques pour ne rien casser côté front (préservation API).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -745,6 +746,47 @@ _TRANSCRIPT_TEXT_KINDS = {
     # speaker_tagged est vide (échec pyannote).
     "transcription": "transcription_text",
 }
+
+
+@bp.route("/api/file/transcript-words/<file_id>")
+@require_auth
+def api_file_transcript_words(file_id):
+    """Charge les word-level timestamps Whisper (lazy).
+
+    Sert le surlignage karaoke côté frontend (cf. mountTranscriptCorrector
+    dans legacy.js). NULL en DB → renvoie ``{"available": true, "words": []}``
+    pour que le frontend dégrade au highlight par bloc sans erreur. Format :
+    ``[{"w": "...", "s": <sec>, "e": <sec>}, ...]``.
+
+    Migration 017 a ajouté la colonne ``transcription_words_json``.
+    """
+    user = get_current_user()
+    def _lookup():
+        db = session_scope()
+        try:
+            return _audio_or_404(db, user["sub"], file_id), db
+        except Exception:
+            try: db.close()
+            except Exception: pass
+            raise
+    (file_obj, audio), db = with_db_retry(_lookup, max_attempts=3)
+    try:
+        if audio is None:
+            return jsonify({"available": False, "reason": "not_ready"})
+        raw = audio.get("transcription_words_json")
+        words: list = []
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    words = parsed
+            except (ValueError, TypeError):
+                # JSON corrompu en DB → on log et on dégrade silencieux
+                # (le frontend retombera sur l'highlight par bloc).
+                logger.warning("Bad transcription_words_json for %s", file_id)
+        return jsonify({"available": True, "words": words})
+    finally:
+        db.close()
 
 
 @bp.route("/api/file/transcript-text/<file_id>/<kind>")

@@ -1107,6 +1107,20 @@
             color: #334155; user-select: text; cursor: text;
         }
         .tc-text::selection { background: #fef08a; color: #0f172a; }
+        /* Karaoke word-level (mig 017 + word_timestamps=true) :
+           span autour de chaque mot pour cliquer dessus et le voir
+           surligner pendant la lecture. Cursor pointer pour signaler
+           qu'on peut cliquer, mais user-select inherit pour ne pas
+           casser la sélection de texte (corrector). */
+        .tc-word {
+            cursor: pointer; padding: 0 1px; border-radius: 2px;
+            transition: background 80ms ease-out;
+        }
+        .tc-word:hover { background: #e0e7ff; }
+        .tc-word-active {
+            background: #fde68a; color: #0f172a;
+            box-shadow: 0 1px 0 #f59e0b;
+        }
         .transcript-corrector-footer {
             margin-top: 0.6rem; padding: 0.5rem 0.6rem;
             background: #fef9c3; border: 1px solid #fde68a; border-radius: 5px;

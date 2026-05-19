@@ -308,18 +308,35 @@ def regenerate_file(file_id: str):
             "status": r.json() if r.content else {},
         }), (200 if r.status_code < 400 else r.status_code)
 
-    # scope == 'full' → demande tracée seulement, admin la traitera.
+    # scope == 'full' → relance le pipeline complet (Whisper + pyannote +
+    # chaîne LLM aval) via l'endpoint dédié de l'ingester. Mapping ID
+    # externe → ID interne identique au cas llm-only.
+    internal_id = _resolve_internal_audio_id(user_sub, file_id)
+    if not internal_id:
+        return jsonify({
+            "feedback_id": feedback.get("id"),
+            "reprocessed": False,
+            "error": "audio_not_found_or_not_ready",
+        }), 404
+    try:
+        # Réponse 202 immédiate côté ingester : pipeline en thread daemon.
+        # Pas de long polling ici — le frontend rafraîchit transcript-status
+        # toutes les ~3s pour suivre la progression (kevent_queued → ...
+        # → kevent_completed) et garder le pulse (i) bleu actif.
+        r = _call_ingester("POST", f"/api/v1/audio/{internal_id}/full-reprocess",
+                           json_body={"user_sub": user_sub},
+                           timeout=30)
+    except req.RequestException:
+        return jsonify({
+            "feedback_id": feedback.get("id"),
+            "reprocessed": False,
+            "error": "ingester_unavailable",
+        }), 502
     return jsonify({
         "feedback_id": feedback.get("id"),
-        "reprocessed": False,
-        "status": "pending_admin_review",
-        "message": (
-            "Votre demande de régénération complète (transcription + "
-            "diarisation) a été enregistrée. Elle sera traitée par un "
-            "administrateur — vous serez notifié·e via la vue 'Mes "
-            "feedbacks' quand le traitement sera lancé."
-        ),
-    }), 202
+        "reprocessed": (r.status_code < 400),
+        "status": r.json() if r.content else {},
+    }), (200 if r.status_code < 400 else r.status_code)
 
 
 # ─── User glossary (édition manuelle) ─────────────────────────────

@@ -67,7 +67,7 @@ from libs.shared.app.config import (
 )
 from libs.shared.app.models import InternalBase, UserAudioFile, Preparation, Meeting
 from libs.shared.app.database import create_session_factory, init_tables
-from libs.shared.app.s3_helper import download_fileobj, upload_fileobj, ensure_bucket, delete_object
+from libs.shared.app.s3_helper import download_fileobj, upload_fileobj, ensure_bucket, delete_object, object_exists
 from libs.shared.app.queue_helper import (
     publish_message,
     declare_queues,
@@ -120,6 +120,32 @@ _orphan_resume_started = False
 _orphan_watchdog_started = False
 # États de transcription "non terminaux" — déclenchent une reprise du
 # poll Kevent si le pod redémarre alors qu'un fichier est dans cet état.
+def flatten_whisper_words(segments) -> list[dict]:
+    """Aplatit ``segments[*].words`` (format Whisper verbose_json avec
+    ``word_timestamps=true``) en un array global ordonné par ``s``.
+
+    Format de sortie compact : ``[{"w": str, "s": float, "e": float}, ...]``.
+    Une réunion d'1h ≈ 10k mots × ~40 octets ≈ 400 KB en JSON minifié.
+
+    Entrées invalides (texte vide, timestamps None) ignorées. Retourne
+    une liste vide si aucun segment ne porte de words — le caller doit
+    alors stocker NULL en DB (la migration 017 autorise NULL).
+
+    Extrait de ``_transcribe_via_kevent`` pour testabilité unitaire
+    sans avoir à monter tout le pipeline.
+    """
+    out: list[dict] = []
+    for seg in segments or []:
+        for w in (seg.get("words") or []):
+            txt = (w.get("word") or "").strip()
+            s = w.get("start")
+            e = w.get("end")
+            if not txt or s is None or e is None:
+                continue
+            out.append({"w": txt, "s": round(float(s), 3), "e": round(float(e), 3)})
+    return out
+
+
 _POLLING_STATES = (
     "kevent_queued", "kevent_transcribing", "kevent_processing",
     "pending", "processing",
@@ -953,9 +979,16 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     else:
         text = (transcription.get("text") or "").strip()
     language = transcription.get("language") or None
+
+    # Word-level timestamps (Whisper word_timestamps=true, cf. kevent_client).
+    # Cf. flatten_whisper_words plus bas dans ce module — extrait pour
+    # testabilité unitaire.
+    words_flat = flatten_whisper_words(segments)
+    words_json = json.dumps(words_flat, ensure_ascii=False, separators=(",", ":")) if words_flat else None
+
     logger.info(
-        "Kevent transcribe: %d chars, %d segments, language=%s, audio_file_id=%s",
-        len(text), len(segments), language, audio_file_id,
+        "Kevent transcribe: %d chars, %d segments, %d words, language=%s, audio_file_id=%s",
+        len(text), len(segments), len(words_flat), language, audio_file_id,
     )
 
     # We'll accumulate DB updates and apply them in one go at the end.
@@ -963,6 +996,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         "transcription_engine": "kevent",
         "transcription_text": text,
         "transcription_language": language,
+        "transcription_words_json": words_json,
     }
     final_status = "kevent_completed"
 
@@ -1716,6 +1750,7 @@ def audio_lookup():
             "reformulated_text": row.reformulated_text,
             "meeting_analysis_json": row.meeting_analysis_json,
             "diarization_json": row.diarization_json,
+            "transcription_words_json": row.transcription_words_json,
             "audio_quality_score": row.audio_quality_score,
             "audio_duration_seconds": row.audio_duration_seconds,
             "transcription_completed_at": (
@@ -2094,6 +2129,153 @@ def reprocess_audio(audio_id: str):
         }), 200
     finally:
         db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/full-reprocess", methods=["POST"])
+def full_reprocess_audio(audio_id: str):
+    """Relance le pipeline COMPLET depuis l'audio transcodé S3-internal :
+    Whisper (transcription) + pyannote (diarisation) + toute la chaîne LLM
+    aval. À utiliser quand la transcription/diarisation initiale est
+    cassée (mauvaise langue, locuteurs fusionnés, etc.).
+
+    Pré-requis : l'audio transcodé est encore disponible dans le bucket
+    S3-internal (``stored_filename``). Si purgé (rétention atteinte),
+    renvoie 410 ``audio_purged``.
+
+    Body : ``{user_sub}``.
+
+    Réponse : 202 ``{reprocessed: true, status: 'kevent_queued',
+    reprocess_version}``. Le pipeline tourne dans un thread daemon en
+    arrière-plan ; le frontend doit poller ``/api/file/transcript-status``
+    pour suivre la progression (kevent_queued → kevent_transcribing →
+    kevent_processing → kevent_completed). Status status DB updaté à
+    chaque étape par ``_transcribe_via_kevent`` (idem upload initial).
+
+    Idempotence : pas de garde-fou côté ingester — le caller
+    (mesreunions-web) impose une confirmation explicite avec raison
+    obligatoire. Un appel concurrent sur la même row donnera deux runs
+    parallèles qui s'écraseront (dernier qui finit gagne).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+
+    from libs.shared.app.models import UserAudioFile
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        if not uaf.stored_filename:
+            return jsonify({"error": "no_audio_path"}), 410
+        # S3-internal probe : si l'audio a été purgé (rétention 7j typique,
+        # cf. INTERNAL_PURGE_MAX_AGE_DAYS) on ne peut plus rejouer Whisper.
+        try:
+            if not object_exists(s3_internal_cfg, uaf.stored_filename):
+                return jsonify({"error": "audio_purged"}), 410
+        except Exception:
+            logger.exception("full-reprocess: s3 probe failed for %s", audio_id)
+            return jsonify({"error": "s3_unavailable"}), 503
+
+        # Reset des colonnes pipeline + bump version + snapshot history.
+        # NB: on garde original_filename / audio_duration_seconds / score
+        # (= métadonnées audio, pas dérivées Whisper).
+        prev_entry = {
+            "version": int(uaf.reprocess_version or 0),
+            "at": datetime.now(timezone.utc).isoformat(),
+            "type": "full_reprocess",
+            "prev_status": uaf.transcription_status,
+        }
+        history = list(uaf.reprocess_history or [])
+        history.append(prev_entry)
+        if len(history) > 5:
+            history = history[-5:]
+        new_version = int(uaf.reprocess_version or 0) + 1
+
+        stored_filename = uaf.stored_filename
+        original_filename = uaf.original_filename
+        try:
+            uaf.transcription_status = "kevent_queued"
+            uaf.transcription_text = None
+            uaf.transcription_words_json = None
+            uaf.transcription_language = None
+            uaf.transcription_engine = None
+            uaf.transcription_started_at = None
+            uaf.transcription_completed_at = None
+            uaf.diarization_json = None
+            uaf.speaker_tagged_text = None
+            uaf.glossary_corrected_text = None
+            uaf.cleaned_text = None
+            uaf.reformulated_text = None
+            uaf.meeting_analysis_json = None
+            uaf.absentee_summary = None
+            uaf.suggested_filename = None
+            uaf.key_points_summary = None
+            uaf.kevent_job_id = None
+            uaf.reprocess_version = new_version
+            uaf.reprocess_history = history
+            uaf.last_reprocessed_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("full-reprocess: reset commit failed for %s", audio_id)
+            return jsonify({"error": "db_write_failed"}), 500
+    finally:
+        db.close()
+
+    # Pas besoin de notify_external_status ici : le user qui relance est
+    # dans mesreunions-web (pas la PWA mobile), et son rail de statut est
+    # piloté par /api/file/transcript-status qui lit directement
+    # ``transcription_status`` en DB — déjà reset à 'kevent_queued'
+    # ci-dessus. Le polling 3s côté frontend verra le statut bouger.
+
+    # Le pipeline _transcribe_via_kevent est synchrone (long-running) :
+    # on le détache dans un thread daemon pour répondre 202 tout de suite.
+    # Le status DB est mis à jour pas-à-pas par la fonction (callback
+    # _on_kevent_status) → le frontend poll transcript-status le voit.
+    def _run():
+        try:
+            file_data = download_fileobj(s3_internal_cfg, stored_filename)
+            # transcoded_filename = basename du stored_filename (S3 key
+            # peut être préfixée par user_sub/code/, on ne garde que le
+            # leaf comme dans le flux d'upload initial).
+            transcoded_filename = stored_filename.rsplit("/", 1)[-1]
+            _transcribe_via_kevent(
+                audio_id, transcoded_filename, file_data,
+                {"user_sub": user_sub, "original_filename": original_filename},
+            )
+        except Exception:
+            logger.exception("full-reprocess: pipeline crashed for %s", audio_id)
+            try:
+                _set_user_audio_status(
+                    audio_id, "kevent_failed",
+                    transcription_engine="kevent",
+                )
+            except Exception:
+                logger.exception("full-reprocess: status_failed write also failed")
+
+    threading.Thread(target=_run, name=f"full-reprocess-{audio_id}",
+                     daemon=True).start()
+
+    logger.info(
+        "full-reprocess: queued audio=%s user_sub=%s version=%d",
+        audio_id, user_sub, new_version,
+    )
+    return jsonify({
+        "reprocessed": True,
+        "status": "kevent_queued",
+        "reprocess_version": new_version,
+    }), 202
 
 
 # ─── User feedback (migration 015) ─────────────────────────────────

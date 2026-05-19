@@ -306,6 +306,11 @@ class UserAudioFile(InternalBase):
     # the latter case).
     diarization_json = Column(Text, nullable=True,
                               comment="raw pyannote segments: [{speaker, start, end}, …]")
+    # Word-level timestamps issus de Whisper word_timestamps=true (migration
+    # 017). Format compact: [{"w": "...", "s": <sec>, "e": <sec>}, ...].
+    # NULL si non-émis (fallback frontend = highlight par bloc).
+    transcription_words_json = Column(Text, nullable=True,
+                                      comment='Whisper word-level timestamps. NULL si word_timestamps absent. Format: [{"w","s","e"}]')
     speaker_tagged_text = Column(Text, nullable=True,
                                  comment="markdown with Intervenant_NN labels (real names if naming enabled); legacy rows may still contain SPEAKER_NN")
     glossary_corrected_text = Column(Text, nullable=True,

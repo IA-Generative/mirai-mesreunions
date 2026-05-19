@@ -447,6 +447,10 @@ function revertDetailTitle(fileId) {
     input.value = input.dataset.originalTitle || '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
 }
+// Référencée via onclick="revertDetailTitle(...)" dans le HTML généré
+// par legacy.js — doit être publiée sur window en mode ES module sinon
+// ReferenceError au clic.
+window.revertDetailTitle = revertDetailTitle;
 
 function toggleRowExpand(btn) {
     const wrapper = btn.closest('.file-row-compact-wrapper');
@@ -1698,7 +1702,13 @@ async function _openRegenerateModal(fileId, scope) {
                 });
             }
             if (typeof loadSessions === 'function') loadSessions({ force: true });
-            showToast && showToast('✓ Régénération terminée', 'success');
+            // Toast différencié : 'full' lance un pipeline asynchrone
+            // (Whisper + pyannote + chaîne LLM, plusieurs minutes), 'llm-only'
+            // a terminé synchroniquement quand on arrive ici.
+            const toastMsg = scope === 'full'
+                ? '✓ Régénération lancée — suivez le rail de statut'
+                : '✓ Régénération terminée';
+            showToast && showToast(toastMsg, 'success');
         } else {
             alert(`Échec de la régénération : HTTP ${resp.status} — ${data.error || ''}`);
         }
@@ -1754,6 +1764,21 @@ function _fmtTimecode(sec) {
     const m = Math.floor(sec / 60);
     const s = sec % 60;
     return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// Rend le texte d'un bloc en spans `.tc-word` si on a des timestamps
+// alignés (b.words rempli par mountTranscriptCorrector). Sinon, fallback
+// au texte échappé (pas de karaoke pour ce bloc, mais lisibilité intacte).
+function _renderBlockText(b) {
+    if (!b.words || !b.words.length) {
+        return escapeHtml(b.text);
+    }
+    return b.words.map((w) => {
+        if (typeof w.s === 'number' && typeof w.e === 'number') {
+            return `<span class="tc-word" data-tc-w-s="${w.s}" data-tc-w-e="${w.e}">${escapeHtml(w.w)}</span>`;
+        }
+        return escapeHtml(w.w);
+    }).join(' ');
 }
 
 function _parseSpeakerTagged(text) {
@@ -1814,8 +1839,46 @@ async function mountTranscriptCorrector(container) {
     }
     // Lazy-load des deux textes utiles : speaker_tagged (priorité) +
     // transcription brute (fallback). En parallèle via Promise.all.
-    data.speaker_tagged_text = await _fetchTranscriptText(fileId, 'speaker_tagged');
+    // En plus, on tire les word-level timestamps (mig 017) pour le
+    // surlignage karaoke pendant la lecture — best-effort, NULL si
+    // word_timestamps non émis (rows antérieures au rollout, opt-out).
+    const [speakerTaggedText, wordsArr] = await Promise.all([
+        _fetchTranscriptText(fileId, 'speaker_tagged'),
+        _fetchTranscriptWords(fileId),
+    ]);
+    data.speaker_tagged_text = speakerTaggedText;
     const blocks = _parseSpeakerTagged(data.speaker_tagged_text || '');
+    // Pour chaque bloc, on tente l'alignement words-Whisper ↔ tokens-texte
+    // (split whitespace). Si les counts correspondent (±10 % tolérance),
+    // on garde l'alignement positionnel → karaoke word-level pour ce bloc.
+    // Sinon (glossary LLM a inséré/supprimé des mots), on retombe au
+    // rendu texte sans spans pour ce bloc (highlight bloc-level seul).
+    const wordsAll = Array.isArray(wordsArr) ? wordsArr : [];
+    for (const b of blocks) {
+        b.words = null;
+        if (!wordsAll.length) continue;
+        const inRange = wordsAll.filter(w => w.s >= b.start - 0.1 && w.e <= b.end + 0.1);
+        if (!inRange.length) continue;
+        const tokens = b.text.split(/\s+/).filter(Boolean);
+        // Tolérance large : speaker_tagged peut diverger de quelques mots
+        // (glossary correction LLM). En cas d'écart > 25 % on lâche
+        // l'alignement positionnel pour CE bloc (rendu texte brut).
+        const diff = Math.abs(tokens.length - inRange.length);
+        if (tokens.length === 0 || diff / Math.max(tokens.length, inRange.length) > 0.25) continue;
+        // Alignement positionnel : on respecte le texte affiché
+        // (potentiellement LLM-corrigé) mais on attache les timestamps
+        // Whisper position par position. Mots manquants en bout d'array
+        // ne reçoivent pas de timestamp (rendu sans .tc-word).
+        const n = Math.min(tokens.length, inRange.length);
+        b.words = [];
+        for (let i = 0; i < n; i++) {
+            b.words.push({ w: tokens[i], s: inRange[i].s, e: inRange[i].e });
+        }
+        // Excédents de tokens-texte sans timestamp (collés à la fin sans span).
+        for (let i = n; i < tokens.length; i++) {
+            b.words.push({ w: tokens[i] });
+        }
+    }
     if (!blocks.length && !data.transcription_text) {
         // Fallback nécessaire : on tire la transcription brute uniquement
         // si pas de blocs (typique d'un échec diarisation).
@@ -1885,7 +1948,7 @@ async function mountTranscriptCorrector(container) {
                       data-tc-file="${escapeHtml(fileId)}"
                       title="Renommer cet interlocuteur partout">✏️</button>
               <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
-              <span class="tc-text" data-tc-text="${i}">${escapeHtml(b.text)}</span>
+              <span class="tc-text" data-tc-text="${i}">${_renderBlockText(b)}</span>
             </div>
           `).join('')}
         </div>
@@ -1900,6 +1963,8 @@ async function mountTranscriptCorrector(container) {
 
     // Click ▶ → seek + play. Click sur texte d'un bloc → seek (sans play
     // forcé pour pas démarrer si l'user voulait juste sélectionner).
+    // Click sur un mot (.tc-word) : seek + play avec rewind si le bloc
+    // est long (>5s = trop loin du contexte si on seek pile sur le mot).
     container.addEventListener('click', (ev) => {
         const playBtn = ev.target.closest && ev.target.closest('[data-tc-play]');
         if (playBtn && !playBtn.disabled) {
@@ -1911,6 +1976,30 @@ async function mountTranscriptCorrector(container) {
                 // et on entend la bande son 2× désynchronisée.
                 try { audio.pause(); audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
             }
+            return;
+        }
+        // Click sur un mot précis (.tc-word) : seek avec petit contexte
+        // pour donner le temps de raccrocher à l'oreille. Si le bloc
+        // contenant le mot est court (<5s) on rejoue tout le bloc.
+        // Sinon on rewind de 2s avant le mot (borné au début du bloc).
+        const wordEl = ev.target.closest && ev.target.closest('.tc-word');
+        if (wordEl && audio) {
+            // setTimeout 50ms : si l'user était en train de sélectionner
+            // du texte, getSelection().isCollapsed sera false et on
+            // n'interrompt pas la sélection (cohérence avec .tc-text).
+            setTimeout(() => {
+                const sel = window.getSelection();
+                if (sel && !sel.isCollapsed) return;
+                const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
+                const blockEl = wordEl.closest('.tc-block');
+                const bStart = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
+                const bEnd = blockEl ? parseFloat(blockEl.getAttribute('data-tc-end')) : wStart;
+                const blockDur = Math.max(0, bEnd - bStart);
+                const target = (blockDur < 5)
+                    ? bStart                              // bloc court : on rejoue tout
+                    : Math.max(bStart, wStart - 2);        // bloc long : 2s de contexte
+                try { audio.pause(); audio.currentTime = Math.max(0, target); audio.play(); } catch (e) {}
+            }, 50);
             return;
         }
         // Click sur le texte d'un bloc (mais pas pendant une sélection !) :
@@ -1929,8 +2018,23 @@ async function mountTranscriptCorrector(container) {
         }
     });
 
+    // Index plat des words pour binary-search dans le timeupdate karaoke
+    // (perf : un audio d'1h peut avoir ~10k words, on évite l'itération
+    // linéaire à chaque tick). Les words sont déjà ordonnés par ``s``.
+    const wordsFlat = [];
+    blocks.forEach((b, blockIdx) => {
+        if (!b.words) return;
+        b.words.forEach((w, wIdx) => {
+            if (typeof w.s === 'number' && typeof w.e === 'number') {
+                wordsFlat.push({ s: w.s, e: w.e, blockIdx, wIdx });
+            }
+        });
+    });
+    let lastActiveWordEl = null;
+
     // Sync audio → text : pendant la lecture, highlight le bloc courant
     // + scroll dans le viewport du container blocks si hors-vue.
+    // Si word-level timestamps dispo, highlight aussi le mot prononcé.
     if (audio) {
         audio.addEventListener('timeupdate', () => {
             const t = audio.currentTime || 0;
@@ -1962,6 +2066,33 @@ async function mountTranscriptCorrector(container) {
                     if (eRect.top < cRect.top || eRect.bottom > cRect.bottom) {
                         el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
                     }
+                }
+            }
+
+            // Word-level karaoke : binary search du word actif dans wordsFlat
+            // (ordonné par s). On retient le dernier mot actif pour pouvoir
+            // le déhighlighter sans rebalayer tout le DOM.
+            if (wordsFlat.length) {
+                let lo = 0, hi = wordsFlat.length - 1, found = -1;
+                while (lo <= hi) {
+                    const mid = (lo + hi) >> 1;
+                    if (t < wordsFlat[mid].s) hi = mid - 1;
+                    else if (t > wordsFlat[mid].e) lo = mid + 1;
+                    else { found = mid; break; }
+                }
+                let targetEl = null;
+                if (found >= 0) {
+                    const ref = wordsFlat[found];
+                    const blockEl = blocksEls[ref.blockIdx];
+                    if (blockEl) {
+                        const spans = blockEl.querySelectorAll('.tc-word');
+                        targetEl = spans[ref.wIdx] || null;
+                    }
+                }
+                if (targetEl !== lastActiveWordEl) {
+                    if (lastActiveWordEl) lastActiveWordEl.classList.remove('tc-word-active');
+                    if (targetEl) targetEl.classList.add('tc-word-active');
+                    lastActiveWordEl = targetEl;
                 }
             }
         });
@@ -2203,6 +2334,22 @@ function _invalidateTranscriptTextCache(fileId) {
     Array.from(_transcriptTextCache.keys())
         .filter((k) => k.startsWith(prefix))
         .forEach((k) => _transcriptTextCache.delete(k));
+    _transcriptWordsCache.delete(fileId);
+}
+
+// Cache des words timestamps Whisper (mig 017). Clé = fileId, valeur =
+// Promise résolvant à un array [{w, s, e}, ...] ou [] si non émis.
+// Une seule requête /api/file/transcript-words par fichier et par
+// session frontend, partagée par mountTranscriptCorrector.
+const _transcriptWordsCache = new Map();
+function _fetchTranscriptWords(fileId) {
+    if (_transcriptWordsCache.has(fileId)) return _transcriptWordsCache.get(fileId);
+    const p = fetch(`/api/file/transcript-words/${encodeURIComponent(fileId)}`)
+        .then((r) => r.ok ? r.json() : { available: false, words: [] })
+        .then((j) => (j && j.available && Array.isArray(j.words)) ? j.words : [])
+        .catch(() => []);
+    _transcriptWordsCache.set(fileId, p);
+    return p;
 }
 
 function _formatMeetingAnalysisAsMarkdown(jsonText) {

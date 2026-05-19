@@ -279,6 +279,8 @@ def test_transcribe_async_chains_submit_then_wait():
     assert post_kw["data"]["model"] == "faster-whisper-large-v3-turbo"
     assert post_kw["data"]["language"] == "fr"
     assert post_kw["data"]["response_format"] == "verbose_json"
+    # Word-level timestamps requis pour le karaoke UI (mig 017).
+    assert post_kw["data"]["word_timestamps"] == "true"
 
 
 def test_diarize_async_chains_submit_then_wait():
