@@ -1907,47 +1907,12 @@ async function mountTranscriptCorrector(container) {
             b.words.push({ w: tokens[i] });
         }
     }
-    // Cap 60s par bloc (pattern dictaphone) : un Intervenant qui monologue
-    // 5 min produit un bloc unique de plusieurs centaines de lignes ; le
-    // surlignage bloc-level reste actif tout du long et le scroll perd
-    // toute utilité. On découpe à la frontière de mot la plus proche de
-    // 60s. Seuls les blocs avec words alignés (b.words) sont splittables ;
-    // les autres restent tels quels (fallback).
-    const CAP_SEC = 60;
-    const splitBlocks = [];
-    for (const b of blocks) {
-        const dur = (b.end || 0) - (b.start || 0);
-        if (dur <= CAP_SEC || !b.words || b.words.length < 2) {
-            splitBlocks.push(b);
-            continue;
-        }
-        // On découpe en sous-blocs de ≤ CAP_SEC, en conservant le speaker.
-        // Chaque sous-bloc démarre au premier mot et ferme dès qu'on
-        // dépasse CAP_SEC. text = concat des w (déjà LLM-corrigé via
-        // l'alignement positionnel ci-dessus).
-        let chunk = { speaker: b.speaker, text: '', start: b.start, end: b.start, words: [] };
-        for (const w of b.words) {
-            const wEnd = (typeof w.e === 'number') ? w.e : chunk.end;
-            if (wEnd - chunk.start > CAP_SEC && chunk.words.length > 0) {
-                chunk.text = chunk.words.map(x => x.w).join(' ');
-                chunk.end = chunk.words[chunk.words.length - 1].e ?? chunk.end;
-                splitBlocks.push(chunk);
-                chunk = {
-                    speaker: b.speaker, text: '',
-                    start: (typeof w.s === 'number' ? w.s : chunk.end),
-                    end: wEnd, words: [],
-                };
-            }
-            chunk.words.push(w);
-            if (typeof wEnd === 'number') chunk.end = wEnd;
-        }
-        if (chunk.words.length > 0) {
-            chunk.text = chunk.words.map(x => x.w).join(' ');
-            splitBlocks.push(chunk);
-        }
-    }
-    blocks.length = 0;
-    blocks.push(...splitBlocks);
+    // NB : le cap 60s introduit précédemment (inspiré dictaphone) a été
+    // RETIRÉ — il créait des artefacts visuels (un long monologue
+    // Antonio découpé en "Antonio 0:00→0:59" + "Antonio 0:59→1:08")
+    // sans bénéfice réel maintenant qu'on a un scroll word-level qui
+    // suit le mot actif (pas le bloc). Le bloc reste long mais le mot
+    // surligné reste centré dans le viewport.
 
     // Rescale AFFINE des timestamps Whisper dans la durée du bloc.
     // Pourquoi : les timestamps Whisper sont précis aux frontières de bloc
@@ -2029,7 +1994,7 @@ async function mountTranscriptCorrector(container) {
           (avec ré-écoute du contexte 🔊).
           Cliquez sur <span class="tc-notice-pencil">✏️</span> à côté d'un
           interlocuteur (« Intervenant_03 », etc.) pour le renommer.
-          ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio. <strong>Double-cliquez un mot</strong> pour le ré-écouter.'}
+          ${audioPurged ? '' : 'Cliquez sur une ligne pour positionner le lecteur audio. <strong>Alt+clic sur un mot</strong> pour le ré-écouter (Option+clic sur Mac).'}
         </div>
         <div class="tc-find" data-tc-find>
           <input type="search" class="tc-find-input" placeholder="Chercher…"
@@ -2077,19 +2042,18 @@ async function mountTranscriptCorrector(container) {
     const audio = container.querySelector('.transcript-corrector-audio');
     const blocksEls = Array.from(container.querySelectorAll('.tc-block'));
 
-    // Double-click sur un mot précis (.tc-word) : seek + play avec petit
-    // contexte. Pattern inspiré dictaphone (suitenumerique) — double-click
-    // préserve naturellement la sélection texte (un user qui sélectionne
-    // un mot pour le copier ne déclenche pas un seek). Si le bloc contenant
-    // le mot est court (<5s) on rejoue tout le bloc, sinon on rewind de 2s
-    // avant le mot (borné au début du bloc) pour avoir un peu de contexte.
-    container.addEventListener('dblclick', (ev) => {
+    // Alt+click (Option+click sur Mac) sur un mot précis → seek + play
+    // avec petit contexte. On utilise Alt plutôt que dblclick parce que
+    // le double-click sert déjà à sélectionner un mot pour la correction
+    // de terme (UX historique). Si le bloc contenant le mot est court
+    // (<5s) on rejoue tout le bloc, sinon on rewind de 2s avant le mot
+    // pour avoir un peu de contexte avant.
+    container.addEventListener('click', (ev) => {
+        if (!ev.altKey) return;
         const wordEl = ev.target.closest && ev.target.closest('.tc-word');
         if (!wordEl || !audio) return;
         ev.preventDefault();
-        // Clean la sélection de texte induite par le double-click navigateur
-        // (sinon le mot reste sélectionné pendant la lecture, distrayant).
-        try { window.getSelection()?.removeAllRanges(); } catch (e) {}
+        ev.stopPropagation();
         const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
         const blockEl = wordEl.closest('.tc-block');
         const bStart = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
@@ -2099,7 +2063,7 @@ async function mountTranscriptCorrector(container) {
             ? bStart                              // bloc court : on rejoue tout
             : Math.max(bStart, wStart - 2);        // bloc long : 2s de contexte
         try { audio.pause(); audio.currentTime = Math.max(0, target); audio.play(); } catch (e) {}
-    });
+    }, true);  // capture phase pour court-circuiter avant le click handler générique
 
     // Click ▶ → seek + play. Click sur texte d'un bloc → seek (sans play
     // forcé pour pas démarrer si l'user voulait juste sélectionner).
