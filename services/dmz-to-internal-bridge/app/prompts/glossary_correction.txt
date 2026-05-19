@@ -19,7 +19,7 @@ INSTRUCTIONS — IMPÉRATIVES :
 2. Si tu n'es pas SÛR à au moins 80 % qu'un passage correspond à un sigle de la liste, **ne le remplace pas**. Mieux vaut une transcription brute qu'une fausse correction.
 
 3. Préserve **strictement** :
-   - les marqueurs de speakers `**SPEAKER_NN**` ou `**Nom Prenom**`
+   - les marqueurs de speakers `**Intervenant_NN**` (ou ancien `**SPEAKER_NN**`) ou `**Nom Prenom**`
    - la ponctuation et les retours à la ligne
    - les mots qui ne sont pas dans la liste — ne les modifie pas, même s'ils paraissent fautifs
 

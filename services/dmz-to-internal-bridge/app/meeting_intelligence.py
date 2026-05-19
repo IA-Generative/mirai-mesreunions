@@ -172,17 +172,27 @@ def extract_speaker_names(transcript: str, llm: LLMClient, model: str) -> Dict[s
     if not isinstance(mapping, dict):
         logger.warning("speaker_names: LLM did not return an object, got %r", type(mapping))
         return {}
-    # Filter out garbage entries: keys must start with SPEAKER_, values must be non-empty strings.
+    # Filter out garbage entries: keys must be a generic intervenant label
+    # (``Intervenant_NN`` is the public form the LLM sees in the transcript,
+    # ``SPEAKER_NN`` is the legacy/internal form). Values must be non-empty
+    # strings. Keys are normalised to the internal ``SPEAKER_NN`` form so
+    # the merger's lookup (which sees raw pyannote labels) keeps working.
     cleaned = {}
     for k, v in mapping.items():
-        if not isinstance(k, str) or not k.startswith("SPEAKER_"):
+        if not isinstance(k, str):
+            continue
+        if k.startswith("Intervenant_"):
+            internal_key = "SPEAKER_" + k.split("_", 1)[1]
+        elif k.startswith("SPEAKER_"):
+            internal_key = k
+        else:
             continue
         if not isinstance(v, str) or not v.strip():
             continue
-        if v.strip() == k:
+        if v.strip() in (k, internal_key):
             # Model couldn't determine the name — keep the anonymous tag.
             continue
-        cleaned[k] = v.strip()
+        cleaned[internal_key] = v.strip()
     logger.info("speaker_names: %d/%d labels resolved", len(cleaned), len(mapping))
     return cleaned
 
@@ -242,7 +252,7 @@ def reformulate(transcript: str, llm: LLMClient, model: str) -> Optional[str]:
     )
 
 
-_SPEAKER_LABEL_RE = __import__("re").compile(r"\bSPEAKER_\d+\b|^\s*\*\*\s*([^*:]+?)\s*\*\*\s*:", __import__("re").MULTILINE)
+_SPEAKER_LABEL_RE = __import__("re").compile(r"\b(?:SPEAKER|Intervenant)_\d+\b|^\s*\*\*\s*([^*:]+?)\s*\*\*\s*:", __import__("re").MULTILINE)
 
 
 def _extract_speaker_labels(speaker_tagged_text: Optional[str]) -> list[str]:
@@ -260,9 +270,10 @@ def _extract_speaker_labels(speaker_tagged_text: Optional[str]) -> list[str]:
         token = (m.group(1) or m.group(0)).strip()
         if token:
             labels.add(token)
-    # Tri stable : noms réels d'abord, SPEAKER_NN ensuite, par index numérique
+    # Tri stable : noms réels d'abord, labels génériques (SPEAKER_NN /
+    # Intervenant_NN) ensuite, par index numérique
     def _key(s: str):
-        if s.startswith("SPEAKER_"):
+        if s.startswith("SPEAKER_") or s.startswith("Intervenant_"):
             try: return (1, int(s.split("_", 1)[1]))
             except ValueError: return (1, 999)
         return (0, s.lower())

@@ -4,7 +4,7 @@ Tu réponds **uniquement** avec un objet JSON conforme au schéma suivant — pa
 
 {
   "actors": [
-    {"name": "string (vrai nom si connu, sinon SPEAKER_NN)", "role": "string ou null (rôle/fonction si déductible)"}
+    {"name": "string (vrai nom si connu, sinon Intervenant_NN)", "role": "string ou null (rôle/fonction si déductible)"}
   ],
   "participants_presents": [
     {"name": "string", "role": "string ou null"}
@@ -28,7 +28,7 @@ Tu réponds **uniquement** avec un objet JSON conforme au schéma suivant — pa
 
 Règles :
 - "actors" : conservé pour compatibilité — union de "participants_presents" + "participants_cites" sans contexte.
-- "participants_presents" : **uniquement** les personnes à qui le contexte (étiquette SPEAKER_NN, marqueur de tour de parole, formulation au présent "X dit que…") permet d'attribuer au moins une intervention. Ces personnes ont effectivement parlé pendant la réunion. Si la transcription ne contient PAS d'étiquettes locuteur (diarization absente ou échouée), retourne ce tableau VIDE — ne devine pas.
+- "participants_presents" : **uniquement** les personnes à qui le contexte (étiquette Intervenant_NN, marqueur de tour de parole, formulation au présent "X dit que…") permet d'attribuer au moins une intervention. Ces personnes ont effectivement parlé pendant la réunion. Si la transcription ne contient PAS d'étiquettes locuteur (diarization absente ou échouée), retourne ce tableau VIDE — ne devine pas.
 - "participants_cites" : personnes simplement mentionnées dans le texte (citées par un autre intervenant, référencées par leur nom/fonction) **sans** avoir pris la parole. Garde une courte phrase de contexte ("a été chargé de…", "qui n'est pas présent mais…", etc.) quand ça aide à comprendre pourquoi.
 {SPEAKER_HINT}- "themes" : 3 à 8 sujets-clés. Pas de redondance, pas de double-comptage entre thèmes proches.
 - "decisions" : ne liste que les décisions/actions explicitement énoncées, pas tes interprétations.

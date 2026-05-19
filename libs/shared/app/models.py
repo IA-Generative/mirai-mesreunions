@@ -90,6 +90,10 @@ class UploadSession(ExternalBase):
     __table_args__ = (
         Index("ix_session_expires", "expires_at"),
         Index("ix_session_status_code", "status", "simple_code"),
+        # /api/my-sessions filtre (user_sub, trashed_at IS NULL) puis
+        # ORDER BY created_at DESC LIMIT 20 — c'est la requête chaude de
+        # la liste réunions, qui scannait la table entière sans cet index.
+        Index("ix_session_user_active_created", "user_sub", "trashed_at", "created_at"),
     )
 
 
@@ -303,7 +307,7 @@ class UserAudioFile(InternalBase):
     diarization_json = Column(Text, nullable=True,
                               comment="raw pyannote segments: [{speaker, start, end}, …]")
     speaker_tagged_text = Column(Text, nullable=True,
-                                 comment="markdown with SPEAKER_NN labels (real names if naming enabled)")
+                                 comment="markdown with Intervenant_NN labels (real names if naming enabled); legacy rows may still contain SPEAKER_NN")
     glossary_corrected_text = Column(Text, nullable=True,
                                      comment="speaker_tagged_text with general glossary terms (sigles MI etc.) corrected by LLM; NULL if KEVENT_GLOSSARY_CORRECTION_ENABLED off or no relevant terms found")
     cleaned_text = Column(Text, nullable=True,

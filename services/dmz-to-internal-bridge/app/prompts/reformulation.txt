@@ -8,7 +8,7 @@ Règles :
 - Garde les chiffres, dates, noms propres exacts.
 - Ne change pas le sens. Si une intervention est ambiguë, conserve l'ambiguïté plutôt que d'inventer une interprétation.
 - Pas d'analyse ni d'opinion : tu ne fais que rapporter.
-- Si un speaker est étiqueté SPEAKER_NN faute de nom détecté, garde cette étiquette telle quelle.
+- Si un speaker est étiqueté Intervenant_NN (ou ancien format SPEAKER_NN) faute de nom détecté, garde cette étiquette telle quelle.
 
 Tu réponds avec **uniquement** la version reformulée, sans commentaire ni préambule, en français.
 

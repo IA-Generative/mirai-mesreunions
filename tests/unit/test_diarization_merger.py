@@ -90,12 +90,15 @@ def test_merge_with_two_speakers_and_aligned_segments():
         "num_speakers": 2,
     }
     out = merge_to_markdown(transcription, diarization)
-    assert "**SPEAKER_00**" in out
+    # Raw pyannote SPEAKER_NN labels are rewritten to user-facing
+    # Intervenant_NN at the rendering boundary.
+    assert "**Intervenant_00**" in out
     assert "Bonjour à tous, on commence la réunion." in out
-    assert "**SPEAKER_01**" in out
+    assert "**Intervenant_01**" in out
     assert "Merci. Je vais présenter le sujet." in out
+    assert "**SPEAKER_" not in out
     # Two distinct blocks, separated by blank line.
-    assert out.count("**SPEAKER_") == 2
+    assert out.count("**Intervenant_") == 2
 
 
 def test_merge_groups_consecutive_segments_of_same_speaker():
@@ -115,11 +118,11 @@ def test_merge_groups_consecutive_segments_of_same_speaker():
         ],
     }
     out = merge_to_markdown(transcription, diarization)
-    # SPEAKER_00 block contains BOTH first and second sentence.
+    # Intervenant_00 block contains BOTH first and second sentence.
     assert "Première phrase." in out
     assert "Deuxième phrase." in out
     # And only TWO blocks total (one per speaker).
-    assert out.count("**SPEAKER_") == 2
+    assert out.count("**Intervenant_") == 2
 
 
 def test_merge_substitutes_real_speaker_names():
@@ -143,6 +146,7 @@ def test_merge_substitutes_real_speaker_names():
     assert "**Jean Dupont**" in out
     assert "**Marie Curie**" in out
     assert "**SPEAKER_" not in out
+    assert "**Intervenant_" not in out
 
 
 def test_merge_partial_naming_keeps_unmatched_anonymous():
@@ -161,7 +165,8 @@ def test_merge_partial_naming_keeps_unmatched_anonymous():
     }
     out = merge_to_markdown(transcription, diarization, speaker_names={"SPEAKER_00": "Jean"})
     assert "**Jean**" in out
-    assert "**SPEAKER_01**" in out  # not resolved
+    assert "**Intervenant_01**" in out  # not resolved → rewritten from SPEAKER_01
+    assert "**SPEAKER_" not in out
 
 
 def test_merge_empty_transcription_returns_empty_string():
@@ -174,7 +179,7 @@ def test_merge_no_segment_timestamps_falls_back_to_single_block():
     transcription = {"text": "Bonjour à tous.", "duration": 5.0}
     diarization = {"segments": []}
     out = merge_to_markdown(transcription, diarization)
-    assert "**SPEAKER_00**" in out
+    assert "**Intervenant_00**" in out
     assert "Bonjour à tous." in out
     assert "(0:00 → 0:05)" in out
 
@@ -188,8 +193,8 @@ def test_merge_no_diarization_assigns_all_to_speaker_00():
         ],
     }
     out = merge_to_markdown(transcription, {"segments": []})
-    # Single SPEAKER_00 block (consecutive segments grouped).
-    assert out.count("**SPEAKER_") == 1
+    # Single Intervenant_00 block (consecutive segments grouped).
+    assert out.count("**Intervenant_") == 1
     assert "A." in out and "B." in out
 
 
@@ -205,7 +210,7 @@ def test_merge_skips_empty_segment_text():
     out = merge_to_markdown(transcription, {"segments": []})
     assert "Réelle phrase." in out
     # Only one block — empty segments dropped.
-    assert out.count("**SPEAKER_") == 1
+    assert out.count("**Intervenant_") == 1
 
 
 # --- list_unique_speakers ------------------------------------------------

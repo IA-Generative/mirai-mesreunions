@@ -13,7 +13,7 @@ Sont considérés comme contenu hors-bande :
 Tu **ne dois pas** :
 - Changer le style ou reformuler.
 - Couper du contenu sémantique même s'il est mal exprimé.
-- Modifier les marqueurs de speakers (ex: `**SPEAKER_00** _(0:00 → 0:14)_`).
+- Modifier les marqueurs de speakers (ex: `**Intervenant_00** _(0:00 → 0:14)_`, ou ancien format `**SPEAKER_00** _(0:00 → 0:14)_`).
 - Modifier la ponctuation au-delà du minimum nécessaire.
 
 Tu réponds avec **uniquement** le texte nettoyé, sans commentaire ni préambule.

@@ -9,17 +9,19 @@ diarisation interval covers the largest overlap with that segment.
 
 The output is a Markdown document of the form::
 
-    **SPEAKER_00** _(0:00 → 0:14)_
+    **Intervenant_00** _(0:00 → 0:14)_
     > Bonjour à tous, on commence la réunion.
 
-    **SPEAKER_01** _(0:14 → 0:32)_
+    **Intervenant_01** _(0:14 → 0:32)_
     > Merci. Je vais présenter le sujet.
 
 If diarisation is empty (one speaker, or pyannote returned nothing), the
-function falls back to a single-speaker block tagged ``SPEAKER_00``.
+function falls back to a single-speaker block tagged ``Intervenant_00``.
 
-Speaker labels are stable across the document — calling code can later
-substitute ``SPEAKER_NN`` with real names without re-running this merge.
+Internally the raw pyannote labels remain ``SPEAKER_NN`` so the optional
+``speaker_names`` mapping produced by the LLM (which uses ``SPEAKER_NN``
+keys) keeps working. The rendering layer rewrites ``SPEAKER_NN`` to
+``Intervenant_NN`` only when no real name was resolved.
 
 This is a **pure function** so it can be unit-tested without any LLM,
 HTTP, or DB.
@@ -27,7 +29,23 @@ HTTP, or DB.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List
+
+
+_SPEAKER_PREFIX_RE = re.compile(r"^SPEAKER_(\d+)$")
+
+
+def _to_display_label(raw_label: str) -> str:
+    """Rewrite a raw pyannote ``SPEAKER_NN`` label to the user-facing
+    ``Intervenant_NN`` form. Anything that doesn't match the canonical
+    pyannote pattern (e.g. already a real name) is returned unchanged."""
+    if not raw_label:
+        return raw_label
+    m = _SPEAKER_PREFIX_RE.match(raw_label)
+    if m:
+        return f"Intervenant_{m.group(1)}"
+    return raw_label
 
 
 def _format_time(seconds: float) -> str:
@@ -89,7 +107,7 @@ def merge_to_markdown(
             if diarization_segments
             else "SPEAKER_00"
         )
-        speaker = speaker_names.get(speaker_raw, speaker_raw)
+        speaker = speaker_names.get(speaker_raw) or _to_display_label(speaker_raw)
         duration = float(transcription.get("duration", 0.0))
         return f"**{speaker}** _(0:00 → {_format_time(duration)})_\n> {text}\n"
 
@@ -103,7 +121,7 @@ def merge_to_markdown(
     def _flush() -> None:
         if current_speaker_raw is None or not current_text:
             return
-        speaker = speaker_names.get(current_speaker_raw, current_speaker_raw)
+        speaker = speaker_names.get(current_speaker_raw) or _to_display_label(current_speaker_raw)
         text = " ".join(s.strip() for s in current_text if s.strip())
         blocks.append(
             f"**{speaker}** _({_format_time(current_start)} → {_format_time(current_end)})_\n> {text}"
