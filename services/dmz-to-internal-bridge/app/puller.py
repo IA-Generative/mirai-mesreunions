@@ -332,7 +332,8 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
     Update transcription_status and any other named columns on a UserAudioFile row.
 
     Optional kwargs accepted: ``mcr_meeting_id``, ``transcription_engine``,
-    ``transcription_text``, ``transcription_language``, ``diarization_json``,
+    ``transcription_text``, ``transcription_language``,
+    ``transcription_words_json``, ``diarization_json``,
     ``speaker_tagged_text``, ``glossary_corrected_text``, ``cleaned_text``,
     ``reformulated_text``, ``meeting_analysis_json``,
     ``suggested_filename``, ``key_points_summary``.
@@ -342,6 +343,9 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "transcription_engine",
         "transcription_text",
         "transcription_language",
+        # Word-level timestamps (Whisper word_timestamps=true, mig 017) :
+        # silencieusement droppé sans cet allowlist → karaoke UI inactif.
+        "transcription_words_json",
         "diarization_json",
         "speaker_tagged_text",
         "glossary_corrected_text",
