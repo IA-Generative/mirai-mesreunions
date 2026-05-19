@@ -1,6 +1,7 @@
 """S3 (MinIO) helper functions."""
 
 import logging
+import threading
 from io import BytesIO
 from typing import Optional
 
@@ -12,6 +13,17 @@ from botocore.exceptions import ClientError
 from .config import S3Config, UPLOAD_MAX_FILE_SIZE_MB
 
 logger = logging.getLogger(__name__)
+
+# Cache thread-safe des clients boto3. La création d'un client boto3 est
+# coûteuse (loaders de schémas + setup signing + HTTPS session, ~50-200ms),
+# ce qui rendait /api/my-sessions monstrueusement lent quand on parallélise
+# des dizaines de HEAD probes (chacun créait son propre client). Les
+# clients boto3 sont documentés thread-safe pour les opérations de lecture
+# (cf. https://boto3.amazonaws.com/v1/documentation/api/latest/guide/clients.html
+# "Multithreading or multiprocessing with clients"), donc on peut partager
+# une instance par (endpoint, bucket, access_key).
+_CLIENT_CACHE: dict = {}
+_CLIENT_CACHE_LOCK = threading.Lock()
 
 
 # Pin boto3's multipart_threshold just above the pipeline's accepted file cap so
@@ -29,15 +41,36 @@ _NO_MULTIPART = TransferConfig(multipart_threshold=_SINGLE_PUT_THRESHOLD_BYTES)
 
 
 def get_s3_client(cfg: S3Config):
-    """Create a boto3 S3 client for the given config."""
-    return boto3.client(
-        "s3",
-        endpoint_url=cfg.endpoint,
-        aws_access_key_id=cfg.access_key,
-        aws_secret_access_key=cfg.secret_key,
-        region_name=cfg.region,
-        config=BotoConfig(signature_version="s3v4"),
-    )
+    """Return a (cached) boto3 S3 client for the given config.
+
+    Le pool de connexions HTTPS du botocore est lui aussi tenu par le
+    client — réutiliser la même instance permet de keep-alive vers S3 et
+    d'éviter le coût de TLS handshake répété. ``max_pool_connections``
+    relevé pour ne pas brider les batchs parallèles (default = 10).
+    """
+    cache_key = (cfg.endpoint, cfg.bucket, cfg.access_key, cfg.region)
+    client = _CLIENT_CACHE.get(cache_key)
+    if client is not None:
+        return client
+    with _CLIENT_CACHE_LOCK:
+        # Double-check après acquisition du lock (un autre thread peut
+        # avoir créé le client pendant qu'on attendait).
+        client = _CLIENT_CACHE.get(cache_key)
+        if client is not None:
+            return client
+        client = boto3.client(
+            "s3",
+            endpoint_url=cfg.endpoint,
+            aws_access_key_id=cfg.access_key,
+            aws_secret_access_key=cfg.secret_key,
+            region_name=cfg.region,
+            config=BotoConfig(
+                signature_version="s3v4",
+                max_pool_connections=64,
+            ),
+        )
+        _CLIENT_CACHE[cache_key] = client
+        return client
 
 
 def ensure_bucket(cfg: S3Config):
