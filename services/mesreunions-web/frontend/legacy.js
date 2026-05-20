@@ -2248,12 +2248,28 @@ async function mountTranscriptCorrector(container) {
             // par-interlocuteur, glossaire, nettoyée, reformulation) a déjà
             // été faite par le POST ci-dessus ; un refresh manuel ou le
             // prochain polling re-synchronisera.
-            container.querySelectorAll(`.tc-speaker`).forEach((el) => {
-                if ((el.textContent || '').trim() === oldName) el.textContent = trimmed;
-            });
-            container.querySelectorAll(`[data-tc-speaker-rename="${CSS.escape(oldName)}"]`).forEach((el) => {
-                el.setAttribute('data-tc-speaker-rename', trimmed);
-                el.setAttribute('title', `Renommer cet interlocuteur partout`);
+            //
+            // On itère depuis les boutons ✏️ (qui portent la valeur RAW
+            // dans data-tc-speaker-rename) plutôt que de comparer le
+            // textContent du .tc-speaker — celui-ci est passé par
+            // _displaySpeaker(), donc "Intervenant_03" devient "Intervenant 3"
+            // à l'affichage et l'égalité avec la valeur RAW ne matche jamais.
+            // Sans ça, tous les blocs Intervenant_NN restaient inchangés
+            // (bug historique avant 2026-05-21).
+            container.querySelectorAll(
+                `[data-tc-speaker-rename="${CSS.escape(oldName)}"]`
+            ).forEach((btn) => {
+                const blk = btn.closest('.tc-block');
+                const lbl = blk && blk.querySelector('.tc-speaker');
+                if (lbl) lbl.textContent = _displaySpeaker(trimmed);
+                btn.setAttribute('data-tc-speaker-rename', trimmed);
+                btn.setAttribute('title', 'Renommer cet interlocuteur partout');
+                // Met à jour la structure en mémoire pour que tout
+                // re-render ultérieur (audio sync, scroll, recherche
+                // locale) utilise le nouveau nom.
+                const idxAttr = blk && blk.getAttribute('data-tc-idx');
+                const idx = idxAttr != null ? parseInt(idxAttr, 10) : -1;
+                if (idx >= 0 && blocks[idx]) blocks[idx].speaker = trimmed;
             });
             // Remplace `**oldName**` → `**trimmed**` dans tous les .tc-text rendus.
             const oldMd = `**${oldName}**`;
@@ -2266,6 +2282,23 @@ async function mountTranscriptCorrector(container) {
                     el.textContent = el.textContent.split(oldMd).join(newMd);
                 }
             });
+
+            // Invalide les caches lazy CR : les blobs cleaned / reformulated /
+            // absentee viennent d'être patchés côté serveur via correct-term,
+            // mais leur copie front est obsolète. Sans invalidation, ouvrir
+            // un autre onglet du modal CR ré-affiche l'ancien nom.
+            if (typeof _invalidateTranscriptTextCache === 'function') {
+                _invalidateTranscriptTextCache(fileId);
+            }
+            const persistentSec = document.querySelector(
+                `.transcript-section[data-transcript-file-id="${CSS.escape(fileId)}"]`
+            );
+            if (persistentSec && persistentSec._mesreunionsCrData) {
+                ['speaker_tagged_text', 'cleaned_text', 'reformulated_text',
+                 'absentee_summary', 'meeting_analysis_json'].forEach((c) => {
+                    delete persistentSec._mesreunionsCrData[c];
+                });
+            }
         } catch (e) {
             alert(`Erreur réseau : ${e.message}`);
         }
