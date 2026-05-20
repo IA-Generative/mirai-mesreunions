@@ -121,8 +121,21 @@ export function mount(container /*, ctx */) {
             </button>
           </div>
           <style>
-            .glossary-bulk-cb { display: none; margin-right: 0.4rem; }
+            /* Par défaut la checkbox est retirée du flow (display:none
+               ⇒ le grid ignore l'item et garde ses 5 colonnes intactes).
+               En mode bulk on la réintègre EN PREMIÈRE COLONNE d'une
+               grille à 6 colonnes pour ne pas casser l'alignement. */
+            .glossary-bulk-cb {
+              display: none;
+              margin: 0;
+              width: 1rem;
+              height: 1rem;
+              cursor: pointer;
+            }
             .glossary-bulk-active .glossary-bulk-cb { display: inline-block; }
+            .glossary-bulk-active .glossary-row {
+              grid-template-columns: 1.2rem 1fr auto 1.4rem 1.4rem 1.4rem;
+            }
           </style>
           <div data-my-glossary-list>
             <p style="color:#94a3b8;font-size:0.85rem;">Chargement…</p>
