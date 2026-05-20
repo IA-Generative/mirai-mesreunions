@@ -91,7 +91,7 @@ export function mount(container /*, ctx */) {
           </p>
           <div class="glossary-add-row">
             <input type="text" class="glossary-add-input"
-                   placeholder="Ajouter un terme (ex: « EFS », « Mathieu Veil »…) puis Entrée"
+                   placeholder="Ajouter un terme (ex: « EFS », « Fernand Naudin »…) puis Entrée"
                    maxlength="200" />
           </div>
           <div data-my-glossary-list>
