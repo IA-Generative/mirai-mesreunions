@@ -119,6 +119,26 @@ step "Push origin/$BRANCH"
 git push -u origin "$BRANCH"
 ok "push terminé — HEAD = $(git rev-parse --short HEAD)"
 
+# 3-bis. Sync des bases gitignored (deploy/kubernetes/internal-zone et
+# external-zone). Ces dossiers ne sont plus dans le repo public (cf
+# commit ca0e41f) mais restent référencés par les overlays kustomize.
+# La VM doit donc les recevoir hors-git pour que `kustomize build`
+# fonctionne lors d'un éventuel apply depuis la VM.
+step "Sync zones gitignored vers $REMOTE_HOST"
+ZONE_PATHS=(
+  "deploy/kubernetes/internal-zone"
+  "deploy/kubernetes/external-zone"
+)
+for p in "${ZONE_PATHS[@]}"; do
+  if [ -d "$p" ]; then
+    info "  rsync $p → $REMOTE_HOST:$REMOTE_REPO/$p"
+    rsync -a --delete "$p/" "$REMOTE_HOST:$REMOTE_REPO/$p/"
+  else
+    info "  $p absent en local — skip"
+  fi
+done
+ok "sync zones terminé"
+
 # 4. Build container sur la VM cloud
 step "Build container sur $REMOTE_HOST"
 info "synchro repo + buildx ($BUILD_PLATFORMS) + push registry (bandwidth interne SCW)"
