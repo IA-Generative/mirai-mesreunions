@@ -3258,7 +3258,7 @@ function _showCorrectionFooter(container, fileId, selectedText, blockIdx, audio,
                  maxlength="200" />
         </div>
         <div class="tc-correct-opts">
-          <label><input type="checkbox" class="tc-opt-glossary" checked /> Ajouter au glossaire personnel</label>
+          <label><input type="checkbox" class="tc-opt-glossary" /> Ajouter au glossaire personnel</label>
           <label><input type="checkbox" class="tc-opt-patch" checked /> Remplacer dans cette transcription</label>
           <!-- Case "Relancer les étapes LLM" retirée : le user déclenche
                manuellement la régénération CR via le bouton dédié en bas

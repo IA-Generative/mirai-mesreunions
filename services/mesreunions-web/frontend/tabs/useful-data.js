@@ -18,10 +18,12 @@ import { CURRENT_USER } from '../lib/bootstrap.js';
 export const COMING_SOON = [
   { id: 'mail', label: 'Boîte mail', icon: 'fr-icon-mail-line' },
   { id: 'agenda', label: 'Agenda', icon: 'fr-icon-calendar-line' },
-  { id: 'drive-perso', label: 'Drive personnel (Google)', icon: 'fr-icon-cloud-line' },
+  { id: 'drive-perso', label: 'Drive personnel (NextCloud)', icon: 'fr-icon-cloud-line' },
   { id: 'drive-dinum', label: 'Drive DINUM / DTNUM', icon: 'fr-icon-folder-2-line' },
   { id: 'resana', label: 'Resana', icon: 'fr-icon-team-line' },
   { id: 'mescollections', label: 'Mes collections', icon: 'fr-icon-bookmark-line' },
+  { id: 'data-sources', label: 'Sources de données', icon: 'fr-icon-database-line' },
+  { id: 'agents', label: 'Agents', icon: 'fr-icon-robot-line' },
 ];
 
 function _esc(s) {
@@ -56,6 +58,8 @@ const COMING_SOON_DESCRIPTIONS = {
   'drive-dinum': 'Accès lecture seule aux espaces partagés de votre direction.',
   resana: 'Liaison avec votre espace collaboratif Resana (notes, espaces projets).',
   mescollections: 'Bibliothèque personnelle de documents importés (PDF, notes, références).',
+  'data-sources': 'Connecteurs vers vos bases de données métier et entrepôts (lecture seule, périmètre cadré).',
+  agents: 'Agents spécialisés (synthèse, relecture, recherche) que vous pouvez invoquer depuis vos réunions.',
 };
 
 export function mount(container /*, ctx */) {
@@ -94,6 +98,32 @@ export function mount(container /*, ctx */) {
                    placeholder="Ajouter un terme (ex: « EFS », « Fernand Naudin »…) puis Entrée"
                    maxlength="200" />
           </div>
+          <p style="color:#64748b;font-size:0.72rem;margin:0 0 0.3rem 0;">
+            Astuce : maintenez <kbd>Alt</kbd> (ou <kbd>Option</kbd> ⌥) pour faire
+            apparaître des cases à cocher et supprimer plusieurs termes d'un coup.
+          </p>
+          <div class="glossary-bulk-bar" data-glossary-bulk-bar hidden
+               style="display:flex;align-items:center;gap:0.6rem;padding:0.4rem 0.6rem;
+                      background:#f0f6ff;border:1px solid #c5d8ff;border-radius:0.25rem;
+                      margin-bottom:0.4rem;">
+            <span data-glossary-bulk-count style="font-size:0.85rem;color:#0c4498;font-weight:600;">
+              Aucun terme sélectionné
+            </span>
+            <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm"
+                    data-glossary-bulk-action="select-all"
+                    style="margin-left:auto;">Tout cocher (page)</button>
+            <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm"
+                    data-glossary-bulk-action="clear">Décocher</button>
+            <button type="button" class="fr-btn fr-btn--sm"
+                    data-glossary-bulk-action="delete" disabled
+                    style="background:#b91c1c;color:#fff;border-color:#b91c1c;">
+              Supprimer la sélection
+            </button>
+          </div>
+          <style>
+            .glossary-bulk-cb { display: none; margin-right: 0.4rem; }
+            .glossary-bulk-active .glossary-bulk-cb { display: inline-block; }
+          </style>
           <div data-my-glossary-list>
             <p style="color:#94a3b8;font-size:0.85rem;">Chargement…</p>
           </div>
@@ -194,6 +224,48 @@ export function mount(container /*, ctx */) {
   // Charge le glossaire utilisateur + ajout inline via Enter.
   _loadMyGlossary(root);
   _bindGlossaryAddInput(root);
+  _bindGlossaryBulk(root);
+}
+
+function _bindGlossaryBulk(root) {
+  _glossaryRootRef = root;
+  _selectedTerms.clear();
+  // Alt-key globalement écouté (pas seulement quand le focus est dans
+  // le panneau) pour matcher l'UX de l'onglet « Réunions ».
+  document.removeEventListener('keydown', _onAltDownGlossary);
+  document.removeEventListener('keyup', _onAltUpGlossary);
+  document.addEventListener('keydown', _onAltDownGlossary);
+  document.addEventListener('keyup', _onAltUpGlossary);
+
+  root.addEventListener('change', (ev) => {
+    const cb = ev.target.closest && ev.target.closest('[data-glossary-bulk-cb]');
+    if (!cb) return;
+    const term = cb.getAttribute('data-term');
+    if (!term) return;
+    if (cb.checked) _selectedTerms.add(term);
+    else _selectedTerms.delete(term);
+    _refreshBulkVisuals(root);
+  });
+
+  root.addEventListener('click', (ev) => {
+    const btn = ev.target.closest && ev.target.closest('[data-glossary-bulk-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-glossary-bulk-action');
+    if (action === 'select-all') {
+      root.querySelectorAll('[data-glossary-bulk-cb]').forEach((cb) => {
+        cb.checked = true;
+        const t = cb.getAttribute('data-term');
+        if (t) _selectedTerms.add(t);
+      });
+      _refreshBulkVisuals(root);
+    } else if (action === 'clear') {
+      _selectedTerms.clear();
+      root.querySelectorAll('[data-glossary-bulk-cb]').forEach((cb) => { cb.checked = false; });
+      _refreshBulkVisuals(root);
+    } else if (action === 'delete') {
+      _bulkDeleteSelected(root);
+    }
+  });
 }
 
 // ─── Glossaire personnel — vue éditable inline ────────────────────
@@ -213,12 +285,19 @@ async function _loadMyGlossary(root) {
       list.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Aucun terme dans votre glossaire. Ajoutez-en un via le champ ci-dessus, ou ils s'ajouteront automatiquement quand vous créerez des préparations.</p>`;
       return;
     }
+    // Purge des termes sélectionnés qui n'existent plus côté backend
+    // (suppression individuelle ou par un autre onglet) — évite que
+    // la barre bulk affiche un compteur fantôme.
+    const existing = new Set(items.map((g) => g.term));
+    Array.from(_selectedTerms).forEach((t) => { if (!existing.has(t)) _selectedTerms.delete(t); });
+
     list.innerHTML = `
       <p style="color:#64748b;font-size:0.75rem;margin:0 0 0.3rem 0;">${items.length} terme(s)</p>
       <div class="glossary-grid">
         ${items.map(_renderGlossaryRow).join('')}
       </div>
     `;
+    _refreshBulkVisuals(root);
   } catch (e) {
     list.innerHTML = `<p style="color:#b91c1c;font-size:0.85rem;">Erreur réseau : ${_esc(e.message)}</p>`;
   }
@@ -228,8 +307,13 @@ function _renderGlossaryRow(g) {
   const curated = !!g.curated_by_user;
   const blocked = !!g.blacklisted;
   const occ = g.occurrence_count || 0;
+  const checked = _selectedTerms.has(g.term);
   return `
     <div class="glossary-row${blocked ? ' is-blocked' : ''}${curated ? ' is-curated' : ''}" data-term="${_esc(g.term)}">
+      <input type="checkbox" class="glossary-bulk-cb"
+             data-glossary-bulk-cb data-term="${_esc(g.term)}"
+             aria-label="Sélectionner ${_esc(g.term)}"
+             ${checked ? 'checked' : ''} />
       <span class="glossary-term">${_esc(g.term)}</span>
       <span class="glossary-meta">${occ}×</span>
       <button type="button" class="glossary-toggle glossary-toggle--star ${curated ? 'is-on' : ''}"
@@ -247,6 +331,81 @@ function _renderGlossaryRow(g) {
               title="Supprimer">×</button>
     </div>
   `;
+}
+
+// ── Bulk-select / bulk-delete (Alt-key) ───────────────────────────────
+//
+// Pattern repris de l'onglet « Réunions » : maintenir Alt révèle les
+// checkboxes, sélectionner ≥1 ligne fait apparaître une barre d'action
+// « Supprimer N termes » qui survit au relâchement de Alt tant qu'il
+// reste une sélection. Permet la suppression en masse sans confirmation
+// par terme (1 seule confirmation pour le batch).
+const _selectedTerms = new Set();
+let _altPressedGlossary = false;
+let _glossaryRootRef = null;
+
+function _glossaryBulkActive() {
+  return _altPressedGlossary || _selectedTerms.size > 0;
+}
+
+function _refreshBulkVisuals(root) {
+  if (!root) return;
+  root.classList.toggle('glossary-bulk-active', _glossaryBulkActive());
+  const bar = root.querySelector('[data-glossary-bulk-bar]');
+  if (!bar) return;
+  const n = _selectedTerms.size;
+  bar.hidden = !_glossaryBulkActive();
+  const count = bar.querySelector('[data-glossary-bulk-count]');
+  if (count) count.textContent = n
+    ? `${n} terme${n > 1 ? 's' : ''} sélectionné${n > 1 ? 's' : ''}`
+    : 'Aucun terme sélectionné';
+  const delBtn = bar.querySelector('[data-glossary-bulk-action="delete"]');
+  if (delBtn) delBtn.disabled = n === 0;
+}
+
+function _onAltDownGlossary(e) {
+  if (e.key !== 'Alt' || _altPressedGlossary) return;
+  _altPressedGlossary = true;
+  _refreshBulkVisuals(_glossaryRootRef);
+}
+
+function _onAltUpGlossary(e) {
+  if (e.key !== 'Alt' || !_altPressedGlossary) return;
+  _altPressedGlossary = false;
+  _refreshBulkVisuals(_glossaryRootRef);
+}
+
+async function _bulkDeleteSelected(root) {
+  const terms = Array.from(_selectedTerms);
+  if (terms.length === 0) return;
+  const ok = window.confirm(
+    `Supprimer ${terms.length} terme${terms.length > 1 ? 's' : ''} du glossaire ?\n\n` +
+    terms.slice(0, 12).map((t) => `· ${t}`).join('\n') +
+    (terms.length > 12 ? `\n… et ${terms.length - 12} autre(s)` : '')
+  );
+  if (!ok) return;
+  const bar = root.querySelector('[data-glossary-bulk-bar]');
+  const delBtn = bar && bar.querySelector('[data-glossary-bulk-action="delete"]');
+  if (delBtn) { delBtn.disabled = true; delBtn.textContent = `Suppression de ${terms.length}…`; }
+  // Suppressions en parallèle (1 DELETE par terme — pas d'endpoint
+  // batch côté backend). On capture les échecs pour rapport, mais on
+  // ne stoppe pas la suite : un terme déjà absent (404) ne doit pas
+  // bloquer les autres.
+  const results = await Promise.allSettled(terms.map((term) =>
+    fetch('/api/my-glossary', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ term }),
+    }).then((r) => ({ term, ok: r.ok, status: r.status }))
+  ));
+  const failed = results
+    .map((r) => r.status === 'fulfilled' ? r.value : { term: '?', ok: false })
+    .filter((r) => !r.ok);
+  if (failed.length) {
+    alert(`${terms.length - failed.length}/${terms.length} suppressions OK. ${failed.length} échec(s).`);
+  }
+  _selectedTerms.clear();
+  _refreshBulkVisuals(root);
+  _loadMyGlossary(root);
 }
 
 function _bindGlossaryAddInput(root) {
@@ -381,5 +540,9 @@ function _renderMyFeedbackRow(fb) {
 }
 
 export function unmount(/* container */) {
-  // Le rendu est statique — rien à nettoyer.
+  document.removeEventListener('keydown', _onAltDownGlossary);
+  document.removeEventListener('keyup', _onAltUpGlossary);
+  _altPressedGlossary = false;
+  _selectedTerms.clear();
+  _glossaryRootRef = null;
 }
