@@ -155,6 +155,17 @@ Aucune donnée n'est *poussée* vers l'interne. La DMZ publie une notification s
 
 `DIARIZATION_BACKEND ∈ {kevent, vm-direct}` choisit le moteur pyannote. En prod-bêta interne depuis le 2026-05-17 : `vm-direct` à `http://<vm-diarization-host>:8080` (cf [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md)).
 
+Configuration runtime observée prod-bêta (vérifiable via `kubectl exec deployment/internal-ingester -- env | grep -E '^(DIARIZATION|TRANSCRIPTION|KEVENT)_'`) :
+
+| Variable | Valeur | Effet |
+|---|---|---|
+| `TRANSCRIPTION_BACKEND` | `kevent` | Whisper via gateway Mirai |
+| `DIARIZATION_BACKEND` | `vm-direct` | pyannote sur VM L4 dédiée (prend la précédence sur Kevent) |
+| `DIARIZATION_VM_URL` | `http://<vm-diarization-host>:8080` | Endpoint VM |
+| `KEVENT_DIARIZATION_ENABLED` | `true` | Conservé pour compat / fallback historique, mais inactif tant que `DIARIZATION_BACKEND=vm-direct` |
+
+Choix motivé par les baselines RTF (cf [reports/](reports/)) : VM L4 directe **0.027** vs MIG10 prod 0.060 vs MIG20 Kevent 0.097 (anomalie ouverte issue #53 — MIG20 plus lent que MIG10 contre-intuitif). Pour basculer sur Kevent, poser `DIARIZATION_BACKEND=kevent` dans l'overlay prod-bêta et rollouter `internal-ingester`.
+
 ### 5.5 La corbeille (soft-delete)
 
 DELETE depuis mydevices = soft-delete via `trashed_at`. Auto-purge 30j déclenchée par `api_my_sessions`. **Aligner** `EXTERNAL_PURGE_MAX_AGE_HOURS=720` avec `TRASH_RETENTION_DAYS` sinon les items external sont purgés avant la corbeille.
