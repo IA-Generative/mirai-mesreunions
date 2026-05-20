@@ -27,6 +27,14 @@ env/
 # Claude Code internal scratch (worktrees / agent state — never commit)
 .claude/
 
+# Manifests de base zone interne/externe — retirés du repo public.
+# Les overlays sous deploy/kubernetes/environments/ référencent ces
+# dossiers via des chemins relatifs ; ils doivent être présents localement
+# (et synchronisés sur la VM de build hors-git) pour que `kustomize build`
+# fonctionne. Voir docs internes pour récupération.
+deploy/kubernetes/internal-zone/
+deploy/kubernetes/external-zone/
+
 # Environment files
 .env
 .env.*
