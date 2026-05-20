@@ -73,7 +73,7 @@ sequenceDiagram
 ## Endpoints Kevent (référence rapide)
 
 ```
-Base URL  : https://gateway.api.ai.fake-domain.name
+Base URL  : https://<kevent-gateway-host>
 Auth      : header "apikey: Bearer <token>"
             (NB : non-standard, pas le standard Authorization)
 
@@ -99,7 +99,7 @@ GET  /jobs/{service_type}/{id}    → { status: pending|processing|completed|fai
   model               : surcharge le défaut du type (optionnel)
 
 LiteLLM (chat for post-processing) :
-Base URL  : https://llm.api.ai.fake-domain.name
+Base URL  : https://<litellm-host>
 Auth      : header "Authorization: Bearer <sk-…>"  (standard OpenAI)
 
 POST /v1/chat/completions         model, messages, response_format?, temperature?
@@ -129,7 +129,7 @@ Tous validés depuis la VM build-vm — cf
 | Variable | Défaut | Description |
 |---|---|---|
 | `TRANSCRIPTION_BACKEND` | `stub` | `stub` / `mcr` / `kevent` — sélection backend (mutuellement exclusif) |
-| `KEVENT_GATEWAY_URL` | `""` | base URL du gateway Kevent (`https://gateway.api.ai.fake-domain.name` en prod) |
+| `KEVENT_GATEWAY_URL` | `""` | base URL du gateway Kevent (`https://<kevent-gateway-host>` en prod) |
 | `KEVENT_API_KEY` | `""` | token apikey (cf K8s Secret `kevent-api-key`, clé `kevent_api_key`) |
 | `KEVENT_TRANSCRIPTION_MODEL` | `faster-whisper-large-v3-turbo` | nom du modèle Whisper |
 | `KEVENT_DIARIZATION_MODEL` | `pyannote-diarization` | nom du modèle diarization |

@@ -15,7 +15,8 @@
 # le script demande le message en interactif.
 #
 # Variables d'env optionnelles :
-#   REMOTE_HOST   cible SSH (par défaut: root@198.51.100.10 = build-vm)
+#   REMOTE_HOST   cible SSH de la VM cloud (obligatoire — exporter dans
+#                 ~/.envrc ou shell, ex: REMOTE_HOST=root@<vm-build-host>)
 #   REMOTE_REPO   chemin du clone sur la VM (par défaut: /root/mirai-mesreunions)
 #   PLATFORMS     override complet de la liste de plateformes buildx
 #                 (ex: PLATFORMS=linux/arm64 pour ne builder QUE arm64)
@@ -25,7 +26,12 @@
 
 set -euo pipefail
 
-REMOTE_HOST="${REMOTE_HOST:-root@198.51.100.10}"
+REMOTE_HOST="${REMOTE_HOST:-}"
+if [ -z "$REMOTE_HOST" ]; then
+  echo "ERREUR : variable REMOTE_HOST non définie." >&2
+  echo "  Exporter dans ~/.envrc ou shell, ex: REMOTE_HOST=root@<vm-build-host>" >&2
+  exit 1
+fi
 REMOTE_REPO="${REMOTE_REPO:-/root/mirai-mesreunions}"
 
 # Plateformes par défaut : amd64 seulement.

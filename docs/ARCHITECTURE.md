@@ -16,8 +16,8 @@ utilisés et doivent disparaître de tout nouveau manifeste.
 | --- | --- |
 | Docker Compose local | `localhost:8080` |
 | Intégration | `import-audio.fake-domain.name` |
-| Prod-bêta canonique | `mesreunions.fake-domain.name` |
-| Prod-bêta transition | `mydevices.fake-domain.name` |
+| Prod-bêta canonique | `<mesreunions-host>` |
+| Prod-bêta transition | `<mydevices-host>` |
 
 > **Note critique** — quand le `clientId` change côté Keycloak (ou
 > qu'un nouveau client est créé), il faut **aussi** patcher le Secret
@@ -252,7 +252,7 @@ runtime indépendant de la transcription Whisper :
 - `DIARIZATION_BACKEND ∈ {kevent, vm-direct}` — choisit la cible
   d'appel pyannote.
 - `DIARIZATION_VM_URL` — endpoint utilisé quand le backend vaut
-  `vm-direct` (ex. `http://198.51.100.10:8080`).
+  `vm-direct` (ex. `http://<vm-diarization-host>:8080`).
 
 Depuis le 2026-05-17, **prod-bêta interne tourne sur `vm-direct`**
 (VM L4 dédiée) pour contourner les limites TTL/timeout de la gateway
@@ -308,7 +308,7 @@ flowchart LR
   MQ["rabbitmq:5672"]
   TI["device-token-authority:8091"]
   FP["internal-ingester:8090"]
-  ING["pull-trigger.fake-domain.name\n(Ingress nginx + ACL whitelist + bearer)"]
+  ING["pull-trigger.<organisation-domain>\n(Ingress nginx + ACL whitelist + bearer)"]
 
   EXTNS --- CG
   EXTNS --- FM
@@ -343,12 +343,12 @@ flowchart LR
   `rabbitmq-lb` échouaient ~50 % du temps en `server closed the
   connection unexpectedly`. **Cause** : la whitelist ACL
   `cds-allow-internal-cluster-only` sur ces LBs ne contenait que
-  `51.158.65.198` (l'IP du Public Gateway dédié au cluster
-  **external-gw**, `pgw-k8s-cluster-1`) — manquait `51.15.244.216` (l'IP
+  `<scw-pgw-external-gw-ip>` (l'IP du Public Gateway dédié au cluster
+  **external-gw**, `pgw-k8s-cluster-1`) — manquait `<scw-pgw-internal-gw-ip>` (l'IP
   du Public Gateway dédié au cluster **internal-gw**,
   `pgw-k8s-cluster-2`). Quand internal-gw sortait via son propre PGW
   (push_default_route=true), l'ACL deniait. **Fix** : ajout de
-  `51.15.244.216` aux 2 whitelists ACL. Sécurité maintenue : les 2 LBs
+  `<scw-pgw-internal-gw-ip>` aux 2 whitelists ACL. Sécurité maintenue : les 2 LBs
   ont une IP publique mais l'ACL les protège (laptop hors VPC ne peut
   pas se connecter — TCP RST). Doc complète : [docs/BUG_SCW_LB_INTER_CLUSTER.md](BUG_SCW_LB_INTER_CLUSTER.md).
   Filet applicatif `with_db_retry` toujours en place dans
@@ -361,12 +361,12 @@ Pour chaque nouvel hôte exposé via cert-manager + webhook Scaleway,
 créer dans la zone parente le CNAME :
 
 ```
-_acme-challenge.<host>  CNAME  _acme-challenge.<host>.acme.fake-domain.name.
+_acme-challenge.<host>  CNAME  _acme-challenge.<host>.acme.<organisation-domain>.
 ```
 
 Sans ce CNAME, le challenge DNS-01 échoue avec « domain not found » :
 le webhook Scaleway ne sait répondre que dans la sous-zone déléguée
-`acme.fake-domain.name`. Toute nouvelle entrée d'Ingress avec
+`acme.<organisation-domain>`. Toute nouvelle entrée d'Ingress avec
 TLS automatique doit être précédée de ce CNAME côté DNS parent.
 
 ## Déploiement Kubernetes

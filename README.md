@@ -125,7 +125,7 @@ Tous les noms sont *self-explanatory* depuis le rebranding du 2026-05-16. Le for
 | Docker Compose local | `openwebui` | `mes-reunions` | `http://localhost:8080` |
 | Intégration interne | `openwebui` | `mes-reunions` | `https://import-audio.fake-domain.name` |
 | Recette | `openwebui` | `mes-reunions` | (cf overlays kustomize recette) |
-| Prod-bêta (cible) | `openwebui` | `mes-reunions` | `https://mesreunions.fake-domain.name` (canonique) + `https://mydevices.fake-domain.name` (transition) |
+| Prod-bêta (cible) | `openwebui` | `mes-reunions` | `https://<mesreunions-host>` (canonique) + `https://<mydevices-host>` (transition) |
 
 > Depuis le 2026-05-16 **tous les modes** utilisent le client `mes-reunions` sur le realm `openwebui`. Les noms historiques (`audio-upload-app` / realm `audio-upload`) ne sont plus utilisés.
 
@@ -153,7 +153,7 @@ Aucune donnée n'est *poussée* vers l'interne. La DMZ publie une notification s
 
 ### 5.4 Le selector de backend diarisation
 
-`DIARIZATION_BACKEND ∈ {kevent, vm-direct}` choisit le moteur pyannote. En prod-bêta interne depuis le 2026-05-17 : `vm-direct` à `http://198.51.100.10:8080` (cf [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md)).
+`DIARIZATION_BACKEND ∈ {kevent, vm-direct}` choisit le moteur pyannote. En prod-bêta interne depuis le 2026-05-17 : `vm-direct` à `http://<vm-diarization-host>:8080` (cf [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md)).
 
 ### 5.5 La corbeille (soft-delete)
 
@@ -243,18 +243,18 @@ cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
 
 Le script `deploy/scripts/commit-push-build.sh` :
 1. `git push`
-2. `ssh root@198.51.100.10` (cloud build VM)
+2. `ssh root@<vm-diarization-host>` (cloud build VM)
 3. `docker buildx build --platform linux/amd64`
 4. `docker push` registry SCW
 5. `kubectl set image` (rollout strategy `surge=100%` pour fast rollouts)
 
 ### 7.2 Cert-manager + DNS-01 (CNAME delegation)
 
-Pattern N1 CDS : sous-zone dédiée `acme.fake-domain.name` pour la délégation cert-manager.
+Pattern N1 CDS : sous-zone dédiée `acme.<organisation-domain>` pour la délégation cert-manager.
 
 Pour chaque nouvel hôte, créer dans la zone parente :
 ```
-_acme-challenge.<host>   CNAME   _acme-challenge.<host>.acme.fake-domain.name.
+_acme-challenge.<host>   CNAME   _acme-challenge.<host>.acme.<organisation-domain>.
 ```
 
 Sans ce CNAME, le challenge échoue avec `domain not found` (le webhook Scaleway ne gère que la sous-zone déléguée).
@@ -300,7 +300,7 @@ kubectl -n audio-internal rollout restart deploy/internal-ingester
 
 1. **Tokens frappés en interne** — `device-token-authority` est seule autorité. En cas de compromission DMZ, aucun token frauduleux possible.
 2. **PULL strict** — Aucune donnée poussée vers l'interne. AMQP sortant + S3 pull. Trigger HTTP optionnel = optimisation latence uniquement.
-3. **Surface entrante interne minimale** — `device-token-authority:8091` réservé à `mydevices-web` via NetworkPolicy ; `internal-ingester` exposé uniquement via `pull-trigger.fake-domain.name` (whitelist IP nginx + bearer + ACL applicative optionnelle).
+3. **Surface entrante interne minimale** — `device-token-authority:8091` réservé à `mydevices-web` via NetworkPolicy ; `internal-ingester` exposé uniquement via `pull-trigger.<organisation-domain>` (whitelist IP nginx + bearer + ACL applicative optionnelle).
 4. **Triple S3 segmenté** — `audio-upload` / `audio-processed` (guichet) / `audio-internal`.
 5. **Codes éphémères** — TTL configurable (15 min → 7 jours), quota uploads configurable (default 299).
 6. **AV obligatoire** — ClamAV systématique, quarantaine sur infection.
@@ -393,7 +393,7 @@ Admin
 |---|---|---|
 | `TRANSCRIPTION_BACKEND` | `stub` | `stub` (simulation), `mcr` (push MCR), `kevent` (Whisper+LLM Mirai) |
 | `DIARIZATION_BACKEND` | `kevent` | `kevent` (via gateway) ou `vm-direct` (HTTP direct) |
-| `DIARIZATION_VM_URL` | — | URL VM si backend `vm-direct` (ex `http://198.51.100.10:8080`) |
+| `DIARIZATION_VM_URL` | — | URL VM si backend `vm-direct` (ex `http://<vm-diarization-host>:8080`) |
 
 ### 10.7 Communs
 
@@ -445,7 +445,7 @@ flowchart TD
 
 NetworkPolicies par namespace, deny-all par défaut côté interne, 2 exceptions :
 1. `mydevices-web` → `device-token-authority:8091` (intra-cluster pour Docker Compose ; cross-cluster via egress contrôlé en K8s)
-2. `dmz-to-internal-bridge` → `internal-ingester` (uniquement via Ingress `pull-trigger.fake-domain.name`)
+2. `dmz-to-internal-bridge` → `internal-ingester` (uniquement via Ingress `pull-trigger.<organisation-domain>`)
 
 ---
 

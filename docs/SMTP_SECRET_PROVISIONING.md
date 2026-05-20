@@ -19,7 +19,7 @@ pour l'envoi automatique du CR par email aux participants en fin de transcriptio
 | `SMTP_FROM` | recommandé | Adresse expéditrice (défaut = `SMTP_USER`). | `Mes Réunions <noreply@numerique-fake-domain.name>` |
 | `SMTP_USE_TLS` | non | `true` (défaut) = STARTTLS, `false` = plain. | `true` |
 | `SMTP_TIMEOUT` | non | Timeout réseau en secondes (défaut 20). | `20` |
-| `PUBLIC_BASE_URL` | recommandé | URL racine publique pour les liens du CR. | `https://mydevices.fake-domain.name` |
+| `PUBLIC_BASE_URL` | recommandé | URL racine publique pour les liens du CR. | `https://<mydevices-host>` |
 
 ## Création du secret K8s
 
@@ -53,7 +53,7 @@ spec:
               optional: true   # tolère l'absence (mode dry-run)
         env:
           - name: PUBLIC_BASE_URL
-            value: "https://mydevices.fake-domain.name"
+            value: "https://<mydevices-host>"
 ```
 
 Puis :

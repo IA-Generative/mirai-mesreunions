@@ -19,7 +19,7 @@ on observe :
   gateway (issue #49) + occupation de slot.
 
 Quand un container `diarization-api` v2.5-gpu est joignable directement
-(par exemple sur la VM `build-vm` 198.51.100.10:8080), il traite
+(par exemple sur la VM `build-vm` <vm-diarization-host>:8080), il traite
 105 min d'audio en ~3 min. Le backend `vm-direct` court-circuite alors
 le gateway et tape ce container en sync.
 
@@ -47,7 +47,7 @@ Kevent quel que soit le backend choisi.
 - name: DIARIZATION_BACKEND
   value: "vm-direct"
 - name: DIARIZATION_VM_URL
-  value: "http://198.51.100.10:8080"
+  value: "http://<vm-diarization-host>:8080"
 ```
 
 Pour revenir au gateway Kevent : retirer `DIARIZATION_VM_URL` (ou laisser
