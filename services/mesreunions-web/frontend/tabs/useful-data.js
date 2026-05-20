@@ -97,6 +97,13 @@ export function mount(container /*, ctx */) {
             <input type="text" class="glossary-add-input"
                    placeholder="Ajouter un terme (ex: « EFS », « Fernand Naudin »…) puis Entrée"
                    maxlength="200" />
+            <button type="button"
+                    class="fr-btn fr-btn--secondary fr-btn--sm fr-btn--icon-left fr-icon-broom-line"
+                    data-glossary-action="auto-clean"
+                    style="margin-left:0.5rem;"
+                    title="Identifier et supprimer les termes peu spécifiques (mots courants, fragments) — preview avant suppression">
+              Nettoyage auto
+            </button>
           </div>
           <p style="color:#64748b;font-size:0.72rem;margin:0 0 0.3rem 0;">
             Astuce : maintenez <kbd>Alt</kbd> (ou <kbd>Option</kbd> ⌥) pour faire
@@ -277,6 +284,142 @@ function _bindGlossaryBulk(root) {
       _refreshBulkVisuals(root);
     } else if (action === 'delete') {
       _bulkDeleteSelected(root);
+    }
+  });
+
+  // Bouton "Nettoyage auto" (séparé de la barre bulk, dans la add-row).
+  root.addEventListener('click', (ev) => {
+    const btn = ev.target.closest && ev.target.closest('[data-glossary-action="auto-clean"]');
+    if (!btn) return;
+    _openAutoCleanModal(root, btn);
+  });
+}
+
+// ── Auto-clean modal ─────────────────────────────────────────────────
+//
+// 2 phases : preview (dry_run=true) → confirmation utilisateur → apply
+// (dry_run=false). L'utilisateur ne valide PAS terme par terme : il voit
+// le compteur + un extrait, puis confirme la suppression en bloc.
+
+async function _openAutoCleanModal(root, triggerBtn) {
+  const originalLabel = triggerBtn ? triggerBtn.innerHTML : '';
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = 'Analyse…';
+  }
+  let preview;
+  try {
+    const resp = await fetch('/api/my-glossary/cleanup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dry_run: true, preview_limit: 30 }),
+    });
+    if (!resp.ok) {
+      alert(`Analyse impossible : HTTP ${resp.status}`);
+      return;
+    }
+    preview = await resp.json();
+  } catch (e) {
+    alert(`Erreur réseau : ${e.message}`);
+    return;
+  } finally {
+    if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.innerHTML = originalLabel; }
+  }
+
+  const total = preview.total_candidates || 0;
+  if (total === 0) {
+    alert('Aucun terme suspect détecté — votre glossaire est déjà propre.');
+    return;
+  }
+
+  // Étiquettes lisibles pour chaque raison (slugs renvoyés par
+  // glossary_filter.is_specific_term côté backend).
+  const REASON_LABEL = {
+    stopword: 'mot courant',
+    common_phrase: 'fragment de phrase',
+    too_short: 'trop court',
+    likely_common: 'mot probablement courant',
+    punct_only: 'ponctuation',
+    empty: 'vide',
+    too_long: 'trop long',
+  };
+  const previewRows = (preview.preview || []).map((p) =>
+    `<li><span style="font-family:monospace;">${_esc(p.term)}</span>
+         <small style="color:#94a3b8;">${_esc(REASON_LABEL[p.reason] || p.reason)}</small></li>`
+  ).join('');
+
+  // Modale plein-écran à la mode "cr-editor-modal".
+  document.querySelectorAll('.glossary-cleanup-modal').forEach((el) => el.remove());
+  const wrap = document.createElement('div');
+  wrap.className = 'glossary-cleanup-modal';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);'
+    + 'display:flex;align-items:center;justify-content:center;z-index:10000;padding:2rem;';
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:0.5rem;max-width:560px;width:100%;
+                max-height:88vh;display:flex;flex-direction:column;
+                box-shadow:0 10px 40px rgba(0,0,0,0.25);">
+      <div style="padding:0.8rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
+        <div style="font-weight:600;color:#0c4498;">🧹 Nettoyer le glossaire</div>
+      </div>
+      <div style="padding:1rem;overflow-y:auto;flex:1 1 auto;">
+        <p style="margin:0 0 0.6rem 0;">
+          <strong>${total}</strong> terme${total > 1 ? 's' : ''}
+          ${total > 1 ? 'semblent' : 'semble'} peu spécifique${total > 1 ? 's' : ''}
+          (mots courants, fragments de phrase, ponctuation).
+          ${preview.preview_truncated ? `Aperçu des ${preview.preview.length} premiers :` : 'Aperçu :'}
+        </p>
+        <ul style="margin:0 0 0.8rem 1.2rem;padding:0;font-size:0.85rem;line-height:1.5;">
+          ${previewRows}
+        </ul>
+        <p style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem 0;">
+          Les termes ⭐ <em>favoris</em> ne sont jamais supprimés —
+          ils restent prioritaires même si l'heuristique les jugerait suspects.
+        </p>
+      </div>
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end;
+                  padding:0.7rem 1rem;border-top:1px solid #e2e8f0;">
+        <button type="button" class="fr-btn fr-btn--secondary"
+                data-glossary-cleanup-cancel>Annuler</button>
+        <button type="button" class="fr-btn"
+                data-glossary-cleanup-apply
+                style="background:#b91c1c;color:#fff;border-color:#b91c1c;">
+          Supprimer ${total} terme${total > 1 ? 's' : ''}
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
+  wrap.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
+  wrap.querySelector('[data-glossary-cleanup-cancel]').addEventListener('click', close);
+  wrap.querySelector('[data-glossary-cleanup-apply]').addEventListener('click', async () => {
+    const applyBtn = wrap.querySelector('[data-glossary-cleanup-apply]');
+    applyBtn.disabled = true;
+    applyBtn.textContent = 'Suppression…';
+    try {
+      const resp = await fetch('/api/my-glossary/cleanup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dry_run: false }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(`Échec : HTTP ${resp.status}`);
+        applyBtn.disabled = false;
+        applyBtn.textContent = `Supprimer ${total} terme${total > 1 ? 's' : ''}`;
+        return;
+      }
+      close();
+      _selectedTerms.clear();
+      _refreshBulkVisuals(root);
+      _loadMyGlossary(root);
+      // Toast léger plutôt qu'alert : moins intrusif.
+      const n = data.deleted || 0;
+      try { if (window.showToast) window.showToast(`✓ ${n} terme(s) supprimé(s)`, 'success'); }
+      catch (e) { /* silencieux */ }
+    } catch (e) {
+      alert(`Erreur réseau : ${e.message}`);
+      applyBtn.disabled = false;
+      applyBtn.textContent = `Supprimer ${total} terme${total > 1 ? 's' : ''}`;
     }
   });
 }

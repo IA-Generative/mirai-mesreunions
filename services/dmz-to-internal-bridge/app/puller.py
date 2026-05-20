@@ -2634,6 +2634,89 @@ def delete_user_glossary_term():
         db.close()
 
 
+# ─── Nettoyage automatique du glossaire utilisateur ────────────────
+#
+# Purge rétroactive des termes peu spécifiques (mots courants, fragments
+# de phrase) accumulés par l'extraction trop large des briefs avant
+# l'introduction du filtre à l'ingestion. Le caller (mesreunions-web)
+# expose une preview avant suppression effective.
+
+
+@app.route("/api/v1/user-glossary/cleanup", methods=["POST"])
+def cleanup_user_glossary():
+    """Body : ``{user_sub, dry_run?: bool, preview_limit?: int}``.
+
+    - ``dry_run=true`` (défaut) : retourne ``{total_candidates, preview}``
+      sans rien supprimer. Permet d'afficher une preview à l'utilisateur.
+    - ``dry_run=false`` : applique la suppression, retourne ``{deleted}``.
+
+    Termes ``curated_by_user=True`` toujours préservés (décision user > heuristique).
+    Termes ``blacklisted=True`` ignorés (déjà invisibles côté UI).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    dry_run = data.get("dry_run")
+    dry_run = True if dry_run is None else bool(dry_run)
+    try:
+        preview_limit = max(1, min(500, int(data.get("preview_limit") or 25)))
+    except (TypeError, ValueError):
+        preview_limit = 25
+
+    from libs.shared.app.glossary_filter import is_specific_term
+    from libs.shared.app.models import UserGlossaryTerm
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserGlossaryTerm)
+            .filter(UserGlossaryTerm.user_sub == user_sub,
+                    UserGlossaryTerm.curated_by_user.is_(False),
+                    UserGlossaryTerm.blacklisted.is_(False))
+            .limit(2000)
+            .all()
+        )
+        candidates = []  # [(term, reason), …]
+        for r in rows:
+            keep, reason = is_specific_term(r.term or "")
+            if not keep:
+                candidates.append((r.term, reason))
+
+        if dry_run:
+            preview = [{"term": t, "reason": rs} for t, rs in candidates[:preview_limit]]
+            return jsonify({
+                "dry_run": True,
+                "total_candidates": len(candidates),
+                "preview": preview,
+                "preview_truncated": len(candidates) > preview_limit,
+            })
+
+        terms_to_delete = [t for t, _ in candidates]
+        deleted = 0
+        if terms_to_delete:
+            deleted = (
+                db.query(UserGlossaryTerm)
+                .filter(UserGlossaryTerm.user_sub == user_sub,
+                        UserGlossaryTerm.curated_by_user.is_(False),
+                        UserGlossaryTerm.blacklisted.is_(False),
+                        UserGlossaryTerm.term.in_(terms_to_delete))
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+        return jsonify({"dry_run": False, "deleted": int(deleted)})
+    except Exception:
+        db.rollback()
+        logger.exception("user-glossary cleanup failed for %s", user_sub)
+        return jsonify({"error": "internal"}), 500
+    finally:
+        db.close()
+
+
 # ─── Correction inline d'un terme sur une transcription existante ─────
 #
 # 3-en-1 : ajout au glossaire / patch texte / reprocess LLM. Le caller

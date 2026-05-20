@@ -2640,16 +2640,30 @@ def upsert_user_glossary_batch():
     if not user_sub or not isinstance(terms, list):
         return jsonify({"error": "user_sub and terms[] required"}), 400
 
+    # (A) Filtre à l'ingestion : ne garde que les termes "spécifiques"
+    # (acronymes, capitalisation interne, noms propres, jargon long).
+    # Évite que la liste se sature de stopwords et fragments de phrase
+    # extraits trop largement par le brief. Le caller peut forcer
+    # ``skip_filter=true`` pour les saisies manuelles déjà validées.
+    from libs.shared.app.glossary_filter import is_specific_term  # local import (tests)
+    skip_filter = bool(data.get("skip_filter"))
+
     now = datetime.now(timezone.utc)
     inserted = 0
     bumped = 0
     skipped = 0
+    rejected_by_filter = 0
     db = SessionLocal()
     try:
         for raw in terms:
             term = (raw or "").strip()
             if not term or len(term) > 255:
                 continue
+            if not skip_filter:
+                keep, _reason = is_specific_term(term)
+                if not keep:
+                    rejected_by_filter += 1
+                    continue
             existing = (
                 db.query(UserGlossaryTerm)
                 .filter(UserGlossaryTerm.user_sub == user_sub,
@@ -2682,6 +2696,7 @@ def upsert_user_glossary_batch():
             "inserted": inserted,
             "bumped": bumped,
             "skipped_blacklisted": skipped,
+            "rejected_by_filter": rejected_by_filter,
         })
     finally:
         db.close()

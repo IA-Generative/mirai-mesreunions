@@ -401,6 +401,29 @@ def patch_my_glossary_term():
     return jsonify(resp.json() if resp.content else {}), resp.status_code
 
 
+@bp.route("/api/my-glossary/cleanup", methods=["POST"])
+@require_auth
+def cleanup_my_glossary():
+    """Body : {dry_run?: bool, preview_limit?: int}.
+
+    Délègue à l'ingester (cf. ``/api/v1/user-glossary/cleanup``) — purge
+    rétroactive des termes peu spécifiques. Tracé séparément (avant
+    delete-individual) pour que le frontend puisse l'invoquer sans
+    confondre avec une suppression unitaire.
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    body["user_sub"] = user_sub
+    try:
+        resp = _call_ingester("POST", "/api/v1/user-glossary/cleanup", json_body=body)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
 @bp.route("/api/my-glossary", methods=["DELETE"])
 @require_auth
 def delete_my_glossary_term():
