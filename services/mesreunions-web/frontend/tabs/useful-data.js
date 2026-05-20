@@ -301,6 +301,18 @@ function _bindGlossaryBulk(root) {
 // (dry_run=false). L'utilisateur ne valide PAS terme par terme : il voit
 // le compteur + un extrait, puis confirme la suppression en bloc.
 
+// Étiquettes lisibles pour chaque raison (slugs renvoyés par
+// glossary_filter.is_specific_term côté backend).
+const _CLEANUP_REASON_LABEL = {
+  stopword: 'mot courant',
+  common_phrase: 'fragment de phrase',
+  too_short: 'trop court',
+  likely_common: 'mot probablement courant',
+  punct_only: 'ponctuation',
+  empty: 'vide',
+  too_long: 'trop long',
+};
+
 async function _openAutoCleanModal(root, triggerBtn) {
   const originalLabel = triggerBtn ? triggerBtn.innerHTML : '';
   if (triggerBtn) {
@@ -311,7 +323,7 @@ async function _openAutoCleanModal(root, triggerBtn) {
   try {
     const resp = await fetch('/api/my-glossary/cleanup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dry_run: true, preview_limit: 30 }),
+      body: JSON.stringify({ dry_run: true }),
     });
     if (!resp.ok) {
       alert(`Analyse impossible : HTTP ${resp.status}`);
@@ -325,101 +337,182 @@ async function _openAutoCleanModal(root, triggerBtn) {
     if (triggerBtn) { triggerBtn.disabled = false; triggerBtn.innerHTML = originalLabel; }
   }
 
-  const total = preview.total_candidates || 0;
+  const items = preview.items || [];
+  const total = preview.total_candidates || items.length;
   if (total === 0) {
     alert('Aucun terme suspect détecté — votre glossaire est déjà propre.');
     return;
   }
 
-  // Étiquettes lisibles pour chaque raison (slugs renvoyés par
-  // glossary_filter.is_specific_term côté backend).
-  const REASON_LABEL = {
-    stopword: 'mot courant',
-    common_phrase: 'fragment de phrase',
-    too_short: 'trop court',
-    likely_common: 'mot probablement courant',
-    punct_only: 'ponctuation',
-    empty: 'vide',
-    too_long: 'trop long',
-  };
-  const previewRows = (preview.preview || []).map((p) =>
-    `<li><span style="font-family:monospace;">${_esc(p.term)}</span>
-         <small style="color:#94a3b8;">${_esc(REASON_LABEL[p.reason] || p.reason)}</small></li>`
-  ).join('');
+  // Sélection initiale = tous cochés (intention par défaut : tout purger).
+  // L'utilisateur décoche ce qu'il veut conserver.
+  const selected = new Set(items.map((it) => it.term));
 
-  // Modale plein-écran à la mode "cr-editor-modal".
+  // Modale plein-écran avec liste scrollable + checkboxes.
   document.querySelectorAll('.glossary-cleanup-modal').forEach((el) => el.remove());
   const wrap = document.createElement('div');
   wrap.className = 'glossary-cleanup-modal';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);'
     + 'display:flex;align-items:center;justify-content:center;z-index:10000;padding:2rem;';
+
+  const rowsHtml = items.map((it, i) => `
+    <label class="cleanup-row" data-cleanup-term="${_esc(it.term)}"
+           style="display:grid;grid-template-columns:1.2rem 1fr auto;align-items:center;
+                  gap:0.5rem;padding:0.25rem 0.4rem;border-radius:3px;cursor:pointer;
+                  font-size:0.85rem;">
+      <input type="checkbox" checked
+             data-cleanup-cb data-term="${_esc(it.term)}"
+             style="margin:0;cursor:pointer;" />
+      <span style="font-family:monospace;color:#0f172a;overflow:hidden;
+                   text-overflow:ellipsis;white-space:nowrap;" title="${_esc(it.term)}">
+        ${_esc(it.term)}
+      </span>
+      <small style="color:#94a3b8;white-space:nowrap;">
+        ${_esc(_CLEANUP_REASON_LABEL[it.reason] || it.reason)}
+      </small>
+    </label>
+  `).join('');
+
   wrap.innerHTML = `
-    <div style="background:#fff;border-radius:0.5rem;max-width:560px;width:100%;
+    <div style="background:#fff;border-radius:0.5rem;max-width:680px;width:100%;
                 max-height:88vh;display:flex;flex-direction:column;
                 box-shadow:0 10px 40px rgba(0,0,0,0.25);">
-      <div style="padding:0.8rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
+      <div style="padding:0.8rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;
+                  display:flex;justify-content:space-between;align-items:center;">
         <div style="font-weight:600;color:#0c4498;">🧹 Nettoyer le glossaire</div>
+        <button type="button" class="cleanup-close"
+                style="background:transparent;border:0;font-size:1.3rem;cursor:pointer;color:#64748b;"
+                aria-label="Fermer">×</button>
       </div>
-      <div style="padding:1rem;overflow-y:auto;flex:1 1 auto;">
-        <p style="margin:0 0 0.6rem 0;">
-          <strong>${total}</strong> terme${total > 1 ? 's' : ''}
-          ${total > 1 ? 'semblent' : 'semble'} peu spécifique${total > 1 ? 's' : ''}
-          (mots courants, fragments de phrase, ponctuation).
-          ${preview.preview_truncated ? `Aperçu des ${preview.preview.length} premiers :` : 'Aperçu :'}
-        </p>
-        <ul style="margin:0 0 0.8rem 1.2rem;padding:0;font-size:0.85rem;line-height:1.5;">
-          ${previewRows}
-        </ul>
-        <p style="font-size:0.78rem;color:#64748b;margin:0 0 0.6rem 0;">
-          Les termes ⭐ <em>favoris</em> ne sont jamais supprimés —
-          ils restent prioritaires même si l'heuristique les jugerait suspects.
-        </p>
+      <div style="padding:0.7rem 1rem 0.5rem 1rem;border-bottom:1px solid #f1f5f9;
+                  display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+        <span style="font-size:0.85rem;">
+          <strong>${total}</strong> terme${total > 1 ? 's' : ''} suspect${total > 1 ? 's' : ''}.
+          <span style="color:#64748b;">Décochez ceux à conserver.</span>
+        </span>
+        <span style="margin-left:auto;display:flex;gap:0.3rem;">
+          <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm"
+                  data-cleanup-action="select-all">Tout cocher</button>
+          <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm"
+                  data-cleanup-action="clear">Tout décocher</button>
+          <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm"
+                  data-cleanup-action="invert">Inverser</button>
+        </span>
       </div>
-      <div style="display:flex;gap:0.5rem;justify-content:flex-end;
-                  padding:0.7rem 1rem;border-top:1px solid #e2e8f0;">
-        <button type="button" class="fr-btn fr-btn--secondary"
-                data-glossary-cleanup-cancel>Annuler</button>
-        <button type="button" class="fr-btn"
-                data-glossary-cleanup-apply
-                style="background:#b91c1c;color:#fff;border-color:#b91c1c;">
-          Supprimer ${total} terme${total > 1 ? 's' : ''}
-        </button>
+      <div style="padding:0.5rem 1rem;border-bottom:1px solid #f1f5f9;background:#fafbff;">
+        <input type="search" class="cleanup-filter" placeholder="Filtrer dans la liste…"
+               autocomplete="off" spellcheck="false"
+               style="width:100%;padding:0.3rem 0.5rem;font-size:0.85rem;
+                      border:1px solid #cbd5e1;border-radius:3px;" />
+      </div>
+      <div style="flex:1 1 auto;overflow-y:auto;padding:0.4rem 0.6rem;background:#fff;"
+           data-cleanup-list>
+        ${rowsHtml}
+      </div>
+      <div style="display:flex;gap:0.5rem;justify-content:space-between;align-items:center;
+                  padding:0.7rem 1rem;border-top:1px solid #e2e8f0;background:#fafbff;">
+        <span style="font-size:0.78rem;color:#64748b;">
+          ⭐ Favoris jamais supprimés (déjà exclus de cette liste).
+        </span>
+        <span style="display:flex;gap:0.5rem;">
+          <button type="button" class="fr-btn fr-btn--secondary"
+                  data-cleanup-cancel>Annuler</button>
+          <button type="button" class="fr-btn"
+                  data-cleanup-apply
+                  style="background:#b91c1c;color:#fff;border-color:#b91c1c;">
+            Supprimer <span data-cleanup-count>${selected.size}</span>
+          </button>
+        </span>
       </div>
     </div>
   `;
   document.body.appendChild(wrap);
+
+  const list = wrap.querySelector('[data-cleanup-list]');
+  const countEl = wrap.querySelector('[data-cleanup-count]');
+  const applyBtn = wrap.querySelector('[data-cleanup-apply]');
+  const filterInp = wrap.querySelector('.cleanup-filter');
+
   const close = () => wrap.remove();
+  wrap.querySelector('.cleanup-close').addEventListener('click', close);
+  wrap.querySelector('[data-cleanup-cancel]').addEventListener('click', close);
   wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
   wrap.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
-  wrap.querySelector('[data-glossary-cleanup-cancel]').addEventListener('click', close);
-  wrap.querySelector('[data-glossary-cleanup-apply]').addEventListener('click', async () => {
-    const applyBtn = wrap.querySelector('[data-glossary-cleanup-apply]');
+
+  const refreshCount = () => {
+    countEl.textContent = String(selected.size);
+    applyBtn.disabled = selected.size === 0;
+  };
+
+  // Toggle checkbox → met à jour selected + compteur.
+  list.addEventListener('change', (ev) => {
+    const cb = ev.target.closest && ev.target.closest('[data-cleanup-cb]');
+    if (!cb) return;
+    const term = cb.getAttribute('data-term');
+    if (cb.checked) selected.add(term);
+    else selected.delete(term);
+    refreshCount();
+  });
+
+  // Actions de la barre haute.
+  wrap.addEventListener('click', (ev) => {
+    const btn = ev.target.closest && ev.target.closest('[data-cleanup-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-cleanup-action');
+    const cbs = Array.from(list.querySelectorAll('[data-cleanup-cb]'));
+    if (action === 'select-all') {
+      cbs.forEach((cb) => { cb.checked = true; selected.add(cb.getAttribute('data-term')); });
+    } else if (action === 'clear') {
+      cbs.forEach((cb) => { cb.checked = false; selected.delete(cb.getAttribute('data-term')); });
+    } else if (action === 'invert') {
+      cbs.forEach((cb) => {
+        cb.checked = !cb.checked;
+        const t = cb.getAttribute('data-term');
+        if (cb.checked) selected.add(t); else selected.delete(t);
+      });
+    }
+    refreshCount();
+  });
+
+  // Filtre live : cache les rows qui ne matchent pas la recherche.
+  // N'altère pas la sélection — un terme caché reste coché.
+  filterInp.addEventListener('input', () => {
+    const q = (filterInp.value || '').trim().toLowerCase();
+    list.querySelectorAll('.cleanup-row').forEach((row) => {
+      const term = (row.getAttribute('data-cleanup-term') || '').toLowerCase();
+      row.style.display = (!q || term.includes(q)) ? '' : 'none';
+    });
+  });
+
+  // Apply : envoie la liste explicite des termes cochés au backend.
+  applyBtn.addEventListener('click', async () => {
+    if (selected.size === 0) return;
     applyBtn.disabled = true;
-    applyBtn.textContent = 'Suppression…';
+    const n = selected.size;
+    applyBtn.innerHTML = `Suppression de ${n}…`;
     try {
       const resp = await fetch('/api/my-glossary/cleanup', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: false }),
+        body: JSON.stringify({ dry_run: false, terms: Array.from(selected) }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
         alert(`Échec : HTTP ${resp.status}`);
         applyBtn.disabled = false;
-        applyBtn.textContent = `Supprimer ${total} terme${total > 1 ? 's' : ''}`;
+        applyBtn.innerHTML = `Supprimer <span data-cleanup-count>${n}</span>`;
         return;
       }
       close();
       _selectedTerms.clear();
       _refreshBulkVisuals(root);
       _loadMyGlossary(root);
-      // Toast léger plutôt qu'alert : moins intrusif.
-      const n = data.deleted || 0;
-      try { if (window.showToast) window.showToast(`✓ ${n} terme(s) supprimé(s)`, 'success'); }
+      const deleted = data.deleted || 0;
+      try { if (window.showToast) window.showToast(`✓ ${deleted} terme(s) supprimé(s)`, 'success'); }
       catch (e) { /* silencieux */ }
     } catch (e) {
       alert(`Erreur réseau : ${e.message}`);
       applyBtn.disabled = false;
-      applyBtn.textContent = `Supprimer ${total} terme${total > 1 ? 's' : ''}`;
+      applyBtn.innerHTML = `Supprimer <span data-cleanup-count>${n}</span>`;
     }
   });
 }

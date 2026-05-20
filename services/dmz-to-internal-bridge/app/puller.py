@@ -2644,11 +2644,19 @@ def delete_user_glossary_term():
 
 @app.route("/api/v1/user-glossary/cleanup", methods=["POST"])
 def cleanup_user_glossary():
-    """Body : ``{user_sub, dry_run?: bool, preview_limit?: int}``.
+    """Body : ``{user_sub, dry_run?: bool, terms?: [str]}``.
 
-    - ``dry_run=true`` (défaut) : retourne ``{total_candidates, preview}``
-      sans rien supprimer. Permet d'afficher une preview à l'utilisateur.
-    - ``dry_run=false`` : applique la suppression, retourne ``{deleted}``.
+    - ``dry_run=true`` (défaut) : retourne ``{total_candidates, items: [{term, reason}]}``
+      avec la liste COMPLÈTE des candidats (cap 2000) ; ne supprime rien.
+      Sert à afficher la modale "Nettoyage auto" côté UI où l'utilisateur
+      peut décocher les termes qu'il souhaite conserver.
+    - ``dry_run=false`` : applique la suppression.
+        * Sans ``terms`` : supprime TOUS les candidats identifiés par
+          l'heuristique (mode "tout supprimer" en un clic).
+        * Avec ``terms=[...]`` : supprime UNIQUEMENT les termes explicites
+          présents dans la liste (la sélection de l'utilisateur). Les
+          termes inattendus (inconnus, curated, blacklisted) sont
+          silencieusement ignorés grâce aux filtres SQL ci-dessous.
 
     Termes ``curated_by_user=True`` toujours préservés (décision user > heuristique).
     Termes ``blacklisted=True`` ignorés (déjà invisibles côté UI).
@@ -2663,21 +2671,40 @@ def cleanup_user_glossary():
         return jsonify({"error": "user_sub required"}), 400
     dry_run = data.get("dry_run")
     dry_run = True if dry_run is None else bool(dry_run)
-    try:
-        preview_limit = max(1, min(500, int(data.get("preview_limit") or 25)))
-    except (TypeError, ValueError):
-        preview_limit = 25
+    explicit_terms = data.get("terms")
 
     from libs.shared.app.glossary_filter import is_specific_term
     from libs.shared.app.models import UserGlossaryTerm
 
     db = SessionLocal()
     try:
+        # Mode "supprime cette sélection" : la liste vient du frontend,
+        # on n'a pas besoin de recalculer l'heuristique. On garde les
+        # filtres curated/blacklisted comme protection de sécurité.
+        if not dry_run and isinstance(explicit_terms, list) and explicit_terms:
+            # Normalise : strings non-vides, dédupliqués.
+            terms_set = {(t or "").strip() for t in explicit_terms if isinstance(t, str)}
+            terms_set.discard("")
+            if not terms_set:
+                return jsonify({"dry_run": False, "deleted": 0})
+            deleted = (
+                db.query(UserGlossaryTerm)
+                .filter(UserGlossaryTerm.user_sub == user_sub,
+                        UserGlossaryTerm.curated_by_user.is_(False),
+                        UserGlossaryTerm.blacklisted.is_(False),
+                        UserGlossaryTerm.term.in_(list(terms_set)))
+                .delete(synchronize_session=False)
+            )
+            db.commit()
+            return jsonify({"dry_run": False, "deleted": int(deleted)})
+
+        # Sinon : on calcule les candidats via l'heuristique.
         rows = (
             db.query(UserGlossaryTerm)
             .filter(UserGlossaryTerm.user_sub == user_sub,
                     UserGlossaryTerm.curated_by_user.is_(False),
                     UserGlossaryTerm.blacklisted.is_(False))
+            .order_by(UserGlossaryTerm.term)
             .limit(2000)
             .all()
         )
@@ -2688,14 +2715,13 @@ def cleanup_user_glossary():
                 candidates.append((r.term, reason))
 
         if dry_run:
-            preview = [{"term": t, "reason": rs} for t, rs in candidates[:preview_limit]]
             return jsonify({
                 "dry_run": True,
                 "total_candidates": len(candidates),
-                "preview": preview,
-                "preview_truncated": len(candidates) > preview_limit,
+                "items": [{"term": t, "reason": rs} for t, rs in candidates],
             })
 
+        # dry_run=false sans terms explicites : supprime tout.
         terms_to_delete = [t for t, _ in candidates]
         deleted = 0
         if terms_to_delete:
