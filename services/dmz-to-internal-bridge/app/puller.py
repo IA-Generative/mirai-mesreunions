@@ -369,14 +369,29 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         if rec is None:
             logger.warning("UserAudioFile not found for status update: %s", audio_file_id)
             return
+        prev_status = rec.transcription_status
         rec.transcription_status = status
         for key, val in fields.items():
             if key in allowed:
                 setattr(rec, key, val)
+        now_ts = datetime.now(timezone.utc)
         # Heartbeat watchdog : chaque changement de statut/colonne signale
         # une activité du pipeline. Le watchdog scan ``last_activity_at``
         # pour repérer les jobs orphelins (cf migration 018 + watchdog.py).
-        rec.last_activity_at = datetime.now(timezone.utc)
+        rec.last_activity_at = now_ts
+        # Timing transcription : start = 1er passage à un état actif
+        # (queued/processing/transcribing) si pas déjà set.
+        # End = passage à un état terminal (completed/partially/failed).
+        # Utilisé par /api/v1/pipeline/timing-stats pour calculer la
+        # médiane RTF + ETA affichés dans les tooltips frontend.
+        _ACTIVE_STATES = {"kevent_queued", "kevent_processing",
+                          "kevent_transcribing", "transcoding"}
+        _TERMINAL_STATES = {"kevent_completed", "kevent_partially_completed",
+                            "kevent_failed", "completed", "failed"}
+        if status in _ACTIVE_STATES and rec.transcription_started_at is None:
+            rec.transcription_started_at = now_ts
+        if status in _TERMINAL_STATES and rec.transcription_completed_at is None:
+            rec.transcription_completed_at = now_ts
         db.commit()
     finally:
         db.close()
