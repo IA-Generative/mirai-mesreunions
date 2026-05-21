@@ -762,22 +762,77 @@ async function _resumeStuckJobs(ev) {
     }
     const data = await resp.json();
     const claimed = data.claimed || 0;
+    const resumedList = Array.isArray(data.resumed) ? data.resumed : [];
     if (claimed === 0) {
       if (window.showToast) window.showToast('Aucune transcription bloquée à relancer.', 'info');
       else window.alert('Aucune transcription bloquée à relancer.');
-    } else {
-      const msg = `🔄 ${claimed} transcription(s) relancée(s) — suivi via la liste (statut "en cours" puis "terminé").`;
-      if (window.showToast) window.showToast(msg, 'success');
-      else window.alert(msg);
-      // Refresh la liste pour montrer les nouveaux statuts.
-      const reload = _resolveLegacyFn('loadSessions');
-      if (reload) reload({ force: true });
+      return;
     }
+    // Construit la liste lisible des titres relancés (depuis le cache
+    // local) + déclenche un highlight visuel sur les rows correspondantes.
+    const titles = [];
+    const ids = [];
+    for (const r of resumedList) {
+      const fid = r.audio_id;
+      if (!fid) continue;
+      ids.push(fid);
+      const f = _findFile(fid);
+      const title = (f && (f.suggested_filename || f.original_filename)) || fid.slice(0, 8);
+      titles.push(title);
+      // Invalide le cache transcript pour ce fileId — le polling va
+      // refetch le nouveau statut depuis transcript-status.
+      _transcriptCache.delete(fid);
+    }
+    // Detail explicite dans le toast (et fallback alert).
+    const sample = titles.slice(0, 5).join(', ');
+    const more = titles.length > 5 ? ` (+${titles.length - 5})` : '';
+    const msg = `🔄 ${claimed} transcription(s) relancée(s) : ${sample}${more}`;
+    if (window.showToast) window.showToast(msg, 'success');
+    else window.alert(msg);
+
+    // Refresh la liste pour montrer les nouveaux statuts ("kevent_queued").
+    const reload = _resolveLegacyFn('loadSessions');
+    if (reload) await reload({ force: true });
+
+    // Highlight visuel temporaire (3.5s) sur les rows relancées pour que
+    // l'utilisateur voie EXACTEMENT lesquelles ont été reprises. CSS
+    // animation injectée à la volée (évite de toucher un fichier .css
+    // partagé pour 1 utilisation ponctuelle).
+    _ensureRelaunchHighlightStyle();
+    setTimeout(() => {
+      for (const fid of ids) {
+        const row = document.querySelector(`.meeting-row[data-file-id="${cssEscape(fid)}"]`);
+        if (row) {
+          row.classList.add('meeting-row--just-relaunched');
+          // Scroll au 1er en vue (en mode "nearest" pour ne pas brusquer).
+          if (fid === ids[0]) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+          setTimeout(() => row.classList.remove('meeting-row--just-relaunched'), 3500);
+        }
+      }
+    }, 50);  // 50ms : laisse le DOM finir le re-render
   } catch (e) {
     window.alert(`Erreur réseau : ${e.message}`);
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
   }
+}
+
+// Injecte le CSS du highlight relance UNE FOIS (idempotent).
+function _ensureRelaunchHighlightStyle() {
+  if (document.getElementById('meeting-row-relaunch-style')) return;
+  const st = document.createElement('style');
+  st.id = 'meeting-row-relaunch-style';
+  st.textContent = `
+    @keyframes meetingRowRelaunchPulse {
+      0%   { background-color: #fef3c7; box-shadow: inset 3px 0 0 #ca8a04; }
+      40%  { background-color: #fef9c3; box-shadow: inset 3px 0 0 #ca8a04; }
+      100% { background-color: transparent; box-shadow: inset 3px 0 0 transparent; }
+    }
+    .meeting-row--just-relaunched {
+      animation: meetingRowRelaunchPulse 3.5s ease-out;
+    }
+  `;
+  document.head.appendChild(st);
 }
 
 async function _confirmBulkDelete() {

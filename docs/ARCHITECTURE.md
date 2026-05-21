@@ -267,6 +267,41 @@ Kevent sur les longs audios. Voir
 | MIG10 prod (Kevent) | 0.060 |
 | MIG20 prod (Kevent) | 0.097 |
 
+### Pipeline watchdog (résilience auto)
+
+Depuis le 2026-05-22, chaque pod `internal-ingester` lance au boot un
+thread daemon `pipeline_watchdog` qui scan toutes les 30 s la table
+`user_audio_files` pour repérer les rows orphelines :
+
+- `transcription_status ∈ {pending, transferring, transcoding,
+  kevent_queued, kevent_transcribing, kevent_processing}`
+- ET `last_activity_at < NOW() - 5 min`
+
+Pour chaque candidat, un **claim atomique** via `UPDATE … SET
+pipeline_claim_at = NOW(), pipeline_claim_pod = $HOSTNAME WHERE id = $id
+AND (pipeline_claim_at IS NULL OR < NOW() - 90s)` désigne un pod
+gestionnaire unique (race-safe). Le pod claim appelle ensuite
+`_reset_and_resubmit_kevent_pipeline` qui réutilise le moteur de
+`POST /api/v1/audio/<id>/full-reprocess` : reset des colonnes pipeline,
+download S3 interne, nouveau Kevent submit, LLM chain.
+
+Couvre : pod tué (OOM, rollout, scale-down) en plein traitement,
+poll Kevent crashé silencieusement, race window submission→DB perdue,
+transitoire réseau. **Lease 90 s** : si le pod qui claim meurt avant
+le resubmit, un autre pod prend la relève au tick suivant.
+
+Schéma (migration 018) :
+- `last_activity_at` TIMESTAMPTZ — heartbeat, touché par `_set_user_audio_status`
+- `pipeline_claim_at` TIMESTAMPTZ + `pipeline_claim_pod` VARCHAR(128) — lease
+- Index `ix_user_audio_watchdog (transcription_status, last_activity_at)`
+
+Déclenchement manuel : `POST /api/v1/pipeline/resume-stuck-jobs`
+(scope global = admin, ou body `{user_sub}` pour user-scope). Bouton
+« 🔄 Relancer les bloqués » dans le header de la liste réunions
+mesreunions-web. Code : [services/dmz-to-internal-bridge/app/pipeline_watchdog.py](../services/dmz-to-internal-bridge/app/pipeline_watchdog.py).
+
+Tunables env : `PIPELINE_WATCHDOG_INTERVAL_S` (30), `PIPELINE_STALE_THRESHOLD_S` (300), `PIPELINE_CLAIM_LEASE_S` (90), `PIPELINE_MAX_AGE_HOURS` (24), `PIPELINE_WATCHDOG_DISABLED=1` (kill switch).
+
 ### Évolution prévue — Pipeline V2 backend Kevent (DAG composable)
 
 **Statut : planifié, non implémenté** (cf. `~/.claude/plans/federated-finding-whisper.md`).

@@ -166,15 +166,51 @@ Configuration runtime prod-bêta (vérifiable via `kubectl exec deployment/inter
 
 Historique : la prod-bêta a tourné sur `vm-direct` (VM L4 dédiée `http://<vm-diarization-host>:8080`) du 2026-05-17 au 2026-05-21, motivé par les baselines RTF (VM L4 directe **0.027** vs MIG10 prod 0.060 vs MIG20 Kevent 0.097 — anomalie issue #53 MIG20 > MIG10). Rebasculé sur Kevent quand la gateway a publié la build qui résout les timeouts long-audio. Pour repasser sur `vm-direct`, poser `DIARIZATION_BACKEND=vm-direct` + `DIARIZATION_VM_URL=http://<vm-diarization-host>:8080` (cf doc).
 
-### 5.5 La corbeille (soft-delete)
+### 5.5 Pipeline watchdog (résilience auto)
+
+Promesse « on s'occupe de tout » : aucun job ne reste bloqué, qu'un pod meure en plein traitement ou qu'un poll Kevent crashe silencieusement.
+
+**Mécanisme** (depuis 2026-05-22, cf [services/dmz-to-internal-bridge/app/pipeline_watchdog.py](services/dmz-to-internal-bridge/app/pipeline_watchdog.py)) :
+
+1. Chaque pod `internal-ingester` lance un thread daemon au boot (`start_watchdog`).
+2. Toutes les **30 s** : SELECT sur `user_audio_files` filtrant les rows `transcription_status ∈ {pending, transferring, transcoding, kevent_queued, kevent_transcribing, kevent_processing}` avec `last_activity_at < NOW() - 5min`.
+3. **Claim atomique** via `UPDATE … SET pipeline_claim_at = NOW(), pipeline_claim_pod = $HOSTNAME WHERE id = $id AND (pipeline_claim_at IS NULL OR < NOW() - 90s)` — premier pod gagne, autres passent (race-safe).
+4. **Resume** = appel direct de `_reset_and_resubmit_kevent_pipeline` (moteur partagé avec `POST /api/v1/audio/<id>/full-reprocess`) : reset des colonnes pipeline, download S3 interne, nouveau Kevent submit, LLM chain.
+5. Lease 90 s : si le pod qui claim meurt avant le resubmit effectif, un autre pod reprend au tick suivant.
+
+**Schéma** (migration 018) :
+
+| Colonne | Rôle |
+|---|---|
+| `last_activity_at` TIMESTAMPTZ | Heartbeat touché à chaque `_set_user_audio_status`. Source de vérité du watchdog. |
+| `pipeline_claim_at` TIMESTAMPTZ | Lease court : un seul pod traite à la fois |
+| `pipeline_claim_pod` VARCHAR(128) | Traçabilité (HOSTNAME du pod claim) |
+
+Index `ix_user_audio_watchdog (transcription_status, last_activity_at)` pour scan hot path.
+
+**Déclenchement manuel** : `POST /api/v1/pipeline/resume-stuck-jobs` body `{user_sub?, limit?}` (sans `user_sub` = scope global admin, avec = scope user). Bouton « 🔄 Relancer les bloqués » dans le header de la liste réunions côté UI mesreunions-web, scope auto au sub du user (jamais arbitraire — la route proxy `/api/files/resume-stuck-jobs` force `user_sub` au sub du JWT).
+
+**Tunables env** (defaults entre parenthèses) :
+- `PIPELINE_WATCHDOG_INTERVAL_S` (30) — fréquence du scan
+- `PIPELINE_STALE_THRESHOLD_S` (300) — durée d'inactivité avant qu'une row soit candidate
+- `PIPELINE_CLAIM_LEASE_S` (90) — durée de vie d'un claim
+- `PIPELINE_MAX_AGE_HOURS` (24) — au-delà, on n'essaie plus (S3 probablement purgé)
+- `PIPELINE_WATCHDOG_DISABLED=1` — kill switch (debug)
+
+**Limites connues** :
+- Resume = full re-submit Kevent (nouveau job, le résultat partiel précédent est jeté). Coût Kevent doublé pour les jobs repris ; acceptable pour des incidents <5/jour.
+- Cap 24 h : un job bloqué depuis >24 h ne sera plus repris (le blob audio interne a probablement été purgé par `INTERNAL_PURGE_MAX_AGE_HOURS`).
+- Le watchdog ne ressuscite pas un fichier dont le blob S3 interne a été purgé — il renvoie `410 audio_purged` côté `_reset_and_resubmit_kevent_pipeline`.
+
+### 5.6 La corbeille (soft-delete)
 
 DELETE depuis mydevices = soft-delete via `trashed_at`. Auto-purge 30j déclenchée par `api_my_sessions`. **Aligner** `EXTERNAL_PURGE_MAX_AGE_HOURS=720` avec `TRASH_RETENTION_DAYS` sinon les items external sont purgés avant la corbeille.
 
-### 5.6 La rétention device = source de vérité
+### 5.7 La rétention device = source de vérité
 
 Le `DEVICE_TOKEN_RETENTION_HOURS=360` (15j) pilote tout. La grâce QR (5 min) est un effet de bord. Le renew bump *les deux*. Cette variable doit être positionnée sur **token-issuer ET code-generator**.
 
-### 5.7 Le glossaire utilisateur
+### 5.8 Le glossaire utilisateur
 
 La table `user_glossary_terms` stocke un glossaire *global* par `user_sub`. Il est :
 - alimenté en upsert batch à chaque brief Mes Réunions ;
@@ -182,7 +218,7 @@ La table `user_glossary_terms` stocke un glossaire *global* par `user_sub`. Il e
 - éditable depuis mydevices (CRUD via API) ;
 - envoyé à Whisper via `initial_prompt` (~244 tokens max) + post-traité côté LLM via `glossary_correction` (stratégies complémentaires).
 
-### 5.8 Le cycle meeting-prep
+### 5.9 Le cycle meeting-prep
 
 ```
 brief → auto-link audio (cosine ≥ 0.55 + écart ≥ 0.15)
@@ -192,7 +228,7 @@ brief → auto-link audio (cosine ≥ 0.55 + écart ≥ 0.15)
 
 Caps glossaire : 50 (brief) / 200 (utilisateur) / 300 (combiné). 4 fichiers exportés au Drive + `glossaire-utilisateur.txt`.
 
-### 5.9 Le corrector de transcript
+### 5.10 Le corrector de transcript
 
 Côté mydevices : édition des segments, marquage des termes glossaire (« ignorer », « toujours utiliser »), feedback structuré (`usefulness`, `regenerate`, `correction`). Les corrections segment-par-segment **n'utilisent plus** l'option « Relancer les étapes LLM » (depuis 2026-05-17) — un badge orange `pending-corrections` invite l'utilisateur à régénérer le compte-rendu en fin d'édition. Persisté en `localStorage` + base (table `user_feedback`).
 
