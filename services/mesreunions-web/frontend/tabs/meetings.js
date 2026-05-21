@@ -301,9 +301,32 @@ function _buildStatusTooltip(file, status) {
 
   // Lignes de timing pour les jobs en cours.
   const inProgress = status.kind === 'processing';
+  const cachedStatus = (cached && cached.status) || '';
+  // Distinction wait (queued) vs processing (transcribing/processing) :
+  // - en queue : on affiche "Attente estimée" = position × médiane durée job
+  // - en traitement actif : on affiche "Écoulé" + "Estimé restant"
+  const isQueued = cachedStatus === 'kevent_queued' || cachedStatus === 'pending';
+  const isActive = cachedStatus === 'kevent_processing' ||
+                   cachedStatus === 'kevent_transcribing' ||
+                   cachedStatus === 'transcoding';
+
   if (inProgress) {
     const startedAt = file.transcription_started_at || (cached && cached.startedAt);
-    if (startedAt) {
+    const pos = _queuePosition(file);
+
+    if (isQueued && _pipelineStats && _pipelineStats.median_total_s) {
+      // Attente estimée = position × médiane totale (worst case
+      // séquentiel). Sur-estimation acceptable car plusieurs pods peuvent
+      // traiter en parallèle, mais ça borne supérieurement.
+      lines.push('');
+      const waitS = pos * _pipelineStats.median_total_s;
+      lines.push(`⏳ En file d'attente — ~${_fmtElapsed(waitS * 1000)} avant traitement`);
+      if (pos > 1) lines.push(`📊 ${pos}ᵉ sur ${_pipelineStats.queue_depth || pos} jobs en file`);
+      if (startedAt) {
+        const enqueuedAt = new Date(startedAt);
+        lines.push(`⏱ En file depuis ${enqueuedAt.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`);
+      }
+    } else if (startedAt) {
       const startDate = new Date(startedAt);
       const elapsedMs = Date.now() - startDate.getTime();
       lines.push('');
@@ -311,9 +334,17 @@ function _buildStatusTooltip(file, status) {
       lines.push(`⏱ Écoulé : ${_fmtElapsed(elapsedMs)}`);
       const eta = _estimateRemaining(file, elapsedMs);
       if (eta) lines.push(`⏱ Estimé restant : ${eta}`);
+      if (pos > 1) lines.push(`📊 ${pos}ᵉ dans la file`);
+    } else if (pos > 1) {
+      lines.push('');
+      lines.push(`📊 ${pos}ᵉ dans la file`);
     }
-    const pos = _queuePosition(file);
-    if (pos > 1) lines.push(`📊 ${pos}ᵉ dans la file`);
+
+    // Note sur la fraîcheur des stats (au cas où l'utilisateur s'étonne
+    // de la valeur). 15 min de TTL.
+    if (_pipelineStats && _pipelineStats.sample_size) {
+      lines.push(`   (stats sur ${_pipelineStats.sample_size} transcriptions, MAJ /15min)`);
+    }
   }
 
   // Badge "relancé" persistant tant que le statut n'a pas bougé.
