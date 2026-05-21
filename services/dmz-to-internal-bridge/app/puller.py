@@ -3332,20 +3332,24 @@ def create_app():
         pull_thread = threading.Thread(target=_pull_queue_loop, daemon=True, name="internal-pull-drain")
         pull_thread.start()
         _pull_loop_thread_started = True
-    # Phase 2bis : reprise auto des polls Kevent orphelins (jobs en cours
-    # dont le pod précédent est mort sans terminer le poll). Lancé une
-    # seule fois au boot, dans un thread non bloquant.
-    if not _orphan_resume_started:
-        threading.Thread(target=_resume_orphaned_kevent_polls,
-                         daemon=True, name="kevent-orphan-resume").start()
-        _orphan_resume_started = True
-    # Watchdog périodique : filet de sécurité pour les rows où kevent_job_id
-    # n'a pas été persisté (race window submission→DB write) ou pour les
-    # polls qui ont silencieusement crashé pendant la vie du pod.
-    if not _orphan_watchdog_started:
-        threading.Thread(target=_orphan_watchdog_loop,
-                         daemon=True, name="kevent-orphan-watchdog").start()
-        _orphan_watchdog_started = True
+    # ANCIEN scanner boot-time `_resume_orphaned_kevent_polls` désactivé
+    # depuis 2026-05-22 : il ne faisait QUE diagnostiquer (logs WARNING
+    # "pipeline downstream non re-engagé") sans finaliser. Le nouveau
+    # `pipeline_watchdog` repère et resubmit les mêmes rows au 1er tick.
+    # if not _orphan_resume_started:
+    #     threading.Thread(target=_resume_orphaned_kevent_polls,
+    #                      daemon=True, name="kevent-orphan-resume").start()
+    #     _orphan_resume_started = True
+    # ANCIEN watchdog `_orphan_watchdog_loop` désactivé depuis 2026-05-22 :
+    # il marquait agressivement `kevent_failed` toute row sans kevent_job_id,
+    # ce qui entrait en conflit avec le NOUVEAU `pipeline_watchdog` (qui
+    # reset temporairement kevent_job_id à NULL pendant la reprise).
+    # Le nouveau watchdog couvre tous les cas que l'ancien gérait, en plus
+    # de FINALISER la reprise (pas juste diagnostiquer).
+    # if not _orphan_watchdog_started:
+    #     threading.Thread(target=_orphan_watchdog_loop,
+    #                      daemon=True, name="kevent-orphan-watchdog").start()
+    #     _orphan_watchdog_started = True
     # Phase A — pipeline watchdog actif : repère les jobs orphelins via
     # last_activity_at + claim atomique, et relance ``full-reprocess`` en
     # interne. Garantit qu'aucun job ne reste bloqué même si le pod meurt
