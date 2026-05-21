@@ -2219,12 +2219,19 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
         stored_filename = uaf.stored_filename
         original_filename = uaf.original_filename
         try:
+            now_reset = datetime.now(timezone.utc)
             uaf.transcription_status = "kevent_queued"
             uaf.transcription_text = None
             uaf.transcription_words_json = None
             uaf.transcription_language = None
             uaf.transcription_engine = None
-            uaf.transcription_started_at = None
+            # Timing : on RE-démarre les chronos sur la version courante.
+            # started_at = NOW() (on rentre tout de suite en file Kevent),
+            # completed_at = NULL (sera reposé au passage en terminal par
+            # _set_user_audio_status). Sans ces 2 set explicites le
+            # tooltip "Estimé restant" reste vide jusqu'au 1er status
+            # callback Kevent — gênant pour les jobs longs en queue.
+            uaf.transcription_started_at = now_reset
             uaf.transcription_completed_at = None
             uaf.diarization_json = None
             uaf.speaker_tagged_text = None
@@ -2238,8 +2245,8 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
             uaf.kevent_job_id = None
             uaf.reprocess_version = new_version
             uaf.reprocess_history = history
-            uaf.last_reprocessed_at = datetime.now(timezone.utc)
-            uaf.last_activity_at = datetime.now(timezone.utc)
+            uaf.last_reprocessed_at = now_reset
+            uaf.last_activity_at = now_reset
             # IMPORTANT : on NE LIBÈRE PAS le claim ici. Le caller (watchdog
             # ou endpoint manuel) a déjà claim cette row, et le pipeline va
             # tourner pendant 5-30 min — il faut garder le claim actif pour
