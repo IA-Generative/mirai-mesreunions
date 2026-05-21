@@ -201,6 +201,21 @@ function renderHeader(fileCount, hasSelection) {
     </div>
     ${hasSelection ? `<div class="meetings-tab-bulkbar">
       <span class="meetings-tab-bulkbar-count"><strong>${_selectedIds.size}</strong> réunion(s) sélectionnée(s)</span>
+      <div class="bulk-dl-wrap" data-bulk-dl-wrap style="position:relative;display:inline-block;">
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+                data-action="meetings-new:bulk-download-menu"
+                aria-haspopup="menu" aria-expanded="false"
+                style="display:inline-flex;align-items:center;gap:0.3rem;">
+          ⬇ Télécharger <span aria-hidden="true">▾</span>
+        </button>
+        <div class="bulk-dl-menu" data-bulk-dl-menu hidden role="menu"
+             style="position:absolute;top:100%;left:0;margin-top:0.25rem;
+                    min-width:300px;background:#fff;border:1px solid #cbd5e1;
+                    border-radius:0.3rem;box-shadow:0 10px 30px rgba(0,0,0,0.15);
+                    z-index:50;padding:0.3rem 0;font-size:0.85rem;">
+          <!-- Rempli dynamiquement par _renderBulkDownloadMenu lors de l'ouverture -->
+        </div>
+      </div>
       <button type="button" class="meetings-tab-btn meetings-tab-btn--danger"
               data-action="meetings-new:bulk-delete">
         Mettre à la corbeille
@@ -373,6 +388,7 @@ async function _prefetchTranscriptStatus(fileId) {
       engine: data.transcription_engine || '',
       suggested: data.suggested_filename || '',
       kp: data.key_points_summary || '',
+      outputs: data.outputs || {},
       fetchedAt: Date.now(),
     });
     updateRowStatus(fileId);
@@ -429,6 +445,7 @@ async function _fetchAndRenderSummary(fileId) {
       engine: data.transcription_engine || '',
       suggested: data.suggested_filename || '',
       kp: data.key_points_summary || '',
+      outputs: data.outputs || {},
       fetchedAt: Date.now(),
     });
     const kp = (data.key_points_summary || '').trim();
@@ -517,6 +534,18 @@ function _onClick(ev) {
       renderList(_lastSessions);
       break;
     }
+    case 'bulk-download-menu': {
+      _toggleBulkDownloadMenu(e);
+      break;
+    }
+    case 'bulk-download-audio':
+    case 'bulk-download-cr':
+    case 'bulk-download-reformulated':
+    case 'bulk-download-cleaned': {
+      const kind = action.replace('bulk-download-', '');
+      _runBulkDownload(kind);
+      break;
+    }
     case 'toggle-sort': {
       const fn = _resolveLegacyFn('toggleSortDir');
       if (fn) fn();
@@ -534,6 +563,177 @@ function _onClick(ev) {
     }
     default:
       break;
+  }
+}
+
+// ── Bulk download dropdown ────────────────────────────────────────────
+//
+// Le menu liste les 4 formats (audio / cr / reformulated / cleaned) avec
+// un compteur "X / N prêts" calculé depuis _transcriptCache (rempli par
+// le polling ?summary=1 des rows transferred). Items à 0/N sont grisés
+// + ⏳, les autres déclenchent un POST /api/files/bulk-download/<kind>
+// qui retourne un ZIP streamé.
+
+const _BULK_KIND_META = {
+  audio:        { icon: '🎵', label: 'Audio (interne)',  flagKey: 'transferred' },
+  cr:           { icon: '📋', label: 'Compte-rendu',     flagKey: 'meeting-cr'  },
+  reformulated: { icon: '✍️', label: 'Reformulation',     flagKey: 'transcript-reformulated' },
+  cleaned:      { icon: '🧹', label: 'Nettoyée',         flagKey: 'transcript-cleaned' },
+};
+
+// Pour chaque kind, retourne {available: N, total: N, missing: [filename...]}
+// en lisant les caches _transcriptCache + les flags transferred_available
+// portés par chaque file row côté window.sessions.
+function _computeBulkAvailability(fileIds) {
+  const out = {};
+  for (const kind of Object.keys(_BULK_KIND_META)) {
+    out[kind] = { available: 0, total: fileIds.length, missing: [] };
+  }
+  for (const fid of fileIds) {
+    const file = _findFile(fid);
+    const cached = _transcriptCache.get(fid);
+    const title = (file && (file.suggested_filename || file.original_filename)) || fid.slice(0, 8);
+    // Audio interne = transferred_available porté par le row.
+    if (file && file.transferred_available) {
+      out.audio.available += 1;
+    } else {
+      out.audio.missing.push(title);
+    }
+    // CR / reformulated / cleaned : depuis transcript-status cache.
+    const outputs = (cached && cached.outputs) || {};
+    for (const kind of ['cr', 'reformulated', 'cleaned']) {
+      const flag = _BULK_KIND_META[kind].flagKey;
+      if (outputs[flag]) out[kind].available += 1;
+      else out[kind].missing.push(title);
+    }
+  }
+  return out;
+}
+
+function _renderBulkDownloadMenu(menuEl, fileIds) {
+  const avail = _computeBulkAvailability(fileIds);
+  const inProgressCount = fileIds.filter((fid) => {
+    const cached = _transcriptCache.get(fid);
+    const st = (cached && cached.status) || '';
+    // statuses non-terminaux = pipeline encore en route
+    return !['kevent_completed', 'kevent_partially_completed', 'kevent_failed',
+             'completed', 'failed'].includes(st);
+  }).length;
+
+  const itemsHtml = Object.keys(_BULK_KIND_META).map((kind) => {
+    const meta = _BULK_KIND_META[kind];
+    const { available, total, missing } = avail[kind];
+    const disabled = available === 0;
+    const partial = available > 0 && available < total;
+    const hourglass = (disabled || partial) ? ' ⏳' : '';
+    const tooltip = disabled
+      ? `Aucun fichier prêt pour ce format — réessayer plus tard (${total} en pipeline).`
+      : (partial
+          ? `${total - available} fichier(s) encore en pipeline et ignoré(s) :\n· ${missing.slice(0, 10).join('\n· ')}${missing.length > 10 ? `\n… et ${missing.length - 10} autre(s)` : ''}`
+          : `${available} fichier(s) prêt(s) → ZIP`);
+    return `
+      <button type="button" role="menuitem"
+              class="bulk-dl-item"
+              ${disabled ? 'disabled' : `data-action="meetings-new:bulk-download-${kind}"`}
+              title="${escapeHtml(tooltip)}"
+              style="display:flex;width:100%;align-items:center;gap:0.5rem;
+                     padding:0.4rem 0.7rem;border:0;background:transparent;
+                     text-align:left;cursor:${disabled ? 'not-allowed' : 'pointer'};
+                     color:${disabled ? '#94a3b8' : '#0f172a'};">
+        <span style="font-size:1rem;">${meta.icon}</span>
+        <span style="flex:1;">${meta.label}${hourglass}</span>
+        <span style="color:${disabled ? '#cbd5e1' : '#64748b'};font-variant-numeric:tabular-nums;">
+          ${available} / ${total}
+        </span>
+      </button>
+    `;
+  }).join('');
+
+  menuEl.innerHTML = `
+    <div style="padding:0.4rem 0.7rem;color:#64748b;font-size:0.72rem;border-bottom:1px solid #f1f5f9;">
+      ⬇ Télécharger en masse pour ${fileIds.length} réunion(s)
+    </div>
+    ${itemsHtml}
+    ${inProgressCount > 0 ? `
+    <div style="padding:0.4rem 0.7rem;color:#0c4498;font-size:0.72rem;
+                border-top:1px solid #f1f5f9;background:#f0f6ff;">
+      ⏳ ${inProgressCount} réunion(s) encore en pipeline. Le ZIP n'inclura que les prêts.
+    </div>` : ''}
+  `;
+}
+
+function _toggleBulkDownloadMenu(ev) {
+  const wrap = ev.target.closest && ev.target.closest('[data-bulk-dl-wrap]');
+  if (!wrap) return;
+  const menu = wrap.querySelector('[data-bulk-dl-menu]');
+  const btn = wrap.querySelector('[data-action="meetings-new:bulk-download-menu"]');
+  if (!menu || !btn) return;
+  const willOpen = menu.hidden;
+  // Fermer les autres menus éventuels (si on multiplie un jour).
+  document.querySelectorAll('[data-bulk-dl-menu]').forEach((m) => { m.hidden = true; });
+  if (willOpen) {
+    _renderBulkDownloadMenu(menu, Array.from(_selectedIds));
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    // Fermer au clic extérieur (1 frame plus tard pour ne pas se fermer
+    // soi-même).
+    setTimeout(() => {
+      const onClickOutside = (e) => {
+        if (!wrap.contains(e.target)) {
+          menu.hidden = true;
+          btn.setAttribute('aria-expanded', 'false');
+          document.removeEventListener('click', onClickOutside);
+        }
+      };
+      document.addEventListener('click', onClickOutside);
+    }, 0);
+  } else {
+    btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+async function _runBulkDownload(kind) {
+  const ids = Array.from(_selectedIds);
+  if (ids.length === 0) return;
+  // Ferme le menu immédiatement.
+  document.querySelectorAll('[data-bulk-dl-menu]').forEach((m) => { m.hidden = true; });
+  // Indicateur de progression léger sur le bouton.
+  const btn = document.querySelector('[data-action="meetings-new:bulk-download-menu"]');
+  const originalLabel = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Préparation du ZIP…'; }
+  try {
+    const resp = await fetch(`/api/files/bulk-download/${encodeURIComponent(kind)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_ids: ids }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      window.alert(`Téléchargement impossible : ${data.error || ('HTTP ' + resp.status)}`);
+      return;
+    }
+    const skipped = parseInt(resp.headers.get('X-Skipped-Files') || '0', 10);
+    const included = parseInt(resp.headers.get('X-Included-Files') || '0', 10);
+    // Trigger download du blob via lien temporaire.
+    const blob = await resp.blob();
+    // Récupère le filename suggéré par le serveur via Content-Disposition.
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/);
+    const filename = m ? decodeURIComponent(m[1]) : `${kind}_export.zip`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    // Toast informatif si certains fichiers ont été skippés.
+    if (skipped > 0 && window.showToast) {
+      window.showToast(`✓ ${included} fichier(s) — ${skipped} ignoré(s) (pas encore prêts)`, 'success');
+    } else if (window.showToast) {
+      window.showToast(`✓ ${included} fichier(s) téléchargé(s)`, 'success');
+    }
+  } catch (e) {
+    window.alert(`Erreur réseau : ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
   }
 }
 

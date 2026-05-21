@@ -507,6 +507,182 @@ def api_file_download_transferred(file_id):
         db.close()
 
 
+# ─── Bulk download (ZIP) ────────────────────────────────────────────────
+#
+# Permet de télécharger en masse un kind donné (audio / cr / reformulated /
+# cleaned) pour une sélection de fichiers depuis la liste réunions
+# (cf bulk-bar Alt-key dans tabs/meetings.js). Streamé via BytesIO avec un
+# cap dur côté serveur pour éviter d'épuiser la RAM des pods.
+
+
+_BULK_DOWNLOAD_MAX_FILES = 50
+_BULK_DOWNLOAD_MAX_BYTES = 500 * 1024 * 1024  # 500 Mo
+
+# Mapping kind → renderer. Chaque renderer renvoie (filename, bytes, mime)
+# ou None si le contenu n'est pas (encore) disponible côté audio outputs.
+_BULK_KINDS = {"audio", "cr", "reformulated", "cleaned"}
+
+
+def _bulk_render_audio(db, file_obj, audio):
+    """Récupère le blob audio transferred ou None si pas dispo."""
+    try:
+        cfg, key = svc.resolve_transferred_storage(db, file_obj)
+    except Exception:
+        return None
+    if not cfg or not key:
+        return None
+    try:
+        data = download_fileobj(cfg, key)
+        data.seek(0)
+        suffix = Path(key).suffix or ".bin"
+        if audio:
+            stem = svc.build_download_basename(file_obj, audio, "audio")
+        else:
+            stem = Path(file_obj.original_filename or "audio").stem
+        return (f"{stem}{suffix}", data.read(), svc.guess_audio_mime_from_key(key))
+    except Exception:
+        logger.debug("bulk audio fetch failed for %s", file_obj.id, exc_info=True)
+        return None
+
+
+def _bulk_render_text(file_obj, audio, kind):
+    """Rend un kind texte (cr/reformulated/cleaned) en Markdown avec header."""
+    if audio is None:
+        return None
+    from app.transcript_formats import (
+        meeting_analysis_to_markdown, text_to_md_string,
+        build_document_header_md,
+        extract_speakers, split_reformulated_by_speaker,
+    )
+    if kind == "cr":
+        raw = audio.get("meeting_analysis_json")
+        if not raw:
+            return None
+        body = meeting_analysis_to_markdown(raw)
+        kind_label = "meeting-cr"
+    elif kind == "reformulated":
+        body = audio.get("reformulated_text")
+        if not body:
+            return None
+        speakers = extract_speakers(audio.get("speaker_tagged_text") or "")
+        body = split_reformulated_by_speaker(body, speakers)
+        kind_label = "transcript-reformulated"
+    elif kind == "cleaned":
+        body = audio.get("cleaned_text")
+        if not body:
+            return None
+        kind_label = "transcript-cleaned"
+    else:
+        return None
+    stem = svc.build_download_basename(file_obj, audio, kind_label)
+    meeting_dt_iso = (
+        file_obj.meeting_datetime.isoformat()
+        if getattr(file_obj, "meeting_datetime", None) else None
+    )
+    upload_dt_iso = file_obj.created_at.isoformat() if file_obj.created_at else None
+    header_md = build_document_header_md(
+        title=stem, kind=kind_label,
+        meeting_date_iso=meeting_dt_iso, upload_date_iso=upload_dt_iso,
+        duration_seconds=file_obj.audio_duration_seconds,
+        key_points=audio.get("key_points_summary"),
+    )
+    md = text_to_md_string(header_md + body)
+    return (f"{stem}.md", md.encode("utf-8"), "text/markdown; charset=utf-8")
+
+
+@bp.route("/api/files/bulk-download/<kind>", methods=["POST"])
+@require_auth
+def api_files_bulk_download(kind):
+    """Body : ``{file_ids: [str]}``. Renvoie un ZIP avec les fichiers
+    correspondant au ``kind`` demandé.
+
+    Les fichiers dont le contenu n'est pas (encore) disponible pour ce
+    kind sont silencieusement skip — un header ``X-Skipped-Files`` permet
+    au frontend de prévenir l'utilisateur dans le cas où la sélection
+    contenait des éléments encore en pipeline.
+    """
+    if kind not in _BULK_KINDS:
+        abort(404, "Unknown bulk kind")
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    file_ids = body.get("file_ids") or []
+    if not isinstance(file_ids, list) or not file_ids:
+        return jsonify({"error": "file_ids[] required"}), 400
+    if len(file_ids) > _BULK_DOWNLOAD_MAX_FILES:
+        return jsonify({
+            "error": f"too_many_files (cap={_BULK_DOWNLOAD_MAX_FILES})"
+        }), 413
+
+    import zipfile  # local import (rare hot path)
+    buf = BytesIO()
+    included = 0
+    skipped = 0
+    total_bytes = 0
+
+    db = session_scope()
+    try:
+        with zipfile.ZipFile(buf, mode="w",
+                             compression=zipfile.ZIP_STORED,
+                             allowZip64=True) as zf:
+            for fid in file_ids:
+                if not isinstance(fid, str):
+                    skipped += 1
+                    continue
+                file_obj = svc.get_owned_file(db, user["sub"], fid)
+                if not file_obj:
+                    skipped += 1
+                    continue
+                # Pour les kinds non-audio on a besoin de l'audio outputs
+                # (lookup ingester). Pour audio pur on évite le round-trip.
+                audio = svc.lookup_audio_outputs(db, file_obj) if kind != "audio" else None
+                if kind == "audio":
+                    entry = _bulk_render_audio(db, file_obj, audio)
+                else:
+                    entry = _bulk_render_text(file_obj, audio, kind)
+                if entry is None:
+                    skipped += 1
+                    continue
+                name, payload, _mime = entry
+                total_bytes += len(payload)
+                if total_bytes > _BULK_DOWNLOAD_MAX_BYTES:
+                    # Stop net pour éviter d'épuiser la RAM. Les fichiers
+                    # restants sont comptés comme skipped pour info user.
+                    skipped += (len(file_ids) - included - skipped)
+                    break
+                # Évite les collisions de noms en suffixant si nécessaire.
+                safe_name = name
+                i = 1
+                # ZipFile.namelist() est O(n) — acceptable pour ≤50 entrées.
+                existing = set(zf.namelist())
+                while safe_name in existing:
+                    base, dot, ext = name.rpartition(".")
+                    safe_name = f"{base}_{i}.{ext}" if dot else f"{name}_{i}"
+                    i += 1
+                zf.writestr(safe_name, payload)
+                included += 1
+    finally:
+        db.close()
+
+    if included == 0:
+        return jsonify({
+            "error": "no_files_available",
+            "skipped": skipped,
+        }), 410
+
+    buf.seek(0)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    zip_name = f"{kind}_{included}fichiers_{ts}.zip"
+    resp = send_file(
+        buf, mimetype="application/zip",
+        as_attachment=True, download_name=zip_name,
+    )
+    # Header de feedback : le front l'utilise pour afficher un toast
+    # « N ignorés (pas encore prêts) » après le download.
+    resp.headers["X-Skipped-Files"] = str(skipped)
+    resp.headers["X-Included-Files"] = str(included)
+    return resp
+
+
 @bp.route("/api/file/stream-transferred/<file_id>")
 @require_auth
 def api_file_stream_transferred(file_id):
