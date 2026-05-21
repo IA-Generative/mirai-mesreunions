@@ -121,7 +121,12 @@ def api_generate_code():
         ttl_minutes = 1
     else:
         ttl_minutes = min(max(int(ttl_raw), 1), CODE_TTL_MAX_MINUTES)
-    max_uploads = min(max(int(data.get("max_uploads", MAX_UPLOADS_PER_SESSION)), 1), 50)
+    # Cap au plafond serveur (MAX_UPLOADS_PER_SESSION = 299 par défaut,
+    # surchargeable via env). L'ancien cap dur à 50 était un reliquat
+    # d'une phase de tests qui plafonnait silencieusement les QR à 50
+    # fichiers même si le client demandait 299 — cf bug PU7S39 2026-05-21.
+    max_uploads = min(max(int(data.get("max_uploads", MAX_UPLOADS_PER_SESSION)), 1),
+                      MAX_UPLOADS_PER_SESSION)
     auto_transcribe = bool(data.get("auto_transcribe", True))
 
     try:

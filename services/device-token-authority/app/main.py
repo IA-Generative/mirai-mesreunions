@@ -143,9 +143,12 @@ def issue_token():
             CODE_TTL_MAX_MINUTES,
         )
         expires_at = now + timedelta(minutes=ttl_minutes)
+    # Cap au plafond serveur MAX_UPLOADS_PER_SESSION (299 par défaut).
+    # L'ancien cap dur 50 plafonnait silencieusement même quand le
+    # frontend demandait 299 — cf bug PU7S39 2026-05-21.
     max_uploads = min(
         max(int(data.get("max_uploads", MAX_UPLOADS_PER_SESSION)), 1),
-        50,
+        MAX_UPLOADS_PER_SESSION,
     )
 
     # Génération côté interne — c'est le point clé
