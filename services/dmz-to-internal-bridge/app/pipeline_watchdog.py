@@ -53,17 +53,28 @@ NON_TERMINAL_STATUSES = (
     "kevent_processing",
 )
 
+# Statuts terminaux qu'on peut RE-tenter si l'utilisateur le demande
+# explicitement (bouton "Relancer les bloqués"). Pas inclus dans le tick
+# automatique pour éviter une boucle de retry infinie sur un audio
+# vraiment cassé (S3 purgé, format non supporté, etc.).
+RETRYABLE_TERMINAL_STATUSES = (
+    "kevent_failed",
+    "failed",
+)
+
 _POD_HOSTNAME = os.environ.get("HOSTNAME") or socket.gethostname()
 _watchdog_started = False
 _watchdog_lock = threading.Lock()
 
 
 def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
-                limit: int = SCAN_BATCH_LIMIT) -> list[Tuple[str, str]]:
+                limit: int = SCAN_BATCH_LIMIT,
+                include_failed: bool = False) -> list[Tuple[str, str]]:
     """Retourne ``[(audio_id, user_sub), ...]`` des jobs candidats à reprise.
 
     Filtre :
-      - status non-terminal
+      - status non-terminal (toujours), + ``kevent_failed``/``failed`` si
+        ``include_failed=True`` (mode manuel "relancer les bloqués")
       - last_activity_at < NOW() - STALE_THRESHOLD_S
       - created_at > NOW() - MAX_AGE_HOURS (évite les très vieux fichiers
         dont S3 a probablement été purgé)
@@ -75,6 +86,10 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
         stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_THRESHOLD_S)
         age_cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
         claim_cutoff = datetime.now(timezone.utc) - timedelta(seconds=CLAIM_LEASE_S)
+
+        statuses = list(NON_TERMINAL_STATUSES)
+        if include_failed:
+            statuses = statuses + list(RETRYABLE_TERMINAL_STATUSES)
 
         q = sql_text("""
             SELECT id::text, user_sub
@@ -88,7 +103,7 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
              LIMIT :limit
         """.replace("{user_filter}", "AND user_sub = :user_sub" if user_sub else ""))
         params = {
-            "statuses": list(NON_TERMINAL_STATUSES),
+            "statuses": statuses,
             "stale_cutoff": stale_cutoff,
             "age_cutoff": age_cutoff,
             "claim_cutoff": claim_cutoff,
@@ -146,13 +161,20 @@ def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog") -> dic
 
 
 def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
-                     limit: int = SCAN_BATCH_LIMIT) -> dict:
+                     limit: int = SCAN_BATCH_LIMIT,
+                     include_failed: bool = False) -> dict:
     """Scan + claim + resume en un seul appel. Utilisé par le thread daemon
     ET par l'endpoint manuel ``/resume-stuck-jobs``.
 
+    ``include_failed=True`` ajoute ``kevent_failed`` aux candidats — à
+    utiliser depuis l'endpoint manuel (bouton "Relancer les bloqués"),
+    pas depuis le tick automatique (sinon boucle de retry infinie sur
+    un fichier vraiment cassé).
+
     Retourne ``{scanned, claimed, resumed: [details], skipped: int}``.
     """
-    candidates = _scan_stuck(session_factory, user_sub=user_sub, limit=limit)
+    candidates = _scan_stuck(session_factory, user_sub=user_sub, limit=limit,
+                              include_failed=include_failed)
     resumed = []
     skipped = 0
     for audio_id, owner_sub in candidates:

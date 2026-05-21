@@ -1773,6 +1773,10 @@ def audio_lookup():
             "transcription_words_json": row.transcription_words_json,
             "audio_quality_score": row.audio_quality_score,
             "audio_duration_seconds": row.audio_duration_seconds,
+            "transcription_started_at": (
+                row.transcription_started_at.isoformat()
+                if row.transcription_started_at else None
+            ),
             "transcription_completed_at": (
                 row.transcription_completed_at.isoformat()
                 if row.transcription_completed_at else None
@@ -2221,10 +2225,12 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
             uaf.reprocess_history = history
             uaf.last_reprocessed_at = datetime.now(timezone.utc)
             uaf.last_activity_at = datetime.now(timezone.utc)
-            # Libère le claim watchdog éventuel : l'opération qu'on relance
-            # remplace toute reprise en cours.
-            uaf.pipeline_claim_at = None
-            uaf.pipeline_claim_pod = None
+            # IMPORTANT : on NE LIBÈRE PAS le claim ici. Le caller (watchdog
+            # ou endpoint manuel) a déjà claim cette row, et le pipeline va
+            # tourner pendant 5-30 min — il faut garder le claim actif pour
+            # qu'aucun autre pod ne re-pickup en parallèle. Le claim
+            # s'étend automatiquement à chaque _set_user_audio_status via
+            # le heartbeat sur pipeline_claim_at.
             db.commit()
         except Exception:
             db.rollback()
@@ -2254,6 +2260,86 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
                  "reprocess_version": new_version, "reason": reason}
 
 
+# Cache in-memory du résultat ``/timing-stats``. TTL court (15 min) :
+# la médiane est lente à dériver (300+ rows participatives), recalcul
+# fréquent inutile. Tuple ``(computed_at, payload_dict)``.
+_TIMING_STATS_CACHE: tuple = (0.0, None)
+_TIMING_STATS_TTL_S = 15 * 60
+
+
+@app.route("/api/v1/pipeline/timing-stats", methods=["GET"])
+def pipeline_timing_stats():
+    """Stats temporelles du pipeline transcription (médiane RTF + durées).
+
+    Calculé sur les jobs ``kevent_completed`` des 14 derniers jours.
+    Cache in-memory 15 min — chaque pod a son cache, c'est OK (résultat
+    converge rapidement entre pods).
+
+    Réponse : ``{median_rtf, sample_size, buckets: {short, medium, long},
+    queue_depth, updated_at}`` où ``buckets`` est la médiane de durée
+    totale (s) par tranche de longueur audio.
+    """
+    global _TIMING_STATS_CACHE
+    now_ts = time.time()
+    cached_at, cached_payload = _TIMING_STATS_CACHE
+    if cached_payload is not None and (now_ts - cached_at) < _TIMING_STATS_TTL_S:
+        return jsonify(cached_payload)
+
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    db = SessionLocal()
+    try:
+        row = db.execute(text("""
+            SELECT
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (transcription_completed_at - transcription_started_at))
+              ) AS median_total_s,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (transcription_completed_at - transcription_started_at))
+                       / NULLIF(audio_duration_seconds, 0)
+              ) AS median_rtf,
+              count(*) AS sample_size,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (transcription_completed_at - transcription_started_at))
+              ) FILTER (WHERE audio_duration_seconds < 600) AS median_short_s,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (transcription_completed_at - transcription_started_at))
+              ) FILTER (WHERE audio_duration_seconds >= 600 AND audio_duration_seconds < 1800) AS median_medium_s,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (transcription_completed_at - transcription_started_at))
+              ) FILTER (WHERE audio_duration_seconds >= 1800) AS median_long_s
+            FROM user_audio_files
+            WHERE transcription_status = 'kevent_completed'
+              AND transcription_completed_at > NOW() - INTERVAL '14 days'
+              AND audio_duration_seconds > 0
+              AND transcription_started_at IS NOT NULL
+              AND transcription_completed_at > transcription_started_at
+        """)).first()
+
+        queue_depth = db.execute(text("""
+            SELECT count(*) FROM user_audio_files
+             WHERE transcription_status IN
+                   ('pending','transcoding','kevent_queued','kevent_transcribing','kevent_processing')
+        """)).scalar() or 0
+
+        payload = {
+            "median_rtf": float(row[1]) if row and row[1] is not None else None,
+            "median_total_s": int(row[0]) if row and row[0] is not None else None,
+            "sample_size": int(row[2]) if row and row[2] is not None else 0,
+            "buckets": {
+                "short_s":  int(row[3]) if row and row[3] is not None else None,
+                "medium_s": int(row[4]) if row and row[4] is not None else None,
+                "long_s":   int(row[5]) if row and row[5] is not None else None,
+            },
+            "queue_depth": int(queue_depth),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _TIMING_STATS_CACHE = (now_ts, payload)
+        return jsonify(payload)
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/pipeline/resume-stuck-jobs", methods=["POST"])
 def resume_stuck_jobs():
     """Déclenche manuellement un cycle du watchdog (scan + claim + resume).
@@ -2276,12 +2362,14 @@ def resume_stuck_jobs():
         return jsonify({"error": "db_unavailable"}), 503
     data = request.get_json(silent=True) or {}
     user_sub = (data.get("user_sub") or "").strip() or None
+    include_failed = bool(data.get("include_failed", False))
     try:
         limit = max(1, min(50, int(data.get("limit") or 20)))
     except (TypeError, ValueError):
         limit = 20
     from app.pipeline_watchdog import scan_and_resume
-    result = scan_and_resume(SessionLocal, user_sub=user_sub, limit=limit)
+    result = scan_and_resume(SessionLocal, user_sub=user_sub, limit=limit,
+                              include_failed=include_failed)
     return jsonify(result)
 
 

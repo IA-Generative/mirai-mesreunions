@@ -85,10 +85,22 @@ const KIND_COLORS = {
 // État local du tab (clear sur unmount).
 let _selectedIds = new Set();   // file IDs cochés en mode bulk
 let _expandedIds = new Set();   // file IDs avec le chevron déployé
-let _transcriptCache = new Map(); // fileId → { status, engine, kp, suggested, fetchedAt }
+let _transcriptCache = new Map(); // fileId → { status, engine, kp, suggested, outputs, fetchedAt }
 let _altPressed = false;
 let _lastSessions = [];
 let _delegationBound = false;
+// IDs des rows fraîchement relancées (par "Relancer les bloqués"). Affiche
+// un badge persistant "🔄 Relancé à HH:MM" sur chaque row tant que le
+// statut transcription n'a pas bougé (signal le watchdog a engagé).
+// Map fileId → { at: Date, lastSeenStatus: string }
+let _recentlyRelaunched = new Map();
+
+// Stats temporelles du pipeline (medianes RTF + durées par bucket).
+// Fetch au mount + refresh toutes les 15min. Utilisé par les tooltips
+// (étape "Démarré à / Écoulé / Estimé restant").
+let _pipelineStats = null;
+let _pipelineStatsLastFetch = 0;
+const _PIPELINE_STATS_TTL_MS = 15 * 60 * 1000;
 
 // ── SVG helpers ───────────────────────────────────────────────────────
 
@@ -196,7 +208,7 @@ function renderHeader(fileCount, hasSelection) {
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:resume-stuck"
-                title="Relancer les transcriptions bloquées (>5min sans activité)">
+                title="Relancer les transcriptions bloquées (>5min sans activité) OU en échec (kevent_failed)">
           🔄 Relancer les bloqués
         </button>
       </div>
@@ -233,19 +245,103 @@ function renderHeader(fileCount, hasSelection) {
   </div>`;
 }
 
+// Format "HH:MM" → "il y a X min" lisible.
+function _fmtElapsed(ms) {
+  if (!ms || ms < 0) return '';
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  if (m < 60) return sec ? `${m}min ${sec}s` : `${m}min`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60}min`;
+}
+
+// Estime le temps restant pour un job en cours, sur base des stats
+// médianes (median_rtf × durée audio) - temps écoulé. Retourne ''
+// quand on n'a pas assez d'info (stats absentes, durée inconnue, etc).
+function _estimateRemaining(file, elapsedMs) {
+  if (!_pipelineStats || !_pipelineStats.median_rtf || !file.audio_duration_seconds) return '';
+  const expectedTotalS = file.audio_duration_seconds * _pipelineStats.median_rtf;
+  const elapsedS = elapsedMs / 1000;
+  const remainingS = expectedTotalS - elapsedS;
+  if (remainingS < 5) return '< 1min';
+  return _fmtElapsed(remainingS * 1000);
+}
+
+// Compte la position dans la file d'attente pour un job en queue.
+// Approximation : count des jobs non-terminaux antérieurs (last_activity
+// ou created plus ancien) — précision suffisante pour un tooltip.
+function _queuePosition(file) {
+  let pos = 1;
+  const myTs = new Date(file.created_at).getTime();
+  for (const s of _lastSessions || []) {
+    for (const f of (s.uploads || [])) {
+      if (f.id === file.id) continue;
+      const cached = _transcriptCache.get(f.id);
+      const st = (cached && cached.status) || '';
+      if (!['kevent_queued','kevent_transcribing','kevent_processing','pending','transcoding']
+            .includes(st) && f.status !== 'pending' && f.status !== 'transcoding') continue;
+      const ts = new Date(f.created_at).getTime();
+      if (ts < myTs) pos++;
+    }
+  }
+  return pos;
+}
+
 // Tooltip détaillé du pipeline pour rollover sur la pastille status.
-// Donne l'étape courante + status_message backend si disponible + l'engine
-// transcription si le transcript-status est connu.
+// Donne l'étape courante + status_message backend + engine + timing
+// (Démarré / Écoulé / Estimé restant) + position file quand pertinent.
 function _buildStatusTooltip(file, status) {
   const lines = [status.label];
   if (file.status_message) lines.push('— ' + file.status_message);
   const cached = _transcriptCache.get(file.id);
   if (cached && cached.engine) lines.push('Moteur : ' + cached.engine);
   if (cached && cached.status) lines.push('État transcription : ' + cached.status);
+
+  // Lignes de timing pour les jobs en cours.
+  const inProgress = status.kind === 'processing';
+  if (inProgress) {
+    const startedAt = file.transcription_started_at || (cached && cached.startedAt);
+    if (startedAt) {
+      const startDate = new Date(startedAt);
+      const elapsedMs = Date.now() - startDate.getTime();
+      lines.push('');
+      lines.push(`⏱ Démarré à ${startDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`);
+      lines.push(`⏱ Écoulé : ${_fmtElapsed(elapsedMs)}`);
+      const eta = _estimateRemaining(file, elapsedMs);
+      if (eta) lines.push(`⏱ Estimé restant : ${eta}`);
+    }
+    const pos = _queuePosition(file);
+    if (pos > 1) lines.push(`📊 ${pos}ᵉ dans la file`);
+  }
+
+  // Badge "relancé" persistant tant que le statut n'a pas bougé.
+  const relaunch = _recentlyRelaunched.get(file.id);
+  if (relaunch) {
+    lines.push('');
+    lines.push(`🔄 Relancé à ${relaunch.at.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} (en attente d'activité)`);
+  }
+
   lines.push('');
   lines.push('Clic = ouvrir la fiche complète');
   lines.push('▾ = afficher le résumé inline');
   return lines.join('\n');
+}
+
+async function _fetchPipelineStats() {
+  if (_pipelineStats && (Date.now() - _pipelineStatsLastFetch) < _PIPELINE_STATS_TTL_MS) {
+    return _pipelineStats;
+  }
+  try {
+    const resp = await fetch('/api/pipeline/timing-stats');
+    if (!resp.ok) return null;
+    _pipelineStats = await resp.json();
+    _pipelineStatsLastFetch = Date.now();
+    return _pipelineStats;
+  } catch (e) {
+    return null;
+  }
 }
 
 function renderRow(file, session) {
@@ -388,14 +484,24 @@ async function _prefetchTranscriptStatus(fileId) {
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data || !data.available) return;
+    const newStatus = (data.transcription_status || '').toLowerCase();
     _transcriptCache.set(fileId, {
-      status: (data.transcription_status || '').toLowerCase(),
+      status: newStatus,
       engine: data.transcription_engine || '',
       suggested: data.suggested_filename || '',
       kp: data.key_points_summary || '',
       outputs: data.outputs || {},
+      // transcription_started_at exposé par transcript-status (fiche
+      // détaillée) — utilisé pour calculer Écoulé / Estimé restant.
+      startedAt: data.transcription_started_at || null,
       fetchedAt: Date.now(),
     });
+    // Auto-clear du badge "Relancé" : si le statut a bougé depuis la
+    // relance, le pipeline a effectivement repris.
+    const relaunch = _recentlyRelaunched.get(fileId);
+    if (relaunch && newStatus && newStatus !== relaunch.lastSeenStatus) {
+      _recentlyRelaunched.delete(fileId);
+    }
     updateRowStatus(fileId);
   } catch (e) {
     // Silencieux — un échec de pre-fetch n'est pas critique (la pastille
@@ -445,14 +551,20 @@ async function _fetchAndRenderSummary(fileId) {
     }
     // Mémorise pour le titre + status (utilisé par resolveTitle/resolveStatus
     // sur prochain render via loadSessions polling).
+    const newStatus2 = (data.transcription_status || '').toLowerCase();
     _transcriptCache.set(fileId, {
-      status: (data.transcription_status || '').toLowerCase(),
+      status: newStatus2,
       engine: data.transcription_engine || '',
       suggested: data.suggested_filename || '',
       kp: data.key_points_summary || '',
       outputs: data.outputs || {},
+      startedAt: data.transcription_started_at || null,
       fetchedAt: Date.now(),
     });
+    const relaunch2 = _recentlyRelaunched.get(fileId);
+    if (relaunch2 && newStatus2 && newStatus2 !== relaunch2.lastSeenStatus) {
+      _recentlyRelaunched.delete(fileId);
+    }
     const kp = (data.key_points_summary || '').trim();
     summaryEl.innerHTML = kp
       ? `<pre class="meeting-row-summary-kp">${escapeHtml(kp)}</pre>`
@@ -753,7 +865,10 @@ async function _resumeStuckJobs(ev) {
   try {
     const resp = await fetch('/api/files/resume-stuck-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ limit: 20 }),
+      // Bouton manuel : on inclut aussi les kevent_failed (action user
+      // explicite, opt-in). Le tick automatique reste sur les
+      // non-terminaux uniquement pour éviter les boucles de retry.
+      body: JSON.stringify({ limit: 20, include_failed: true }),
     });
     if (!resp.ok) {
       const data = await resp.json().catch(() => ({}));
@@ -779,6 +894,13 @@ async function _resumeStuckJobs(ev) {
       const f = _findFile(fid);
       const title = (f && (f.suggested_filename || f.original_filename)) || fid.slice(0, 8);
       titles.push(title);
+      // Marque comme relancé : un badge persistant "🔄 Relancé à HH:MM"
+      // s'affiche jusqu'à ce que le statut transcription bouge (cf
+      // _checkRelaunchClear appelé au polling).
+      _recentlyRelaunched.set(fid, {
+        at: new Date(),
+        lastSeenStatus: (_transcriptCache.get(fid) || {}).status || '',
+      });
       // Invalide le cache transcript pour ce fileId — le polling va
       // refetch le nouveau statut depuis transcript-status.
       _transcriptCache.delete(fid);
@@ -899,6 +1021,9 @@ export function mount(container /*, ctx */) {
     if (fn) fn({ force: true });
   }
   _firstLoadDone = true;
+  // Pré-charge les stats temporelles (cache 15min) pour que le calcul
+  // d'ETA dans les tooltips soit dispo dès le 1er rollover.
+  _fetchPipelineStats();
 }
 
 export function unmount(/* container */) {

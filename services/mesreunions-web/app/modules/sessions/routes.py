@@ -888,6 +888,11 @@ def api_file_transcript_status(file_id):
             "key_points_summary": audio.get("key_points_summary"),
             "meeting_datetime": audio.get("meeting_datetime"),
             "kevent_job_id": audio.get("kevent_job_id"),
+            # Timing : utilisé côté frontend pour calculer "Écoulé /
+            # Estimé restant" dans les tooltips et la fiche détail.
+            "transcription_started_at": audio.get("transcription_started_at"),
+            "transcription_completed_at": audio.get("transcription_completed_at"),
+            "audio_duration_seconds": audio.get("audio_duration_seconds"),
             # Le CR (meeting_analysis_json) reste exposé même en mode
             # summary : c'est le premier onglet, on veut éviter un round-trip
             # supplémentaire pour l'afficher.

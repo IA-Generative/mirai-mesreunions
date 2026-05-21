@@ -401,6 +401,22 @@ def patch_my_glossary_term():
     return jsonify(resp.json() if resp.content else {}), resp.status_code
 
 
+@bp.route("/api/pipeline/timing-stats", methods=["GET"])
+@require_auth
+def pipeline_timing_stats_proxy():
+    """Proxy GET vers /api/v1/pipeline/timing-stats (cache 15min in-ingester).
+
+    Pas de scope par user_sub : la médiane est globale (calculée sur tous
+    les jobs réussis du parc). Permet à l'UI d'afficher des ETA basés
+    sur l'historique réel.
+    """
+    try:
+        resp = _call_ingester("GET", "/api/v1/pipeline/timing-stats")
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
 @bp.route("/api/files/resume-stuck-jobs", methods=["POST"])
 @require_auth
 def resume_stuck_jobs_user():
