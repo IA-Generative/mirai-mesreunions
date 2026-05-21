@@ -1256,6 +1256,17 @@ def _perform_pull(payload: dict) -> dict:
     notify_external_status(file_id, "transferring", "Transfert: finalisation et indexation (90%)")
     db = SessionLocal()
     try:
+        # Pré-remplissage best-effort de meeting_datetime à partir du nom
+        # de fichier (Voice Memos iOS, Cop'ia, dictaphones Android écrivent
+        # souvent la date dans le nom). L'override manuel utilisateur via
+        # l'UI fiche détail reste prioritaire (cette valeur n'est posée
+        # que si on n'a rien d'autre, et un user edit l'écrasera quand il
+        # voudra). cf libs/shared/app/filename_datetime.py.
+        from libs.shared.app.filename_datetime import extract_meeting_datetime
+        parsed_dt = extract_meeting_datetime(
+            payload.get("original_filename") or transcoded_filename or ""
+        )
+
         audio_file = UserAudioFile(
             id=uuid4(),
             user_sub=user_sub,
@@ -1267,6 +1278,7 @@ def _perform_pull(payload: dict) -> dict:
             audio_quality_score=payload.get("quality_score"),
             audio_duration_seconds=payload.get("duration_seconds"),
             transcription_status="pending" if auto_transcribe else "disabled",
+            meeting_datetime=parsed_dt,
         )
         db.add(audio_file)
         db.flush()  # garantit audio_file.id avant la Meeting
