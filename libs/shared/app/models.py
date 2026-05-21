@@ -354,9 +354,27 @@ class UserAudioFile(InternalBase):
     # Alias legacy supprimés en PR2d. Les noms canoniques migration 012 sont
     # `meeting_id`, `reprocessed_with_meeting_id`, `suggested_meeting_dismissed_id`.
 
+    # ─── Pipeline watchdog (migration 017) ───────────────────────────
+    # Heartbeat applicatif : touché à chaque étape clé du pipeline
+    # (submit Kevent, poll status, application résultat). Permet au
+    # watchdog de détecter les jobs orphelins (last_activity_at trop
+    # vieux pour un status non-terminal). Default = created_at.
+    last_activity_at = Column(DateTime(timezone=True), nullable=True)
+    # Lease court (90s par défaut) pour éviter qu'un job orphelin soit
+    # repris par plusieurs pods simultanément. Le watchdog claim via
+    # UPDATE atomique avec WHERE (pipeline_claim_at IS NULL OR < NOW()-90s).
+    pipeline_claim_at = Column(DateTime(timezone=True), nullable=True)
+    pipeline_claim_pod = Column(String(128), nullable=True)
+
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
+        # Index utilisé par le watchdog : balaie tous les jobs non-terminaux
+        # dont last_activity_at est trop vieux. Ordre des colonnes choisi
+        # pour que postgres puisse short-circuiter sur transcription_status
+        # avant le scan temporel.
+        Index("ix_user_audio_watchdog",
+              "transcription_status", "last_activity_at"),
     )
 
 

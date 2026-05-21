@@ -373,6 +373,10 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         for key, val in fields.items():
             if key in allowed:
                 setattr(rec, key, val)
+        # Heartbeat watchdog : chaque changement de statut/colonne signale
+        # une activité du pipeline. Le watchdog scan ``last_activity_at``
+        # pour repérer les jobs orphelins (cf migration 018 + watchdog.py).
+        rec.last_activity_at = datetime.now(timezone.utc)
         db.commit()
     finally:
         db.close()
@@ -2147,6 +2151,140 @@ def reprocess_audio(audio_id: str):
         db.close()
 
 
+def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
+                                         *, reason: str = "manual") -> tuple[int, dict]:
+    """Logic réutilisable de ``/full-reprocess`` (sans Flask).
+
+    Reset les colonnes pipeline + bump version + relance ``_transcribe_via_kevent``
+    dans un thread daemon. Retourne ``(http_status_code, payload_dict)`` pour
+    que le caller (endpoint HTTP ou watchdog) puisse uniformiser la
+    réponse. ``reason`` est tracé dans ``reprocess_history``.
+
+    Préconditions :
+      - audio existe et appartient à user_sub (sinon 404)
+      - stored_filename existe et le blob est encore dans S3-internal (sinon 410)
+    """
+    if SessionLocal is None:
+        return 503, {"error": "db_unavailable"}
+    from libs.shared.app.models import UserAudioFile
+    db = SessionLocal()
+    try:
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return 404, {"error": "not_found"}
+        if not uaf.stored_filename:
+            return 410, {"error": "no_audio_path"}
+        try:
+            if not object_exists(s3_internal_cfg, uaf.stored_filename):
+                return 410, {"error": "audio_purged"}
+        except Exception:
+            logger.exception("reset+resubmit: s3 probe failed for %s", audio_id)
+            return 503, {"error": "s3_unavailable"}
+
+        prev_entry = {
+            "version": int(uaf.reprocess_version or 0),
+            "at": datetime.now(timezone.utc).isoformat(),
+            "type": reason,
+            "prev_status": uaf.transcription_status,
+        }
+        history = list(uaf.reprocess_history or [])
+        history.append(prev_entry)
+        if len(history) > 5:
+            history = history[-5:]
+        new_version = int(uaf.reprocess_version or 0) + 1
+        stored_filename = uaf.stored_filename
+        original_filename = uaf.original_filename
+        try:
+            uaf.transcription_status = "kevent_queued"
+            uaf.transcription_text = None
+            uaf.transcription_words_json = None
+            uaf.transcription_language = None
+            uaf.transcription_engine = None
+            uaf.transcription_started_at = None
+            uaf.transcription_completed_at = None
+            uaf.diarization_json = None
+            uaf.speaker_tagged_text = None
+            uaf.glossary_corrected_text = None
+            uaf.cleaned_text = None
+            uaf.reformulated_text = None
+            uaf.meeting_analysis_json = None
+            uaf.absentee_summary = None
+            uaf.suggested_filename = None
+            uaf.key_points_summary = None
+            uaf.kevent_job_id = None
+            uaf.reprocess_version = new_version
+            uaf.reprocess_history = history
+            uaf.last_reprocessed_at = datetime.now(timezone.utc)
+            uaf.last_activity_at = datetime.now(timezone.utc)
+            # Libère le claim watchdog éventuel : l'opération qu'on relance
+            # remplace toute reprise en cours.
+            uaf.pipeline_claim_at = None
+            uaf.pipeline_claim_pod = None
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("reset+resubmit: reset commit failed for %s", audio_id)
+            return 500, {"error": "db_write_failed"}
+    finally:
+        db.close()
+
+    def _run():
+        try:
+            file_data = download_fileobj(s3_internal_cfg, stored_filename)
+            transcoded_filename = stored_filename.rsplit("/", 1)[-1]
+            _transcribe_via_kevent(
+                audio_id, transcoded_filename, file_data,
+                {"user_sub": user_sub, "original_filename": original_filename},
+            )
+        except Exception:
+            logger.exception("reset+resubmit: pipeline crashed for %s", audio_id)
+            try:
+                _set_user_audio_status(audio_id, "kevent_failed",
+                                       transcription_engine="kevent")
+            except Exception:
+                logger.exception("reset+resubmit: status_failed write also failed")
+
+    threading.Thread(target=_run, name=f"resubmit-{audio_id[:8]}", daemon=True).start()
+    return 202, {"reprocessed": True, "status": "kevent_queued",
+                 "reprocess_version": new_version, "reason": reason}
+
+
+@app.route("/api/v1/pipeline/resume-stuck-jobs", methods=["POST"])
+def resume_stuck_jobs():
+    """Déclenche manuellement un cycle du watchdog (scan + claim + resume).
+
+    Body : ``{user_sub?: str, limit?: int}``.
+    - Sans ``user_sub`` : scan global (toutes les rows de tous les users,
+      à utiliser depuis admin uniquement — l'auth bearer INTERNAL_API_TOKEN
+      du caller fait foi).
+    - Avec ``user_sub`` : scan limité à cet utilisateur (utilisé par
+      l'endpoint user-facing dans mesreunions-web).
+
+    Retourne ``{scanned, claimed, resumed: [{audio_id, http_code, ...}],
+    skipped: int}``. Le pipeline tourne en thread daemon par audio_id,
+    le caller doit poller ``/api/file/transcript-status`` côté frontend
+    pour suivre la progression.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip() or None
+    try:
+        limit = max(1, min(50, int(data.get("limit") or 20)))
+    except (TypeError, ValueError):
+        limit = 20
+    from app.pipeline_watchdog import scan_and_resume
+    result = scan_and_resume(SessionLocal, user_sub=user_sub, limit=limit)
+    return jsonify(result)
+
+
 @app.route("/api/v1/audio/<audio_id>/full-reprocess", methods=["POST"])
 def full_reprocess_audio(audio_id: str):
     """Relance le pipeline COMPLET depuis l'audio transcodé S3-internal :
@@ -3120,6 +3258,16 @@ def create_app():
         threading.Thread(target=_orphan_watchdog_loop,
                          daemon=True, name="kevent-orphan-watchdog").start()
         _orphan_watchdog_started = True
+    # Phase A — pipeline watchdog actif : repère les jobs orphelins via
+    # last_activity_at + claim atomique, et relance ``full-reprocess`` en
+    # interne. Garantit qu'aucun job ne reste bloqué même si le pod meurt
+    # en plein traitement. Cf app/pipeline_watchdog.py.
+    try:
+        from app.pipeline_watchdog import start_watchdog
+        if SessionLocal is not None:
+            start_watchdog(SessionLocal)
+    except Exception:
+        logger.exception("pipeline_watchdog launch failed (non-fatal)")
     if INTERNAL_PUSH_TRIGGER_TOKEN:
         logger.info("Pull trigger HTTP endpoint enabled (allowlist=%s)",
                     _TRIGGER_IP_ALLOWLIST_RAW or "<empty>")

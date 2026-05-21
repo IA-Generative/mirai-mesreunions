@@ -194,6 +194,11 @@ function renderHeader(fileCount, hasSelection) {
                 title="Inverser l'ordre de tri (date de réunion)">
           <span data-sort-label>Plus récent d'abord</span>
         </button>
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
+                data-action="meetings-new:resume-stuck"
+                title="Relancer les transcriptions bloquées (>5min sans activité)">
+          🔄 Relancer les bloqués
+        </button>
       </div>
     </div>
     <div class="meetings-tab-header-hint">
@@ -551,6 +556,10 @@ function _onClick(ev) {
       if (fn) fn();
       break;
     }
+    case 'resume-stuck': {
+      _resumeStuckJobs(e);
+      break;
+    }
     case 'pick-files': {
       const input = document.getElementById('local-upload-files-input');
       if (input) input.click();
@@ -729,6 +738,40 @@ async function _runBulkDownload(kind) {
       window.showToast(`✓ ${included} fichier(s) — ${skipped} ignoré(s) (pas encore prêts)`, 'success');
     } else if (window.showToast) {
       window.showToast(`✓ ${included} fichier(s) téléchargé(s)`, 'success');
+    }
+  } catch (e) {
+    window.alert(`Erreur réseau : ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = originalLabel; }
+  }
+}
+
+async function _resumeStuckJobs(ev) {
+  const btn = ev && ev.target && ev.target.closest('[data-action="meetings-new:resume-stuck"]');
+  const originalLabel = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Analyse…'; }
+  try {
+    const resp = await fetch('/api/files/resume-stuck-jobs', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit: 20 }),
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      window.alert(`Échec : ${data.error || ('HTTP ' + resp.status)}`);
+      return;
+    }
+    const data = await resp.json();
+    const claimed = data.claimed || 0;
+    if (claimed === 0) {
+      if (window.showToast) window.showToast('Aucune transcription bloquée à relancer.', 'info');
+      else window.alert('Aucune transcription bloquée à relancer.');
+    } else {
+      const msg = `🔄 ${claimed} transcription(s) relancée(s) — suivi via la liste (statut "en cours" puis "terminé").`;
+      if (window.showToast) window.showToast(msg, 'success');
+      else window.alert(msg);
+      // Refresh la liste pour montrer les nouveaux statuts.
+      const reload = _resolveLegacyFn('loadSessions');
+      if (reload) reload({ force: true });
     }
   } catch (e) {
     window.alert(`Erreur réseau : ${e.message}`);

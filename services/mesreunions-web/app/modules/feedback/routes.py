@@ -401,6 +401,31 @@ def patch_my_glossary_term():
     return jsonify(resp.json() if resp.content else {}), resp.status_code
 
 
+@bp.route("/api/files/resume-stuck-jobs", methods=["POST"])
+@require_auth
+def resume_stuck_jobs_user():
+    """Body : ``{limit?: int}``. Déclenche un cycle du watchdog pipeline
+    LIMITÉ aux fichiers de l'utilisateur connecté.
+
+    Réutilise la route interne ``/api/v1/pipeline/resume-stuck-jobs`` en
+    forçant ``user_sub`` au sub de l'utilisateur (jamais à la valeur
+    fournie en body — sinon un user pourrait relancer les jobs d'un
+    autre user via curl).
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    body["user_sub"] = user_sub  # force le scope
+    try:
+        resp = _call_ingester("POST", "/api/v1/pipeline/resume-stuck-jobs",
+                              json_body=body)
+    except req.RequestException:
+        return jsonify({"error": "ingester_unavailable"}), 502
+    return jsonify(resp.json() if resp.content else {}), resp.status_code
+
+
 @bp.route("/api/my-glossary/cleanup", methods=["POST"])
 @require_auth
 def cleanup_my_glossary():
