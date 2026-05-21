@@ -194,12 +194,12 @@ Index `ix_user_audio_watchdog (transcription_status, last_activity_at)` pour sca
 - `PIPELINE_WATCHDOG_INTERVAL_S` (30) — fréquence du scan
 - `PIPELINE_STALE_THRESHOLD_S` (300) — durée d'inactivité avant qu'une row soit candidate
 - `PIPELINE_CLAIM_LEASE_S` (90) — durée de vie d'un claim
-- `PIPELINE_MAX_AGE_HOURS` (24) — au-delà, on n'essaie plus (S3 probablement purgé)
+- `PIPELINE_MAX_AGE_HOURS` (168 = 7j) — aligné sur `INTERNAL_PURGE_MAX_AGE_DAYS` (rétention S3 interne). Au-delà, S3 est purgé, le retry échouera en `audio_purged`
 - `PIPELINE_WATCHDOG_DISABLED=1` — kill switch (debug)
 
 **Limites connues** :
 - Resume = full re-submit Kevent (nouveau job, le résultat partiel précédent est jeté). Coût Kevent doublé pour les jobs repris ; acceptable pour des incidents <5/jour.
-- Cap 24 h : un job bloqué depuis >24 h ne sera plus repris (le blob audio interne a probablement été purgé par `INTERNAL_PURGE_MAX_AGE_HOURS`).
+- Cap 7 j : un job bloqué depuis >7 j ne sera plus repris (le blob audio interne a probablement été purgé par `INTERNAL_PURGE_MAX_AGE_DAYS`).
 - Le watchdog ne ressuscite pas un fichier dont le blob S3 interne a été purgé — il renvoie `410 audio_purged` côté `_reset_and_resubmit_kevent_pipeline`.
 
 ### 5.6 La corbeille (soft-delete)

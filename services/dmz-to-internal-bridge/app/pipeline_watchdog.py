@@ -40,7 +40,7 @@ WATCHDOG_INTERVAL_S = int(os.environ.get("PIPELINE_WATCHDOG_INTERVAL_S", "30"))
 STALE_THRESHOLD_S = int(os.environ.get("PIPELINE_STALE_THRESHOLD_S", "300"))  # 5 min
 CLAIM_LEASE_S = int(os.environ.get("PIPELINE_CLAIM_LEASE_S", "90"))
 SCAN_BATCH_LIMIT = int(os.environ.get("PIPELINE_SCAN_BATCH_LIMIT", "20"))
-MAX_AGE_HOURS = int(os.environ.get("PIPELINE_MAX_AGE_HOURS", "24"))
+MAX_AGE_HOURS = int(os.environ.get("PIPELINE_MAX_AGE_HOURS", "168"))  # 7 jours
 
 # Statuts non-terminaux (= job en cours). Si la row est dans un de ces
 # états ET inactive depuis STALE_THRESHOLD_S, c'est un orphelin candidat.
