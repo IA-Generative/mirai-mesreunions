@@ -41,6 +41,12 @@ STALE_THRESHOLD_S = int(os.environ.get("PIPELINE_STALE_THRESHOLD_S", "300"))  # 
 CLAIM_LEASE_S = int(os.environ.get("PIPELINE_CLAIM_LEASE_S", "90"))
 SCAN_BATCH_LIMIT = int(os.environ.get("PIPELINE_SCAN_BATCH_LIMIT", "20"))
 MAX_AGE_HOURS = int(os.environ.get("PIPELINE_MAX_AGE_HOURS", "168"))  # 7 jours
+# Cap dur sur le nombre de retentatives auto. Au-delà, marquer
+# kevent_failed et stop. Évite la boucle infinie quand un job ne
+# revient JAMAIS du pipeline (Kevent rejette silencieusement, audio
+# corrompu, race interne...). L'utilisateur peut toujours forcer un
+# retry manuel via le bouton "Relancer les bloqués" (include_failed).
+MAX_AUTO_RETRIES = int(os.environ.get("PIPELINE_MAX_AUTO_RETRIES", "5"))
 
 # Statuts non-terminaux (= job en cours). Si la row est dans un de ces
 # états ET inactive depuis STALE_THRESHOLD_S, c'est un orphelin candidat.
@@ -91,17 +97,27 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
         if include_failed:
             statuses = statuses + list(RETRYABLE_TERMINAL_STATUSES)
 
-        q = sql_text("""
+        # Cap auto : on filtre les rows qui ont déjà été relancées plus
+        # de MAX_AUTO_RETRIES fois. Quand include_failed=True (mode user
+        # explicite), on ignore ce cap : l'utilisateur peut toujours
+        # forcer un dernier essai.
+        retry_cap_clause = ""
+        if not include_failed:
+            retry_cap_clause = "AND COALESCE(reprocess_version, 0) < :max_retries"
+
+        q = sql_text(("""
             SELECT id::text, user_sub
               FROM user_audio_files
              WHERE transcription_status = ANY(:statuses)
                AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)
                AND created_at > :age_cutoff
                AND (pipeline_claim_at IS NULL OR pipeline_claim_at < :claim_cutoff)
+               {retry_cap}
                {user_filter}
              ORDER BY last_activity_at ASC NULLS FIRST
              LIMIT :limit
-        """.replace("{user_filter}", "AND user_sub = :user_sub" if user_sub else ""))
+        """).replace("{retry_cap}", retry_cap_clause)
+            .replace("{user_filter}", "AND user_sub = :user_sub" if user_sub else ""))
         params = {
             "statuses": statuses,
             "stale_cutoff": stale_cutoff,
@@ -109,6 +125,8 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
             "claim_cutoff": claim_cutoff,
             "limit": limit,
         }
+        if not include_failed:
+            params["max_retries"] = MAX_AUTO_RETRIES
         if user_sub:
             params["user_sub"] = user_sub
         rows = db.execute(q, params).fetchall()
@@ -195,6 +213,39 @@ def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
     }
 
 
+def _mark_capped_as_failed(session_factory) -> int:
+    """Marque kevent_failed les rows qui ont dépassé le cap de retentatives
+    auto ET qui sont encore en état non-terminal stale. Sortir du
+    purgatoire pour qu'elles apparaissent clairement comme failed côté UI.
+    """
+    db = session_factory()
+    try:
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_THRESHOLD_S)
+        result = db.execute(sql_text("""
+            UPDATE user_audio_files
+               SET transcription_status = 'kevent_failed',
+                   transcription_completed_at = COALESCE(transcription_completed_at, NOW()),
+                   last_activity_at = NOW(),
+                   pipeline_claim_at = NULL,
+                   pipeline_claim_pod = NULL
+             WHERE transcription_status = ANY(:statuses)
+               AND COALESCE(reprocess_version, 0) >= :max_retries
+               AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)
+        """), {
+            "statuses": list(NON_TERMINAL_STATUSES),
+            "max_retries": MAX_AUTO_RETRIES,
+            "stale_cutoff": stale_cutoff,
+        })
+        db.commit()
+        return result.rowcount
+    except Exception:
+        db.rollback()
+        logger.exception("watchdog: _mark_capped_as_failed failed")
+        return 0
+    finally:
+        db.close()
+
+
 def _watchdog_loop(session_factory):
     logger.info(
         "pipeline_watchdog started: interval=%ss stale=%ss lease=%ss pod=%s",
@@ -203,6 +254,15 @@ def _watchdog_loop(session_factory):
     while True:
         try:
             time.sleep(WATCHDOG_INTERVAL_S)
+            # 1) Sortir du purgatoire les rows qui ont dépassé le cap
+            #    retries. Évite la boucle infinie sur un job vraiment cassé.
+            capped = _mark_capped_as_failed(session_factory)
+            if capped > 0:
+                logger.warning(
+                    "pipeline_watchdog: %d row(s) capped at %d retries → marked kevent_failed",
+                    capped, MAX_AUTO_RETRIES,
+                )
+            # 2) Scan + claim + resume normal.
             result = scan_and_resume(session_factory)
             if result["claimed"] > 0 or result["skipped"] > 0:
                 logger.info(
