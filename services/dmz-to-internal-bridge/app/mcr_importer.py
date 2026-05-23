@@ -138,9 +138,16 @@ def _import_meeting_audio(
     try:
         resp = client.download_audio(access_token, mcr_meeting_id)
     except MCRApplicativeError as exc:
-        if "No audio available" in str(exc):
-            return False
-        raise
+        # Tous les "applicatif" sur l'audio = audio indisponible côté MCR :
+        #   - 404/410 : pas d'audio pour cette réunion
+        #   - 403 + "feature flag" : audio download globalement désactivé en prod
+        # Dans tous ces cas on retourne False pour que le caller fallback sur
+        # le transcript DOCX (qui n'a pas le feature flag).
+        logger.info(
+            "mcr_importer: audio indisponible côté MCR pour meeting %s (%s) — fallback transcript",
+            mcr_meeting_id, exc,
+        )
+        return False
     try:
         chunks = []
         total_bytes = 0
@@ -202,7 +209,69 @@ def _import_meeting_transcript(
         db.commit()
     finally:
         db.close()
+
+    # Lance la chaîne LLM (glossary correction / cleaning / reformulation /
+    # meeting analysis / key_points / absentee_summary / suggested_filename)
+    # sur la transcription brute MCR — équivalent du pipeline kevent
+    # post-Whisper, sans Whisper. Skip diarization / speaker_naming (pas
+    # d'audio donc pas de speakers identifiables).
+    _trigger_llm_chain_on_transcript(session_factory, str(row.id), text)
     return True
+
+
+def _trigger_llm_chain_on_transcript(session_factory, audio_id: str, transcript: str) -> None:
+    """Spawn un thread daemon qui exécute la chaîne LLM puis met à jour la row.
+
+    Réutilise ``_run_llm_chain_for_audio`` et ``_set_user_audio_status`` de
+    puller.py — même service donc import direct OK.
+    """
+    def _run():
+        try:
+            from app.puller import (
+                _build_llm_client,
+                _run_llm_chain_for_audio,
+                _set_user_audio_status,
+            )
+        except Exception:
+            logger.exception("mcr_importer: cannot import LLM chain helpers; transcript stays raw")
+            return
+        try:
+            llm = _build_llm_client()
+            if llm is None:
+                logger.info("mcr_importer: LiteLLM non configuré, on garde le transcript brut")
+                return
+            chain_updates, chain_status = _run_llm_chain_for_audio(
+                transcript,
+                None,  # pas de speaker_tagged_text
+                llm=llm,
+                glossary_terms=None,  # fallback _GLOSSARY_TERMS statique
+                include_metadata=True,
+            )
+            final_status = (
+                "kevent_completed"
+                if chain_status == "kevent_completed"
+                else "kevent_partially_completed"
+            )
+            # transcription_engine reste "mcr" — le LLM enrichit mais l'origine
+            # de la transcription brute c'est MCR.
+            _set_user_audio_status(audio_id, final_status, **chain_updates)
+            logger.info(
+                "mcr_importer: LLM chain done audio=%s status=%s outputs=%d",
+                audio_id, final_status, len(chain_updates),
+            )
+        except Exception:
+            logger.exception("mcr_importer: LLM chain crashed for %s", audio_id)
+            try:
+                from app.puller import _set_user_audio_status
+                _set_user_audio_status(audio_id, "kevent_partially_completed")
+            except Exception:
+                logger.exception("mcr_importer: also failed to mark partially_completed")
+
+    threading.Thread(
+        target=_run,
+        name=f"mcr-transcript-llm-{audio_id[:8]}",
+        daemon=True,
+    ).start()
 
 
 def _handle_message(session_factory, s3_internal_cfg: S3Config, message: dict) -> bool:

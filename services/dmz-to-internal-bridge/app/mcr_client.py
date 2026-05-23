@@ -237,6 +237,22 @@ class MCRClient:
         if resp.status_code in (404, 410):
             resp.close()
             raise MCRApplicativeError(f"No audio available for meeting {meeting_id}")
+        # 403 + "feature flag" body = audio download globalement désactivé côté
+        # MCR (cf feature_flag_service.is_get_meeting_audio_enabled). Ce n'est
+        # PAS une erreur d'auth — on traite comme "audio indisponible" pour
+        # que le caller fallback sur le transcript.
+        if resp.status_code == 403:
+            body_peek = ""
+            try:
+                body_peek = resp.text or ""
+            except Exception:
+                pass
+            resp.close()
+            if "feature flag" in body_peek.lower():
+                raise MCRApplicativeError(
+                    f"Audio download disabled by MCR feature flag (meeting {meeting_id})"
+                )
+            raise MCRAuthError(f"GET /meetings/{meeting_id}/audio → 403 (token rejected by MCR)")
         self._raise_for_status(resp, context=f"GET /meetings/{meeting_id}/audio")
         return resp
 
