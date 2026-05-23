@@ -147,16 +147,27 @@ class KeventClient:
 
     @staticmethod
     def _whisper_safe_filename(filename: str) -> str:
-        """Renomme l'extension pour matcher la whitelist du gateway Whisper.
+        """Renomme l'extension + sanitise pour matcher la whitelist gateway.
 
-        Le gateway accepte ``.mp3 .wav .m4a .ogg .flac``. Le audio-normalizer
-        produit du ``.mp4`` (container MP4 + AAC), qui est sémantiquement
-        identique à ``.m4a`` côté contenu. On renomme juste l'extension du
-        multipart sans toucher aux bytes, sinon le gateway répond
-        ``400: extension ".mp4" not accepted``.
+        1) Garde le BASENAME : retire tout chemin (``Pitch my epic/X.mp3``
+           → ``X.mp3``). Sinon Whisper côté kevent écrit le fichier sur
+           disque et le ``/`` est interprété comme un sous-dossier
+           inexistant → upload silencieusement perdu. Vu en prod 2026-05-24
+           sur ``Pitch my epic/2026-05-20_13_45_46.mp3`` qui ne pouvait
+           jamais terminer kevent_processing.
+        2) Renomme ``.mp4`` → ``.m4a`` parce que le gateway whitelist les
+           extensions audio : ``.mp3 .wav .m4a .ogg .flac``. Le
+           audio-normalizer produit du ``.mp4`` (container MP4 + AAC),
+           sémantiquement identique à ``.m4a`` ; on renomme juste
+           l'extension du multipart, pas les bytes.
         """
         if not filename:
             return filename
+        # Strip path components — équivalent os.path.basename mais en pur
+        # str pour éviter d'importer os pour ça et marcher avec / ET \.
+        for sep in ("/", "\\"):
+            if sep in filename:
+                filename = filename.rsplit(sep, 1)[-1]
         lower = filename.lower()
         if lower.endswith(".mp4"):
             return filename[:-4] + ".m4a"
