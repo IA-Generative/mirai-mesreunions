@@ -176,6 +176,8 @@ def trigger_import():
 
     import_ids: list[str] = []
     rabbit_cfg = get_rabbit_cfg()
+    if rabbit_cfg is None:
+        return _err("rabbitmq_not_configured", 500)
 
     db = session_scope()
     try:
