@@ -262,7 +262,33 @@ def main():
             # 403 = pas à nous, on continue le scan
 
     if bad_id is None:
-        print("\n⚠️ Aucun ID dans la plage n'a renvoyé 500. La row pourrie a peut-être un ID hors plage. Vérifie le tri MCR.")
+        # Le bad row peut avoir un ID en dehors du gap "local". On élargit
+        # la recherche à toute la plage des IDs vus jusque-là (min..max
+        # parmi {last_ok_id, next_ids…}), en sautant les IDs déjà testés.
+        seen_ids = {last_ok_id, *(mid for _, mid, _ in next_ids)}
+        all_lo = min(seen_ids) if seen_ids else None
+        all_hi = max(seen_ids) if seen_ids else None
+        if all_lo is None or all_hi is None or all_hi - all_lo < 10:
+            print("\n⚠️ Pas assez d'IDs vus pour étendre. Augmente max_page du bisect ou scan manuel.")
+            return
+        already_tested = set(range(lo, hi + 1))
+        wide_range = [i for i in range(all_lo, all_hi + 1) if i not in already_tested]
+        proceed = input(f"\n⚠️ Gap local vide. Élargir à toute la plage des IDs vus ({all_lo}..{all_hi}, {len(wide_range)} IDs à tester) ? [y/N] : ").strip().lower()
+        if proceed != "y":
+            print("Annulé.")
+            return
+        for cid in wide_range:
+            code, body = http("GET", f"/meetings/{cid}", token)
+            kind = classify(code, body)
+            if kind == "bad":
+                bad_id = cid
+                print(f"  id={cid} → 500 ({body[:80]}…) ✅ trouvé !")
+                break
+            if code == 401:
+                sys.exit("  401 — token expiré. Refresh + relance.")
+
+    if bad_id is None:
+        print("\n⚠️ Toujours rien. La row pourrie a un ID hors de la plage scannée. Tente max_page plus grand ou contacte l'équipe MCR.")
         return
 
     proceed = input(f"\nPATCH /meetings/{bad_id} avec {{meeting_platform_id:null, meeting_password:null}} ? [y/N] : ").strip().lower()
