@@ -1368,8 +1368,17 @@ async function _submitMcrImport() {
     const msg = `✓ ${published} import(s) MCR lancé(s). Les réunions vont apparaître dans la liste — la transcription et le compte-rendu prennent ~1 min.`;
     if (window.showToast) window.showToast(msg, 'success');
     else alert(msg);
+    // Le worker côté ingester met ~2-5s à créer les rows en DB. On fait
+    // 3 reloads échelonnés pour rafraîchir l'UI au fil de l'apparition :
+    //   - immédiat : peut déjà voir le 1er insert si rapide
+    //   - 3s : tous les inserts faits
+    //   - 30s : les statuts ont bougé (mcr_transcript_only / kevent_completed)
     const reload = _resolveLegacyFn('loadSessions');
-    if (reload) reload();
+    if (reload) {
+      reload();
+      setTimeout(() => reload({ force: true }), 3000);
+      setTimeout(() => reload({ force: true }), 30000);
+    }
   } catch (err) {
     console.error('mcr import error', err);
     alert('Erreur réseau pendant l\'import.');
