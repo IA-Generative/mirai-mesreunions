@@ -158,6 +158,115 @@ class MCRClient:
             raise MCRApplicativeError(f"MCR presigned response missing url field: {(resp.text or '')[:200]}")
         return presigned
 
+    # ── Pull: list user's meetings ────────────────────────────
+
+    def list_meetings(
+        self,
+        access_token: str,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: Optional[str] = None,
+    ) -> dict:
+        """GET /api/meetings/?page&page_size&search → paginated response.
+
+        Returns the raw MCR response dict ``{total_items, total_pages, page, data:[Meeting]}``.
+        Each Meeting includes ``id, name, status, creation_date, start_date,
+        end_date, name_platform, url, notes``.
+        """
+        url = f"{self.gateway_url}/api/meetings/"
+        params: dict = {"page": page, "page_size": page_size}
+        if search:
+            params["search"] = search
+        try:
+            resp = req.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.timeout,
+            )
+        except req.RequestException as exc:
+            raise MCRTransientError(f"MCR GET /meetings unreachable: {exc}") from exc
+        self._raise_for_status(resp, context="GET /meetings")
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise MCRApplicativeError(f"MCR GET /meetings non-JSON: {exc}") from exc
+
+    def get_meeting(self, access_token: str, meeting_id: str) -> dict:
+        """GET /api/meetings/{id} → single meeting record."""
+        url = f"{self.gateway_url}/api/meetings/{meeting_id}"
+        try:
+            resp = req.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.timeout,
+            )
+        except req.RequestException as exc:
+            raise MCRTransientError(f"MCR GET /meetings/{meeting_id} unreachable: {exc}") from exc
+        self._raise_for_status(resp, context=f"GET /meetings/{meeting_id}")
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise MCRApplicativeError(
+                f"MCR GET /meetings/{meeting_id} non-JSON: {exc}"
+            ) from exc
+
+    # ── Pull: download audio (streaming) ──────────────────────
+
+    def download_audio(self, access_token: str, meeting_id: str) -> req.Response:
+        """GET /api/meetings/{id}/audio → streaming binary ``audio/webm``.
+
+        Returns the open ``requests.Response`` with ``stream=True``; caller is
+        responsible for iterating ``iter_content()`` and closing the response.
+        Raises ``MCRApplicativeError`` on 404 (no audio for this meeting) so
+        the caller can fall back to the transcription endpoint.
+        """
+        url = f"{self.gateway_url}/api/meetings/{meeting_id}/audio"
+        try:
+            resp = req.get(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.upload_timeout,
+                stream=True,
+            )
+        except req.RequestException as exc:
+            raise MCRTransientError(
+                f"MCR GET /meetings/{meeting_id}/audio unreachable: {exc}"
+            ) from exc
+        if resp.status_code in (404, 410):
+            resp.close()
+            raise MCRApplicativeError(f"No audio available for meeting {meeting_id}")
+        self._raise_for_status(resp, context=f"GET /meetings/{meeting_id}/audio")
+        return resp
+
+    # ── Pull: download transcription DOCX ─────────────────────
+
+    def download_transcription_docx(self, access_token: str, meeting_id: str) -> bytes:
+        """POST /api/meetings/{id}/transcription → DOCX bytes.
+
+        Returns the raw DOCX body. Caller is expected to either store it as
+        a file and/or extract text via python-docx. Raises
+        ``MCRApplicativeError`` on 404 if no transcript exists yet.
+        """
+        url = f"{self.gateway_url}/api/meetings/{meeting_id}/transcription"
+        try:
+            resp = req.post(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=self.upload_timeout,
+            )
+        except req.RequestException as exc:
+            raise MCRTransientError(
+                f"MCR POST /meetings/{meeting_id}/transcription unreachable: {exc}"
+            ) from exc
+        if resp.status_code in (404, 410):
+            raise MCRApplicativeError(
+                f"No transcription available for meeting {meeting_id}"
+            )
+        self._raise_for_status(resp, context=f"POST /meetings/{meeting_id}/transcription")
+        return resp.content
+
     # ── Step 4: PUT binary ───────────────────────────────────
 
     def upload_binary(self, presigned_url: str, body: bytes, content_type: str) -> None:
