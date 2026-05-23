@@ -275,84 +275,56 @@ def trigger_import():
         return _err("too_many_meetings", 400)
     fallback_transcript = bool(body.get("fallback_transcript", True))
 
-    # On a besoin d'un access_token valide AVANT d'enregistrer les rows pour
-    # ne pas créer 50 lignes "pending" si le user n'est même pas authentifiable.
+    # On a besoin d'un access_token valide AVANT de publier les messages
+    # pour ne pas pourrir la queue si le user n'est même pas authentifiable.
     try:
         _ = _get_user_access_token(user_sub)
     except (OIDCAuthError, OIDCApplicativeError, OIDCTransientError) as exc:
         return _handle_oidc_exc(exc)
 
-    from libs.shared.app.models import UserAudioFile
-
-    import_ids: list[str] = []
     rabbit_cfg = get_rabbit_cfg()
     if rabbit_cfg is None:
         return _err("rabbitmq_not_configured", 500)
 
-    db = session_scope()
-    try:
-        for raw_id in meeting_ids:
-            mcr_meeting_id = str(raw_id)
-            # Dédoublonnage : si une ligne mcr_import existe déjà pour ce user
-            # et ce meeting, on la réutilise (cas typique : re-cliquer "Importer"
-            # après une erreur transitoire). L'index partiel migration 019
-            # garantit l'unicité côté DB.
-            existing = (
-                db.query(UserAudioFile)
-                .filter(
-                    UserAudioFile.user_sub == user_sub,
-                    UserAudioFile.mcr_meeting_id == mcr_meeting_id,
-                    UserAudioFile.origin == "mcr_import",
-                )
-                .first()
-            )
-            if existing:
-                row_id = str(existing.id)
-                # Si la précédente tentative a échoué, on relance le worker.
-                if existing.transcription_status in (
-                    "mcr_import_failed", "mcr_import_pending",
-                ):
-                    existing.transcription_status = "mcr_import_pending"
-                    existing.last_activity_at = datetime.now(timezone.utc)
-                    db.flush()
-                    _publish_import(rabbit_cfg, row_id, mcr_meeting_id,
-                                    user_sub, user_email, fallback_transcript)
-                import_ids.append(row_id)
-                continue
-
-            row = UserAudioFile(
-                id=uuid.uuid4(),
+    # NB : on ne fait PAS d'INSERT dans user_audio_files ici. mesreunions-web
+    # ne se connecte qu'à postgres-external, alors que user_audio_files vit
+    # en postgres-internal. C'est l'internal-ingester (qui consomme la queue
+    # et a les credentials internes) qui INSERT la ligne en début de
+    # traitement. Le dédoublonnage est garanti par l'index partiel migration
+    # 019 (UNIQUE (user_sub, mcr_meeting_id) WHERE origin='mcr_import').
+    published = 0
+    for raw_id in meeting_ids:
+        mcr_meeting_id = str(raw_id)
+        try:
+            _publish_import(
+                rabbit_cfg,
+                user_audio_file_id=None,  # le worker générera l'UUID
+                mcr_meeting_id=mcr_meeting_id,
                 user_sub=user_sub,
                 user_email=user_email,
-                original_session_code="MCRIMP",
-                original_filename=f"mcr-meeting-{mcr_meeting_id}.webm",
-                stored_filename="",  # rempli par le worker après PUT S3
-                file_size_bytes=0,
-                origin="mcr_import",
-                transcription_status="mcr_import_pending",
-                mcr_meeting_id=mcr_meeting_id,
-                last_activity_at=datetime.now(timezone.utc),
+                fallback_transcript=fallback_transcript,
             )
-            db.add(row)
-            db.flush()
-            row_id = str(row.id)
-            import_ids.append(row_id)
-            _publish_import(rabbit_cfg, row_id, mcr_meeting_id,
-                            user_sub, user_email, fallback_transcript)
-        db.commit()
-    except Exception:
-        db.rollback()
-        logger.exception("trigger_import: DB or queue failure")
-        return _err("internal_error", 500)
-    finally:
-        db.close()
+            published += 1
+        except Exception:
+            logger.exception(
+                "trigger_import: publish failed for mcr_meeting_id=%s",
+                mcr_meeting_id,
+            )
 
-    return jsonify({"accepted": True, "import_ids": import_ids}), 202
+    if published == 0:
+        return _err("publish_failed", 500)
+
+    return jsonify({
+        "accepted": True,
+        "published": published,
+        "requested": len(meeting_ids),
+    }), 202
 
 
 def _publish_import(
     rabbit_cfg,
-    user_audio_file_id: str,
+    *,
+    user_audio_file_id,  # may be None — le worker créera la row
     mcr_meeting_id: str,
     user_sub: str,
     user_email: str,
@@ -369,7 +341,7 @@ def _publish_import(
         publish_message(rabbit_cfg, QUEUE_MCR_IMPORT, message)
     except Exception:
         logger.exception(
-            "trigger_import: failed to publish QUEUE_MCR_IMPORT for row=%s",
-            user_audio_file_id,
+            "trigger_import: failed to publish QUEUE_MCR_IMPORT for mcr_id=%s",
+            mcr_meeting_id,
         )
         raise

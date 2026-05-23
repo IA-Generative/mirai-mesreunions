@@ -214,18 +214,57 @@ def _handle_message(session_factory, s3_internal_cfg: S3Config, message: dict) -
     audio_file_id = message.get("user_audio_file_id")
     mcr_meeting_id = str(message.get("mcr_meeting_id") or "")
     user_sub = message.get("user_sub") or ""
+    user_email = message.get("user_email") or ""
     fallback_transcript = bool(message.get("fallback_transcript", True))
 
-    if not (audio_file_id and mcr_meeting_id and user_sub):
+    if not (mcr_meeting_id and user_sub):
         logger.error("mcr_importer: malformed message %s", message)
         return False
 
     db = session_factory()
     try:
-        row = db.query(UserAudioFile).filter(UserAudioFile.id == audio_file_id).one_or_none()
+        # Si pas d'audio_file_id dans le message (cas standard depuis le refactor
+        # 2026-05-23 — mesreunions-web n'a pas accès à postgres-internal), on
+        # crée la row ici. Dédoublonnage via l'index partiel migration 019.
+        row = None
+        if audio_file_id:
+            row = db.query(UserAudioFile).filter(UserAudioFile.id == audio_file_id).one_or_none()
         if row is None:
-            logger.warning("mcr_importer: row %s not found, ack-ing message", audio_file_id)
-            return True
+            # Cherche par (user_sub, mcr_meeting_id) — dédoublonnage standard
+            row = (
+                db.query(UserAudioFile)
+                .filter(
+                    UserAudioFile.user_sub == user_sub,
+                    UserAudioFile.mcr_meeting_id == mcr_meeting_id,
+                    UserAudioFile.origin == "mcr_import",
+                )
+                .one_or_none()
+            )
+        if row is None:
+            # Nouvelle row à créer
+            row = UserAudioFile(
+                id=uuid.uuid4(),
+                user_sub=user_sub,
+                user_email=user_email,
+                original_session_code="MCRIMP",
+                original_filename=f"mcr-meeting-{mcr_meeting_id}.webm",
+                stored_filename="",
+                file_size_bytes=0,
+                origin="mcr_import",
+                transcription_status="mcr_import_pending",
+                mcr_meeting_id=mcr_meeting_id,
+                last_activity_at=datetime.now(timezone.utc),
+            )
+            db.add(row)
+            db.commit()
+            logger.info("mcr_importer: created row id=%s for mcr_meeting_id=%s", row.id, mcr_meeting_id)
+        else:
+            # Existing row : on rebascule en pending pour relancer le traitement
+            if row.transcription_status != "pending":
+                row.transcription_status = "mcr_import_pending"
+                row.last_activity_at = datetime.now(timezone.utc)
+                db.commit()
+        audio_file_id = row.id
     finally:
         db.close()
 
