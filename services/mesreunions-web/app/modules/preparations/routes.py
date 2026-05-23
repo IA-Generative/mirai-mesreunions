@@ -1094,7 +1094,10 @@ def test_drive_access():
     user_sub = (user or {}).get("sub") or ""
 
     folder_raw = (request.args.get("folder_id") or request.args.get("folder") or "").strip()
-    folder_id = _mp.extract_folder_id(folder_raw) if folder_raw else None
+    folder_id: "str | None" = None
+    folder_host: "str | None" = None
+    if folder_raw:
+        folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
 
     result = {
         "token_stored": False,
@@ -1129,8 +1132,13 @@ def test_drive_access():
         result["error"] = "DRIVE_BASE_URL ou OIDC_TOKEN_ENDPOINT manquant côté serveur."
         return jsonify(result), 200
 
+    # Routage Drive multi-instance, idem _execute_generation : si le user
+    # a collé une URL avec un hostname connu (mesfichiers / fichiers.gouv),
+    # on route en conséquence. Sinon fallback DRIVE_BASE_URL env.
+    effective_base_url = _resolve_drive_base_url(folder_host)
+    result["drive_base_url"] = effective_base_url
     drive = _mp.DriveClient(
-        base_url=DRIVE_BASE_URL,
+        base_url=effective_base_url,
         oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
         oidc_client_id=oidc_cfg.client_id,
         oidc_client_secret=oidc_cfg.client_secret,
