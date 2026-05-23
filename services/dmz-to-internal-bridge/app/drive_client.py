@@ -157,10 +157,11 @@ class DriveClient:
         """GET avec retry exponentiel sur RequestException (ConnectionReset,
         timeout, DNS, etc.).
 
-        Le Drive (suite-numérique Jitsi) reset parfois la connexion sur
-        certains items — surtout les gros documents. 1 seul shot fait
-        échouer toute la génération de brief. 3 tentatives avec backoff
-        0.5s / 1.5s couvrent 95% des transitoires sans rallonger l'UX.
+        On force `Connection: close` pour ne PAS réutiliser le pool de
+        connexions de requests entre 2 appels. Constat prod 2026-05-24 :
+        le LB devant le Drive ferme silencieusement les sockets idle, et
+        urllib3 réutilise la conn morte → ConnectionResetError sur EVERY
+        retry. Une nouvelle TCP par requête contourne le bug.
 
         On NE retry PAS les 4xx/5xx applicatifs : le caller veut savoir
         si c'est auth vs not_found vs transient. Seul le RequestException
@@ -169,13 +170,17 @@ class DriveClient:
         import time as _time
         last_exc = None
         delay = 0.5
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Connection": "close",
+        }
         for attempt in range(1, max_attempts + 1):
             try:
-                return req.get(
-                    url,
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=timeout or self.timeout,
-                )
+                # Chaque appel a sa propre Session pour éviter qu'urllib3
+                # ré-utilise un pool de connexions partagé via le singleton
+                # req.get(). Session fermée explicitement après usage.
+                with req.Session() as s:
+                    return s.get(url, headers=headers, timeout=timeout or self.timeout)
             except req.RequestException as exc:
                 last_exc = exc
                 if attempt == max_attempts:
@@ -271,10 +276,14 @@ class DriveClient:
         delay = 0.5
         max_attempts = 3
         resp = None
-        headers = {"Authorization": f"Bearer {access_token}"} if send_bearer else {}
+        headers = {"Connection": "close"}
+        if send_bearer:
+            headers["Authorization"] = f"Bearer {access_token}"
         for attempt in range(1, max_attempts + 1):
             try:
-                resp = req.get(download_url, headers=headers, timeout=self.download_timeout, stream=False)
+                with req.Session() as s:
+                    resp = s.get(download_url, headers=headers,
+                                  timeout=self.download_timeout, stream=False)
                 break
             except req.RequestException as exc:
                 last_exc = exc
