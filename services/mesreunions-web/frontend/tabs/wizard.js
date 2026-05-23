@@ -698,7 +698,12 @@ function _writeAllDrafts(obj) {
 // Exposé pour preparations.js (rendu liste).
 export function listDrafts() {
   const all = _readAllDrafts();
-  return Object.values(all).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  // L'id est la clé du dict — on doit l'injecter dans chaque snapshot
+  // sinon le rendu UI sort `data-draft-id=""` vide et le click handler
+  // `reopen-draft` reçoit '' → reopenPrepDraft('') → return false silencieux.
+  return Object.entries(all)
+    .map(([id, snap]) => Object.assign({}, snap, { id: id }))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 export function deleteDraft(id) {
   if (!id) return;
