@@ -3382,6 +3382,15 @@ def create_app():
             start_watchdog(SessionLocal)
     except Exception:
         logger.exception("pipeline_watchdog launch failed (non-fatal)")
+
+    # MCR import worker — consumes QUEUE_MCR_IMPORT and pulls audio/transcript
+    # from compte-rendu.mirai. Idempotent start (no-op if already running).
+    try:
+        from app.mcr_importer import start_mcr_importer
+        if SessionLocal is not None:
+            start_mcr_importer(SessionLocal, rabbit_cfg=rabbit_cfg)
+    except Exception:
+        logger.exception("mcr_importer launch failed (non-fatal)")
     if INTERNAL_PUSH_TRIGGER_TOKEN:
         logger.info("Pull trigger HTTP endpoint enabled (allowlist=%s)",
                     _TRIGGER_IP_ALLOWLIST_RAW or "<empty>")
