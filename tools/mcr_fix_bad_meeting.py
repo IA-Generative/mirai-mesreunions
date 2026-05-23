@@ -181,40 +181,97 @@ def main():
         return
 
     next_id = next_ids[0][1]
-    print(f"\n💡 IDs candidats : entre {last_ok_id} (avant) et {next_id} (après).")
-    if last_ok_id is None:
-        candidates = list(range(max(1, next_id - 5), next_id))
-    else:
-        candidates = list(range(last_ok_id + 1, next_id))
-        if not candidates:
-            candidates = [last_ok_id + 1, next_id - 1]
+    # IDs en ordre potentiellement descendant (sort par creation_date DESC).
+    # La row pourrie a un ID dans la plage (min(last,next), max(last,next)) exclusive.
+    lo = min(last_ok_id, next_id) + 1
+    hi = max(last_ok_id, next_id) - 1
+    span = hi - lo + 1
+    print(f"\n💡 ID de la row pourrie : entre {lo} et {hi} ({span} valeurs possibles).")
 
-    if len(candidates) > 1:
-        print(f"   {len(candidates)} candidat(s) entre les deux. On va tester un par un.")
-    print(f"   Liste : {candidates}")
-
-    proceed = input("\nLancer les PATCH automatiquement ? [y/N] : ").strip().lower()
-    if proceed != "y":
-        print("Aucun PATCH lancé. Commandes à essayer manuellement :")
-        for cid in candidates:
-            print(f"  curl -X PATCH '{BASE}/meetings/{cid}' -H 'Authorization: Bearer …' -H 'Content-Type: application/json' -d '{{\"meeting_platform_id\":null,\"meeting_password\":null}}'")
+    if span <= 0:
+        print("   Plage vide — bug logique. Abandon.")
         return
 
-    for cid in candidates:
-        code = try_patch(token, cid)
-        if code == 200:
-            print(f"\n✅ PATCH id={cid} OK. Re-teste GET /meetings : doit refonctionner.")
-            code_test, body_test = http("GET", "/meetings?page=1&page_size=5", token)
-            print(f"   GET /meetings page=1 → HTTP {code_test}")
-            if code_test == 200:
-                print("   🎉 Plus de crash. Tu peux retourner sur mesreunions cliquer 📥 Depuis MCR.")
-            return
-        if code == 404:
-            continue  # mauvais ID, on passe au suivant
-        # Tout autre code (500 VISIO inclus) : on continue mais signale
-        print(f"   id={cid} : code {code} — pas un PATCH valide, on continue.")
+    # Stratégie : on probe avec GET /meetings/{id} en pas adaptatif.
+    # Si 500 → c'est la row pourrie.
+    # Si 200 → c'est une autre row à nous (peu probable mais possible).
+    # Si 404 → ne nous appartient pas, on passe.
+    # Si 401/403 → token mort, on stop.
+    if span <= 60:
+        candidates = list(range(lo, hi + 1))
+    else:
+        # Stride pour couvrir la plage en ~50 probes max, puis on raffine si on trouve.
+        step = max(1, span // 50)
+        candidates = list(range(lo, hi + 1, step))
+        if candidates[-1] != hi:
+            candidates.append(hi)
 
-    print("\n⚠️ Aucun candidat n'a abouti à un 200. Essaie d'élargir manuellement la plage d'IDs.")
+    print(f"   Probe sur {len(candidates)} IDs (step={candidates[1]-candidates[0] if len(candidates)>1 else 1}). Ça va prendre quelques secondes…")
+
+    def classify(code, body):
+        """500 'owned by different user' = pas à nous (mcr-gateway re-wrappe le 403)."""
+        if code == 500 and "different user" in (body or ""):
+            return "other"
+        if code == 500 and "VISIO" in (body or ""):
+            return "bad"
+        if code == 500:
+            return "500_other"
+        if code == 200:
+            return "ok"
+        if code == 404:
+            return "not_found"
+        return f"err_{code}"
+
+    bad_id = None
+    for cid in candidates:
+        code, body = http("GET", f"/meetings/{cid}", token)
+        kind = classify(code, body)
+        if kind == "bad":
+            bad_id = cid
+            print(f"  id={cid} → 500 VISIO ✅ row pourrie trouvée !")
+            break
+        if kind == "ok":
+            print(f"  id={cid} → 200 (une autre de tes meetings, pas la pourrie)")
+        if code in (401, 403):
+            sys.exit(f"  id={cid} → {code}, token expiré. Refresh et relance.")
+        # other / not_found / 500_other : silencieux
+
+    if bad_id is None:
+        print("   Stride sans succès — scan exhaustif (lent, ~", hi - lo + 1, "requêtes)…")
+        for cid in range(lo, hi + 1):
+            code, body = http("GET", f"/meetings/{cid}", token)
+            kind = classify(code, body)
+            if kind == "bad":
+                bad_id = cid
+                print(f"  id={cid} → 500 VISIO ✅ trouvé !")
+                break
+            if code in (401, 403):
+                sys.exit("  Token expiré pendant le scan. Refresh + relance.")
+
+    if bad_id is None:
+        print("\n⚠️ Aucun ID dans la plage n'a renvoyé 500. La row pourrie a peut-être un ID hors plage. Vérifie le tri MCR.")
+        return
+
+    proceed = input(f"\nPATCH /meetings/{bad_id} avec {{meeting_platform_id:null, meeting_password:null}} ? [y/N] : ").strip().lower()
+    if proceed != "y":
+        print(f"Annulé. Commande manuelle :")
+        print(f"  curl -X PATCH '{BASE}/meetings/{bad_id}' -H 'Authorization: Bearer …' -H 'Content-Type: application/json' -d '{{\"meeting_platform_id\":null,\"meeting_password\":null}}'")
+        return
+
+    code = try_patch(token, bad_id)
+    if code == 200:
+        print(f"\n✅ PATCH id={bad_id} OK.")
+    else:
+        print(f"\n⚠️ PATCH a renvoyé {code} — la row n'a peut-être pas été nettoyée. Tente DELETE en fallback :")
+        print(f"  curl -X DELETE '{BASE}/meetings/{bad_id}' -H 'Authorization: Bearer …'")
+
+    print("\n→ Re-test GET /meetings?page=1&page_size=20…")
+    code_test, body_test = http("GET", "/meetings?page=1&page_size=20", token)
+    print(f"   HTTP {code_test}")
+    if code_test == 200:
+        print("   🎉 Plus de crash. Tu peux retourner sur mesreunions cliquer 📥 Depuis MCR.")
+    else:
+        print(f"   body : {body_test[:300]}")
 
 
 if __name__ == "__main__":
