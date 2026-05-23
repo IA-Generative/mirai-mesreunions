@@ -1159,6 +1159,11 @@ function _openMcrImportModal() {
                   gap:0.5rem;">
         <span data-mcr-status style="font-size:0.85rem;color:#475569;"></span>
         <div style="display:flex;gap:0.5rem;">
+          <button type="button" data-mcr-action="export"
+                  class="meetings-tab-btn meetings-tab-btn--ghost"
+                  title="Télécharge un CSV de toutes tes réunions MCR (toutes pages)">
+            📥 Exporter CSV
+          </button>
           <button type="button" data-mcr-action="close"
                   class="meetings-tab-btn meetings-tab-btn--ghost">Annuler</button>
           <button type="button" data-mcr-action="submit"
@@ -1180,6 +1185,7 @@ function _openMcrImportModal() {
     const action = btn.getAttribute('data-mcr-action');
     if (action === 'close') _closeMcrImportModal();
     if (action === 'submit') _submitMcrImport();
+    if (action === 'export') _exportMcrCsv();
   });
 
   const search = overlay.querySelector('[data-mcr-search]');
@@ -1244,14 +1250,22 @@ async function _loadMcrMeetings(page, search) {
       // par le backend pour que l'utilisateur voie EXACTEMENT la position en
       // erreur, sans la cocher (id=null → non importable).
       if (m._broken) {
-        const tooltip = esc((m._mcr_error || '').slice(0, 250));
+        const tooltip = esc((m._mcr_error || '').slice(0, 500));
+        // Extrait l'indice technique du body MCR : platform_id partiel
+        // (ex "...apq-smlr-zlv") et la plateforme (VISIO/WEBCONF/…).
+        const platformMatch = /not supported for platform (\w+)/.exec(m._mcr_error || '');
+        const platform = platformMatch ? platformMatch[1] : '?';
+        const idMatch = /platform_id['\"]?:\s*['\"]([^'\"]+)['\"]/.exec(m._mcr_error || '');
+        const partialId = idMatch ? idMatch[1] : '?';
         return `<tr style="background:#fef2f2;color:#991b1b;">
           <td><input type="checkbox" disabled></td>
           <td style="padding:0.4rem 0.5rem;" colspan="3" title="${tooltip}">
-            ${esc(m.name)}
-            <span style="font-size:0.75rem;color:#7f1d1d;opacity:0.7;">
-              (réunion non récupérable — contacter l'équipe MCR)
-            </span>
+            <strong>⚠️ Réunion #${m._slot ?? '?'} non récupérable</strong>
+            <div style="font-size:0.75rem;color:#7f1d1d;opacity:0.85;margin-top:2px;">
+              plateforme=<code>${esc(platform)}</code>
+              · meeting_platform_id=<code>${esc(partialId)}</code>
+              — bug serveur MCR (validator pydantic). Survol pour le détail.
+            </div>
           </td>
         </tr>`;
       }
@@ -1260,8 +1274,8 @@ async function _loadMcrMeetings(page, search) {
       return `<tr>
         <td><input type="checkbox" data-mcr-pick value="${m.id}"></td>
         <td style="padding:0.4rem 0.5rem;">${esc(m.name)}</td>
-        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${dateStr}</td>
-        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${esc(m.status)}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;white-space:nowrap;">${dateStr}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;white-space:nowrap;">${esc(m.status)}</td>
       </tr>`;
     }).join('');
     const fallbackNotice = data._fallback_used ? `
@@ -1352,4 +1366,90 @@ async function _submitMcrImport() {
     submit.disabled = false;
     submit.textContent = 'Importer la sélection';
   }
+}
+
+
+// ── Export CSV de toute la liste MCR ─────────────────────────────────
+//
+// Boucle GET /api/mcr/meetings sur toutes les pages (page_size=50) jusqu'à
+// total_pages, agrège, génère un CSV téléchargeable. Inclut les rows _broken
+// (avec marqueur visible) pour que le user ait l'inventaire complet.
+
+async function _exportMcrCsv() {
+  if (!_mcrModalEl) return;
+  const exportBtn = _mcrModalEl.querySelector('[data-mcr-action="export"]');
+  const status = _mcrModalEl.querySelector('[data-mcr-status]');
+  const orig = exportBtn.textContent;
+  exportBtn.disabled = true;
+  exportBtn.textContent = '⏳ Export en cours…';
+
+  const allRows = [];
+  let page = 1;
+  let totalPages = 1;
+  const pageSize = 50;
+  try {
+    do {
+      status.textContent = `Téléchargement page ${page}…`;
+      const resp = await fetch(`/api/mcr/meetings?page=${page}&page_size=${pageSize}`, {
+        credentials: 'same-origin',
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      totalPages = data.total_pages || 1;
+      const items = data.data || [];
+      for (const m of items) allRows.push(m);
+      page += 1;
+      if (page > 200) break;  // safety stop
+    } while (page <= totalPages);
+
+    status.textContent = `Génération CSV (${allRows.length} lignes)…`;
+    const csv = _buildMcrCsv(allRows);
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const dlUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = dlUrl;
+    a.download = `mcr-meetings-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(dlUrl);
+    status.textContent = `✅ Export terminé (${allRows.length} réunions)`;
+  } catch (err) {
+    console.error('mcr export error', err);
+    alert('Erreur pendant l\'export CSV : ' + err.message);
+    status.textContent = '❌ Export échoué';
+  } finally {
+    exportBtn.disabled = false;
+    exportBtn.textContent = orig;
+  }
+}
+
+function _buildMcrCsv(rows) {
+  const cols = ['id', 'name', 'name_platform', 'status', 'creation_date',
+                'start_date', 'end_date', 'meeting_platform_id', 'url', 'notes',
+                'broken', 'broken_reason'];
+  const head = cols.join(';');
+  const esc = (v) => {
+    if (v === null || v === undefined) return '';
+    let s = String(v);
+    if (/[";\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const lines = rows.map((m) => {
+    if (m._broken) {
+      return [
+        '', m.name || '', 'BROKEN', 'BROKEN', '', '', '', '', '', '',
+        'true', (m._mcr_error || '').slice(0, 300),
+      ].map(esc).join(';');
+    }
+    return [
+      m.id ?? '', m.name ?? '', m.name_platform ?? '', m.status ?? '',
+      m.creation_date ?? '', m.start_date ?? '', m.end_date ?? '',
+      m.meeting_platform_id ?? '', m.url ?? '', m.notes ?? '',
+      'false', '',
+    ].map(esc).join(';');
+  });
+  return [head, ...lines].join('\r\n');
 }
