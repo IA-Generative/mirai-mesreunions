@@ -167,6 +167,34 @@ class UploadTokenOption(ExternalBase):
     )
 
 
+class PreparationGenerationJob(ExternalBase):
+    """Store partagé multi-pod des jobs de génération de brief.
+
+    Remplace l'ancien in-memory dict de generation_jobs.py qui ne
+    fonctionnait qu'en single-replica. Avec 2+ pods, le polling tombait
+    parfois sur un pod différent du worker → 404 "Job introuvable".
+
+    Hébergé en postgres-external parce que mesreunions-web y a accès
+    direct (creds via external-db-secret). Le job est éphémère (TTL 1h
+    via gc) donc pas besoin de le mettre en postgres-internal.
+    """
+    __tablename__ = "preparation_generation_jobs"
+
+    id = Column(String(64), primary_key=True)  # uuid4 hex
+    user_sub = Column(String(255), nullable=False, index=True)
+    phase = Column(String(40), nullable=False, default="queued",
+                   comment="queued|init|test_drive|listing_docs|reading_doc|"
+                           "generating_llm|persisting|extracting_glossary|done|failed")
+    current_doc = Column(Text, nullable=True)
+    docs_processed = Column(Integer, nullable=False, default=0)
+    docs_total = Column(Integer, nullable=False, default=0)
+    preparation_id = Column(String(64), nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
 # ─── Zone Interne ───────────────────────────────────────────
 
 class IssuedToken(InternalBase):
