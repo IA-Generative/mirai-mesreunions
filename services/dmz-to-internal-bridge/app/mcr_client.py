@@ -244,27 +244,26 @@ class MCRClient:
         if resp.status_code == 403:
             body_peek = ""
             try:
-                # `resp.content` force la lecture COMPLÈTE (vs .text qui peut
-                # foirer en stream=True selon le timing). Encodage utf-8 best-effort.
                 body_peek = (resp.content or b"").decode("utf-8", errors="replace")
             except Exception:
                 logger.exception("download_audio: cannot read 403 body")
             resp.close()
+            # Sur l'endpoint audio, 403 ne peut PAS être un problème d'auth :
+            # l'auth est déjà validée par le listing /api/meetings qu'on a
+            # appelé juste avant pour obtenir l'ID. Donc tout 403 ici =
+            # MCR refuse l'audio pour une raison applicative :
+            #   - feature flag get_meeting_audio OFF
+            #   - rétention 7j ("Meeting must have been created in the last 7 days…")
+            #   - autre policy
+            # Dans tous les cas → MCRApplicativeError pour que le caller
+            # fallback sur le transcript DOCX.
             logger.info(
-                "download_audio: meeting=%s got 403, body_peek=%r",
+                "download_audio: meeting=%s 403 (audio indispo côté MCR), body=%r",
                 meeting_id, body_peek[:300],
             )
-            # MCR retourne typiquement {"detail": "The feature flag of this feature is OFF"}
-            # quand le flag get_meeting_audio est OFF (cf feature_flag_service).
-            # On élargit aux variantes "feature flag" / "feature_flag" / "OFF".
-            body_lower = body_peek.lower()
-            if ("feature flag" in body_lower or
-                "feature_flag" in body_lower or
-                "this feature is off" in body_lower):
-                raise MCRApplicativeError(
-                    f"Audio download disabled by MCR feature flag (meeting {meeting_id})"
-                )
-            raise MCRAuthError(f"GET /meetings/{meeting_id}/audio → 403 (token rejected by MCR, body={body_peek[:120]})")
+            raise MCRApplicativeError(
+                f"Audio refused by MCR for meeting {meeting_id}: {body_peek[:200]}"
+            )
         self._raise_for_status(resp, context=f"GET /meetings/{meeting_id}/audio")
         return resp
 
