@@ -1237,18 +1237,39 @@ async function _loadMcrMeetings(page, search) {
       return;
     }
     const rows = items.map((m) => {
-      const d = m.start_date || m.creation_date || '';
-      const dateStr = d ? new Date(d).toLocaleString('fr-FR') : '';
-      const escapedName = String(m.name || '').replace(/[<>&"']/g, (c) => ({
+      const esc = (s) => String(s || '').replace(/[<>&"']/g, (c) => ({
         '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;',
       })[c]);
+      // Row "pourrie" côté MCR (validator pydantic) — exposée via _broken=true
+      // par le backend pour que l'utilisateur voie EXACTEMENT la position en
+      // erreur, sans la cocher (id=null → non importable).
+      if (m._broken) {
+        const tooltip = esc((m._mcr_error || '').slice(0, 250));
+        return `<tr style="background:#fef2f2;color:#991b1b;">
+          <td><input type="checkbox" disabled></td>
+          <td style="padding:0.4rem 0.5rem;" colspan="3" title="${tooltip}">
+            ${esc(m.name)}
+            <span style="font-size:0.75rem;color:#7f1d1d;opacity:0.7;">
+              (réunion non récupérable — contacter l'équipe MCR)
+            </span>
+          </td>
+        </tr>`;
+      }
+      const d = m.start_date || m.creation_date || '';
+      const dateStr = d ? new Date(d).toLocaleString('fr-FR') : '';
       return `<tr>
         <td><input type="checkbox" data-mcr-pick value="${m.id}"></td>
-        <td style="padding:0.4rem 0.5rem;">${escapedName}</td>
+        <td style="padding:0.4rem 0.5rem;">${esc(m.name)}</td>
         <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${dateStr}</td>
-        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${String(m.status || '')}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${esc(m.status)}</td>
       </tr>`;
     }).join('');
+    const fallbackNotice = data._fallback_used ? `
+      <div style="background:#fef3c7;border-left:3px solid #f59e0b;
+                  padding:0.5rem 0.75rem;margin-bottom:0.5rem;font-size:0.85rem;color:#78350f;">
+        ⚠️ ${data._broken_count || 0} réunion(s) sur cette page sont en erreur côté MCR
+        (validator pydantic). Les autres sont importables normalement.
+      </div>` : '';
     const pager = `
       <div style="display:flex;justify-content:space-between;align-items:center;
                   margin-top:0.75rem;color:#64748b;font-size:0.85rem;">
@@ -1260,6 +1281,7 @@ async function _loadMcrMeetings(page, search) {
       </div>
     `;
     body.innerHTML = `
+      ${fallbackNotice}
       <table style="width:100%;border-collapse:collapse;">
         <thead><tr style="background:#f8fafc;text-align:left;">
           <th style="padding:0.4rem 0.5rem;"></th>

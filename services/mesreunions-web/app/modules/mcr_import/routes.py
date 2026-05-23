@@ -121,33 +121,139 @@ def list_mcr_meetings():
         return _err("internal_error", 500)
 
     try:
-        url = f"{_mcr_base()}/api/meetings"
-        params = {"page": page, "page_size": page_size}
-        if search:
-            params["search"] = search
-        resp = req.get(
-            url,
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=15,
+        payload = _fetch_meetings_resilient(
+            access_token, page=page, page_size=page_size, search=search, user_sub=user_sub,
         )
     except req.RequestException:
         logger.exception("MCR /meetings unreachable")
         return _err("mcr_unreachable", 502)
+    if payload is None:
+        return _err("mcr_unreachable", 502)
+    if isinstance(payload, tuple):
+        return _err(payload[0], payload[1])
+    return jsonify(payload), 200
+
+
+def _fetch_meetings_resilient(access_token, *, page, page_size, search, user_sub):
+    """Liste paginée MCR avec résilience par ligne.
+
+    Stratégie :
+      1. Tente le fetch normal `page&page_size`.
+      2. Si 500 avec le marker "is not supported for platform" → on est dans
+         le bug pydantic d'une row pourrie qui casse toute la page. Bascule
+         en fallback per-row : on rappelle MCR `page_size=1` pour chaque
+         position de la page demandée, on garde les 200 et on remplace les
+         500 par un placeholder `_broken: true` que l'UI rendra explicitement.
+      3. Tout autre status → renvoie un tuple (error_code, http_status) pour
+         que le caller produise un _err propre.
+
+    Retourne le payload paginé MCR (dict) ou un tuple (err, status) sur
+    erreur non récupérable.
+    """
+    base = _mcr_base()
+
+    def _call(p, ps):
+        params = {"page": p, "page_size": ps}
+        if search:
+            params["search"] = search
+        return req.get(
+            f"{base}/api/meetings",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+
+    resp = _call(page, page_size)
     logger.info(
-        "MCR /meetings user_sub=%s status=%s body=%s",
-        user_sub, resp.status_code, (resp.text or "")[:400],
+        "MCR /meetings user_sub=%s status=%s page=%s size=%s body=%s",
+        user_sub, resp.status_code, page, page_size, (resp.text or "")[:200],
     )
+    if resp.status_code == 200:
+        try:
+            return resp.json()
+        except Exception:
+            logger.exception("MCR /meetings non-JSON")
+            return ("mcr_invalid_json", 502)
     if resp.status_code in (401, 403):
-        return _err("mcr_forbidden", 403)
-    if resp.status_code >= 500:
-        return _err(f"mcr_5xx: {resp.status_code}", 502)
-    if resp.status_code >= 400:
-        return _err(f"mcr_{resp.status_code}", 400)
-    try:
-        return jsonify(resp.json()), 200
-    except Exception:
-        return _err("mcr_invalid_json", 502)
+        return ("mcr_forbidden", 403)
+    if resp.status_code != 500 or "is not supported for platform" not in (resp.text or ""):
+        # Erreur que le fallback ne sait pas guérir.
+        if resp.status_code >= 500:
+            return (f"mcr_5xx: {resp.status_code}", 502)
+        return (f"mcr_{resp.status_code}", 400)
+
+    # ─── Fallback per-row ────────────────────────────────────────────
+    # On itère sur les `page_size` slots de la page demandée. Chaque slot
+    # devient une page_size=1 indépendante. Les rows qui crashent sont
+    # remplacées par un placeholder lisible par l'UI.
+    logger.warning(
+        "MCR /meetings page=%s size=%s a planté en 500 (row pourrie). Fallback per-row.",
+        page, page_size,
+    )
+    start_slot = (page - 1) * page_size + 1
+    rows = []
+    broken_count = 0
+    total_items = None
+    total_pages = None
+    for offset in range(page_size):
+        slot_page = start_slot + offset  # absolute position dans la liste MCR
+        r = _call(slot_page, 1)
+        body_short = (r.text or "")[:300]
+        if r.status_code == 200:
+            try:
+                slot_payload = r.json()
+            except Exception:
+                logger.warning("Slot %s: 200 mais JSON invalide, on saute.", slot_page)
+                continue
+            if total_items is None:
+                total_items = slot_payload.get("total_items")
+                total_pages = slot_payload.get("total_pages")
+            data = slot_payload.get("data") or []
+            if not data:
+                # Plus de rows à fetcher → on a atteint la fin de la liste.
+                break
+            rows.extend(data)
+            continue
+        if r.status_code == 500 and "is not supported for platform" in body_short:
+            broken_count += 1
+            rows.append({
+                "id": None,
+                "name": f"⚠️ Réunion #{slot_page} impossible à charger (bug MCR)",
+                "name_platform": "BROKEN",
+                "status": "BROKEN",
+                "creation_date": None,
+                "start_date": None,
+                "end_date": None,
+                "url": None,
+                "notes": body_short,
+                "_broken": True,
+                "_slot": slot_page,
+                "_mcr_error": body_short,
+            })
+            continue
+        if r.status_code in (401, 403):
+            return ("mcr_forbidden", 403)
+        # Erreur inattendue sur un slot → on l'expose aussi en placeholder.
+        logger.warning("Slot %s: status inattendu %s — exposé en placeholder", slot_page, r.status_code)
+        broken_count += 1
+        rows.append({
+            "id": None,
+            "name": f"⚠️ Réunion #{slot_page} : erreur HTTP {r.status_code}",
+            "name_platform": "BROKEN",
+            "status": "BROKEN",
+            "_broken": True,
+            "_slot": slot_page,
+            "_mcr_error": body_short,
+        })
+
+    return {
+        "total_items": total_items if total_items is not None else len(rows),
+        "total_pages": total_pages if total_pages is not None else page,
+        "page": page,
+        "data": rows,
+        "_fallback_used": True,
+        "_broken_count": broken_count,
+    }
 
 
 # ─── Import effectif (déclenche le worker async) ─────────────────────
