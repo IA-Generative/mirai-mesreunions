@@ -199,7 +199,11 @@ def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog",
                             UserAudioFile.user_sub == user_sub)
                     .first()
                 )
-                if row is not None and row.origin == "mcr_import" and not row.stored_filename:
+                # Pour les rows mcr_import, on republie TOUJOURS sur la queue
+                # MCR (peu importe le status courant et la présence ou pas d'un
+                # stored_filename). Le path kevent ne sait pas gérer ces rows
+                # (pas d'audio S3 dans le cas transcript-only → 410 en boucle).
+                if row is not None and row.origin == "mcr_import":
                     return _resume_mcr_import(audio_id, user_sub, row, reason=reason)
             finally:
                 db.close()

@@ -901,7 +901,12 @@ async function _runBulkDownload(kind) {
 async function _resumeStuckJobs(ev) {
   const btn = ev && ev.target && ev.target.closest('[data-action="meetings-new:resume-stuck"]');
   const originalLabel = btn ? btn.innerHTML : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Analyse…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Recherche…'; }
+  // Toast persistant pendant l'analyse — sinon le user ne sait pas si l'app
+  // a entendu le clic. Disparait remplacé par le résultat final.
+  if (window.showToast) {
+    window.showToast('🔍 Recherche des transcriptions à relancer…', 'info', 8000);
+  }
   try {
     const resp = await fetch('/api/files/resume-stuck-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1357,7 +1362,12 @@ async function _submitMcrImport() {
       submit.textContent = 'Importer la sélection';
       return;
     }
+    const data = await resp.json().catch(() => ({}));
+    const published = data.published ?? picks.length;
     _closeMcrImportModal();
+    const msg = `✓ ${published} import(s) MCR lancé(s). Les réunions vont apparaître dans la liste — la transcription et le compte-rendu prennent ~1 min.`;
+    if (window.showToast) window.showToast(msg, 'success');
+    else alert(msg);
     const reload = _resolveLegacyFn('loadSessions');
     if (reload) reload();
   } catch (err) {
