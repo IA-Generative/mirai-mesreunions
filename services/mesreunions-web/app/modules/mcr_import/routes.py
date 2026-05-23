@@ -139,7 +139,7 @@ def _fetch_meetings_resilient(access_token, *, page, page_size, search, user_sub
 
     Stratégie :
       1. Tente le fetch normal `page&page_size`.
-      2. Si 500 avec le marker "is not supported for platform" → on est dans
+      2. Si 500 avec le marker "not supported for platform" → on est dans
          le bug pydantic d'une row pourrie qui casse toute la page. Bascule
          en fallback per-row : on rappelle MCR `page_size=1` pour chaque
          position de la page demandée, on garde les 200 et on remplace les
@@ -176,7 +176,7 @@ def _fetch_meetings_resilient(access_token, *, page, page_size, search, user_sub
             return ("mcr_invalid_json", 502)
     if resp.status_code in (401, 403):
         return ("mcr_forbidden", 403)
-    if resp.status_code != 500 or "is not supported for platform" not in (resp.text or ""):
+    if resp.status_code != 500 or "not supported for platform" not in (resp.text or ""):
         # Erreur que le fallback ne sait pas guérir.
         if resp.status_code >= 500:
             return (f"mcr_5xx: {resp.status_code}", 502)
@@ -214,7 +214,7 @@ def _fetch_meetings_resilient(access_token, *, page, page_size, search, user_sub
                 break
             rows.extend(data)
             continue
-        if r.status_code == 500 and "is not supported for platform" in body_short:
+        if r.status_code == 500 and "not supported for platform" in body_short:
             broken_count += 1
             rows.append({
                 "id": None,
