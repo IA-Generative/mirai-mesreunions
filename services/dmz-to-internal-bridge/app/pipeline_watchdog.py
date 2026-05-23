@@ -57,6 +57,9 @@ NON_TERMINAL_STATUSES = (
     "kevent_queued",
     "kevent_transcribing",
     "kevent_processing",
+    # Import MCR : la row est créée en pending ; si le worker mcr_importer
+    # n'aboutit pas (timeout, MCR transitoire), elle reste bloquée ici.
+    "mcr_import_pending",
 )
 
 # Statuts terminaux qu'on peut RE-tenter si l'utilisateur le demande
@@ -66,6 +69,7 @@ NON_TERMINAL_STATUSES = (
 RETRYABLE_TERMINAL_STATUSES = (
     "kevent_failed",
     "failed",
+    "mcr_import_failed",
 )
 
 _POD_HOSTNAME = os.environ.get("HOSTNAME") or socket.gethostname()
@@ -165,17 +169,72 @@ def _try_claim(session_factory, audio_id: str) -> bool:
         db.close()
 
 
-def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog") -> dict:
-    """Appelle le moteur de full-reprocess pour un audio donné.
+def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog",
+                session_factory=None) -> dict:
+    """Reprise d'un job bloqué. Branche selon l'origine :
 
-    Wrap autour de ``_reset_and_resubmit_kevent_pipeline`` pour isoler la
-    dépendance circulaire (le watchdog est importé par puller, et appelle
-    une fonction de puller).
+      - row 'mcr_import' SANS stored_filename → republier sur QUEUE_MCR_IMPORT
+        (le worker mcr_importer ré-essaiera download audio puis fallback
+        transcript + chaîne LLM)
+      - autres rows → ``_reset_and_resubmit_kevent_pipeline`` (Whisper + LLM)
     """
-    # Import différé pour éviter le cycle puller ↔ watchdog au module load.
+    # Inspect d'abord la row pour décider du chemin.
+    if session_factory is not None:
+        try:
+            from libs.shared.app.models import UserAudioFile
+            db = session_factory()
+            try:
+                row = (
+                    db.query(UserAudioFile)
+                    .filter(UserAudioFile.id == audio_id,
+                            UserAudioFile.user_sub == user_sub)
+                    .first()
+                )
+                if row is not None and row.origin == "mcr_import" and not row.stored_filename:
+                    return _resume_mcr_import(audio_id, user_sub, row, reason=reason)
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("resume_one: inspection origin failed for %s, fallback kevent path", audio_id)
+
+    # Default : pipeline kevent (audio + LLM).
     from app.puller import _reset_and_resubmit_kevent_pipeline
     code, payload = _reset_and_resubmit_kevent_pipeline(audio_id, user_sub, reason=reason)
     return {"audio_id": audio_id, "http_code": code, **payload}
+
+
+def _resume_mcr_import(audio_id: str, user_sub: str, row, *, reason: str) -> dict:
+    """Re-publie une row mcr_import sur QUEUE_MCR_IMPORT.
+
+    Réinitialise le statut à 'mcr_import_pending' + last_activity_at, puis
+    publie un message au worker. Le dédoublonnage côté worker (index partiel
+    migration 019) garantit qu'on réutilisera la même row.
+    """
+    try:
+        from libs.shared.app.config import RabbitMQConfig
+        from libs.shared.app.queue_helper import QUEUE_MCR_IMPORT, publish_message
+        message = {
+            "user_audio_file_id": audio_id,
+            "mcr_meeting_id": row.mcr_meeting_id,
+            "user_sub": user_sub,
+            "user_email": row.user_email or "",
+            "fallback_transcript": True,
+        }
+        publish_message(RabbitMQConfig(), QUEUE_MCR_IMPORT, message)
+        logger.info(
+            "resume_one: re-published mcr_import row=%s mcr_meeting_id=%s reason=%s",
+            audio_id, row.mcr_meeting_id, reason,
+        )
+        return {
+            "audio_id": audio_id,
+            "http_code": 202,
+            "reprocessed": True,
+            "mode": "mcr_import_republish",
+            "mcr_meeting_id": row.mcr_meeting_id,
+        }
+    except Exception as exc:
+        logger.exception("resume_one: mcr_import republish failed for %s", audio_id)
+        return {"audio_id": audio_id, "http_code": 500, "error": str(exc)}
 
 
 def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
@@ -200,7 +259,8 @@ def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
             skipped += 1
             continue
         try:
-            r = resume_one(audio_id, owner_sub, reason="watchdog")
+            r = resume_one(audio_id, owner_sub, reason="watchdog",
+                            session_factory=session_factory)
             resumed.append(r)
         except Exception:
             logger.exception("watchdog: resume_one failed for %s", audio_id)

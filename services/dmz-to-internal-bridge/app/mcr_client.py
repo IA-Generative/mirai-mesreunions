@@ -244,15 +244,27 @@ class MCRClient:
         if resp.status_code == 403:
             body_peek = ""
             try:
-                body_peek = resp.text or ""
+                # `resp.content` force la lecture COMPLÈTE (vs .text qui peut
+                # foirer en stream=True selon le timing). Encodage utf-8 best-effort.
+                body_peek = (resp.content or b"").decode("utf-8", errors="replace")
             except Exception:
-                pass
+                logger.exception("download_audio: cannot read 403 body")
             resp.close()
-            if "feature flag" in body_peek.lower():
+            logger.info(
+                "download_audio: meeting=%s got 403, body_peek=%r",
+                meeting_id, body_peek[:300],
+            )
+            # MCR retourne typiquement {"detail": "The feature flag of this feature is OFF"}
+            # quand le flag get_meeting_audio est OFF (cf feature_flag_service).
+            # On élargit aux variantes "feature flag" / "feature_flag" / "OFF".
+            body_lower = body_peek.lower()
+            if ("feature flag" in body_lower or
+                "feature_flag" in body_lower or
+                "this feature is off" in body_lower):
                 raise MCRApplicativeError(
                     f"Audio download disabled by MCR feature flag (meeting {meeting_id})"
                 )
-            raise MCRAuthError(f"GET /meetings/{meeting_id}/audio → 403 (token rejected by MCR)")
+            raise MCRAuthError(f"GET /meetings/{meeting_id}/audio → 403 (token rejected by MCR, body={body_peek[:120]})")
         self._raise_for_status(resp, context=f"GET /meetings/{meeting_id}/audio")
         return resp
 
