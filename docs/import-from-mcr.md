@@ -148,6 +148,15 @@ Le client `mes-reunions` (importé dans `sso.mirai/realms/mirai`) doit avoir :
 
 Sans ça, le login casse (cf. memo `OIDC offline_access — 2 étapes Keycloak`).
 
+## Pièges connus (intégration MCR)
+
+Capturés à la mise en prod 2026-05-23 — éviter à toute future intégration MCR :
+
+1. **Trailing slash interdit** : `${gateway}/api/meetings/` → 301 → downgrade scheme `http://` → CNP egress TLS-only → timeout. Toujours appeler `/api/meetings` sans `/` final.
+2. **Scopes Keycloak requis sur `mes-reunions`** : `basic` + `groups` en Default scopes, sinon le token n'a pas `sub` et MCR (`python-keycloak.decode_token`) renvoie 401. `offline_access` reste Optional, jamais Default (sinon les SPAs Vue tournent en boucle de redirect).
+3. **MeetingResponse validator strict** : une row legacy `VISIO + meeting_platform_id≠NULL` casse tout le listing du user (500 systématique). Workaround `tools/mcr_fix_bad_meeting.py`. Bug report `docs/mcr-bug-report-meeting-response-validator.md`.
+4. **`mcr` client (SPA)** : ne JAMAIS lui attacher `offline_access` — `@dsb-norge/vue-keycloak-js` voit `refreshToken.exp = undefined` (les offline tokens n'expirent pas) → considère expiré → re-login en boucle → `invalid_grant: Code not valid`.
+
 ## Modes d'échec connus
 
 1. **`401 auth_required_reconnect`** — l'utilisateur n'a pas de refresh_token capturé : il s'est loggué avant l'activation de `OIDC_OFFLINE_ACCESS=true`, ou son refresh a expiré côté KC. Solution : se déconnecter / reconnecter pour réémettre un offline token.
