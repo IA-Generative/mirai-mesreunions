@@ -255,8 +255,9 @@ def main():
                 bad_id = cid
                 print(f"  id={cid} → 500 VISIO ✅ trouvé !")
                 break
-            if code in (401, 403):
-                sys.exit("  Token expiré pendant le scan. Refresh + relance.")
+            if code == 401:
+                sys.exit("  401 — token expiré pendant le scan. Refresh + relance.")
+            # 403 = pas à nous, on continue le scan
 
     if bad_id is None:
         print("\n⚠️ Aucun ID dans la plage n'a renvoyé 500. La row pourrie a peut-être un ID hors plage. Vérifie le tri MCR.")
