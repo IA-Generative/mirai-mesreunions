@@ -72,8 +72,13 @@ def _drive_sync_module():
 #     (bypass du LB public qui resettait les sockets idle, cf
 #     docs/debug-brief-drive-connection-reset.md)
 #   - fichiers.fake-domain.name : LB public Mirai
+# NB : on n'utilise PAS de route intra-cluster vers drive-backend pour
+# mesfichiers — testé 2026-05-24 et le drive-backend Django refuse les
+# requêtes HTTP avec Host=drive-backend... (ALLOWED_HOSTS) et redirige
+# vers HTTPS canonical (boucle). On garde donc le hairpin LB public et
+# on tolère les RST via retries + Session fraîche dans DriveClient.
 _DRIVE_HOST_ROUTES = {
-    "mesfichiers.fake-domain.name": "http://drive-backend.drive.svc.cluster.local",
+    "mesfichiers.fake-domain.name": "https://mesfichiers.fake-domain.name",
     "fichiers.fake-domain.name": "https://fichiers.fake-domain.name",
 }
 
