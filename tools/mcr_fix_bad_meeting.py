@@ -149,9 +149,9 @@ def main():
         sys.exit(f"Token vide ou format inattendu (len={len(token)}, dots={token.count('.')}). Abandon.")
     print(f"Token reçu : {len(token)} caractères, {token.count('.')} segments (attendu : 2).")
 
-    # 0) Ping rapide /me pour valider le token
-    print("\n→ Validation token via GET /me…")
-    code, body = http("GET", "/me", token)
+    # 0) Ping rapide /auth/me pour valider le token
+    print("\n→ Validation token via GET /auth/me…")
+    code, body = http("GET", "/auth/me", token)
     if code != 200:
         sys.exit(f"  /me a renvoyé {code} — token invalide ?\n  body : {body[:300]}")
     try:
