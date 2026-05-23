@@ -13,14 +13,11 @@ BEGIN;
 ALTER TABLE user_audio_files
     ADD COLUMN IF NOT EXISTS origin VARCHAR(20) NOT NULL DEFAULT 'upload';
 
--- Backfill explicite pour les uploads venant du mobile (origine = présence
--- d'un device_id sur la session) : best-effort, le défaut reste 'upload'.
-UPDATE user_audio_files uaf
-SET origin = 'mobile'
-FROM upload_sessions us
-WHERE us.id = uaf.session_id
-  AND us.device_id IS NOT NULL
-  AND uaf.origin = 'upload';
+-- NOTE : pas de backfill 'mobile' ici parce que upload_sessions vit en
+-- zone externe (postgres-external) et n'est pas accessible depuis la
+-- migration interne. Le défaut 'upload' est acceptable pour les rows
+-- existants : la valeur n'est utilisée que pour l'affichage UI nouveaux
+-- imports MCR.
 
 -- Dédoublonnage : un user ne ré-importe pas deux fois la même réunion MCR.
 -- Index partiel (n'indexe que les lignes mcr_import avec un mcr_meeting_id).
