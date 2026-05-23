@@ -109,26 +109,35 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
         if not include_failed:
             retry_cap_clause = "AND COALESCE(reprocess_version, 0) < :max_retries"
 
+        # En mode user-explicite (include_failed=True via le bouton "Relancer
+        # les bloqués"), on ignore le délai stale : l'utilisateur a demandé
+        # un retry MAINTENANT, pas dans 5 minutes.
+        stale_clause = (
+            "AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)"
+            if not include_failed else ""
+        )
         q = sql_text(("""
             SELECT id::text, user_sub
               FROM user_audio_files
              WHERE transcription_status = ANY(:statuses)
-               AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)
+               {stale}
                AND created_at > :age_cutoff
                AND (pipeline_claim_at IS NULL OR pipeline_claim_at < :claim_cutoff)
                {retry_cap}
                {user_filter}
              ORDER BY last_activity_at ASC NULLS FIRST
              LIMIT :limit
-        """).replace("{retry_cap}", retry_cap_clause)
+        """).replace("{stale}", stale_clause)
+            .replace("{retry_cap}", retry_cap_clause)
             .replace("{user_filter}", "AND user_sub = :user_sub" if user_sub else ""))
         params = {
             "statuses": statuses,
-            "stale_cutoff": stale_cutoff,
             "age_cutoff": age_cutoff,
             "claim_cutoff": claim_cutoff,
             "limit": limit,
         }
+        if not include_failed:
+            params["stale_cutoff"] = stale_cutoff
         if not include_failed:
             params["max_retries"] = MAX_AUTO_RETRIES
         if user_sub:
