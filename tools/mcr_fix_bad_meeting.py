@@ -209,7 +209,14 @@ def main():
     print(f"   Probe sur {len(candidates)} IDs (step={candidates[1]-candidates[0] if len(candidates)>1 else 1}). Ça va prendre quelques secondes…")
 
     def classify(code, body):
-        """500 'owned by different user' = pas à nous (mcr-gateway re-wrappe le 403)."""
+        """Distinguer les types de réponse :
+           - 200 = à nous (mais probablement pas la pourrie)
+           - 403 = pas à nous (GET ; le gateway propage le 403 tel quel)
+           - 404 = id inexistant
+           - 500 + 'different user' = pas à nous (cas PATCH où le gateway re-wrappe)
+           - 500 + 'VISIO' = LA row pourrie qu'on cherche
+           - 401 = token expiré, on stop
+        """
         if code == 500 and "different user" in (body or ""):
             return "other"
         if code == 500 and "VISIO" in (body or ""):
@@ -218,6 +225,8 @@ def main():
             return "500_other"
         if code == 200:
             return "ok"
+        if code == 403:
+            return "other"
         if code == 404:
             return "not_found"
         return f"err_{code}"
@@ -232,8 +241,9 @@ def main():
             break
         if kind == "ok":
             print(f"  id={cid} → 200 (une autre de tes meetings, pas la pourrie)")
-        if code in (401, 403):
-            sys.exit(f"  id={cid} → {code}, token expiré. Refresh et relance.")
+        if code == 401:
+            sys.exit(f"  id={cid} → 401, token expiré. Refresh et relance.")
+        # 403 = pas à nous (le gateway ne re-wrappe pas comme PATCH), on skip
         # other / not_found / 500_other : silencieux
 
     if bad_id is None:
