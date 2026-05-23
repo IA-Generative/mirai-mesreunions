@@ -134,6 +134,10 @@ def list_mcr_meetings():
     except req.RequestException:
         logger.exception("MCR /meetings unreachable")
         return _err("mcr_unreachable", 502)
+    logger.info(
+        "MCR /meetings user_sub=%s status=%s body=%s",
+        user_sub, resp.status_code, (resp.text or "")[:400],
+    )
     if resp.status_code in (401, 403):
         return _err("mcr_forbidden", 403)
     if resp.status_code >= 500:
