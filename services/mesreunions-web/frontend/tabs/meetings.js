@@ -1116,6 +1116,69 @@ if (typeof window !== 'undefined') {
 }
 
 
+// ── MCR import : bandeau persistant "import en cours" ────────────────
+//
+// Toast disparait en 4s — trop court pour une opération de ~1min. On
+// ajoute en plus un bandeau jaune en haut de l'onglet "Mes réunions"
+// qui reste visible jusqu'à ce que les rows apparaissent (ou ~2 min
+// max). L'utilisateur sait que ça travaille même s'il regarde ailleurs.
+
+let _mcrImportBannerTimer = null;
+let _mcrImportBannerExpected = 0;
+
+function _showMcrImportInProgressBanner(expectedCount) {
+  _mcrImportBannerExpected = Math.max(0, expectedCount | 0);
+  if (_mcrImportBannerTimer) {
+    clearInterval(_mcrImportBannerTimer);
+    _mcrImportBannerTimer = null;
+  }
+  const render = (secs) => {
+    const host = document.querySelector('.meetings-tab-header')
+      || document.getElementById('sessions-list')
+      || document.body;
+    if (!host) return;
+    let bn = document.getElementById('mcr-import-progress-banner');
+    if (!bn) {
+      bn = document.createElement('div');
+      bn.id = 'mcr-import-progress-banner';
+      bn.style.cssText = (
+        'background:#fef3c7;border-left:4px solid #f59e0b;color:#78350f;' +
+        'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
+        'font-size:0.88rem;display:flex;align-items:center;gap:0.5rem;'
+      );
+      host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+    }
+    const dots = '.'.repeat(1 + (secs % 3));
+    bn.innerHTML =
+      `<span style="font-size:1.1em;">⏳</span>` +
+      `<span><strong>${_mcrImportBannerExpected} import(s) MCR en cours${dots}</strong> ` +
+      `Téléchargement audio + transcription côté Mirai — la liste se rafraîchit automatiquement (${secs}s écoulées).</span>` +
+      `<button type="button" id="mcr-import-banner-dismiss" ` +
+      `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
+    const dismiss = document.getElementById('mcr-import-banner-dismiss');
+    if (dismiss) {
+      dismiss.onclick = () => _clearMcrImportBanner();
+    }
+  };
+  let secs = 0;
+  render(secs);
+  _mcrImportBannerTimer = setInterval(() => {
+    secs += 2;
+    render(secs);
+    if (secs >= 120) _clearMcrImportBanner();
+  }, 2000);
+}
+
+function _clearMcrImportBanner() {
+  if (_mcrImportBannerTimer) {
+    clearInterval(_mcrImportBannerTimer);
+    _mcrImportBannerTimer = null;
+  }
+  const bn = document.getElementById('mcr-import-progress-banner');
+  if (bn) bn.remove();
+}
+
+
 // ── MCR import modal ──────────────────────────────────────────────────
 //
 // Liste les réunions de compte-rendu.mirai pour l'utilisateur connecté,
@@ -1365,19 +1428,20 @@ async function _submitMcrImport() {
     const data = await resp.json().catch(() => ({}));
     const published = data.published ?? picks.length;
     _closeMcrImportModal();
-    const msg = `✓ ${published} import(s) MCR lancé(s). Les réunions vont apparaître dans la liste — la transcription et le compte-rendu prennent ~1 min.`;
+    // Toast court ET bandeau persistant en haut de la liste : le toast
+    // disparait en 4s, le bandeau reste jusqu'à apparition des rows.
+    const msg = `✓ ${published} import(s) MCR lancé(s). Apparaîtront dans la liste — ~1 min pour transcription + CR.`;
     if (window.showToast) window.showToast(msg, 'success');
-    else alert(msg);
+    _showMcrImportInProgressBanner(published);
     // Le worker côté ingester met ~2-5s à créer les rows en DB. On fait
-    // 3 reloads échelonnés pour rafraîchir l'UI au fil de l'apparition :
-    //   - immédiat : peut déjà voir le 1er insert si rapide
-    //   - 3s : tous les inserts faits
-    //   - 30s : les statuts ont bougé (mcr_transcript_only / kevent_completed)
+    // plusieurs reloads échelonnés pour rafraîchir l'UI au fil de l'apparition.
     const reload = _resolveLegacyFn('loadSessions');
     if (reload) {
       reload();
       setTimeout(() => reload({ force: true }), 3000);
-      setTimeout(() => reload({ force: true }), 30000);
+      setTimeout(() => reload({ force: true }), 15000);
+      setTimeout(() => reload({ force: true }), 45000);
+      setTimeout(() => reload({ force: true }), 90000);
     }
   } catch (err) {
     console.error('mcr import error', err);
