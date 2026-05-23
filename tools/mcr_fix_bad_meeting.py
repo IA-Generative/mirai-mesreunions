@@ -219,7 +219,9 @@ def main():
         """
         if code == 500 and "different user" in (body or ""):
             return "other"
-        if code == 500 and "VISIO" in (body or ""):
+        # Le validator strict matche pour VISIO / WEBCONF / WEBEX / WEBINAIRE.
+        # On utilise le marker générique du message d'erreur côté pydantic.
+        if code == 500 and "is not supported for platform" in (body or ""):
             return "bad"
         if code == 500:
             return "500_other"
