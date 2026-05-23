@@ -688,7 +688,7 @@ function _onClick(ev) {
       break;
     }
     case 'bulk-download-menu': {
-      _toggleBulkDownloadMenu(e);
+      _toggleBulkDownloadMenu(ev);
       break;
     }
     case 'bulk-download-audio':
@@ -705,7 +705,7 @@ function _onClick(ev) {
       break;
     }
     case 'resume-stuck': {
-      _resumeStuckJobs(e);
+      _resumeStuckJobs(ev);
       break;
     }
     case 'pick-files': {
