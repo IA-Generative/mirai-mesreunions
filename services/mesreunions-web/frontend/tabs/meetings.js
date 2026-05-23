@@ -201,6 +201,11 @@ function renderHeader(fileCount, hasSelection) {
                 title="Importer un dossier entier (tous les audios à l'intérieur)">
           + Dossier
         </button>
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+                data-action="meetings-new:import-from-mcr"
+                title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
+          📥 Depuis MCR
+        </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:toggle-sort"
                 title="Inverser l'ordre de tri (date de réunion)">
@@ -713,6 +718,10 @@ function _onClick(ev) {
       if (input) input.click();
       break;
     }
+    case 'import-from-mcr': {
+      _openMcrImportModal();
+      break;
+    }
     default:
       break;
   }
@@ -1099,4 +1108,226 @@ export const updateDownloadButtons = window.updateDownloadButtons;
 // (bloc « rendu sessions-list »).
 if (typeof window !== 'undefined') {
   window.__meetingsTab = { mount, unmount, renderList };
+}
+
+
+// ── MCR import modal ──────────────────────────────────────────────────
+//
+// Liste les réunions de compte-rendu.mirai pour l'utilisateur connecté,
+// permet d'en cocher plusieurs, et déclenche un import asynchrone côté
+// backend. Cf services/mesreunions-web/app/modules/mcr_import/routes.py.
+
+let _mcrModalEl = null;
+
+function _openMcrImportModal() {
+  _closeMcrImportModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'mcr-modal-overlay';
+  overlay.style.cssText = (
+    'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;' +
+    'display:flex;align-items:center;justify-content:center;'
+  );
+  overlay.innerHTML = `
+    <div class="mcr-modal" role="dialog" aria-modal="true"
+         style="background:#fff;border-radius:0.5rem;width:min(900px,90vw);
+                max-height:85vh;display:flex;flex-direction:column;
+                box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:1rem 1.25rem;border-bottom:1px solid #e5e7eb;
+                  display:flex;align-items:center;justify-content:space-between;">
+        <h3 style="margin:0;font-size:1.1rem;">📥 Importer depuis MCR</h3>
+        <button type="button" data-mcr-action="close"
+                style="background:none;border:0;font-size:1.5rem;cursor:pointer;
+                       line-height:1;color:#64748b;">×</button>
+      </div>
+      <div style="padding:0.75rem 1.25rem;display:flex;gap:0.5rem;align-items:center;
+                  border-bottom:1px solid #f1f5f9;">
+        <input type="text" data-mcr-search placeholder="Rechercher…"
+               style="flex:1;padding:0.4rem 0.6rem;border:1px solid #cbd5e1;
+                      border-radius:0.3rem;font-size:0.9rem;">
+        <label style="font-size:0.85rem;color:#475569;display:inline-flex;
+                      align-items:center;gap:0.3rem;">
+          <input type="checkbox" data-mcr-fallback checked>
+          Importer la transcription si pas d'audio
+        </label>
+      </div>
+      <div data-mcr-body style="flex:1;overflow:auto;padding:0.5rem 1.25rem;
+                                 font-size:0.9rem;">
+        <p style="color:#64748b;padding:1rem 0;">Chargement…</p>
+      </div>
+      <div style="padding:0.75rem 1.25rem;border-top:1px solid #e5e7eb;
+                  display:flex;justify-content:space-between;align-items:center;
+                  gap:0.5rem;">
+        <span data-mcr-status style="font-size:0.85rem;color:#475569;"></span>
+        <div style="display:flex;gap:0.5rem;">
+          <button type="button" data-mcr-action="close"
+                  class="meetings-tab-btn meetings-tab-btn--ghost">Annuler</button>
+          <button type="button" data-mcr-action="submit"
+                  class="meetings-tab-btn meetings-tab-btn--primary"
+                  disabled>Importer la sélection</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  _mcrModalEl = overlay;
+
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) {
+      _closeMcrImportModal();
+    }
+    const btn = ev.target.closest('[data-mcr-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-mcr-action');
+    if (action === 'close') _closeMcrImportModal();
+    if (action === 'submit') _submitMcrImport();
+  });
+
+  const search = overlay.querySelector('[data-mcr-search]');
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => _loadMcrMeetings(1, search.value.trim()), 300);
+  });
+
+  _loadMcrMeetings(1, '');
+}
+
+function _closeMcrImportModal() {
+  if (_mcrModalEl) {
+    _mcrModalEl.remove();
+    _mcrModalEl = null;
+  }
+}
+
+async function _loadMcrMeetings(page, search) {
+  if (!_mcrModalEl) return;
+  const body = _mcrModalEl.querySelector('[data-mcr-body]');
+  body.innerHTML = '<p style="color:#64748b;padding:1rem 0;">Chargement…</p>';
+  try {
+    const params = new URLSearchParams({ page: String(page), page_size: '20' });
+    if (search) params.set('search', search);
+    const resp = await fetch(`/api/mcr/meetings?${params.toString()}`, {
+      credentials: 'same-origin',
+    });
+    if (resp.status === 401) {
+      body.innerHTML = (
+        '<p style="color:#b91c1c;">Reconnecte-toi pour activer l\'import depuis MCR ' +
+        '(refresh_token absent ou expiré).</p>'
+      );
+      return;
+    }
+    if (resp.status === 403) {
+      body.innerHTML = (
+        '<p style="color:#b91c1c;">Ton compte n\'a pas accès à ' +
+        'compte-rendu.mirai.</p>'
+      );
+      return;
+    }
+    if (!resp.ok) {
+      body.innerHTML = `<p style="color:#b91c1c;">Erreur MCR (HTTP ${resp.status}).</p>`;
+      return;
+    }
+    const data = await resp.json();
+    const items = data.data || [];
+    if (items.length === 0) {
+      body.innerHTML = (
+        '<p style="color:#64748b;padding:1rem 0;">Aucune réunion trouvée sur ' +
+        'compte-rendu.mirai pour ton compte.</p>'
+      );
+      return;
+    }
+    const rows = items.map((m) => {
+      const d = m.start_date || m.creation_date || '';
+      const dateStr = d ? new Date(d).toLocaleString('fr-FR') : '';
+      const escapedName = String(m.name || '').replace(/[<>&"']/g, (c) => ({
+        '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;',
+      })[c]);
+      return `<tr>
+        <td><input type="checkbox" data-mcr-pick value="${m.id}"></td>
+        <td style="padding:0.4rem 0.5rem;">${escapedName}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${dateStr}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;">${String(m.status || '')}</td>
+      </tr>`;
+    }).join('');
+    const pager = `
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  margin-top:0.75rem;color:#64748b;font-size:0.85rem;">
+        <span>${data.total_items || 0} réunion(s) — page ${data.page || page} / ${data.total_pages || 1}</span>
+        <div style="display:flex;gap:0.3rem;">
+          ${page > 1 ? `<button type="button" data-mcr-page="${page-1}" class="meetings-tab-btn meetings-tab-btn--ghost">‹ Précédent</button>` : ''}
+          ${page < (data.total_pages || 1) ? `<button type="button" data-mcr-page="${page+1}" class="meetings-tab-btn meetings-tab-btn--ghost">Suivant ›</button>` : ''}
+        </div>
+      </div>
+    `;
+    body.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:#f8fafc;text-align:left;">
+          <th style="padding:0.4rem 0.5rem;"></th>
+          <th style="padding:0.4rem 0.5rem;">Nom</th>
+          <th style="padding:0.4rem 0.5rem;">Date</th>
+          <th style="padding:0.4rem 0.5rem;">Statut</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${pager}
+    `;
+    body.querySelectorAll('[data-mcr-page]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const p = parseInt(b.getAttribute('data-mcr-page'), 10) || 1;
+        _loadMcrMeetings(p, search);
+      });
+    });
+    body.querySelectorAll('[data-mcr-pick]').forEach((cb) => {
+      cb.addEventListener('change', _updateMcrSubmitState);
+    });
+    _updateMcrSubmitState();
+  } catch (err) {
+    console.error('mcr list error', err);
+    body.innerHTML = '<p style="color:#b91c1c;">Erreur réseau.</p>';
+  }
+}
+
+function _updateMcrSubmitState() {
+  if (!_mcrModalEl) return;
+  const picks = _mcrModalEl.querySelectorAll('[data-mcr-pick]:checked');
+  const submit = _mcrModalEl.querySelector('[data-mcr-action="submit"]');
+  const status = _mcrModalEl.querySelector('[data-mcr-status]');
+  submit.disabled = picks.length === 0;
+  status.textContent = picks.length === 0
+    ? ''
+    : `${picks.length} réunion(s) sélectionnée(s)`;
+}
+
+async function _submitMcrImport() {
+  if (!_mcrModalEl) return;
+  const picks = Array.from(_mcrModalEl.querySelectorAll('[data-mcr-pick]:checked'))
+    .map((cb) => cb.value);
+  if (picks.length === 0) return;
+  const fallback = _mcrModalEl.querySelector('[data-mcr-fallback]').checked;
+  const submit = _mcrModalEl.querySelector('[data-mcr-action="submit"]');
+  submit.disabled = true;
+  submit.textContent = 'Import en cours…';
+  try {
+    const resp = await fetch('/api/mcr/import', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meeting_ids: picks, fallback_transcript: fallback }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      alert(`Échec de l'import : HTTP ${resp.status}\n${err.slice(0, 300)}`);
+      submit.disabled = false;
+      submit.textContent = 'Importer la sélection';
+      return;
+    }
+    _closeMcrImportModal();
+    const reload = _resolveLegacyFn('loadSessions');
+    if (reload) reload();
+  } catch (err) {
+    console.error('mcr import error', err);
+    alert('Erreur réseau pendant l\'import.');
+    submit.disabled = false;
+    submit.textContent = 'Importer la sélection';
+  }
 }
