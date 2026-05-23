@@ -248,10 +248,20 @@ def assemble_corpus(
             logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
             used.append({"name": name, "id": item_id, "status": "error_download"})
             continue
-        except DriveTransientError:
-            # Surface transient errors so the route can return 502 — partial
-            # corpus would mislead the LLM. Re-raise.
-            raise
+        except DriveTransientError as exc:
+            # 2026-05-24 : on bascule en best-effort sur les transient errors
+            # spécifiques à UN document — vu en prod des HTTP 500 systématiques
+            # sur certains fichiers Drive (bug applicatif côté drive-backend).
+            # Avant : raise → toute la génération échouait. Maintenant : on
+            # skip le doc fautif et on continue ; le brief sera construit sur
+            # les autres docs (mention "[…fichier indisponible]" si jamais
+            # tous ratent en cascade, le caller détectera corpus vide).
+            logger.warning(
+                "meeting_prep: drive transient error on %s (skip + continue): %s",
+                item_id, exc,
+            )
+            used.append({"name": name, "id": item_id, "status": "error_transient"})
+            continue
 
         text = extract_text(body, content_type, filename_hint=name, max_chars=per_doc_max_chars)
         if not text:
