@@ -65,6 +65,35 @@ def _drive_sync_module():
         return None
 
 
+# Routage Drive multi-instances : on supporte plusieurs Drives Mirai
+# (mesfichiers interne au cluster, fichiers.fake-domain.name externe).
+# Key = hostname, value = base URL à utiliser pour les appels API.
+#   - mesfichiers.fake-domain.name : pod intra-cluster
+#     (bypass du LB public qui resettait les sockets idle, cf
+#     docs/debug-brief-drive-connection-reset.md)
+#   - fichiers.fake-domain.name : LB public Mirai
+_DRIVE_HOST_ROUTES = {
+    "mesfichiers.fake-domain.name": "http://drive-backend.drive.svc.cluster.local",
+    "fichiers.fake-domain.name": "https://fichiers.fake-domain.name",
+}
+
+
+def _resolve_drive_base_url(folder_host):
+    """Retourne le base URL Drive à utiliser pour ce job.
+
+    Si l'utilisateur a collé une URL avec un hostname connu, on route
+    via la table dédiée (intra-cluster ou externe). Sinon (ID nu, ou
+    host inconnu) on retombe sur DRIVE_BASE_URL env qui pointe sur le
+    Drive par défaut.
+    """
+    if folder_host:
+        lc = folder_host.strip().lower()
+        if lc in _DRIVE_HOST_ROUTES:
+            return _DRIVE_HOST_ROUTES[lc]
+    from libs.shared.app.config import DRIVE_BASE_URL
+    return DRIVE_BASE_URL
+
+
 def _err(reason: dict | str, status: int):
     if isinstance(reason, str):
         return jsonify({"error": reason}), status
@@ -167,8 +196,9 @@ def create_preparation():
         return _err("Le sujet de la réunion est requis.", 400)
 
     folder_id: "str | None" = None
+    folder_host: "str | None" = None
     if folder_raw:
-        folder_id = _mp.extract_folder_id(folder_raw)
+        folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
         if not folder_id:
             return _err("Identifiant de dossier Drive invalide.", 400)
     if not role_viewpoint:
@@ -251,6 +281,7 @@ def create_preparation():
         "user_sub": user_sub,
         "subject": subject,
         "folder_id": folder_id,
+        "folder_host": folder_host,
         "role_viewpoint": role_viewpoint,
         "expectation": expectation,
         "duration_minutes": duration_minutes,
@@ -378,8 +409,13 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             logger.exception("preparations: failed to decrypt refresh token for sub=%s", user_sub)
             _fail("Token Drive illisible côté serveur.", 500)
 
+        # Routage Drive : si le user a collé une URL avec un hostname
+        # spécifique, on l'utilise (en passant par _resolve_drive_base_url
+        # qui peut court-circuiter le LB public via le service intra-cluster).
+        # Sinon → fallback DRIVE_BASE_URL env.
+        drive_base = _resolve_drive_base_url(job.get("folder_host"))
         drive = _mp.DriveClient(
-            base_url=DRIVE_BASE_URL,
+            base_url=drive_base,
             oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
             oidc_client_id=oidc_cfg.client_id,
             oidc_client_secret=oidc_cfg.client_secret,
