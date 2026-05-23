@@ -273,11 +273,18 @@ class UserAudioFile(InternalBase):
     audio_quality_score = Column(Float, nullable=True)
     audio_duration_seconds = Column(Float, nullable=True)
 
+    # Origine de la ligne : upload web (mesreunions-web), mobile (PWA depot),
+    # ou import depuis MCR (compte-rendu.mirai). Persisté pour différencier les
+    # cas dans l'UI (badge "venu de MCR") + dédoublonnage à l'import.
+    origin = Column(String(20), nullable=False, default="upload",
+                    comment="upload | mobile | mcr_import")
+
     # Transcription — final text produced by whichever backend ran.
     transcription_status = Column(String(50), default="pending",
                                   comment=(
                                       "stub: pending|disabled|processing|completed|failed | "
-                                      "mcr: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
+                                      "mcr push: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
+                                      "mcr import: mcr_import_pending|mcr_imported|mcr_transcript_only|mcr_import_failed | "
                                       "kevent: kevent_transcribing|kevent_queued|"
                                       "kevent_processing|kevent_completed|"
                                       "kevent_partially_completed|kevent_failed"
