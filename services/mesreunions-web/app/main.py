@@ -178,6 +178,7 @@ def _register_modular_blueprints(flask_app):
     from app.modules.devices import devices_bp
     from app.modules.sessions import sessions_bp
     from app.modules.feedback import feedback_bp
+    from app.modules.mcr_import import mcr_import_bp
 
     registered = {b.name for b in flask_app.blueprints.values()}
     for name, bp in (
@@ -187,6 +188,7 @@ def _register_modular_blueprints(flask_app):
         ("preparations", preparations_bp),
         ("meetings", meetings_bp),
         ("feedback", feedback_bp),
+        ("mcr_import", mcr_import_bp),
     ):
         if name not in registered:
             flask_app.register_blueprint(bp)
