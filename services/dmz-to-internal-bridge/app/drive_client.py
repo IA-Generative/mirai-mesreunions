@@ -279,6 +279,12 @@ class DriveClient:
         headers = {"Connection": "close"}
         if send_bearer:
             headers["Authorization"] = f"Bearer {access_token}"
+        # DEBUG : log la première URL téléchargée pour diagnostiquer où ça
+        # plante. À retirer une fois le bug RST résolu.
+        logger.info(
+            "drive_client.download_item: item=%s download_url=%s send_bearer=%s",
+            item_id, download_url[:200], send_bearer,
+        )
         for attempt in range(1, max_attempts + 1):
             try:
                 with req.Session() as s:
