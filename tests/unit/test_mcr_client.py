@@ -238,9 +238,11 @@ def test_list_meetings_200_returns_paginated_dict():
     _REQ.get.return_value = _resp(200, json_data=payload)
     out = _client().list_meetings("AT", page=1, page_size=10)
     assert out == payload
-    # URL was the gateway + /api/meetings/ with Bearer header
+    # URL was the gateway + /api/meetings (no trailing slash — MCR redirects
+    # trailing-slash to non-slash but downgrades to http:// which the CNP
+    # frontend-egress blocks; cf bug 2026-05-23 prod-bêta first deploy).
     args, kwargs = _REQ.get.call_args
-    assert args[0].endswith("/api/meetings/")
+    assert args[0].endswith("/api/meetings")
     assert kwargs["params"] == {"page": 1, "page_size": 10}
     assert kwargs["headers"]["Authorization"] == "Bearer AT"
 

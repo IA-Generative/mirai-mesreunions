@@ -121,7 +121,7 @@ def list_mcr_meetings():
         return _err("internal_error", 500)
 
     try:
-        url = f"{_mcr_base()}/api/meetings/"
+        url = f"{_mcr_base()}/api/meetings"
         params = {"page": page, "page_size": page_size}
         if search:
             params["search"] = search

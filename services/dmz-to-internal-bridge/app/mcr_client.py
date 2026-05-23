@@ -174,7 +174,7 @@ class MCRClient:
         Each Meeting includes ``id, name, status, creation_date, start_date,
         end_date, name_platform, url, notes``.
         """
-        url = f"{self.gateway_url}/api/meetings/"
+        url = f"{self.gateway_url}/api/meetings"
         params: dict = {"page": page, "page_size": page_size}
         if search:
             params["search"] = search
