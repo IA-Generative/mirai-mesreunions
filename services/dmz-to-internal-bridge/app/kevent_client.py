@@ -147,27 +147,38 @@ class KeventClient:
 
     @staticmethod
     def _whisper_safe_filename(filename: str) -> str:
-        """Renomme l'extension + sanitise pour matcher la whitelist gateway.
+        """Renomme l'extension + sanitise pour matcher la whitelist gateway
+        et résister au shell/disque côté Whisper.
 
-        1) Garde le BASENAME : retire tout chemin (``Pitch my epic/X.mp3``
-           → ``X.mp3``). Sinon Whisper côté kevent écrit le fichier sur
-           disque et le ``/`` est interprété comme un sous-dossier
-           inexistant → upload silencieusement perdu. Vu en prod 2026-05-24
-           sur ``Pitch my epic/2026-05-20_13_45_46.mp3`` qui ne pouvait
-           jamais terminer kevent_processing.
-        2) Renomme ``.mp4`` → ``.m4a`` parce que le gateway whitelist les
-           extensions audio : ``.mp3 .wav .m4a .ogg .flac``. Le
-           audio-normalizer produit du ``.mp4`` (container MP4 + AAC),
-           sémantiquement identique à ``.m4a`` ; on renomme juste
-           l'extension du multipart, pas les bytes.
+        1) Strip path components (``Pitch my epic/X.mp3`` → ``X.mp3``)
+           sinon Whisper interprète ``/`` comme un sous-dossier inexistant
+           lors de l'écriture sur disque → fichier perdu silencieusement.
+           Vu en prod 2026-05-24 (Pitch my epic/2026-05-20_13_45_46.mp3).
+        2) Remplace TOUS les caractères "ambigus" pour le shell/disque
+           (``'`` ``"`` ``;`` ``&`` ``|`` ``$`` ``\\`` etc) par ``_``.
+           Garde lettres/chiffres/dash/underscore/dot/espace/accents.
+           Protège contre tout chaînage de cmd, mauvaise quoting,
+           filesystems exotiques côté worker Whisper.
+        3) Renomme ``.mp4`` → ``.m4a`` (whitelist gateway : mp3 wav m4a
+           ogg flac ; audio-normalizer produit du .mp4 = AAC en container
+           MP4, sémantiquement identique au m4a).
         """
         if not filename:
             return filename
-        # Strip path components — équivalent os.path.basename mais en pur
-        # str pour éviter d'importer os pour ça et marcher avec / ET \.
+        # 1) Basename — strip / et \.
         for sep in ("/", "\\"):
             if sep in filename:
                 filename = filename.rsplit(sep, 1)[-1]
+        # 2) Sanitize : remplace tout caractère non-sûr par '_'. On garde
+        # alphanumériques (Unicode word chars couvre les accents), point,
+        # dash, underscore, espace. Tout le reste → '_'.
+        import re
+        filename = re.sub(r"[^\w\.\-\s]", "_", filename, flags=re.UNICODE)
+        # Collapse les '_' multiples consécutifs pour rester lisible.
+        filename = re.sub(r"_{2,}", "_", filename).strip(" _")
+        if not filename:
+            filename = "audio"
+        # 3) Extension mapping.
         lower = filename.lower()
         if lower.endswith(".mp4"):
             return filename[:-4] + ".m4a"
