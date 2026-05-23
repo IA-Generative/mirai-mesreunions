@@ -4,23 +4,56 @@ Localise la row 'pourrie' qui fait planter GET /api/meetings sur MCR
 (validator pydantic VISIO + meeting_platform_id), puis propose de la
 PATCHer (meilleur) ou DELETEr.
 
-Usage :
-    1. Sur https://compte-rendu.mirai.fake-domain.name/, ouvre DevTools
-       (F12) → Network → recharge la page → clique sur la requête /token
-       → onglet Preview/Response → copie la valeur de access_token.
-    2. Lance ce script — il te demande de coller le token.
-    3. Suis les instructions.
+Usage (3 manières de fournir le token, par ordre de préférence) :
+
+    A) Variable d'env (recommandé pour les tokens longs >2000 chars) :
+         export MCR_TOKEN='eyJ...'
+         python3 tools/mcr_fix_bad_meeting.py
+
+    B) Fichier :
+         pbpaste > /tmp/tk.txt        # macOS, ou : echo 'eyJ...' > /tmp/tk.txt
+         python3 tools/mcr_fix_bad_meeting.py /tmp/tk.txt
+
+    C) Prompt interactif (peut buguer si le token est très long) :
+         python3 tools/mcr_fix_bad_meeting.py
+
+Pour récupérer le token : sur https://compte-rendu.mirai.fake-domain.name/,
+DevTools (F12) → Network → filtre "token" → recharge → clique sur la requête
+POST .../openid-connect/token → Response → copie la valeur de access_token.
 
 Aucune dépendance externe (stdlib only).
 """
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 BASE = "https://compte-rendu.mirai.fake-domain.name/api"
+
+
+def load_token() -> str:
+    """3 sources d'input par ordre de priorité : argv (fichier), env, prompt."""
+    if len(sys.argv) > 1:
+        path = sys.argv[1]
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as exc:
+            sys.exit(f"Impossible de lire {path} : {exc}")
+    env_token = os.getenv("MCR_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    print("Colle l'access_token puis Entrée (sans guillemets, sans 'Bearer ')")
+    print("Si le token est très long et que le terminal coupe, relance avec :")
+    print("  export MCR_TOKEN='eyJ...' && python3 tools/mcr_fix_bad_meeting.py")
+    print()
+    try:
+        return sys.stdin.readline().strip()
+    except KeyboardInterrupt:
+        sys.exit("\nAbandon.")
 
 
 def http(method, path, token, body=None):
@@ -107,11 +140,14 @@ def try_patch(token, meeting_id):
 def main():
     print(__doc__)
     print("=" * 70)
-    token = input("\nColle l'access_token (sans guillemets, sans 'Bearer ') puis Entrée :\n> ").strip()
+    token = load_token()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
-    if not token or "." not in token:
-        sys.exit("Token vide ou format inattendu. Abandon.")
+    # Nettoyage : retire d'éventuels guillemets/virgules de copier-coller JSON.
+    token = token.strip().strip('"').strip(",").strip().strip('"').strip()
+    if not token or "." not in token or token.count(".") < 2:
+        sys.exit(f"Token vide ou format inattendu (len={len(token)}, dots={token.count('.')}). Abandon.")
+    print(f"Token reçu : {len(token)} caractères, {token.count('.')} segments (attendu : 2).")
 
     # 0) Ping rapide /me pour valider le token
     print("\n→ Validation token via GET /me…")
