@@ -33,10 +33,18 @@ from typing import Optional
 
 import requests as req
 
+from libs.shared.app.mirai_oidc import (
+    OIDCAuthError,
+    OIDCApplicativeError,
+    OIDCTransientError,
+    exchange_refresh_token,
+)
+
 logger = logging.getLogger(__name__)
 
 
 # ─── Exceptions ────────────────────────────────────────────────
+# MCR* aliases kept for backward compat with puller.py and existing tests.
 
 class MCRError(Exception):
     """Base class — never raised directly."""
@@ -52,6 +60,14 @@ class MCRTransientError(MCRError):
 
 class MCRApplicativeError(MCRError):
     """4xx other than auth — bad payload, unknown meeting, etc. No retry."""
+
+
+# Map shared OIDC errors → MCR errors so callers using only MCR* still work.
+_OIDC_TO_MCR = {
+    OIDCAuthError: MCRAuthError,
+    OIDCTransientError: MCRTransientError,
+    OIDCApplicativeError: MCRApplicativeError,
+}
 
 
 # ─── Client ────────────────────────────────────────────────────
@@ -86,37 +102,17 @@ class MCRClient:
     # ── Step 1: refresh → access ─────────────────────────────
 
     def exchange_refresh(self, refresh_token: str) -> str:
-        """Exchange a refresh token for a fresh access token."""
-        if not refresh_token:
-            raise MCRAuthError("Empty refresh token")
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": self.oidc_client_id,
-        }
-        if self.oidc_client_secret:
-            data["client_secret"] = self.oidc_client_secret
+        """Exchange a refresh token for a fresh access token (delegated to shared helper)."""
         try:
-            resp = req.post(self.oidc_token_endpoint, data=data, timeout=self.timeout)
-        except req.RequestException as exc:
-            raise MCRTransientError(f"Keycloak token endpoint unreachable: {exc}") from exc
-        if resp.status_code == 400:
-            # Keycloak conventionally returns 400 invalid_grant when the refresh
-            # has expired or been revoked. Treat any 400 from the token endpoint
-            # as terminal authentication failure.
-            body = (resp.text or "")[:300]
-            raise MCRAuthError(f"Refresh exchange failed (400): {body}")
-        if resp.status_code >= 500:
-            raise MCRTransientError(f"Keycloak 5xx on token exchange: {resp.status_code}")
-        if resp.status_code >= 400:
-            raise MCRApplicativeError(f"Keycloak {resp.status_code} on token exchange: {(resp.text or '')[:200]}")
-        try:
-            access_token = resp.json().get("access_token", "")
-        except Exception as exc:
-            raise MCRTransientError(f"Keycloak response not JSON: {exc}") from exc
-        if not access_token:
-            raise MCRAuthError("Keycloak returned no access_token")
-        return access_token
+            return exchange_refresh_token(
+                token_endpoint=self.oidc_token_endpoint,
+                client_id=self.oidc_client_id,
+                refresh_token=refresh_token,
+                client_secret=self.oidc_client_secret,
+                timeout=self.timeout,
+            )
+        except tuple(_OIDC_TO_MCR.keys()) as exc:
+            raise _OIDC_TO_MCR[type(exc)](str(exc)) from exc
 
     # ── Step 2: create meeting ───────────────────────────────
 
