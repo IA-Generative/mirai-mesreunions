@@ -957,6 +957,11 @@ async function _resumeStuckJobs(ev) {
     if (window.showToast) window.showToast(msg, 'success');
     else window.alert(msg);
 
+    // Bandeau VISIBLE persistant — disparait au prochain reload réussi
+    // ou au clic ×. Reste affiché pendant que les statuts évoluent
+    // (kevent_queued → kevent_processing → kevent_completed/_failed).
+    _showResumeStuckBanner(claimed, titles);
+
     // Refresh la liste pour montrer les nouveaux statuts ("kevent_queued").
     // Puis re-refresh échelonnés pour suivre la transition vers le statut
     // terminal (kevent_processing → kevent_completed OU kevent_failed) sans
@@ -1130,6 +1135,74 @@ export const updateDownloadButtons = window.updateDownloadButtons;
 // (bloc « rendu sessions-list »).
 if (typeof window !== 'undefined') {
   window.__meetingsTab = { mount, unmount, renderList };
+}
+
+
+// ── Bandeau persistant "transcriptions relancées" ───────────────────
+//
+// Toast 4s = trop court pour suivre des reprises de transcription qui
+// prennent 30s-2min. On ajoute un bandeau vert en haut de l'onglet "Mes
+// réunions" qui compte les secondes écoulées + liste les titres relancés.
+// Auto-disparait à 180s ou au clic ×.
+
+let _resumeStuckBannerTimer = null;
+let _resumeStuckBannerCount = 0;
+let _resumeStuckBannerTitles = [];
+
+function _showResumeStuckBanner(count, titles) {
+  _resumeStuckBannerCount = count | 0;
+  _resumeStuckBannerTitles = Array.isArray(titles) ? titles.slice(0, 5) : [];
+  if (_resumeStuckBannerTimer) {
+    clearInterval(_resumeStuckBannerTimer);
+    _resumeStuckBannerTimer = null;
+  }
+  const render = (secs) => {
+    const host = document.querySelector('.meetings-tab-header')
+      || document.getElementById('sessions-list')
+      || document.body;
+    if (!host) return;
+    let bn = document.getElementById('mcr-resume-stuck-banner');
+    if (!bn) {
+      bn = document.createElement('div');
+      bn.id = 'mcr-resume-stuck-banner';
+      bn.style.cssText = (
+        'background:#dcfce7;border-left:4px solid #16a34a;color:#14532d;' +
+        'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
+        'font-size:0.88rem;display:flex;align-items:center;gap:0.5rem;'
+      );
+      host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+    }
+    const dots = '.'.repeat(1 + (secs % 3));
+    const sample = _resumeStuckBannerTitles.join(', ');
+    const more = _resumeStuckBannerCount > _resumeStuckBannerTitles.length
+      ? ` (+${_resumeStuckBannerCount - _resumeStuckBannerTitles.length})` : '';
+    bn.innerHTML =
+      `<span style="font-size:1.1em;">🔄</span>` +
+      `<span><strong>${_resumeStuckBannerCount} transcription(s) relancée(s)${dots}</strong> ` +
+      `— les statuts vont passer en <code>kevent_queued</code> puis <code>kevent_processing</code> ` +
+      `puis <code>kevent_completed</code> (ou <code>kevent_failed</code> si replante). ` +
+      `Liste auto-actualisée (${secs}s) — ${sample}${more}</span>` +
+      `<button type="button" id="resume-stuck-banner-dismiss" ` +
+      `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
+    const dismiss = document.getElementById('resume-stuck-banner-dismiss');
+    if (dismiss) dismiss.onclick = () => _clearResumeStuckBanner();
+  };
+  let secs = 0;
+  render(secs);
+  _resumeStuckBannerTimer = setInterval(() => {
+    secs += 2;
+    render(secs);
+    if (secs >= 180) _clearResumeStuckBanner();
+  }, 2000);
+}
+
+function _clearResumeStuckBanner() {
+  if (_resumeStuckBannerTimer) {
+    clearInterval(_resumeStuckBannerTimer);
+    _resumeStuckBannerTimer = null;
+  }
+  const bn = document.getElementById('mcr-resume-stuck-banner');
+  if (bn) bn.remove();
 }
 
 
