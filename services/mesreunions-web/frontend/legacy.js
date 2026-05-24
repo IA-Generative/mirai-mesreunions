@@ -1818,6 +1818,30 @@ function _parseSpeakerTagged(text) {
     return blocks;
 }
 
+// Re-monte le corrector sur place (sans location.reload) après une
+// modification serveur de la transcription (delete-hidden-blocks ou
+// re-filter). Conserve la position de scroll de la page + le panneau
+// détail ouvert — sinon location.reload rafraîchit toute la page et
+// l'utilisateur retombe sur la liste des réunions, frustrant.
+//
+// Stratégie : invalide le cache transcript-text (sinon le refetch
+// retournerait le vieux contenu en RAM), reset le flag mounted, vide
+// le container, puis re-call mountTranscriptCorrector qui ré-execute
+// la chaîne fetch + parse + render avec le nouveau speaker_tagged_text.
+async function _remountCorrectorInPlace(container, fileId) {
+    if (!container || !fileId) return;
+    const savedScrollY = window.scrollY;
+    if (typeof _invalidateTranscriptTextCache === 'function') {
+        try { _invalidateTranscriptTextCache(fileId); } catch (e) {}
+    }
+    container.dataset.correctorMounted = '0';
+    container.innerHTML = '';
+    await mountTranscriptCorrector(container);
+    // Restaure le scroll : mountTranscriptCorrector peut avoir grandi/
+    // rétréci le DOM, le browser peut avoir clampé. Force-restore.
+    window.scrollTo(0, savedScrollY);
+}
+
 async function mountTranscriptCorrector(container) {
     if (!container || container.dataset.correctorMounted === '1') return;
     const fileId = container.getAttribute('data-corrector-for') || '';
@@ -2182,9 +2206,11 @@ async function mountTranscriptCorrector(container) {
           });
           if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
           const d = await r.json();
-          alert(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Les compte-rendus dérivés (CR, reformulation) ont été vidés — cliquez "Re-générer" pour les recréer.`);
-          // Reload de la fiche pour voir la nouvelle transcription propre.
-          location.reload();
+          // Re-monte le corrector sur place plutôt que location.reload() qui
+          // ferait perdre le scroll + ré-afficher la liste des réunions.
+          await _remountCorrectorInPlace(container, fileId);
+          if (window.showToast) window.showToast(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Compte-rendus dérivés à régénérer.`, 'success');
+          else alert(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Les compte-rendus dérivés (CR, reformulation) ont été vidés — cliquez "Re-générer" pour les recréer.`);
         } catch (e) { alert('Erreur : ' + e.message); }
         return;
       }
@@ -2198,11 +2224,20 @@ async function mountTranscriptCorrector(container) {
           if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
           const d = await r.json();
           if (d.dropped_lines === 0) {
-            alert('Aucune phrase interdite trouvée — la transcription est déjà propre.');
+            // Message plus diagnostic — l'user peut conclure à tort que la
+            // liste n'est pas chargée alors qu'aucune ligne ne matche.
+            const msg = `Aucune ligne de cette transcription ne matche la liste des phrases interdites configurées en admin.\n\n` +
+                        `Si vous attendiez un nettoyage : vérifiez que la phrase EXACTE est bien dans la liste (admin-console) — le match est insensible à la casse mais sans regex.\n\n` +
+                        `Astuce : pour barrer manuellement un bloc visible, survolez-le et cliquez 🚫.`;
+            alert(msg);
             return;
           }
-          alert(`✓ ${d.dropped_lines} ligne(s) retirée(s). Compte-rendus dérivés invalidés.`);
-          location.reload();
+          // Re-monte le corrector sur place (pas de reload qui ferait
+          // perdre le scroll et ré-afficher la liste des réunions).
+          await _remountCorrectorInPlace(container, fileId);
+          const sample = (d.samples || []).slice(0, 3).map(s => '« ' + (s || '').slice(0, 80) + ' »').join(', ');
+          if (window.showToast) window.showToast(`✓ ${d.dropped_lines} ligne(s) retirée(s)${sample ? ' : ' + sample : ''}. CR à régénérer.`, 'success');
+          else alert(`✓ ${d.dropped_lines} ligne(s) retirée(s)${sample ? '. Exemples : ' + sample : ''}. Compte-rendus dérivés invalidés.`);
         } catch (e) { alert('Erreur : ' + e.message); }
         return;
       }
