@@ -1002,7 +1002,9 @@ async function _resumeStuckJobs(ev) {
     // Bandeau VISIBLE persistant — disparait au prochain reload réussi
     // ou au clic ×. Reste affiché pendant que les statuts évoluent
     // (kevent_queued → kevent_processing → kevent_completed/_failed).
-    _showResumeStuckBanner(claimed, titles);
+    // ids passés explicitement → le bandeau peut afficher un breakdown
+    // live des statuts (✓ prête / 🔄 en cours / ⏳ en file / ⚠ échec).
+    _showResumeStuckBanner(claimed, titles, ids);
 
     // Refresh la liste pour montrer les nouveaux statuts ("kevent_queued").
     // Puis re-refresh échelonnés pour suivre la transition vers le statut
@@ -1018,11 +1020,16 @@ async function _resumeStuckJobs(ev) {
         for (const fid of ids) _transcriptCache.delete(fid);
         try { reload({ force: true }); } catch (e) {}
       };
-      setTimeout(refreshIds, 5000);
-      setTimeout(refreshIds, 15000);
-      setTimeout(refreshIds, 30000);
-      setTimeout(refreshIds, 60000);
-      setTimeout(refreshIds, 120000);
+      // Premier refresh AGRESSIF à T+2s pour que l'utilisateur voie
+      // l'icône passer de "Échec" à "En file d'attente" immédiatement.
+      // Sans ça, l'impression d'"il ne se passe rien" pendant 5s pousse à
+      // re-cliquer ou à recharger manuellement (déjà signalé en prod).
+      setTimeout(refreshIds, 2000);
+      setTimeout(refreshIds, 8000);
+      setTimeout(refreshIds, 20000);
+      setTimeout(refreshIds, 45000);
+      setTimeout(refreshIds, 90000);
+      setTimeout(refreshIds, 180000);
     }
 
     // Highlight visuel temporaire (3.5s) sur les rows relancées pour que
@@ -1190,10 +1197,36 @@ if (typeof window !== 'undefined') {
 let _resumeStuckBannerTimer = null;
 let _resumeStuckBannerCount = 0;
 let _resumeStuckBannerTitles = [];
+let _resumeStuckBannerIds = [];
 
-function _showResumeStuckBanner(count, titles) {
+// Compte les statuts actuels des rows relancées, depuis le cache transcript.
+// Renvoie { processing, completed, failed, queued, unknown }.
+function _countTrackedStatuses(ids) {
+  const out = { processing: 0, completed: 0, failed: 0, queued: 0, unknown: 0 };
+  for (const fid of ids) {
+    const cached = _transcriptCache.get(fid);
+    const s = (cached && cached.status) || '';
+    if (s === 'kevent_completed' || s === 'kevent_partially_completed' || s === 'completed') {
+      out.completed += 1;
+    } else if (s === 'kevent_failed' || s === 'failed' ||
+               (s && s.indexOf('_failed') !== -1)) {
+      out.failed += 1;
+    } else if (s === 'kevent_processing' || s === 'kevent_transcribing' ||
+               s === 'processing') {
+      out.processing += 1;
+    } else if (s === 'kevent_queued' || s === 'pending' || s === 'mcr_import_pending') {
+      out.queued += 1;
+    } else {
+      out.unknown += 1;
+    }
+  }
+  return out;
+}
+
+function _showResumeStuckBanner(count, titles, ids) {
   _resumeStuckBannerCount = count | 0;
   _resumeStuckBannerTitles = Array.isArray(titles) ? titles.slice(0, 5) : [];
+  _resumeStuckBannerIds = Array.isArray(ids) ? ids.slice() : [];
   if (_resumeStuckBannerTimer) {
     clearInterval(_resumeStuckBannerTimer);
     _resumeStuckBannerTimer = null;
@@ -1210,20 +1243,31 @@ function _showResumeStuckBanner(count, titles) {
       bn.style.cssText = (
         'background:#dcfce7;border-left:4px solid #16a34a;color:#14532d;' +
         'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
-        'font-size:0.88rem;display:flex;align-items:center;gap:0.5rem;'
+        'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
       );
       host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
     }
-    const dots = '.'.repeat(1 + (secs % 3));
+    // Breakdown live des statuts (lit le cache à chaque tick).
+    const k = _countTrackedStatuses(_resumeStuckBannerIds);
+    const chips = [];
+    if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
+    if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
+    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en file</span>`);
+    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} en échec</span>`);
+    if (k.unknown > 0) chips.push(`<span style="background:#e5e7eb;border-radius:9999px;padding:1px 8px;">… ${k.unknown}</span>`);
     const sample = _resumeStuckBannerTitles.join(', ');
     const more = _resumeStuckBannerCount > _resumeStuckBannerTitles.length
       ? ` (+${_resumeStuckBannerCount - _resumeStuckBannerTitles.length})` : '';
+    // Phrase principale : claire, courte, avec ETA réaliste.
+    const allDone = (k.completed + k.failed) === _resumeStuckBannerIds.length && _resumeStuckBannerIds.length > 0;
+    const headline = allDone
+      ? `<strong>Reprise terminée</strong> pour les ${_resumeStuckBannerCount} réunion(s).`
+      : `<strong>${_resumeStuckBannerCount} transcription(s) reprise(s)</strong> — la liste ci-dessous se met à jour toute seule, vous pouvez attendre. (${secs}s écoulées)`;
     bn.innerHTML =
       `<span style="font-size:1.1em;">🔄</span>` +
-      `<span><strong>${_resumeStuckBannerCount} réunion(s) relancée(s)${dots}</strong> ` +
-      `— le traitement est reparti. La liste se met à jour automatiquement ` +
-      `pendant que la transcription puis le compte-rendu sont (re)générés ` +
-      `(${secs}s écoulées). Réunions concernées : ${sample}${more}</span>` +
+      `<span>${headline}</span>` +
+      (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
+      `<span style="opacity:0.75;font-size:0.8em;">Concernées : ${sample}${more}</span>` +
       `<button type="button" id="resume-stuck-banner-dismiss" ` +
       `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
     const dismiss = document.getElementById('resume-stuck-banner-dismiss');
@@ -1234,7 +1278,7 @@ function _showResumeStuckBanner(count, titles) {
   _resumeStuckBannerTimer = setInterval(() => {
     secs += 2;
     render(secs);
-    if (secs >= 180) _clearResumeStuckBanner();
+    if (secs >= 300) _clearResumeStuckBanner();  // étendu à 5 min — les CR mettent du temps
   }, 2000);
 }
 
@@ -1264,6 +1308,9 @@ function _showMcrImportInProgressBanner(expectedCount) {
     clearInterval(_mcrImportBannerTimer);
     _mcrImportBannerTimer = null;
   }
+  const _startSnapshotIds = new Set(
+    (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean)
+  );
   const render = (secs) => {
     const host = document.querySelector('.meetings-tab-header')
       || document.getElementById('sessions-list')
@@ -1276,16 +1323,28 @@ function _showMcrImportInProgressBanner(expectedCount) {
       bn.style.cssText = (
         'background:#fef3c7;border-left:4px solid #f59e0b;color:#78350f;' +
         'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
-        'font-size:0.88rem;display:flex;align-items:center;gap:0.5rem;'
+        'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
       );
       host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
     }
-    const dots = '.'.repeat(1 + (secs % 3));
+    // Compte les rows NOUVELLES apparues depuis le clic "Importer".
+    const currentIds = (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean);
+    const newIds = currentIds.filter(id => !_startSnapshotIds.has(id));
+    const arrived = newIds.length;
+    const k = _countTrackedStatuses(newIds);
+    const chips = [];
+    if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
+    if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
+    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en file</span>`);
+    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} en échec</span>`);
+    const remaining = Math.max(0, _mcrImportBannerExpected - arrived);
+    const headline = arrived >= _mcrImportBannerExpected && _mcrImportBannerExpected > 0
+      ? `<strong>Toutes les ${_mcrImportBannerExpected} réunions sont arrivées.</strong> Suivez le traitement ci-dessous.`
+      : `<strong>${arrived}/${_mcrImportBannerExpected} réunion(s) arrivée(s) depuis compte-rendu.mirai</strong> — ${remaining > 0 ? remaining + ' attendue(s) dans quelques secondes' : 'finalisation…'}. (${secs}s écoulées)`;
     bn.innerHTML =
-      `<span style="font-size:1.1em;">⏳</span>` +
-      `<span><strong>${_mcrImportBannerExpected} réunion(s) en cours d'import depuis compte-rendu.mirai${dots}</strong> ` +
-      `Récupération de l'audio puis génération de la transcription et du compte-rendu — ` +
-      `la liste se rafraîchit automatiquement (${secs}s écoulées).</span>` +
+      `<span style="font-size:1.1em;">📥</span>` +
+      `<span>${headline}</span>` +
+      (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
       `<button type="button" id="mcr-import-banner-dismiss" ` +
       `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
     const dismiss = document.getElementById('mcr-import-banner-dismiss');
@@ -1298,7 +1357,7 @@ function _showMcrImportInProgressBanner(expectedCount) {
   _mcrImportBannerTimer = setInterval(() => {
     secs += 2;
     render(secs);
-    if (secs >= 120) _clearMcrImportBanner();
+    if (secs >= 300) _clearMcrImportBanner();  // 5 min — les CR peuvent prendre du temps
   }, 2000);
 }
 
@@ -1573,10 +1632,14 @@ async function _submitMcrImport() {
     const reload = _resolveLegacyFn('loadSessions');
     if (reload) {
       reload();
-      setTimeout(() => reload({ force: true }), 3000);
+      // T+2s : montre les premières rows arrivées (worker ingester pose
+      // la row en DB après ~1-3s). Sans ça, on attendait 3-5s muet.
+      setTimeout(() => reload({ force: true }), 2000);
+      setTimeout(() => reload({ force: true }), 6000);
       setTimeout(() => reload({ force: true }), 15000);
-      setTimeout(() => reload({ force: true }), 45000);
-      setTimeout(() => reload({ force: true }), 90000);
+      setTimeout(() => reload({ force: true }), 30000);
+      setTimeout(() => reload({ force: true }), 60000);
+      setTimeout(() => reload({ force: true }), 120000);
     }
   } catch (err) {
     console.error('mcr import error', err);
