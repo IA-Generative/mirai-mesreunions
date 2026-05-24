@@ -2671,6 +2671,253 @@ def full_reprocess_audio(audio_id: str):
     }), 202
 
 
+# ─── Édition utilisateur de la transcription ───────────────────────
+# (migration 022 hidden_block_indices + migration 021 forbidden_phrases)
+#
+# Trois endpoints :
+#   PATCH /api/v1/audio/<id>/hidden-blocks       → upsert liste indices
+#   POST  /api/v1/audio/<id>/delete-hidden-blocks → applique (irréversible)
+#   POST  /api/v1/audio/<id>/re-filter           → applique forbidden phrases
+#                                                  rétroactivement sur la
+#                                                  transcription actuelle
+
+
+def _reparse_speaker_tagged_blocks(text: str) -> list[dict]:
+    """Parser server-side du speaker_tagged_text — miroir du
+    _parseSpeakerTagged côté legacy.js. Format attendu :
+
+        **Speaker** _(M:SS → M:SS)_
+        > texte ligne 1
+        > texte ligne 2
+
+    Retourne une liste de dicts {speaker, start, end, text, header_line,
+    body_lines} où header_line + body_lines sont les lignes brutes
+    originelles (pour pouvoir reconstruire à l'identique).
+    """
+    if not text:
+        return []
+    import re as _re
+    head_re = _re.compile(
+        r"^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*→\s*(\d+):(\d+(?:\.\d+)?)\)_"
+    )
+    blocks: list[dict] = []
+    current: Optional[dict] = None
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        m = head_re.match(line)
+        if m:
+            if current is not None:
+                blocks.append(current)
+            current = {
+                "speaker": m.group(1).strip(),
+                "start": int(m.group(2)) * 60 + float(m.group(3)),
+                "end": int(m.group(4)) * 60 + float(m.group(5)),
+                "header_line": raw,
+                "body_lines": [],
+            }
+        elif current is not None and line.startswith(">"):
+            current["body_lines"].append(raw)
+        # lignes vides : ignorées (séparateurs entre blocs)
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def _rebuild_speaker_tagged(blocks: list[dict]) -> str:
+    """Inverse de _reparse_speaker_tagged_blocks — recompose le texte."""
+    out: list[str] = []
+    for b in blocks:
+        out.append(b.get("header_line", ""))
+        out.extend(b.get("body_lines", []))
+        out.append("")  # séparateur visuel
+    return "\n".join(out).rstrip() + "\n"
+
+
+@app.route("/api/v1/audio/<audio_id>/hidden-blocks", methods=["PATCH"])
+def api_patch_hidden_blocks(audio_id: str):
+    """Upsert la liste des indices de blocs barrés (réversible).
+
+    Body : ``{user_sub: str, indices: [int]}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    raw_indices = data.get("indices") or []
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        indices = sorted({int(i) for i in raw_indices if int(i) >= 0})
+    except (TypeError, ValueError):
+        return jsonify({"error": "indices must be list of non-negative ints"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        uaf.hidden_block_indices = indices
+        db.commit()
+        return jsonify({"ok": True, "indices": indices})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/delete-hidden-blocks", methods=["POST"])
+def api_delete_hidden_blocks(audio_id: str):
+    """Applique la suppression (irréversible) des blocs barrés.
+
+    Recompose speaker_tagged_text sans les blocs masqués + vide la liste
+    hidden_block_indices. La transcription_text brute n'est PAS touchée
+    (les indices référencent les blocs speaker_tagged uniquement).
+
+    Body : ``{user_sub: str}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        hidden = set(uaf.hidden_block_indices or [])
+        if not hidden:
+            return jsonify({"deleted": 0, "kept": 0, "reason": "no_hidden_blocks"})
+        blocks = _reparse_speaker_tagged_blocks(uaf.speaker_tagged_text or "")
+        if not blocks:
+            return jsonify({"deleted": 0, "kept": 0,
+                             "reason": "no_blocks_parseable"})
+        kept = [b for i, b in enumerate(blocks) if i not in hidden]
+        deleted_count = len(blocks) - len(kept)
+        new_text = _rebuild_speaker_tagged(kept) if kept else ""
+        uaf.speaker_tagged_text = new_text
+        uaf.hidden_block_indices = []
+        # Invalide les textes dérivés LLM : ils ont été générés sur l'ancien
+        # texte qui contenait les blocs maintenant supprimés. Le user devra
+        # cliquer "Re-générer" pour avoir des CR cohérents (ou /full-reprocess).
+        uaf.cleaned_text = None
+        uaf.reformulated_text = None
+        uaf.meeting_analysis_json = None
+        uaf.absentee_summary = None
+        uaf.key_points_summary = None
+        uaf.last_activity_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info(
+            "delete-hidden-blocks: audio=%s deleted=%d kept=%d",
+            audio_id, deleted_count, len(kept),
+        )
+        return jsonify({"deleted": deleted_count, "kept": len(kept),
+                         "llm_outputs_invalidated": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/re-filter", methods=["POST"])
+def api_re_filter_forbidden(audio_id: str):
+    """Réapplique la liste des phrases interdites (migration 021)
+    rétroactivement sur la transcription existante.
+
+    Utile quand un admin a ajouté de nouveaux patterns après que la
+    réunion soit déjà transcrite. Ne re-soumet PAS à Kevent — applique
+    juste le filtre côté texte. Pour un retraitement complet (re-Whisper
+    + re-CR), utiliser /full-reprocess.
+
+    Body : ``{user_sub: str}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        from app.forbidden_phrases import (
+            get_forbidden_phrases, _segment_matches_any,
+        )
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        phrases = get_forbidden_phrases(SessionLocal, force_refresh=True)
+        if not phrases:
+            return jsonify({"dropped_lines": 0, "reason": "no_active_phrases"})
+        dropped_lines: list[str] = []
+        # Filtre transcription_text (joint de lignes par segment).
+        if uaf.transcription_text:
+            kept_lines: list[str] = []
+            for line in uaf.transcription_text.split("\n"):
+                m = _segment_matches_any(line, phrases)
+                if m:
+                    dropped_lines.append(line.strip())
+                else:
+                    kept_lines.append(line)
+            uaf.transcription_text = "\n".join(kept_lines).strip()
+        # Filtre speaker_tagged_text au niveau LIGNES `> ...` (intra-bloc).
+        if uaf.speaker_tagged_text:
+            blocks = _reparse_speaker_tagged_blocks(uaf.speaker_tagged_text)
+            for b in blocks:
+                cleaned_body: list[str] = []
+                for body_line in b["body_lines"]:
+                    txt = body_line.lstrip(">").strip()
+                    m = _segment_matches_any(txt, phrases)
+                    if m:
+                        dropped_lines.append(txt)
+                    else:
+                        cleaned_body.append(body_line)
+                b["body_lines"] = cleaned_body
+            # Drop les blocs vidés (header sans body)
+            blocks = [b for b in blocks if b["body_lines"]]
+            uaf.speaker_tagged_text = _rebuild_speaker_tagged(blocks)
+        if dropped_lines:
+            # Invalide les outputs LLM par cohérence (mêmes raisons que
+            # delete-hidden-blocks).
+            uaf.cleaned_text = None
+            uaf.reformulated_text = None
+            uaf.meeting_analysis_json = None
+            uaf.absentee_summary = None
+            uaf.key_points_summary = None
+            uaf.last_activity_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(
+                "re-filter: audio=%s dropped %d line(s) — sample: %s",
+                audio_id, len(dropped_lines),
+                ", ".join(repr(l[:80]) for l in dropped_lines[:3]),
+            )
+            return jsonify({"dropped_lines": len(dropped_lines),
+                             "samples": dropped_lines[:5],
+                             "llm_outputs_invalidated": True})
+        return jsonify({"dropped_lines": 0, "reason": "nothing_matched"})
+    finally:
+        db.close()
+
+
 # ─── User feedback (migration 015) ─────────────────────────────────
 #
 # 4 endpoints CRUD pour la table user_feedback :

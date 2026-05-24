@@ -2005,6 +2005,55 @@ async function mountTranscriptCorrector(container) {
         </div>
       </div>
     `;
+    // État des blocs barrés (mig 022) — partagé entre les boutons par-bloc
+    // et la toolbar batch. Persisté server-side via PATCH /hidden-blocks
+    // après chaque toggle (debounced 500ms — évite de hammer la DB en cas
+    // de toggle rapide en série).
+    const crossedSet = new Set((data.hidden_block_indices || []).map(Number));
+    const _renderCount = () => {
+      const toolbar = container.querySelector('[data-tc-toolbar]');
+      if (toolbar) {
+        const cntEl = toolbar.querySelector('[data-tc-crossed-count]');
+        if (cntEl) cntEl.textContent = String(crossedSet.size);
+        const delBtn = toolbar.querySelector('[data-tc-delete-crossed]');
+        if (delBtn) delBtn.disabled = crossedSet.size === 0;
+      }
+    };
+    let _persistTimer = null;
+    const _persistCrossed = () => {
+      if (_persistTimer) clearTimeout(_persistTimer);
+      _persistTimer = setTimeout(async () => {
+        try {
+          await fetch(`/api/file/${encodeURIComponent(fileId)}/hidden-blocks`, {
+            method: 'PATCH', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({indices: Array.from(crossedSet)}),
+          });
+        } catch (e) { /* silencieux — état local conservé, retry au prochain toggle */ }
+      }, 500);
+    };
+    // Toolbar : checkbox afficher barrés + bouton supprimer batch + bouton
+    // re-filtrer. Insérée juste après le notice, au-dessus des blocs.
+    const toolbarHtml = `
+      <div class="tc-toolbar" data-tc-toolbar
+           style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;padding:0.4rem 0.6rem;background:#f9fafb;border-radius:6px;margin:0.5rem 0;font-size:0.83rem;">
+        <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer;">
+          <input type="checkbox" data-tc-show-crossed checked />
+          Afficher les blocs barrés
+        </label>
+        <button type="button" data-tc-delete-crossed
+                style="padding:0.2rem 0.7rem;border:1px solid #b91c1c;background:#fff;color:#b91c1c;border-radius:4px;cursor:pointer;font-size:0.82rem;"
+                title="Retire définitivement les blocs barrés de la transcription. Action irréversible. Les compte-rendus dérivés (CR, reformulation) seront invalidés et à régénérer.">
+          🗑 Supprimer les blocs barrés (<span data-tc-crossed-count>0</span>)
+        </button>
+        <button type="button" data-tc-re-filter
+                style="padding:0.2rem 0.7rem;border:1px solid #1d4ed8;background:#fff;color:#1d4ed8;border-radius:4px;cursor:pointer;font-size:0.82rem;"
+                title="Réapplique la liste des phrases interdites de l'admin sur cette transcription. Utile si de nouvelles entrées ont été ajoutées après la transcription initiale.">
+          🧹 Re-filtrer avec la liste admin
+        </button>
+        <span style="color:#64748b;font-size:0.75rem;margin-left:auto;">
+          Clic 🚫 sur un bloc pour le barrer (réversible).
+        </span>
+      </div>`;
     container.innerHTML = `
       <details class="transcript-corrector">
         <summary class="transcript-corrector-summary">
@@ -2017,9 +2066,10 @@ async function mountTranscriptCorrector(container) {
           ${playerHtml}
         </div>
         ${noticeHtml}
+        ${toolbarHtml}
         <div class="transcript-corrector-blocks">
           ${blocks.map((b, i) => `
-            <div class="tc-block" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
+            <div class="tc-block${crossedSet.has(i) ? ' is-crossed' : ''}" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
               <button type="button" class="tc-play" data-tc-play="${b.start}"
                       title="${audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')'}"
                       ${audioPurged ? 'disabled' : ''}>▶</button>
@@ -2030,6 +2080,9 @@ async function mountTranscriptCorrector(container) {
                       title="Renommer cet interlocuteur partout">✏️</button>
               <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
               <span class="tc-text" data-tc-text="${i}">${_renderBlockText(b)}</span>
+              <button type="button" class="tc-cross" data-tc-cross="${i}"
+                      title="Barrer ce bloc (réversible). Sera exclu des exports et de la prochaine génération de CR."
+                      style="background:none;border:0;cursor:pointer;font-size:0.95rem;opacity:0.6;margin-left:auto;">🚫</button>
             </div>
           `).join('')}
         </div>
@@ -2038,6 +2091,78 @@ async function mountTranscriptCorrector(container) {
              hidden></div>
       </details>
     `;
+    _renderCount();
+    // Styles barré + masquage (1× idempotent via id check).
+    if (!document.getElementById('tc-crossed-styles')) {
+      const st = document.createElement('style');
+      st.id = 'tc-crossed-styles';
+      st.textContent = `
+        .tc-block.is-crossed { opacity: 0.55; }
+        .tc-block.is-crossed .tc-text,
+        .tc-block.is-crossed .tc-speaker { text-decoration: line-through; }
+        .tc-block.is-crossed .tc-cross { opacity: 1; color: #b91c1c; }
+        details.transcript-corrector.is-hide-crossed .tc-block.is-crossed { display: none; }
+      `;
+      document.head.appendChild(st);
+    }
+    // Wire: clic 🚫 toggle, checkbox afficher/masquer, bouton supprimer batch, bouton re-filter.
+    container.addEventListener('click', async (ev) => {
+      const cb = ev.target && ev.target.closest('[data-tc-cross]');
+      if (cb) {
+        const idx = parseInt(cb.getAttribute('data-tc-cross'), 10);
+        const blk = cb.closest('.tc-block');
+        if (crossedSet.has(idx)) {
+          crossedSet.delete(idx);
+          if (blk) blk.classList.remove('is-crossed');
+        } else {
+          crossedSet.add(idx);
+          if (blk) blk.classList.add('is-crossed');
+        }
+        _renderCount();
+        _persistCrossed();
+        return;
+      }
+      const del = ev.target && ev.target.closest('[data-tc-delete-crossed]');
+      if (del) {
+        if (!confirm(`Supprimer définitivement ${crossedSet.size} bloc(s) ? Action irréversible. Les comptes-rendus dérivés seront invalidés.`)) return;
+        try {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/delete-hidden-blocks`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+          });
+          if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
+          const d = await r.json();
+          alert(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Les compte-rendus dérivés (CR, reformulation) ont été vidés — cliquez "Re-générer" pour les recréer.`);
+          // Reload de la fiche pour voir la nouvelle transcription propre.
+          location.reload();
+        } catch (e) { alert('Erreur : ' + e.message); }
+        return;
+      }
+      const rf = ev.target && ev.target.closest('[data-tc-re-filter]');
+      if (rf) {
+        if (!confirm('Réappliquer la liste des phrases interdites (admin) à cette transcription ? Si des phrases matchent, les compte-rendus dérivés (CR, reformulation) seront vidés et à régénérer.')) return;
+        try {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/re-filter`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+          });
+          if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
+          const d = await r.json();
+          if (d.dropped_lines === 0) {
+            alert('Aucune phrase interdite trouvée — la transcription est déjà propre.');
+            return;
+          }
+          alert(`✓ ${d.dropped_lines} ligne(s) retirée(s). Compte-rendus dérivés invalidés.`);
+          location.reload();
+        } catch (e) { alert('Erreur : ' + e.message); }
+        return;
+      }
+    });
+    container.addEventListener('change', (ev) => {
+      const cb = ev.target && ev.target.closest('[data-tc-show-crossed]');
+      if (cb) {
+        const det = container.querySelector('details.transcript-corrector');
+        if (det) det.classList.toggle('is-hide-crossed', !cb.checked);
+      }
+    });
 
     const audio = container.querySelector('.transcript-corrector-audio');
     const blocksEls = Array.from(container.querySelectorAll('.tc-block'));

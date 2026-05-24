@@ -904,6 +904,10 @@ def api_file_transcript_status(file_id):
             "last_error_kind": audio.get("last_error_kind"),
             "last_error_message": (audio.get("last_error_message") or None) and audio["last_error_message"][:300],
             "last_error_at": audio.get("last_error_at"),
+            # Édition user (migration 022) — indices de blocs barrés par
+            # l'utilisateur dans l'éditeur de transcription. Réversible
+            # jusqu'au clic "Supprimer les blocs barrés".
+            "hidden_block_indices": audio.get("hidden_block_indices") or [],
         }
         if not summary_only:
             # Texte speaker-tagged (avec timecodes par bloc) exposé pour
@@ -1143,6 +1147,63 @@ def api_rename_file(file_id):
         return jsonify({"ok": True, "title": data.get("new_title", new_title)})
     finally:
         db.close()
+
+
+# ─── Édition transcription : blocs barrés + re-filter ─────────────
+#
+# 3 endpoints proxy vers internal-ingester (cf puller.py
+# api_patch_hidden_blocks, api_delete_hidden_blocks, api_re_filter_forbidden).
+# Le user_sub est forcé côté serveur depuis la session OIDC — l'user ne
+# peut pas toucher les rows d'un autre.
+
+@bp.route("/api/file/<file_id>/hidden-blocks", methods=["PATCH"])
+@require_auth
+def api_patch_hidden_blocks(file_id):
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    indices = payload.get("indices") or []
+    try:
+        data = _request_internal_ingester_api(
+            f"/api/v1/audio/{file_id}/hidden-blocks",
+            method="PATCH",
+            json_body={"user_sub": user["sub"], "indices": indices},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "internal_api_error"}), status
+    return jsonify(data or {"ok": True})
+
+
+@bp.route("/api/file/<file_id>/delete-hidden-blocks", methods=["POST"])
+@require_auth
+def api_delete_hidden_blocks(file_id):
+    user = get_current_user()
+    try:
+        data = _request_internal_ingester_api(
+            f"/api/v1/audio/{file_id}/delete-hidden-blocks",
+            method="POST",
+            json_body={"user_sub": user["sub"]},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "internal_api_error"}), status
+    return jsonify(data or {"ok": True})
+
+
+@bp.route("/api/file/<file_id>/re-filter", methods=["POST"])
+@require_auth
+def api_re_filter_forbidden(file_id):
+    user = get_current_user()
+    try:
+        data = _request_internal_ingester_api(
+            f"/api/v1/audio/{file_id}/re-filter",
+            method="POST",
+            json_body={"user_sub": user["sub"]},
+        )
+    except req.HTTPError as err:
+        status = err.response.status_code if err.response is not None else 502
+        return jsonify({"error": "internal_api_error"}), status
+    return jsonify(data or {"ok": True})
 
 
 @bp.route("/api/file/<file_id>/meeting-datetime", methods=["PATCH"])

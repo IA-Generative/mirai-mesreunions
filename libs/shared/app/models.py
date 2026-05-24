@@ -409,6 +409,14 @@ class UserAudioFile(InternalBase):
     last_error_kind = Column(String(64), nullable=True)
     last_error_message = Column(Text, nullable=True)
 
+    # ─── Édition utilisateur (migration 022) ─────────────────────────
+    # Liste d'indices de blocs (speaker_tagged) que l'utilisateur a
+    # marqués comme "à supprimer". Affichés barrés dans l'éditeur,
+    # exclus des exports. Définitivement retirés par
+    # POST /api/file/<id>/delete-hidden-blocks. Reset à [] sur reprocess.
+    hidden_block_indices = Column(_JSON_TYPE, nullable=False, default=list,
+                                   server_default="[]")
+
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
