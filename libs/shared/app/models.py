@@ -688,3 +688,39 @@ class TranscriptionEvent(InternalBase):
         Index("ix_transcription_event_file_created", "audio_file_id", "created_at"),
         Index("ix_transcription_event_code_created", "original_session_code", "created_at"),
     )
+
+
+class TranscriptionForbiddenPhrase(InternalBase):
+    """Phrase à filtrer automatiquement des transcriptions Whisper.
+
+    Liste curée par l'admin (cf admin-console). Appliquée par le pipeline
+    entre la transcription Whisper et les étapes LLM downstream (cf
+    services/dmz-to-internal-bridge/app/forbidden_phrases.py). Sans ce
+    filtre, des scories d'entraînement Whisper (sous-titrages YouTube,
+    intros vidéo, etc.) polluent les CR LLM.
+
+    ``ordering`` pilote l'ordre d'évaluation : les patterns LONGS doivent
+    matcher avant les courts pour ne pas être masqués (ex : "Sous-titrage
+    Société Radio-Canada" doit avoir un ordering INFÉRIEUR à
+    "Société Radio-Canada", sinon le second mange le premier).
+
+    ``is_active`` permet de désactiver sans perdre l'audit trail. Préférer
+    le toggle à un DELETE quand la phrase a déjà été appliquée
+    historiquement.
+    """
+    __tablename__ = "transcription_forbidden_phrases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    phrase = Column(Text, nullable=False, unique=True)
+    ordering = Column(Integer, nullable=False, default=1000)
+    is_active = Column(Boolean, nullable=False, default=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True),
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True),
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_forbidden_phrases_active_order", "is_active", "ordering"),
+    )

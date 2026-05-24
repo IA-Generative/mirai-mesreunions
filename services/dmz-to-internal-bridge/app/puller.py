@@ -1080,6 +1080,18 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         return
     # KeventTransientError propagates → queue retry handles it.
 
+    # Pré-filtrage des scories Whisper (hallucinations sous-titrages
+    # YouTube, intros vidéo, etc.) AVANT les étapes LLM downstream —
+    # sinon le cleaning/reformulation/CR LLM travaillent sur du texte
+    # pollué. Cf migration 021 + admin-console pour gestion de la liste.
+    try:
+        from app.forbidden_phrases import filter_whisper_segments
+        if SessionLocal is not None:
+            transcription = filter_whisper_segments(transcription, SessionLocal)
+    except Exception:
+        logger.exception("forbidden_phrases: filtering failed for %s, continuing without",
+                          audio_file_id)
+
     # Le champ "text" de Whisper est un seul long string sans \n, peu
     # lisible. On reconstruit à partir de "segments" (découpage naturel
     # par pauses/phrases, granularité ~10-30s) en mettant un saut de
