@@ -667,10 +667,10 @@ async function _saveDetailParticipants() {
 // skipped_unsupported_or_empty), un bandeau d'alerte le signale au user.
 const _DOC_STATUS_META = {
   ingested:                       { icon: '✓',  color: '#15803d', label: 'utilisé' },
-  error_download:                 { icon: '✗',  color: '#b91c1c', label: 'erreur Drive (404/403)' },
-  error_transient:                { icon: '⚠️', color: '#b45309', label: 'erreur serveur Drive (transient)' },
-  skipped_unsupported_or_empty:   { icon: '⊘',  color: '#64748b', label: 'format non supporté ou vide' },
-  skipped_total_cap:              { icon: '⊘',  color: '#64748b', label: 'tronqué (cap total atteint)' },
+  error_download:                 { icon: '✗',  color: '#b91c1c', label: 'fichier introuvable ou accès refusé' },
+  error_transient:                { icon: '⚠️', color: '#b45309', label: 'le Drive a refusé le téléchargement (à réessayer)' },
+  skipped_unsupported_or_empty:   { icon: '⊘',  color: '#64748b', label: 'format non lisible ou document vide' },
+  skipped_total_cap:              { icon: '⊘',  color: '#64748b', label: 'tronqué (limite globale atteinte)' },
 };
 
 function _renderDriveSourcesBlock(brief) {

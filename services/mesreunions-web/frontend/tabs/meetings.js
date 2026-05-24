@@ -59,16 +59,16 @@ const UPLOAD_PIPELINE = {
 
 // Override par transcription_status (post-transfert, polling séparé).
 const TRANSCRIPT_PIPELINE = {
-  kevent_queued:                  { kind: 'processing', pct:  80, label: 'En file Kevent' },
-  kevent_processing:              { kind: 'processing', pct:  88, label: 'Transcription Whisper' },
-  kevent_transcribing:            { kind: 'processing', pct:  90, label: 'Transcription Whisper' },
+  kevent_queued:                  { kind: 'processing', pct:  80, label: 'En file d\'attente' },
+  kevent_processing:              { kind: 'processing', pct:  88, label: 'Transcription en cours' },
+  kevent_transcribing:            { kind: 'processing', pct:  90, label: 'Transcription en cours' },
   kevent_completed:               { kind: 'success',    pct: 100, label: 'Réunion prête' },
-  kevent_partially_completed:     { kind: 'partial',    pct: 100, label: 'Partiellement prête' },
-  kevent_failed:                  { kind: 'error',      pct: 100, label: 'Échec transcription' },
-  mcr_pushed:                     { kind: 'success',    pct: 100, label: 'Poussée vers MCR' },
-  mcr_auth_failed:                { kind: 'error',      pct: 100, label: 'Auth MCR refusée' },
-  mcr_rejected:                   { kind: 'error',      pct: 100, label: 'MCR a refusé' },
-  mcr_push_failed:                { kind: 'error',      pct: 100, label: 'Échec push MCR' },
+  kevent_partially_completed:     { kind: 'partial',    pct: 100, label: 'Réunion prête (partiellement)' },
+  kevent_failed:                  { kind: 'error',      pct: 100, label: 'Échec — relancer ?' },
+  mcr_pushed:                     { kind: 'success',    pct: 100, label: 'Envoyée à compte-rendu.mirai' },
+  mcr_auth_failed:                { kind: 'error',      pct: 100, label: 'Authentification refusée' },
+  mcr_rejected:                   { kind: 'error',      pct: 100, label: 'Refusée par compte-rendu.mirai' },
+  mcr_push_failed:                { kind: 'error',      pct: 100, label: 'Échec d\'envoi' },
   completed:                      { kind: 'success',    pct: 100, label: 'Réunion prête' },
   failed:                         { kind: 'error',      pct: 100, label: 'Échec' },
   processing:                     { kind: 'processing', pct:  88, label: 'En cours' },
@@ -213,7 +213,7 @@ function renderHeader(fileCount, hasSelection) {
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:resume-stuck"
-                title="Relancer les transcriptions bloquées (>5min sans activité) OU en échec (kevent_failed)">
+                title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
           🔄 Relancer les bloqués
         </button>
       </div>
@@ -953,7 +953,7 @@ async function _resumeStuckJobs(ev) {
     // Detail explicite dans le toast (et fallback alert).
     const sample = titles.slice(0, 5).join(', ');
     const more = titles.length > 5 ? ` (+${titles.length - 5})` : '';
-    const msg = `🔄 ${claimed} transcription(s) relancée(s) : ${sample}${more}`;
+    const msg = `🔄 ${claimed} réunion(s) relancée(s) : ${sample}${more}`;
     if (window.showToast) window.showToast(msg, 'success');
     else window.alert(msg);
 
@@ -1178,10 +1178,10 @@ function _showResumeStuckBanner(count, titles) {
       ? ` (+${_resumeStuckBannerCount - _resumeStuckBannerTitles.length})` : '';
     bn.innerHTML =
       `<span style="font-size:1.1em;">🔄</span>` +
-      `<span><strong>${_resumeStuckBannerCount} transcription(s) relancée(s)${dots}</strong> ` +
-      `— les statuts vont passer en <code>kevent_queued</code> puis <code>kevent_processing</code> ` +
-      `puis <code>kevent_completed</code> (ou <code>kevent_failed</code> si replante). ` +
-      `Liste auto-actualisée (${secs}s) — ${sample}${more}</span>` +
+      `<span><strong>${_resumeStuckBannerCount} réunion(s) relancée(s)${dots}</strong> ` +
+      `— le traitement est reparti. La liste se met à jour automatiquement ` +
+      `pendant que la transcription puis le compte-rendu sont (re)générés ` +
+      `(${secs}s écoulées). Réunions concernées : ${sample}${more}</span>` +
       `<button type="button" id="resume-stuck-banner-dismiss" ` +
       `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
     const dismiss = document.getElementById('resume-stuck-banner-dismiss');
@@ -1241,8 +1241,9 @@ function _showMcrImportInProgressBanner(expectedCount) {
     const dots = '.'.repeat(1 + (secs % 3));
     bn.innerHTML =
       `<span style="font-size:1.1em;">⏳</span>` +
-      `<span><strong>${_mcrImportBannerExpected} import(s) MCR en cours${dots}</strong> ` +
-      `Téléchargement audio + transcription côté Mirai — la liste se rafraîchit automatiquement (${secs}s écoulées).</span>` +
+      `<span><strong>${_mcrImportBannerExpected} réunion(s) en cours d'import depuis compte-rendu.mirai${dots}</strong> ` +
+      `Récupération de l'audio puis génération de la transcription et du compte-rendu — ` +
+      `la liste se rafraîchit automatiquement (${secs}s écoulées).</span>` +
       `<button type="button" id="mcr-import-banner-dismiss" ` +
       `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
     const dismiss = document.getElementById('mcr-import-banner-dismiss');
@@ -1418,11 +1419,12 @@ async function _loadMcrMeetings(page, search) {
         return `<tr style="background:#fef2f2;color:#991b1b;">
           <td><input type="checkbox" disabled></td>
           <td style="padding:0.4rem 0.5rem;" colspan="3" title="${tooltip}">
-            <strong>⚠️ Réunion #${m._slot ?? '?'} non récupérable</strong>
+            <strong>⚠️ Réunion impossible à récupérer (position ${m._slot ?? '?'})</strong>
             <div style="font-size:0.75rem;color:#7f1d1d;opacity:0.85;margin-top:2px;">
-              plateforme=<code>${esc(platform)}</code>
-              · meeting_platform_id=<code>${esc(partialId)}</code>
-              — bug serveur MCR (validator pydantic). Survol pour le détail.
+              Type de réunion : <code>${esc(platform)}</code>.
+              Cette réunion contient un identifiant que compte-rendu.mirai
+              ne sait pas relire actuellement. Pour la débloquer : la
+              supprimer ou modifier son type directement sur compte-rendu.mirai.
             </div>
           </td>
         </tr>`;
@@ -1439,8 +1441,9 @@ async function _loadMcrMeetings(page, search) {
     const fallbackNotice = data._fallback_used ? `
       <div style="background:#fef3c7;border-left:3px solid #f59e0b;
                   padding:0.5rem 0.75rem;margin-bottom:0.5rem;font-size:0.85rem;color:#78350f;">
-        ⚠️ ${data._broken_count || 0} réunion(s) sur cette page sont en erreur côté MCR
-        (validator pydantic). Les autres sont importables normalement.
+        ⚠️ ${data._broken_count || 0} réunion(s) sur cette page sont impossibles à
+        récupérer depuis compte-rendu.mirai (erreur côté serveur). Les autres
+        restent importables normalement.
       </div>` : '';
     const pager = `
       <div style="display:flex;justify-content:space-between;align-items:center;
@@ -1520,7 +1523,7 @@ async function _submitMcrImport() {
     _closeMcrImportModal();
     // Toast court ET bandeau persistant en haut de la liste : le toast
     // disparait en 4s, le bandeau reste jusqu'à apparition des rows.
-    const msg = `✓ ${published} import(s) MCR lancé(s). Apparaîtront dans la liste — ~1 min pour transcription + CR.`;
+    const msg = `✓ ${published} réunion(s) en cours d'import depuis compte-rendu.mirai. Elles vont apparaître dans la liste — comptez environ 1 minute pour la transcription et le compte-rendu.`;
     if (window.showToast) window.showToast(msg, 'success');
     _showMcrImportInProgressBanner(published);
     // Le worker côté ingester met ~2-5s à créer les rows en DB. On fait
