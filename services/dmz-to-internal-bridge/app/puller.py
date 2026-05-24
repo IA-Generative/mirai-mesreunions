@@ -327,6 +327,38 @@ def _build_llm_client() -> Optional[LLMClient]:
         return None
 
 
+def _persist_terminal_error(db, uaf, *, kind: str, message: str,
+                             status: str = "kevent_failed") -> None:
+    """Marque une row en statut terminal d'échec + remplit last_error_*.
+
+    Utilisé par les pré-checks de _reset_and_resubmit_kevent_pipeline (S3
+    purgé, no_audio_path) pour transformer une 410 muette en statut DB
+    explicite que l'UI peut surfacer. La transaction est commit ici —
+    appelant peut continuer son flux normal (return après).
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        uaf.transcription_status = status
+        if uaf.transcription_completed_at is None:
+            uaf.transcription_completed_at = now
+        uaf.last_activity_at = now
+        uaf.last_error_at = now
+        uaf.last_error_kind = kind
+        uaf.last_error_message = message[:4000]
+        # Libérer le claim watchdog : aucun pod ne doit re-pickup une row
+        # qu'on vient de marquer définitivement.
+        uaf.pipeline_claim_at = None
+        uaf.pipeline_claim_pod = None
+        db.commit()
+        logger.info(
+            "reset+resubmit: row %s marked terminal kind=%s status=%s",
+            uaf.id, kind, status,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("_persist_terminal_error: write failed for %s", uaf.id)
+
+
 def _touch_last_activity(audio_file_id) -> None:
     """Heartbeat léger : UPDATE last_activity_at=NOW pour un audio_id.
 
@@ -2258,13 +2290,33 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
         if not uaf:
             return 404, {"error": "not_found"}
         if not uaf.stored_filename:
+            # Marquer terminal explicite : pas d'audio S3 référencé, retry
+            # inutile. Cas pathologique (création de row sans upload réussi).
+            _persist_terminal_error(
+                db, uaf,
+                kind="s3_no_audio_path",
+                message="Pas de référence S3 sur la row (création de row sans upload réussi). Non-relançable.",
+            )
             return 410, {"error": "no_audio_path"}
         try:
             if not object_exists(s3_internal_cfg, uaf.stored_filename):
+                # Blob S3 purgé (rétention dépassée ou suppression manuelle).
+                # Pas la peine de re-soumettre Kevent, ça plantera pareil.
+                _persist_terminal_error(
+                    db, uaf,
+                    kind="s3_object_purged",
+                    message=(
+                        f"L'audio S3 ({uaf.stored_filename}) a été purgé "
+                        "et n'est plus récupérable. Vous pouvez supprimer "
+                        "cette ligne."
+                    ),
+                )
                 return 410, {"error": "audio_purged"}
-        except Exception:
+        except Exception as exc:
             logger.exception("reset+resubmit: s3 probe failed for %s", audio_id)
-            return 503, {"error": "s3_unavailable"}
+            # Erreur transitoire S3 — on n'écrit pas last_error_kind pour
+            # ne pas marquer définitivement, le watchdog réessaiera.
+            return 503, {"error": "s3_unavailable", "detail": str(exc)[:200]}
 
         prev_entry = {
             "version": int(uaf.reprocess_version or 0),

@@ -395,6 +395,8 @@ function _humanizeErrorKind(kind) {
     kevent_no_job_id: "Le pipeline a redémarré sans avoir enregistré la transcription. Cliquez Relancer.",
     cap_exceeded:     "5 tentatives automatiques épuisées. Cliquez Relancer pour forcer une nouvelle tentative.",
     worker_crash:     "Le pipeline a planté pendant le traitement. Cliquez Relancer.",
+    s3_object_purged: "L'audio a été supprimé du stockage (rétention dépassée). Non-relançable, supprimez la ligne.",
+    s3_no_audio_path: "Pas de fichier audio associé à cette ligne. Non-relançable, supprimez la ligne.",
   };
   return M[kind] || `Erreur : ${kind}. Cliquez Relancer ou contactez un administrateur.`;
 }

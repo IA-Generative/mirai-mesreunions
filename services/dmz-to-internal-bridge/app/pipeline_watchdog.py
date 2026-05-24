@@ -117,9 +117,11 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
             if not include_failed else ""
         )
         # Exclusion non-retryable : certains last_error_kind décrivent un
-        # échec terminal qui ne sera JAMAIS résolu en réessayant (ex :
-        # mcr_unavailable_on_source = audio ET transcript 404 sur MCR).
+        # échec terminal qui ne sera JAMAIS résolu en réessayant.
         # L'utilisateur doit supprimer la ligne, pas la relancer.
+        #   - mcr_unavailable_on_source : audio ET transcript 404 sur MCR
+        #   - s3_object_purged : blob audio retiré de S3 par lifecycle
+        #   - s3_no_audio_path : row sans référence S3 (création anormale)
         q = sql_text(("""
             SELECT id::text, user_sub
               FROM user_audio_files
@@ -127,7 +129,10 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
                {stale}
                AND created_at > :age_cutoff
                AND (pipeline_claim_at IS NULL OR pipeline_claim_at < :claim_cutoff)
-               AND (last_error_kind IS NULL OR last_error_kind <> 'mcr_unavailable_on_source')
+               AND (last_error_kind IS NULL OR last_error_kind NOT IN (
+                       'mcr_unavailable_on_source',
+                       's3_object_purged',
+                       's3_no_audio_path'))
                {retry_cap}
                {user_filter}
              ORDER BY last_activity_at ASC NULLS FIRST
