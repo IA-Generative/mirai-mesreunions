@@ -212,7 +212,38 @@ expose le lease-based cancellation. Quand ce sera le cas :
    `last_error_message` → c'est un poll qui a manqué la deadline.
    Investiguer la latence réseau ingester → gateway.
 
-## 6. Métriques à exposer (à venir)
+## 6. Post-mortem OOM cascade (2026-05-24, premier déploiement Phase 1)
+
+**Symptôme** : pendant le rollout initial Phase 1, le bouton "Relancer
+les bloqués" exécuté en global (limit=50) a déclenché ~16 threads
+daemons concurrents dans le même pod gunicorn. Chaque thread
+téléchargeait un audio entier en RAM (`download_fileobj` BytesIO +
+`audio_bytes = file_data.read()` = double la mémoire). Total ~1.3 GB,
+limit 512Mi → **OOMKilled** sur 2 pods, cascade de re-claims par le
+watchdog, 16 rows à nouveau capped en `kevent_failed` avec
+`last_error_kind=cap_exceeded`.
+
+**Mitigation immédiate** : `kubectl patch` pour passer la limit
+memory à 2Gi (requests 1Gi) sur internal-ingester. Permis la reprise
+de tous les jobs sans OOM.
+
+**Fix durable** : édit du manifest source dans
+`deploy/kubernetes/internal-zone/deployments.yaml` (gitignored, sync
+via `commit-push-build.sh`) — block resources internal-ingester
+relevé à 1Gi / 2Gi avec commentaire explicatif. Validé.
+
+**Apprentissage** : la limite 512Mi était dimensionnée pour le
+fonctionnement nominal (1-2 jobs en parallèle). Phase 1 augmente la
+résilience mais aussi la **convergence rapide post-incident**, ce
+qui change le profil de charge. Toute relance manuelle massive
+(> 8 audios concurrents) bénéficie de la nouvelle limit.
+
+**Recommandation opérationnelle** : pour les relances post-incident
+sur > 16 rows, utiliser `limit=5` dans les payloads
+`/api/v1/pipeline/resume-stuck-jobs` et attendre 60s entre batchs.
+Limite l'empreinte mémoire transitoire même avec 2Gi.
+
+## 7. Métriques à exposer (à venir)
 
 Pas de métriques Prometheus dédiées à ce jour. Backlog :
 

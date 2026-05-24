@@ -225,7 +225,33 @@ résoudre. À l'échelle de la diffusion ministérielle, intenable.
   doivent faire un hard refresh pour voir les nouveaux messages
   d'erreur. À communiquer à la diffusion.
 
-### 4.3. Risques résiduels
+### 4.3. Retour d'expérience post-déploiement initial (2026-05-24)
+
+Premier déploiement Phase 1 sur prod-bêta validé end-to-end. 18
+rows historiques en `kevent_failed` (dont 7 à `reprocess_version`
+49-61) toutes relancées avec succès. Heartbeat Phase 6 mesuré à
+< 3s sur des audios longs, **aucun watchdog steal observé** — la
+décomposition liveness/progress tient.
+
+**Incident révélé pendant l'opération** : OOMKill cascade sur 2
+pods lors de la relance batch de 16 audios simultanés (limit
+mémoire 512Mi insuffisante quand chaque thread daemon charge
+30-65 MB d'audio en RAM × 2 buffers). Mitigation immédiate :
+`kubectl patch` resources à 1Gi/2Gi. Fix durable dans
+`deploy/kubernetes/internal-zone/deployments.yaml` + post-mortem
+détaillé dans [`RUNBOOK_PIPELINE_RELIABILITY.md §6`](../RUNBOOK_PIPELINE_RELIABILITY.md).
+
+Apprentissage : Phase 1 augmente la **vitesse de convergence
+post-incident** (relances enchainées fonctionnent), ce qui change
+le profil de charge transitoire. Le dimensionnement RAM doit
+suivre. Documenté.
+
+L'observabilité (Phase 2) a pleinement joué son rôle de premier
+relevé prod : sans `last_error_kind=cap_exceeded` peuplé, on
+aurait mis 30+ minutes à diagnostiquer la cascade. Avec, c'était
+visible en 1 requête SQL.
+
+### 4.4. Risques résiduels
 
 - **Long audios > MAX_RTF × budget Kevent** (cas hypothétique : audio
   de 10h). Aujourd'hui le `KEVENT_ASYNC_TIMEOUT_SECONDS=0` (pas de
