@@ -2020,15 +2020,41 @@ async function mountTranscriptCorrector(container) {
       }
     };
     let _persistTimer = null;
+    const _setSaveStatus = (state) => {
+      // state ∈ 'pending' | 'saved' | 'error'
+      const ind = container.querySelector('[data-tc-save-status]');
+      if (!ind) return;
+      const map = {
+        pending: { txt: '💾 Sauvegarde…', color: '#92400e', bg: '#fef3c7' },
+        saved:   { txt: '✓ Modifications sauvegardées', color: '#14532d', bg: '#dcfce7' },
+        error:   { txt: '⚠ Sauvegarde échouée (retry au prochain clic)', color: '#7f1d1d', bg: '#fee2e2' },
+      };
+      const m = map[state] || {txt: '', color: '#64748b', bg: 'transparent'};
+      ind.textContent = m.txt;
+      ind.style.color = m.color;
+      ind.style.background = m.bg;
+      ind.style.opacity = m.txt ? '1' : '0';
+      if (state === 'saved') {
+        // Fade-out après 2s pour ne pas encombrer.
+        setTimeout(() => {
+          if (ind.textContent === m.txt) ind.style.opacity = '0';
+        }, 2000);
+      }
+    };
     const _persistCrossed = () => {
+      _setSaveStatus('pending');
       if (_persistTimer) clearTimeout(_persistTimer);
       _persistTimer = setTimeout(async () => {
         try {
-          await fetch(`/api/file/${encodeURIComponent(fileId)}/hidden-blocks`, {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/hidden-blocks`, {
             method: 'PATCH', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({indices: Array.from(crossedSet)}),
           });
-        } catch (e) { /* silencieux — état local conservé, retry au prochain toggle */ }
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          _setSaveStatus('saved');
+        } catch (e) {
+          _setSaveStatus('error');
+        }
       }, 500);
     };
     // Toolbar : checkbox afficher barrés + bouton supprimer batch + bouton
@@ -2051,8 +2077,10 @@ async function mountTranscriptCorrector(container) {
           🧹 Re-filtrer avec la liste admin
         </button>
         <span style="color:#64748b;font-size:0.75rem;margin-left:auto;">
-          Clic 🚫 sur un bloc pour le barrer (réversible).
+          Survol d'un bloc → 🚫 pour le barrer (réversible, sauvé auto).
         </span>
+        <span data-tc-save-status
+              style="font-size:0.72rem;padding:1px 8px;border-radius:9999px;opacity:0;transition:opacity 0.3s;"></span>
       </div>`;
     container.innerHTML = `
       <details class="transcript-corrector">
@@ -2081,8 +2109,7 @@ async function mountTranscriptCorrector(container) {
               <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
               <span class="tc-text" data-tc-text="${i}">${_renderBlockText(b)}</span>
               <button type="button" class="tc-cross" data-tc-cross="${i}"
-                      title="Barrer ce bloc (réversible). Sera exclu des exports et de la prochaine génération de CR."
-                      style="background:none;border:0;cursor:pointer;font-size:0.95rem;opacity:0.6;margin-left:auto;">🚫</button>
+                      title="Barrer ce bloc (réversible, sauvé automatiquement). Sera exclu des exports et de la prochaine génération de CR.">🚫</button>
             </div>
           `).join('')}
         </div>
@@ -2093,14 +2120,38 @@ async function mountTranscriptCorrector(container) {
     `;
     _renderCount();
     // Styles barré + masquage (1× idempotent via id check).
+    // Position absolute pour le bouton 🚫 : sinon il ajoute une 6e colonne
+    // à la grille `.tc-block` (qui est grid-template-columns à 5 cols dans
+    // index.html) → bloc qui passe à 2 lignes pour les segments courts.
     if (!document.getElementById('tc-crossed-styles')) {
       const st = document.createElement('style');
       st.id = 'tc-crossed-styles';
       st.textContent = `
+        .tc-block { position: relative; }
+        .tc-block .tc-cross {
+          position: absolute;
+          top: 0.15rem;
+          right: 0.25rem;
+          padding: 0;
+          line-height: 1;
+          font-size: 0.85rem;
+          background: none;
+          border: 0;
+          cursor: pointer;
+          opacity: 0;
+          transition: opacity 0.15s;
+          z-index: 2;
+        }
+        .tc-block:hover .tc-cross,
+        .tc-block:focus-within .tc-cross { opacity: 0.55; }
+        .tc-block .tc-cross:hover { opacity: 1 !important; }
         .tc-block.is-crossed { opacity: 0.55; }
         .tc-block.is-crossed .tc-text,
         .tc-block.is-crossed .tc-speaker { text-decoration: line-through; }
-        .tc-block.is-crossed .tc-cross { opacity: 1; color: #b91c1c; }
+        .tc-block.is-crossed .tc-cross {
+          opacity: 1 !important;
+          color: #b91c1c;
+        }
         details.transcript-corrector.is-hide-crossed .tc-block.is-crossed { display: none; }
       `;
       document.head.appendChild(st);
@@ -2224,6 +2275,7 @@ async function mountTranscriptCorrector(container) {
     // Index plat des words pour binary-search dans le timeupdate karaoke
     // (perf : un audio d'1h peut avoir ~10k words, on évite l'itération
     // linéaire à chaque tick). Les words sont déjà ordonnés par ``s``.
+    // ``const`` sur l'array (mutation via splice OK pour _tcRebuildAfterEdit).
     const wordsFlat = [];
     blocks.forEach((b, blockIdx) => {
         if (!b.words) return;
@@ -2234,6 +2286,70 @@ async function mountTranscriptCorrector(container) {
         });
     });
     let lastActiveWordEl = null;
+
+    // Exposé pour _patchVisibleTranscriptOccurrences (édition correct-term) :
+    // re-render des spans `.tc-word` d'un bloc après modification du texte,
+    // puis reconstruction de wordsFlat. Sans ça, l'édition écrase
+    // textContent et le karaoke ne retrouve plus les spans timestamps
+    // → highlight mot silencieusement cassé.
+    container._tcRebuildBlockTextAfterEdit = (blockEl, newText) => {
+        const blockIdx = blocksEls.indexOf(blockEl);
+        if (blockIdx < 0 || !blocks[blockIdx]) {
+            // Bloc non trouvé : fallback sécurité, contente-toi de textContent.
+            const t = blockEl.querySelector('.tc-text');
+            if (t) t.textContent = newText;
+            return;
+        }
+        const b = blocks[blockIdx];
+        const blockDur = (b.end || 0) - (b.start || 0);
+        // Re-tokenize sur espaces. Garde les mots avec leur ponctuation
+        // adjacente (split simple).
+        const words = (newText || '').trim().split(/\s+/).filter(Boolean);
+        const tcText = blockEl.querySelector('.tc-text');
+        if (!tcText) return;
+        if (words.length === 0 || blockDur <= 0) {
+            tcText.textContent = newText || '';
+            b.text = newText || '';
+            b.words = [];
+        } else {
+            // Distribution char-count : poids par mot ≈ longueur + 1
+            // (espace implicite). Même heuristique que le fallback init
+            // quand Whisper ne fournit pas de timestamps exploitables.
+            const weights = words.map(w => Math.max(1, w.length + 1));
+            const total = weights.reduce((a, c) => a + c, 0);
+            const newWords = [];
+            let cumul = 0;
+            const spans = [];
+            for (let i = 0; i < words.length; i++) {
+                const s = b.start + (cumul / total) * blockDur;
+                cumul += weights[i];
+                const e = b.start + (cumul / total) * blockDur;
+                newWords.push({ w: words[i], s, e });
+                spans.push(
+                    `<span class="tc-word" data-tc-w-s="${s}" data-tc-w-e="${e}">${escapeHtml(words[i])}</span>`
+                );
+            }
+            tcText.innerHTML = spans.join(' ');
+            b.text = newText;
+            b.words = newWords;
+        }
+        // Reconstruit wordsFlat depuis tous les blocs (in-place via splice
+        // pour ne pas casser la closure timeupdate qui le référence par ID).
+        wordsFlat.length = 0;
+        blocks.forEach((bb, bi) => {
+            if (!bb.words) return;
+            bb.words.forEach((w, wIdx) => {
+                if (typeof w.s === 'number' && typeof w.e === 'number') {
+                    wordsFlat.push({ s: w.s, e: w.e, blockIdx: bi, wIdx });
+                }
+            });
+        });
+        // Reset le pointeur du dernier mot actif (peut référencer un span
+        // détruit par notre innerHTML replacement).
+        if (lastActiveWordEl && !document.contains(lastActiveWordEl)) {
+            lastActiveWordEl = null;
+        }
+    };
 
     // Compensation latence audio output : ``audio.currentTime`` reflète la
     // position DÉCODÉE par le navigateur, pas l'instant où le son sort
@@ -3487,6 +3603,10 @@ function _patchVisibleTranscriptOccurrences(fileId, oldTerm, newTerm) {
     );
     if (!corrector) return;
     const oldLower = oldTerm.toLowerCase();
+    // Si le corrector a exposé _tcRebuildBlockTextAfterEdit (mountTranscript
+    // Corrector l'attache), on l'utilise pour préserver les spans `.tc-word`
+    // (sinon textContent=… écrase les spans et casse le karaoke).
+    const rebuild = corrector._tcRebuildBlockTextAfterEdit;
     corrector.querySelectorAll('.tc-text').forEach((el) => {
         const txt = el.textContent || '';
         if (txt.toLowerCase().indexOf(oldLower) < 0) return;
@@ -3498,6 +3618,17 @@ function _patchVisibleTranscriptOccurrences(fileId, oldTerm, newTerm) {
             const re = new RegExp(oldTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
             updated = txt.replace(re, newTerm);
         }
+        if (typeof rebuild === 'function') {
+            const blockEl = el.closest('.tc-block');
+            if (blockEl) {
+                rebuild(blockEl, updated);
+                return;
+            }
+        }
+        // Fallback : si le rebuild n'est pas accessible (ex : on n'est pas
+        // dans la vue "Transcription de la réunion"), patch textContent
+        // simple. Le karaoke ne sera pas restauré dans ce cas mais c'est OK
+        // car il n'est rendu que dans cette vue précisément.
         el.textContent = updated;
     });
 }
