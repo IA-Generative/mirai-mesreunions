@@ -158,11 +158,13 @@ def _import_meeting_audio(
     finally:
         resp.close()
     blob = b"".join(chunks)
-    # Stored filename pattern mirrors the existing build_stored_filename
-    # convention so the rest of the pipeline (kevent, watchdog) doesn't need
-    # to special-case mcr imports.
-    stored_filename = f"MCRIMP_{uuid.uuid4().hex[:8]}_mcr-meeting-{mcr_meeting_id}.webm"
-    upload_fileobj(s3_internal_cfg, stored_filename, BytesIO(blob), content_type="audio/webm")
+    # Transcoder webm → m4a (AAC) avant l'upload S3. Kevent refuse .webm
+    # (whitelist : .ogg .flac .mp3 .mp4 .wav .m4a). On utilise ffmpeg en
+    # subprocess (déjà dans l'image internal-ingester).
+    m4a_blob = _transcode_webm_to_m4a(blob, mcr_meeting_id)
+    total_bytes = len(m4a_blob)
+    stored_filename = f"MCRIMP_{uuid.uuid4().hex[:8]}_mcr-meeting-{mcr_meeting_id}.m4a"
+    upload_fileobj(s3_internal_cfg, stored_filename, BytesIO(m4a_blob), content_type="audio/mp4")
     db = session_factory()
     try:
         db_row = db.query(UserAudioFile).filter(UserAudioFile.id == row.id).one()
@@ -177,6 +179,50 @@ def _import_meeting_audio(
     finally:
         db.close()
     return True
+
+
+def _transcode_webm_to_m4a(webm_bytes: bytes, label: str) -> bytes:
+    """Transcode webm bytes → m4a (AAC LC, mono, 16kHz) via ffmpeg subprocess.
+
+    Optimisé pour Whisper : mono 16kHz suffit (Whisper resample de toute façon),
+    AAC LC car c'est le codec audio standard MP4. -y pour overwrite, -loglevel
+    error pour silence stdout sauf en cas d'erreur.
+
+    Raises RuntimeError si ffmpeg foire (mais on garde le subprocess exit
+    code dans le message pour diagnostic).
+    """
+    import subprocess, tempfile
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as fin, \
+         tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as fout:
+        fin.write(webm_bytes)
+        fin.flush()
+        in_path = fin.name
+        out_path = fout.name
+    try:
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", in_path,
+            "-vn",                    # pas de stream vidéo
+            "-ac", "1",               # mono (Whisper)
+            "-ar", "16000",           # 16kHz (Whisper)
+            "-c:a", "aac",            # AAC LC
+            "-b:a", "64k",            # bitrate raisonnable pour voix
+            out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg transcode webm→m4a failed (rc={result.returncode}) "
+                f"for {label}: {result.stderr.decode('utf-8', errors='replace')[:300]}"
+            )
+        with open(out_path, "rb") as f:
+            return f.read()
+    finally:
+        try:
+            os.unlink(in_path)
+            os.unlink(out_path)
+        except Exception:
+            pass
 
 
 def _import_meeting_transcript(
