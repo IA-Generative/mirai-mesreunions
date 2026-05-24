@@ -327,6 +327,35 @@ def _build_llm_client() -> Optional[LLMClient]:
         return None
 
 
+def _touch_last_activity(audio_file_id) -> None:
+    """Heartbeat léger : UPDATE last_activity_at=NOW pour un audio_id.
+
+    Appelé à chaque poll Kevent (cf ``_on_kevent_poll``) pour éviter que le
+    pipeline_watchdog ne considère la row stale et la "vole" en cours de
+    transcription (cf bug docs/BUG_WATCHDOG_STEAL.md — root cause des rows
+    bouclant à reprocess_version > 40 en mai 2026).
+
+    Pas de full ORM ni de heartbeat sur d'autres colonnes : on veut l'écriture
+    la plus légère possible (1 UPDATE par poll Kevent toutes les 3s).
+    """
+    if SessionLocal is None:
+        return
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text(
+                "UPDATE user_audio_files SET last_activity_at = NOW() WHERE id = :id"
+            ), {"id": str(audio_file_id)})
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        # Heartbeat best-effort — si DB temporairement down on n'interrompt
+        # PAS le pipeline (le watchdog reprendra le job sur la prochaine row
+        # stale, c'est précisément ce qu'on évite ici mais cas dégradé).
+        logger.exception("kevent poll heartbeat failed for %s", audio_file_id)
+
+
 def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
     """
     Update transcription_status and any other named columns on a UserAudioFile row.
@@ -362,6 +391,10 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "reprocessed_with_meeting_id",
         "last_reprocessed_at",
         "reprocess_history",
+        # Observabilité erreur (migration 020) — last_error_at posé
+        # automatiquement quand kind ou message est fourni.
+        "last_error_kind",
+        "last_error_message",
     }
     db = SessionLocal()
     try:
@@ -373,7 +406,11 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         rec.transcription_status = status
         for key, val in fields.items():
             if key in allowed:
+                if key == "last_error_message" and isinstance(val, str):
+                    val = val[:4000]
                 setattr(rec, key, val)
+        if "last_error_kind" in fields or "last_error_message" in fields:
+            rec.last_error_at = datetime.now(timezone.utc)
         now_ts = datetime.now(timezone.utc)
         # Heartbeat watchdog : chaque changement de statut/colonne signale
         # une activité du pipeline. Le watchdog scan ``last_activity_at``
@@ -563,6 +600,8 @@ def _orphan_watchdog_loop() -> None:
                     _set_user_audio_status(
                         audio_id, "kevent_failed",
                         transcription_engine="kevent",
+                        last_error_kind="kevent_no_job_id",
+                        last_error_message="Pipeline Kevent orphelin (pas de job_id Kevent assigné, probable crash avant submit).",
                     )
                     logger.warning("orphan watchdog: row %s has no kevent_job_id, marked failed", audio_id)
         except Exception:
@@ -816,7 +855,9 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     client = _build_kevent_client()
     if client is None:
         _set_user_audio_status(audio_file_id, "kevent_failed",
-                               transcription_engine="kevent")
+                               transcription_engine="kevent",
+                               last_error_kind="kevent_client_unavailable",
+                               last_error_message="Client Kevent non initialisé (config gateway/token manquante).")
         return
 
     # Read the audio bytes once, reuse for both transcribe + diarize.
@@ -853,6 +894,15 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 )
             except Exception:
                 pass  # déjà loggé dans notify_external_status
+
+    def _on_kevent_poll(_kevent_status: str):
+        """Heartbeat last_activity_at à chaque poll Kevent.
+
+        Sans ça, le watchdog (STALE_THRESHOLD_S=300s) vole la row pendant
+        que Kevent transcrit un long audio → boucle infinie de re-submits
+        (cf root cause des rows à reprocess_version > 40, mai 2026).
+        """
+        _touch_last_activity(audio_file_id)
 
     def _on_kevent_submitted(job_id: str):
         """Persiste le kevent_job_id en DB dès que le gateway accepte le job.
@@ -911,6 +961,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_poll=_on_kevent_poll,
                 on_submitted=_on_kevent_submitted,
                 initial_prompt=initial_prompt_for_whisper,
             )
@@ -940,6 +991,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_poll=_on_kevent_poll,
                 on_submitted=_on_kevent_submitted,
             )
         return client.diarize(
@@ -955,10 +1007,15 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     # mobile alors que la transcription a silencieusement échoué).
     external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
 
-    def _push_failure(status: str, message: str):
+    def _push_failure(status: str, message: str, *,
+                       error_kind: str | None = None,
+                       error_message: str | None = None):
+        extra: dict = {"transcription_engine": "kevent"}
+        if error_kind:
+            extra["last_error_kind"] = error_kind
+            extra["last_error_message"] = error_message or message
         try:
-            _set_user_audio_status(audio_file_id, status,
-                                   transcription_engine="kevent")
+            _set_user_audio_status(audio_file_id, status, **extra)
         except Exception:
             logger.exception("Failed to persist %s status for %s",
                              status, audio_file_id)
@@ -969,12 +1026,14 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
 
     try:
         transcription = _kevent_transcribe()
-    except KeventAuthError:
+    except KeventAuthError as exc:
         logger.exception("Kevent auth error on transcription for %s", audio_file_id)
         _push_failure(
             "kevent_failed",
             "Accès au backend IA refusé. La transcription automatique n'a "
             "pas pu démarrer — contactez un administrateur.",
+            error_kind="kevent_auth_failed",
+            error_message=f"KeventAuthError: {exc}",
         )
         return
     except KeventApplicativeError as exc:
@@ -983,6 +1042,8 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             "kevent_failed",
             "Erreur du backend IA pendant la transcription. Réessayez "
             "ultérieurement ou contactez un administrateur.",
+            error_kind="kevent_applicative",
+            error_message=f"KeventApplicativeError: {exc}",
         )
         return
     # KeventTransientError propagates → queue retry handles it.
@@ -2273,7 +2334,9 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
             logger.exception("reset+resubmit: pipeline crashed for %s", audio_id)
             try:
                 _set_user_audio_status(audio_id, "kevent_failed",
-                                       transcription_engine="kevent")
+                                       transcription_engine="kevent",
+                                       last_error_kind="worker_crash",
+                                       last_error_message="Exception non gérée pendant le re-traitement Kevent (voir logs ingester pour la stacktrace).")
             except Exception:
                 logger.exception("reset+resubmit: status_failed write also failed")
 
@@ -2524,6 +2587,8 @@ def full_reprocess_audio(audio_id: str):
                 _set_user_audio_status(
                     audio_id, "kevent_failed",
                     transcription_engine="kevent",
+                    last_error_kind="worker_crash",
+                    last_error_message="Exception non gérée pendant /full-reprocess (voir logs ingester pour la stacktrace).",
                 )
             except Exception:
                 logger.exception("full-reprocess: status_failed write also failed")

@@ -352,6 +352,17 @@ function _buildStatusTooltip(file, status) {
     }
   }
 
+  // Bloc erreur détaillée — surfacé quand status.kind === 'error' et qu'on
+  // a un last_error_kind en cache (migration 020 + endpoint transcript-status).
+  // Donne à l'utilisateur la cause + l'action possible.
+  if (status.kind === 'error' && cached && cached.errorKind) {
+    lines.push('');
+    lines.push('⚠ ' + _humanizeErrorKind(cached.errorKind));
+    if (cached.errorMessage) {
+      lines.push('   Détail : ' + cached.errorMessage);
+    }
+  }
+
   // Badge "relancé" persistant tant que le statut n'a pas bougé.
   const relaunch = _recentlyRelaunched.get(file.id);
   if (relaunch) {
@@ -363,6 +374,29 @@ function _buildStatusTooltip(file, status) {
   lines.push('Clic = ouvrir la fiche complète');
   lines.push('▾ = afficher le résumé inline');
   return lines.join('\n');
+}
+
+// Mappe un code last_error_kind (cf migration 020 + _REASON_TO_KIND côté
+// mcr_importer.py) vers une phrase utilisateur en français incluant
+// l'action possible. Tout kind non listé tombe sur un message générique.
+function _humanizeErrorKind(kind) {
+  const M = {
+    mcr_unavailable_on_source: "Audio et compte-rendu indisponibles sur Compte-Rendu Mirai. Vous pouvez supprimer cette ligne.",
+    mcr_audio_404:    "Audio non trouvé sur Compte-Rendu Mirai. Vous pouvez relancer ou supprimer.",
+    mcr_transcript_404: "Compte-rendu non trouvé sur Compte-Rendu Mirai. Vous pouvez relancer.",
+    mcr_audio_error:  "Erreur en récupérant l'audio depuis Compte-Rendu Mirai. Réessayez plus tard.",
+    mcr_transcript_error: "Erreur en récupérant le compte-rendu. Réessayez plus tard.",
+    mcr_auth_failed:  "Authentification refusée par Compte-Rendu Mirai. Reconnectez-vous puis relancez.",
+    mcr_oidc_auth:    "Session expirée. Reconnectez-vous puis relancez.",
+    mcr_oidc_other:   "Erreur d'authentification. Reconnectez-vous puis relancez.",
+    kevent_auth_failed:    "Accès au moteur de transcription refusé. Contactez un administrateur.",
+    kevent_applicative:    "Erreur du moteur de transcription. Vous pouvez relancer.",
+    kevent_client_unavailable: "Configuration du moteur de transcription manquante. Contactez un administrateur.",
+    kevent_no_job_id: "Le pipeline a redémarré sans avoir enregistré la transcription. Cliquez Relancer.",
+    cap_exceeded:     "5 tentatives automatiques épuisées. Cliquez Relancer pour forcer une nouvelle tentative.",
+    worker_crash:     "Le pipeline a planté pendant le traitement. Cliquez Relancer.",
+  };
+  return M[kind] || `Erreur : ${kind}. Cliquez Relancer ou contactez un administrateur.`;
 }
 
 async function _fetchPipelineStats() {
@@ -530,6 +564,9 @@ async function _prefetchTranscriptStatus(fileId) {
       // transcription_started_at exposé par transcript-status (fiche
       // détaillée) — utilisé pour calculer Écoulé / Estimé restant.
       startedAt: data.transcription_started_at || null,
+      errorKind: data.last_error_kind || null,
+      errorMessage: data.last_error_message || null,
+      errorAt: data.last_error_at || null,
       fetchedAt: Date.now(),
     });
     // Auto-clear du badge "Relancé" : si le statut a bougé depuis la
@@ -595,6 +632,9 @@ async function _fetchAndRenderSummary(fileId) {
       kp: data.key_points_summary || '',
       outputs: data.outputs || {},
       startedAt: data.transcription_started_at || null,
+      errorKind: data.last_error_kind || null,
+      errorMessage: data.last_error_message || null,
+      errorAt: data.last_error_at || null,
       fetchedAt: Date.now(),
     });
     const relaunch2 = _recentlyRelaunched.get(fileId);

@@ -106,20 +106,48 @@ def _extract_docx_text(docx_bytes: bytes) -> str:
     return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
-def _set_failed(session_factory, audio_file_id: str, reason: str) -> None:
-    """Best-effort DB update on a failure path."""
+def _set_failed(session_factory, audio_file_id: str, reason: str,
+                *, error_kind: str | None = None,
+                error_message: str | None = None) -> None:
+    """Best-effort DB update on a failure path.
+
+    ``reason`` est le code legacy court (audio, transcript, no_transcript, …)
+    conservé pour la lisibilité des logs. ``error_kind`` + ``error_message``
+    sont persistés dans les colonnes ``last_error_*`` (migration 020) pour
+    surfacer la cause côté UI et débug DB. Si ``error_kind`` n'est pas fourni,
+    il est dérivé de ``reason`` via ``_REASON_TO_KIND``.
+    """
+    kind = error_kind or _REASON_TO_KIND.get(reason, f"mcr_{reason}")
     try:
         db = session_factory()
         try:
             row = db.query(UserAudioFile).filter(UserAudioFile.id == audio_file_id).one_or_none()
             if row is not None:
+                now = datetime.now(timezone.utc)
                 row.transcription_status = "mcr_import_failed"
-                row.last_activity_at = datetime.now(timezone.utc)
+                row.last_activity_at = now
+                row.last_error_at = now
+                row.last_error_kind = kind
+                if error_message:
+                    row.last_error_message = error_message[:4000]
                 db.commit()
         finally:
             db.close()
     except Exception:
         logger.exception("Could not persist mcr_import_failed for %s (%s)", audio_file_id, reason)
+
+
+# Mapping des codes ``reason`` legacy → ``last_error_kind`` canonique
+# (cf migration 020 pour le catalogue complet).
+_REASON_TO_KIND: dict[str, str] = {
+    "auth": "mcr_oidc_auth",
+    "oidc_other": "mcr_oidc_other",
+    "mcr_auth": "mcr_auth_failed",
+    "audio": "mcr_audio_error",
+    "no_audio_no_fallback": "mcr_audio_404",
+    "transcript": "mcr_transcript_error",
+    "no_transcript": "mcr_unavailable_on_source",
+}
 
 
 def _import_meeting_audio(
@@ -415,14 +443,14 @@ def _handle_message(session_factory, s3_internal_cfg: S3Config, message: dict) -
         )
     except (MCRAuthError, OIDCAuthError) as exc:
         logger.warning("mcr_importer: MCR rejected token for %s (%s)", audio_file_id, exc)
-        _set_failed(session_factory, audio_file_id, "mcr_auth")
+        _set_failed(session_factory, audio_file_id, "mcr_auth", error_message=str(exc))
         return False
     except MCRTransientError:
         logger.exception("mcr_importer: MCR transient on audio, will retry")
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception("mcr_importer: unexpected error pulling audio for %s", audio_file_id)
-        _set_failed(session_factory, audio_file_id, "audio")
+        _set_failed(session_factory, audio_file_id, "audio", error_message=str(exc))
         return False
 
     if imported_audio:
@@ -443,13 +471,14 @@ def _handle_message(session_factory, s3_internal_cfg: S3Config, message: dict) -
     except MCRTransientError:
         logger.exception("mcr_importer: MCR transient on transcript, will retry")
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception("mcr_importer: unexpected error pulling transcript for %s", audio_file_id)
-        _set_failed(session_factory, audio_file_id, "transcript")
+        _set_failed(session_factory, audio_file_id, "transcript", error_message=str(exc))
         return False
 
     if not imported_txt:
-        _set_failed(session_factory, audio_file_id, "no_transcript")
+        _set_failed(session_factory, audio_file_id, "no_transcript",
+                    error_message="Audio et compte-rendu indisponibles sur Compte-Rendu Mirai")
         return False
 
     return True

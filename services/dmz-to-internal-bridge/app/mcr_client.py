@@ -320,6 +320,16 @@ class MCRClient:
 
     @staticmethod
     def _raise_for_status(resp, context: str) -> None:
+        # Log systématique pour observabilité (sans corps si OK).
+        try:
+            body_len = len(resp.content or b"") if not getattr(resp, "raw", None) else -1
+        except Exception:
+            body_len = -1
+        if resp.status_code < 400:
+            logger.info("MCR %s → %d (body=%dB)", context, resp.status_code, body_len)
+        else:
+            logger.warning("MCR %s → %d body=%s",
+                           context, resp.status_code, (resp.text or "")[:500])
         if resp.status_code in (401, 403):
             raise MCRAuthError(f"{context} → {resp.status_code} (token rejected by MCR)")
         if resp.status_code >= 500:

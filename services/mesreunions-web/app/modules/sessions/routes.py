@@ -899,6 +899,11 @@ def api_file_transcript_status(file_id):
             "meeting_analysis_json": audio.get("meeting_analysis_json"),
             "reprocess_version": audio.get("reprocess_version") or 0,
             "last_reprocessed_at": audio.get("last_reprocessed_at"),
+            # Observabilité erreur (migration 020) — surfacé en UI pour
+            # afficher un badge + message actionnable à l'utilisateur.
+            "last_error_kind": audio.get("last_error_kind"),
+            "last_error_message": (audio.get("last_error_message") or None) and audio["last_error_message"][:300],
+            "last_error_at": audio.get("last_error_at"),
         }
         if not summary_only:
             # Texte speaker-tagged (avec timecodes par bloc) exposé pour

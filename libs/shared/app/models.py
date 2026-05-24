@@ -401,6 +401,14 @@ class UserAudioFile(InternalBase):
     pipeline_claim_at = Column(DateTime(timezone=True), nullable=True)
     pipeline_claim_pod = Column(String(128), nullable=True)
 
+    # ─── Observabilité erreur (migration 020) ────────────────────────
+    # Peuplé par tous les call-sites passant en *_failed (mcr_importer,
+    # pipeline_watchdog._mark_capped_as_failed, puller Kevent path).
+    # Permet de débugger depuis la DB et de surfacer un message UI clair.
+    last_error_at = Column(DateTime(timezone=True), nullable=True)
+    last_error_kind = Column(String(64), nullable=True)
+    last_error_message = Column(Text, nullable=True)
+
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
         Index("ix_user_audio_transcription", "transcription_status"),
