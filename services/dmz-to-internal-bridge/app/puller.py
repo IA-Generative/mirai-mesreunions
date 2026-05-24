@@ -2241,47 +2241,73 @@ def reprocess_audio(audio_id: str):
             uaf.transcription_status = "kevent_reprocessing"
             uaf.reprocess_version = new_version
             uaf.reprocess_history = history
+            uaf.last_activity_at = datetime.now(timezone.utc)
             db.commit()
         except Exception:
             db.rollback()
             logger.exception("reprocess: failed to commit reprocessing status for %s", audio_id)
             return jsonify({"error": "db_write_failed"}), 500
 
-        # Relance la chaîne LLM via la sous-fonction composable.
-        # SKIP transcription / diarisation / speaker_naming.
+        # Snapshot des inputs LLM AVANT close() de la session courante :
+        # le thread daemon n'a plus accès à ``uaf`` après db.close() dans
+        # le ``finally`` ci-dessous. On capture les attributs en locales.
         base_for_llm = uaf.speaker_tagged_text or uaf.glossary_corrected_text or uaf.transcription_text
         speaker_tagged = uaf.speaker_tagged_text
-        llm = _build_llm_client()
-        chain_updates, chain_status = _run_llm_chain_for_audio(
-            base_for_llm, speaker_tagged,
-            llm=llm,
-            glossary_terms=effective_glossary,
-            include_metadata=False,  # garde le filename/key_points existants
-        )
+        _audio_id_local = audio_id
+        _new_version_local = new_version
+        _brief_id_local = brief_id
+        _effective_glossary_local = list(effective_glossary)
+        _brief_terms_added_local = brief_terms_added
 
-        # Status final + tracking reprocess.
-        final_status = (
-            "kevent_completed"
-            if chain_status == "kevent_completed"
-            else "kevent_partially_completed"
-        )
-        chain_updates["reprocessed_with_meeting_id"] = brief_id
-        chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
-        _set_user_audio_status(audio_id, final_status, **chain_updates)
-
-        logger.info(
-            "reprocess: audio=%s done version=%d brief_id=%s glossary_terms=%d outputs=%d",
-            audio_id, new_version, brief_id, len(effective_glossary), len(chain_updates),
-        )
-        return jsonify({
-            "reprocessed": True,
-            "glossary_terms_used": len(effective_glossary),
-            "brief_terms_added": brief_terms_added,
-            "version": new_version,
-            "status": final_status,
-        }), 200
     finally:
         db.close()
+
+    # Async daemon — la chaîne LLM peut prendre 5-15 min sur un long
+    # transcript, gunicorn --timeout 300 SIGKILL le worker sinon. Le pattern
+    # est aligné sur /full-reprocess (cf endpoint full_reprocess_audio).
+    def _run_reprocess():
+        try:
+            llm = _build_llm_client()
+            chain_updates, chain_status = _run_llm_chain_for_audio(
+                base_for_llm, speaker_tagged,
+                llm=llm,
+                glossary_terms=_effective_glossary_local,
+                include_metadata=False,  # garde le filename/key_points existants
+            )
+            final_status = (
+                "kevent_completed"
+                if chain_status == "kevent_completed"
+                else "kevent_partially_completed"
+            )
+            chain_updates["reprocessed_with_meeting_id"] = _brief_id_local
+            chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
+            _set_user_audio_status(_audio_id_local, final_status, **chain_updates)
+            logger.info(
+                "reprocess: audio=%s done version=%d brief_id=%s glossary_terms=%d outputs=%d",
+                _audio_id_local, _new_version_local, _brief_id_local,
+                len(_effective_glossary_local), len(chain_updates),
+            )
+        except Exception:
+            logger.exception("reprocess: LLM chain crashed for %s", _audio_id_local)
+            try:
+                _set_user_audio_status(
+                    _audio_id_local, "kevent_partially_completed",
+                    last_error_kind="worker_crash",
+                    last_error_message="La régénération du compte-rendu a crashé. Cliquez Re-générer pour relancer.",
+                )
+            except Exception:
+                logger.exception("reprocess: status_failed write also failed")
+
+    threading.Thread(target=_run_reprocess, name=f"reprocess-{audio_id[:8]}",
+                      daemon=True).start()
+
+    return jsonify({
+        "reprocessed": True,
+        "glossary_terms_used": len(_effective_glossary_local),
+        "brief_terms_added": _brief_terms_added_local,
+        "version": _new_version_local,
+        "status": "kevent_reprocessing",
+    }), 202
 
 
 def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,

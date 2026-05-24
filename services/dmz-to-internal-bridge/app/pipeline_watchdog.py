@@ -57,6 +57,10 @@ NON_TERMINAL_STATUSES = (
     "kevent_queued",
     "kevent_transcribing",
     "kevent_processing",
+    # Reprocess LLM (cf puller.reprocess_audio) — peut bloquer si le worker
+    # gunicorn est SIGKILL pendant la chaîne LLM (sync, peut dépasser 5min).
+    # Inclus ici pour que _mark_capped_as_failed le sorte du purgatoire.
+    "kevent_reprocessing",
     # Import MCR : la row est créée en pending ; si le worker mcr_importer
     # n'aboutit pas (timeout, MCR transitoire), elle reste bloquée ici.
     "mcr_import_pending",
