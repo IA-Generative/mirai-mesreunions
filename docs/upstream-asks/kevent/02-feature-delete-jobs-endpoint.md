@@ -1,5 +1,30 @@
 # [Feature] Add `DELETE /jobs/{service_type}/{job_id}` endpoint
 
+> **⚠ Draft caduc (mai 2026).** Après lecture de la code base
+> kevent-ai, l'endpoint **existe déjà** : handler `Cancel` dans
+> `internal/handler/jobs.go:447`, swagger dans `internal/handler/docs.go:289`,
+> 5 tests dans `internal/handler/jobs_test.go:497-624`.
+>
+> **Limitation actuelle** : ne couvre que l'état `pending`. Renvoie
+> 409 Conflict sur `processing`/`completed`/`failed`. La raison
+> architecturale est saine (Kafka fire-and-forget + relay sans
+> canal de cancel → cancel sur `processing` créerait des résultats
+> orphelins).
+>
+> **Conséquence pour notre cas** : la fenêtre `pending` est de
+> quelques secondes (pickup Kafka → relay rapide), donc le DELETE
+> existant n'aide pas notre scénario réel (jobs longs qui passent
+> 99 % du temps en `processing`).
+>
+> **Ask consolidée** dans [IA-Generative/kevent-ai#66](https://github.com/IA-Generative/kevent-ai/issues/66)
+> qui pivote vers le niveau 2 (lease auto-renouvelé) — solution qui
+> couvre `processing` sans nécessiter le refactor relay.
+>
+> Le draft ci-dessous est conservé pour traçabilité de la
+> réflexion.
+
+---
+
 **Type** : feature request — small PR
 **Priority** : P2 — unblocks client-side fix for issue #1
 **Component** : gateway / REST API
