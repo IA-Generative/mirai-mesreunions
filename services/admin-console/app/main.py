@@ -880,6 +880,111 @@ def create_app() -> Flask:
             download_name=filename,
         )
 
+    # ── Forbidden Phrases (pré-filtrage transcription) ───────────────
+    #
+    # Liste des phrases parasites à retirer automatiquement des
+    # transcriptions Whisper. Cf migration 021 + module forbidden_phrases.py
+    # côté internal-ingester. CRUD réservé aux admins (require_auth +
+    # déjà filtré par ALLOWED_USERS).
+
+    from libs.shared.app.models import TranscriptionForbiddenPhrase
+
+    def _phrase_to_dict(p):
+        return {
+            "id": p.id,
+            "phrase": p.phrase,
+            "ordering": p.ordering,
+            "is_active": p.is_active,
+            "note": p.note,
+            "created_at": _as_iso(p.created_at),
+            "updated_at": _as_iso(p.updated_at),
+        }
+
+    @app.route("/api/forbidden-phrases", methods=["GET"])
+    @require_auth
+    def api_forbidden_phrases_list():
+        db = IntSessionLocal()
+        try:
+            rows = (
+                db.query(TranscriptionForbiddenPhrase)
+                .order_by(TranscriptionForbiddenPhrase.ordering.asc(),
+                          TranscriptionForbiddenPhrase.id.asc())
+                .all()
+            )
+            return jsonify({"items": [_phrase_to_dict(p) for p in rows]})
+        finally:
+            db.close()
+
+    @app.route("/api/forbidden-phrases", methods=["POST"])
+    @require_auth
+    def api_forbidden_phrases_create():
+        data = request.get_json(silent=True) or {}
+        phrase = (data.get("phrase") or "").strip()
+        if not phrase:
+            abort(400, "phrase is required")
+        ordering = int(data.get("ordering") or 1000)
+        is_active = bool(data.get("is_active", True))
+        note = (data.get("note") or "").strip() or None
+        db = IntSessionLocal()
+        try:
+            existing = db.query(TranscriptionForbiddenPhrase).filter(
+                TranscriptionForbiddenPhrase.phrase == phrase).first()
+            if existing:
+                return jsonify({"error": "phrase_exists",
+                                "item": _phrase_to_dict(existing)}), 409
+            row = TranscriptionForbiddenPhrase(
+                phrase=phrase, ordering=ordering,
+                is_active=is_active, note=note,
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            return jsonify(_phrase_to_dict(row)), 201
+        finally:
+            db.close()
+
+    @app.route("/api/forbidden-phrases/<int:phrase_id>", methods=["PUT"])
+    @require_auth
+    def api_forbidden_phrases_update(phrase_id: int):
+        data = request.get_json(silent=True) or {}
+        db = IntSessionLocal()
+        try:
+            row = db.query(TranscriptionForbiddenPhrase).filter(
+                TranscriptionForbiddenPhrase.id == phrase_id).first()
+            if not row:
+                abort(404, "not_found")
+            if "phrase" in data:
+                new_phrase = (data["phrase"] or "").strip()
+                if not new_phrase:
+                    abort(400, "phrase cannot be empty")
+                row.phrase = new_phrase
+            if "ordering" in data:
+                row.ordering = int(data["ordering"])
+            if "is_active" in data:
+                row.is_active = bool(data["is_active"])
+            if "note" in data:
+                row.note = (data["note"] or "").strip() or None
+            db.commit()
+            db.refresh(row)
+            return jsonify(_phrase_to_dict(row))
+        finally:
+            db.close()
+
+    @app.route("/api/forbidden-phrases/<int:phrase_id>", methods=["DELETE"])
+    @require_auth
+    def api_forbidden_phrases_delete(phrase_id: int):
+        db = IntSessionLocal()
+        try:
+            row = db.query(TranscriptionForbiddenPhrase).filter(
+                TranscriptionForbiddenPhrase.id == phrase_id).first()
+            if not row:
+                abort(404, "not_found")
+            db.delete(row)
+            db.commit()
+            return ("", 204)
+        finally:
+            db.close()
+
     return app
 
 
@@ -995,6 +1100,26 @@ INDEX_TEMPLATE = """
         <span class=\"muted\">Refresh auto 5s</span>
       </div>
       <div id=\"sessions\" style=\"margin-top:10px\"></div>
+    </div>
+    <div class=\"card\">
+      <div style=\"display:flex;justify-content:space-between;align-items:center\">
+        <strong>Phrases interdites (pré-filtrage transcription)</strong>
+        <span class=\"muted\">Retirées automatiquement de toute transcription Whisper</span>
+      </div>
+      <div id=\"forbidden-phrases\" style=\"margin-top:10px\"></div>
+      <div style=\"margin-top:12px;padding-top:10px;border-top:1px dashed #e5e7eb;\">
+        <strong style=\"font-size:13px;\">Ajouter une phrase</strong>
+        <div style=\"display:grid;grid-template-columns:1fr 100px auto;gap:6px;margin-top:6px;\">
+          <input id=\"fp-new-phrase\" type=\"text\" placeholder=\"Phrase à filtrer (ex : Merci d'avoir regardé)\"
+                 style=\"padding:6px;border:1px solid #d0d5dd;border-radius:6px;font-size:13px;\" />
+          <input id=\"fp-new-ordering\" type=\"number\" placeholder=\"Ordre\" value=\"500\"
+                 title=\"Ordre d'évaluation. Petits nombres = évalués en premier. Les patterns LONGS doivent avoir un ordering plus PETIT que les courts (sinon ils sont masqués).\"
+                 style=\"padding:6px;border:1px solid #d0d5dd;border-radius:6px;font-size:13px;\" />
+          <button onclick=\"createForbiddenPhrase()\" class=\"fr-btn fr-btn--sm\">Ajouter</button>
+        </div>
+        <input id=\"fp-new-note\" type=\"text\" placeholder=\"Note (optionnel : raison d'ajout)\"
+               style=\"padding:6px;border:1px solid #d0d5dd;border-radius:6px;font-size:13px;width:100%;margin-top:6px;\" />
+      </div>
     </div>
   </div>
   </main>
@@ -1273,6 +1398,94 @@ document.getElementById('logout-link')?.addEventListener('click', () => {
     dashboardTimer = null;
   }
 });
+
+// ── Phrases interdites (pré-filtrage transcription) ─────────────────
+async function loadForbiddenPhrases() {
+  const host = document.getElementById('forbidden-phrases');
+  if (!host) return;
+  try {
+    const r = await fetch('/api/forbidden-phrases');
+    if (!r.ok) { host.innerHTML = '<div class=\"muted\">Erreur de chargement</div>'; return; }
+    const data = await r.json();
+    const items = data.items || [];
+    if (items.length === 0) {
+      host.innerHTML = '<div class=\"muted\">Aucune phrase configurée.</div>';
+      return;
+    }
+    const rows = items.map(it => {
+      const inactive = it.is_active ? '' : 'opacity:0.5;text-decoration:line-through;';
+      return `
+        <div class=\"obj\" data-fp-id=\"${it.id}\" style=\"display:grid;grid-template-columns:60px 1fr 90px auto auto auto;gap:6px;align-items:center;${inactive}\">
+          <input type=\"number\" value=\"${it.ordering}\"
+                 onchange=\"updateForbiddenPhrase(${it.id}, {ordering: parseInt(this.value, 10)})\"
+                 title=\"Ordre d'évaluation (petits = en premier)\"
+                 style=\"padding:4px;border:1px solid #d0d5dd;border-radius:4px;font-size:12px;\" />
+          <div>
+            <input type=\"text\" value=\"${esc(it.phrase)}\"
+                   onchange=\"updateForbiddenPhrase(${it.id}, {phrase: this.value})\"
+                   style=\"padding:4px;border:1px solid #d0d5dd;border-radius:4px;font-size:12px;width:100%;\" />
+            ${it.note ? `<div class=\"muted\" style=\"font-size:11px;margin-top:2px;\">${esc(it.note)}</div>` : ''}
+          </div>
+          <label style=\"font-size:11px;\">
+            <input type=\"checkbox\" ${it.is_active ? 'checked' : ''}
+                   onchange=\"updateForbiddenPhrase(${it.id}, {is_active: this.checked})\" /> active
+          </label>
+          <button onclick=\"editForbiddenPhraseNote(${it.id}, ${JSON.stringify(it.note || '')})\"
+                  class=\"fr-btn fr-btn--sm fr-btn--tertiary\" title=\"Modifier la note\" style=\"padding:2px 8px;font-size:11px;\">📝</button>
+          <button onclick=\"deleteForbiddenPhrase(${it.id})\"
+                  class=\"fr-btn fr-btn--sm fr-btn--tertiary\" title=\"Supprimer définitivement\" style=\"padding:2px 8px;font-size:11px;color:#b91c1c;\">🗑</button>
+          <span class=\"muted\" style=\"font-size:10px;\">${(it.updated_at || '').slice(0, 16).replace('T', ' ')}</span>
+        </div>`;
+    }).join('');
+    host.innerHTML =
+      `<div class=\"muted\" style=\"font-size:11px;margin-bottom:6px;\">⚠ L'ordre matters : les patterns LONGS doivent avoir un ordering plus PETIT que les courts, sinon ils sont masqués (ex : \"Sous-titrage Société Radio-Canada\" avant \"Société Radio-Canada\"). Le cache pipeline se rafraîchit toutes les 5 min.</div>` +
+      rows;
+  } catch (e) {
+    host.innerHTML = `<div class=\"muted\">Erreur : ${esc(e.message)}</div>`;
+  }
+}
+
+async function createForbiddenPhrase() {
+  const phrase = (document.getElementById('fp-new-phrase').value || '').trim();
+  const ordering = parseInt(document.getElementById('fp-new-ordering').value, 10) || 1000;
+  const note = (document.getElementById('fp-new-note').value || '').trim() || null;
+  if (!phrase) { alert('Saisissez une phrase.'); return; }
+  const r = await fetch('/api/forbidden-phrases', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({phrase, ordering, is_active: true, note}),
+  });
+  if (r.status === 409) { alert('Cette phrase existe déjà.'); return; }
+  if (!r.ok) { alert('Erreur : HTTP ' + r.status); return; }
+  document.getElementById('fp-new-phrase').value = '';
+  document.getElementById('fp-new-note').value = '';
+  loadForbiddenPhrases();
+}
+
+async function updateForbiddenPhrase(id, patch) {
+  const r = await fetch(`/api/forbidden-phrases/${id}`, {
+    method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) { alert('Échec mise à jour : HTTP ' + r.status); loadForbiddenPhrases(); return; }
+  // pas de full reload pour éviter le flash visuel sur le champ qu'on vient d'éditer
+}
+
+async function editForbiddenPhraseNote(id, currentNote) {
+  const note = prompt('Note (raison d\\'ajout) :', currentNote || '');
+  if (note === null) return;
+  await updateForbiddenPhrase(id, {note});
+  loadForbiddenPhrases();
+}
+
+async function deleteForbiddenPhrase(id) {
+  if (!confirm('Supprimer définitivement cette phrase ? Préférer la désactiver pour garder l\\'audit trail.')) return;
+  const r = await fetch(`/api/forbidden-phrases/${id}`, {method: 'DELETE'});
+  if (!r.ok && r.status !== 204) { alert('Échec : HTTP ' + r.status); return; }
+  loadForbiddenPhrases();
+}
+
+loadForbiddenPhrases();
+setInterval(loadForbiddenPhrases, 60000);  // refresh 1 min
 </script>
 <script type=\"module\" src=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.module.min.js\"></script>
 <script nomodule src=\"https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.14.2/dist/dsfr/dsfr.nomodule.min.js\"></script>
