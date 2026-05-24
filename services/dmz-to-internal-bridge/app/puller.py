@@ -1921,6 +1921,15 @@ def audio_lookup():
             "meeting_id": meeting_id,
             "preparation_id": preparation_id,
             "meeting_brief_id": preparation_id,  # alias legacy
+            # Observabilité erreur (mig 020) + édition user (mig 022) — sans
+            # ces 4 champs ici, leur PATCH écrit en DB mais l'UI au retour
+            # voit '[]' / null car le GET ne renvoie pas le champ.
+            "last_error_at": (
+                row.last_error_at.isoformat() if row.last_error_at else None
+            ),
+            "last_error_kind": row.last_error_kind,
+            "last_error_message": row.last_error_message,
+            "hidden_block_indices": list(row.hidden_block_indices or []),
         })
     except Exception:
         logger.exception("audio_lookup failed")
