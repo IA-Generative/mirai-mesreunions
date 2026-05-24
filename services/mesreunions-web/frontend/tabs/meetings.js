@@ -958,8 +958,25 @@ async function _resumeStuckJobs(ev) {
     else window.alert(msg);
 
     // Refresh la liste pour montrer les nouveaux statuts ("kevent_queued").
+    // Puis re-refresh échelonnés pour suivre la transition vers le statut
+    // terminal (kevent_processing → kevent_completed OU kevent_failed) sans
+    // que l'user ait à F5 lui-même. Si un job replante, la croix rouge
+    // ré-apparait automatiquement après ~30-60s.
     const reload = _resolveLegacyFn('loadSessions');
-    if (reload) await reload({ force: true });
+    if (reload) {
+      await reload({ force: true });
+      // Invalidation périodique du cache transcript pour TOUTES les rows
+      // relancées — sinon le polling local pourrait servir un statut stale.
+      const refreshIds = () => {
+        for (const fid of ids) _transcriptCache.delete(fid);
+        try { reload({ force: true }); } catch (e) {}
+      };
+      setTimeout(refreshIds, 5000);
+      setTimeout(refreshIds, 15000);
+      setTimeout(refreshIds, 30000);
+      setTimeout(refreshIds, 60000);
+      setTimeout(refreshIds, 120000);
+    }
 
     // Highlight visuel temporaire (3.5s) sur les rows relancées pour que
     // l'utilisateur voie EXACTEMENT lesquelles ont été reprises. CSS
