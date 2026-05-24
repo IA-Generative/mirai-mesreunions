@@ -1831,6 +1831,16 @@ function _parseSpeakerTagged(text) {
 async function _remountCorrectorInPlace(container, fileId) {
     if (!container || !fileId) return;
     const savedScrollY = window.scrollY;
+    // CRITIQUE : un élément <audio> retiré du DOM continue de jouer si
+    // l'objet JS est gardé vivant par une closure (les event listeners
+    // timeupdate de mountTranscriptCorrector le maintiennent en référence).
+    // Sans pause + reset src explicites, le nouveau corrector affiche un
+    // nouvel <audio> ET l'ancien continue → 2 sources qui jouent en
+    // décalage = symptôme "son doublé" signalé en prod.
+    container.querySelectorAll('audio').forEach((a) => {
+        try { a.pause(); } catch (e) {}
+        try { a.removeAttribute('src'); a.load(); } catch (e) {}
+    });
     if (typeof _invalidateTranscriptTextCache === 'function') {
         try { _invalidateTranscriptTextCache(fileId); } catch (e) {}
     }
