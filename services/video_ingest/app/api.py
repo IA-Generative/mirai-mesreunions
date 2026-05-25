@@ -21,8 +21,10 @@ import logging
 
 from flask import Blueprint, Flask, g, jsonify, request
 
+from . import audit
 from . import db
 from . import jobs as jobs_mod
+from . import quotas
 from .auth import require_admin, require_auth
 from .providers.youtube import url as yt_url
 from .providers.youtube import YouTubeProvider
@@ -79,6 +81,11 @@ def import_video():
                 conn, user_sub=g.user_sub, video_source_id=existing,
                 context=payload.get("context"), context_id=payload.get("context_id"),
             )
+            audit.log_event(
+                conn, action="import", user_sub=g.user_sub, url=url,
+                video_source_id=existing, reused=True, job_id=None,
+                context=payload.get("context"), context_id=payload.get("context_id"),
+            )
             return jsonify({
                 "status": "ready",
                 "reused": True,
@@ -87,13 +94,27 @@ def import_video():
                 "job_id": None,
             }), 200
 
-    # MISS — on enqueue un job pour le worker.
+    # MISS — quota check + enqueue.
     with db.connection() as conn:
+        try:
+            quotas.check_import_quota(conn, user_sub=g.user_sub)
+        except quotas.QuotaExceeded as e:
+            audit.log_event(
+                conn, action="error", user_sub=g.user_sub, url=url,
+                details={"reason": "quota_exceeded", "limit": e.limit, "current": e.current},
+            )
+            return jsonify({"error": str(e), "limit": e.limit, "current": e.current}), 429
         job_id = jobs_mod.enqueue(
             conn, url=url, user_sub=g.user_sub,
             context=payload.get("context"), context_id=payload.get("context_id"),
             language_pref=language_pref,
             force_audio=bool(payload.get("force_audio", False)),
+        )
+        audit.log_event(
+            conn, action="import", user_sub=g.user_sub, url=url,
+            video_source_id=None, reused=False, job_id=job_id,
+            context=payload.get("context"), context_id=payload.get("context_id"),
+            details={"force_audio": bool(payload.get("force_audio", False))},
         )
     return jsonify({
         "status": "pending",
@@ -246,6 +267,11 @@ def purge_source(source_id: int):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM video_sources WHERE id = %s RETURNING id", (source_id,))
             row = cur.fetchone()
+        if row:
+            audit.log_event(
+                conn, action="purge", user_sub=g.user_sub,
+                video_source_id=source_id,
+            )
     if not row:
         return jsonify({"error": "source introuvable"}), 404
     log.warning("purge admin: source %s supprimée par %s", source_id, g.user_sub)

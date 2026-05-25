@@ -66,7 +66,8 @@ def test_import_cache_hit_returns_ready_sync(client):
     with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
          patch("services.video_ingest.app.api.find_source_by_provider_id", return_value=777), \
          patch("services.video_ingest.app.api.has_transcript", return_value=True), \
-         patch("services.video_ingest.app.api.add_bookmark", return_value=999):
+         patch("services.video_ingest.app.api.add_bookmark", return_value=999), \
+         patch("services.video_ingest.app.api.audit.log_event"):
         resp = client.post("/video/import", json={"url": "https://youtu.be/dQw4w9WgXcQ"})
     assert resp.status_code == 200
     body = resp.get_json()
@@ -82,6 +83,8 @@ def test_import_cache_miss_enqueues_job(client):
     with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
          patch("services.video_ingest.app.api.find_source_by_provider_id", return_value=None), \
          patch("services.video_ingest.app.api.has_transcript", return_value=False), \
+         patch("services.video_ingest.app.api.quotas.check_import_quota"), \
+         patch("services.video_ingest.app.api.audit.log_event"), \
          patch("services.video_ingest.app.api.jobs_mod.enqueue", return_value=42):
         resp = client.post("/video/import", json={
             "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",

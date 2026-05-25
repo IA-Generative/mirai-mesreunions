@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — V1 complète backend : 7 slices livrées (120 tests verts), reste à câbler la modale frontend dans `tabs/meetings.js` |
+| **Dernière mise à jour** | 2026-05-25 — V1 backend complète + Q4/Q5 résolues (audit + quotas), 126 tests verts ; reste modale frontend dans `tabs/meetings.js` |
 
 ---
 
@@ -207,8 +207,8 @@ V2 : `DailymotionProvider`.
 | Q1 | Quel orchestrateur de jobs async utiliser (Celery / Temporal / autre déjà en place dans le repo MirAI) ? | Avant début V1 | **Résolu 2026-05-25 (D13)** : Postgres natif, pas de nouvelle dépendance. À réévaluer si volume ou maturité des libs (procrastinate, pgmq) le justifient |
 | Q2 | Iframe YouTube standard ou composant maison pour lecteur horodaté ? | V1.5 | _Ouvert_ |
 | Q3 | Quel modèle pour post-traitement LLM (Mistral Small via API MirAI ?) ? | V1.5 | _Ouvert_ |
-| Q4 | Quotas par utilisateur sur les imports (anti-abus) ? | V1 ou V1.5 | _Ouvert_ |
-| Q5 | Logging d'audit : qui a importé quoi quand (pour traçabilité interne) ? | V1 | _Ouvert_ |
+| Q4 | Quotas par utilisateur sur les imports (anti-abus) ? | V1 ou V1.5 | **Résolu 2026-05-25** : `VIDEO_INGEST_QUOTA_IMPORTS_PER_DAY` (défaut 50, 0 = désactivé), fenêtre glissante 24h sur `video_ingest_jobs.created_at`. HIT cache ne consomme pas. HTTP 429 si dépassé |
+| Q5 | Logging d'audit : qui a importé quoi quand (pour traçabilité interne) ? | V1 | **Résolu 2026-05-25** : migration 021 + table `video_ingest_audit` (action, user_sub, url, video_source_id soft, reused, job_id, context, details_json). Logged sur import (HIT+MISS), purge, quota dépassé |
 | Q6 | Mention légale dans la modale d'import (responsabilité droits) ? | V1 | _Ouvert — recommandé_ |
 | Q7 | Sortie internet vers youtube.com : passerelle/proxy à configurer en environnement souverain ? | V1 | **Résolu 2026-05-25 (D15)** : A par défaut (egress direct + Cilium FQDN allowlist en prod-bêta), B prête (proxy rotatif `rotating-proxy.miraiku.svc:3128` d'`owuicore-main`, bascule config-only via env vars) |
 | Q8 | Visibilité finale du corpus mutualisé (instance / direction / utilisateur) | V2 | Différée explicitement |
@@ -319,6 +319,12 @@ V2 : `DailymotionProvider`.
   - Frontend : ajouter la modale + le polling dans `tabs/meetings.js` (snippet HTML + JS dans INTEGRATION_NOTES.md §1.4).
   - Q4 (quotas anti-abus) et Q5 (audit logging) : toujours ouverts.
 - **120/120 tests verts** côté `video_ingest`.
+
+### 2026-05-25 — Q4 + Q5 résolues (quotas + audit)
+- **Q5 audit** : migration `021_video_ingest_audit.sql` + `app/audit.py` (log_event, swallow exceptions — l'audit ne tue jamais le flux). Câblé dans `api.import_video` (HIT, MISS, quota dépassé) et `api.purge_source`. Soft pointer sur `video_source_id` (préserve la trace après purge).
+- **Q4 quotas** : `app/quotas.py` (`check_import_quota`), fenêtre glissante 24h, HIT cache n'en consomme pas (volontaire : seul le MISS coûte vraiment). Env `VIDEO_INGEST_QUOTA_IMPORTS_PER_DAY` (50 défaut, 0 désactive). HTTP 429 + audit `error` si dépassé.
+- 6 nouveaux tests, **126/126 verts**.
+- **Reste vraiment** : modale frontend `tabs/meetings.js` (1102 lignes, supervision recommandée) + activation prod-bêta (checklist INTEGRATION_NOTES §3) + revue sécu.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
