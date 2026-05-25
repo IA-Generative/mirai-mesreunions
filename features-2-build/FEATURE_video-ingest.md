@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — mission cadrée : service mutualisé destiné à être extrait du monorepo (cf. D14) |
+| **Dernière mise à jour** | 2026-05-25 — slice 1 livrée : migration 019 + squelette `services/video_ingest/` + parseur URL YouTube (37 tests verts) |
 
 ---
 
@@ -150,9 +150,9 @@ V2 : `DailymotionProvider`.
 ## 5. Plan de livraison (incréments SAFe)
 
 ### V1 — MVP partagé (objectif PI courant)
-- [ ] Schéma BDD `VideoSource` / `Transcript` / `UserVideoBookmark`
+- [x] Schéma BDD `VideoSource` / `Transcript` / `UserVideoBookmark` _(+ `video_ingest_jobs` pour la file Postgres-native)_
 - [ ] `YouTubeProvider` (yt-dlp + youtube-transcript-api)
-- [ ] Normalisation URL YouTube (formats `youtube.com/watch`, `youtu.be`, `&t=`, playlists)
+- [x] Normalisation URL YouTube (formats `youtube.com/watch`, `youtu.be`, `shorts`, `embed`, `live`, `&t=`, paramètres parasites ; playlists et channels rejetés)
 - [ ] Pipeline d'ingestion async (worker existant à identifier dans le repo — Celery/Temporal/autre)
 - [ ] Fallback Whisper large-v3 sous flag `force_audio`
 - [ ] **Aucun stockage audio post-transcription** (test E2E à vérifier)
@@ -249,6 +249,16 @@ V2 : `DailymotionProvider`.
 - **Fait** : explicitation de la mission — `video-ingest` est un **service mutualisé MirAI** hébergé temporairement dans le repo Mes Réunions (en cours de rename `mirai-mesreunions` → `mirai-mesreunions`), destiné à être extrait dans son propre repo dès maturité V1. Principe 3 réécrit en conséquence (zéro import croisé, schéma BDD isolé, identité opaque, interface REST+MCP only, déployable seul).
 - **Impact archi V1** : tables préfixées `video_*` dans un schéma dédié, pas de FK vers les tables MirAI, pas de réutilisation de `libs/shared` côté Mes Réunions, Dockerfile et manifeste K8s autoporteurs sous `services/video-ingest/`.
 - **Critère de sortie** : `git filter-repo --path services/video-ingest/` doit produire un repo viable.
+
+### 2026-05-25 — Slice 1 : fondations isolées
+- **Fait** :
+  - Migration `migrations/internal/019_video_ingest_initial.sql` : 4 tables (`video_sources`, `video_transcripts`, `user_video_bookmarks`, `video_ingest_jobs`), index full-text français généré via `tsvector` STORED, index de dispatch worker `(status, lease_until, created_at)`, zéro FK vers les tables MirAI.
+  - Squelette service `services/video_ingest/` (underscore assumé, cf. README — exception vs reste du repo pour rester importable et préfigurer l'extraction).
+  - Parseur URL YouTube `services/video_ingest/app/providers/youtube/url.py` : pur, sans réseau, gère watch / youtu.be / shorts / embed / live / m. / music. + variantes scheme et paramètres parasites ; rejette playlists seules, channels, vimeo, dailymotion.
+  - Tests unit `tests/unit/test_video_ingest_youtube_url.py` : 37 cas, tous verts.
+  - README `services/video_ingest/README.md` matérialise le pacte d'isolation D14 (règles pour chaque future PR).
+- **Reste** : `YouTubeProvider.fetch_metadata` + `.fetch_subtitles` (avec yt-dlp + youtube-transcript-api), worker Postgres-native, endpoints REST, outils MCP, intégration Mes Réunions.
+- **Blocages** : aucun. Q7 (sortie internet vers youtube.com en environnement souverain) à arbitrer avant le premier appel réseau réel.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
