@@ -35,6 +35,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Service-specific deps : chaque service peut déclarer ses propres deps
+# dans `services/<svc>/requirements.txt` (cf. D14 video-ingest — composant
+# destiné à être extrait). On les installe en plus du root.
+COPY services/video_ingest/requirements.txt /app/services-video-ingest-requirements.txt
+RUN pip install --no-cache-dir -r /app/services-video-ingest-requirements.txt
+
 # Copy shared library
 COPY libs/shared /app/libs/shared
 # Copy service code for Kubernetes/runtime images

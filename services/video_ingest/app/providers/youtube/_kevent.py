@@ -41,6 +41,12 @@ def submit_transcription(
         raise KeventError(
             "VIDEO_INGEST_KEVENT_GATEWAY_URL et _API_KEY requis pour fetch_audio"
         )
+    # Defensive : le secret K8s historique stocke la valeur préfixée "Bearer "
+    # (vestige de l'ancienne convention `apikey: Bearer …`). On strip ici
+    # pour pouvoir mettre la valeur brute dans la nouvelle convention
+    # `Authorization: Bearer …`.
+    if api_key.lower().startswith("bearer "):
+        api_key = api_key[7:].strip()
 
     url = f"{gateway.rstrip('/')}/jobs/audio"
     files = {"file": (filename, audio_bytes, "audio/m4a")}
@@ -75,7 +81,9 @@ def submit_transcription(
 def wait_for_result(job_id: str, *, poll_interval: float = 3.0, timeout: float = 600.0) -> dict:
     """GET /jobs/audio/{id} en boucle jusqu'à `completed` ou `failed`."""
     gateway = os.environ.get("VIDEO_INGEST_KEVENT_GATEWAY_URL")
-    api_key = os.environ.get("VIDEO_INGEST_KEVENT_API_KEY")
+    api_key = os.environ.get("VIDEO_INGEST_KEVENT_API_KEY") or ""
+    if api_key.lower().startswith("bearer "):
+        api_key = api_key[7:].strip()
     url = f"{gateway.rstrip('/')}/jobs/audio/{job_id}"
     deadline = time.monotonic() + timeout
     while True:
