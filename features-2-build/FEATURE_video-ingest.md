@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — Q1 résolu (orchestrateur = Postgres natif, cf. D13) |
+| **Dernière mise à jour** | 2026-05-25 — mission cadrée : service mutualisé destiné à être extrait du monorepo (cf. D14) |
 
 ---
 
@@ -38,7 +38,7 @@ Ces principes encadrent toute décision d'implémentation. Le coding assistant l
 
 1. **Sous-titres d'abord.** Priorité absolue aux sous-titres YouTube (manuels puis auto-générés en français). Whisper local n'est qu'un fallback explicite (flag `force_audio`).
 2. **Pas de stockage de média.** Aucun fichier audio ou vidéo n'est persisté après transcription. La vidéo se joue depuis YouTube (iframe ou lien horodaté).
-3. **Composant autonome.** `video-ingest` est un module à part, avec sa propre persistance et son interface MCP. Mes Réunions et Mes Collections sont des **clients**, pas des hôtes.
+3. **Composant autonome — service mutualisé destiné à être extrait du monorepo.** `video-ingest` est un module à part, avec sa propre persistance, sa propre interface MCP/REST, et son propre cycle de vie. Mes Réunions et Mes Collections sont des **clients** (par API uniquement), pas des hôtes. **Conséquence directe sur V1** : aucun import Python croisé avec le reste du repo, aucun partage de schéma BDD (tables préfixées `video_*` dans un schéma dédié ou base séparable), pas de FK vers les tables MirAI, identité utilisateur = `user_sub` opaque (pas de jointure). Objectif : un `git filter-repo` ou un simple `cp -r services/video-ingest/` doit suffire à extraire le composant dans son propre repo le jour venu.
 4. **Dédup au niveau ressource.** L'unicité d'une vidéo est `(provider, provider_video_id)` après normalisation d'URL, pas l'URL brute.
 5. **Séparation ressource partagée / appropriation utilisateur.** `VideoSource` et `Transcript` sont partagés. `UserVideoBookmark` matérialise l'usage par utilisateur/contexte.
 6. **Visibilité des données : décision différée.** Tout est conservé sans filtrage côté backend en V1. L'arbitrage visibilité se fera à l'introduction du RAG, par filtrage au query time (pas par fragmentation des index).
@@ -195,6 +195,7 @@ V2 : `DailymotionProvider`.
 | D11 | 2026-05-25 | Vidéo figée par défaut, `refetch` réservé admin | YouTube ne mute pas le contenu ; éviter refresh sauvage |
 | D12 | 2026-05-25 | Provider Dailymotion reporté à V2 | Focaliser V1 sur YouTube, abstraction prête dès V1 |
 | D13 | 2026-05-25 | Orchestrateur async = **Postgres natif** (`SELECT … FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`), **pas de nouvelle dépendance** | Charge V1 modeste (imports manuels), transactionnalité `INSERT VideoSource + enqueue` élimine la classe « purgatoires » (ADR-0001), composant autonome → ne pas le coupler au RabbitMQ MirAI existant. **Veille** : réévaluer si le volume passe à un flux soutenu, ou si l'écosystème (procrastinate, pgmq, river-py…) mûrit suffisamment pour justifier une lib externe |
+| D14 | 2026-05-25 | **Mission = service mutualisé MirAI**, hébergé temporairement dans le repo « Mes Réunions » (en cours de rename `mirai-mesreunions` → `mirai-mesreunions`) et destiné à être **extrait dans son propre repo** dès maturité V1 | Le repo hôte devient explicitement « un client parmi d'autres » ; héberger durablement `video-ingest` dedans créerait une dette de couplage. Conséquences V1 : (a) zéro import Python croisé avec le code Mes Réunions, (b) tables préfixées `video_*` dans un schéma dédié, aucune FK vers les tables MirAI, (c) identité = `user_sub` opaque, pas de jointure, (d) interface = REST + MCP uniquement, (e) déployable indépendamment (Dockerfile + manifeste K8s autoporteurs). Critère de sortie : `git filter-repo --path services/video-ingest/` doit produire un repo viable |
 
 ---
 
@@ -243,6 +244,11 @@ V2 : `DailymotionProvider`.
 - **Fait** : Q1 tranché → orchestrateur Postgres natif (`SELECT … FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`), zéro nouvelle dépendance (cf. D13). Composant `video-ingest` restera autonome du bus RabbitMQ MirAI.
 - **Reste** : démarrer le scaffolding (migration BDD jobs + `VideoSource`/`Transcript`/`UserVideoBookmark`, worker minimal, `YouTubeProvider`).
 - **Veille à tenir** : suivre l'évolution des libs Postgres-queue (procrastinate, pgmq, river-py) et basculer si le besoin (volume, fiabilité, ergonomie) le justifie.
+
+### 2026-05-25 — Cadrage mission : service mutualisé extrayable (D14)
+- **Fait** : explicitation de la mission — `video-ingest` est un **service mutualisé MirAI** hébergé temporairement dans le repo Mes Réunions (en cours de rename `mirai-mesreunions` → `mirai-mesreunions`), destiné à être extrait dans son propre repo dès maturité V1. Principe 3 réécrit en conséquence (zéro import croisé, schéma BDD isolé, identité opaque, interface REST+MCP only, déployable seul).
+- **Impact archi V1** : tables préfixées `video_*` dans un schéma dédié, pas de FK vers les tables MirAI, pas de réutilisation de `libs/shared` côté Mes Réunions, Dockerfile et manifeste K8s autoporteurs sous `services/video-ingest/`.
+- **Critère de sortie** : `git filter-repo --path services/video-ingest/` doit produire un repo viable.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
