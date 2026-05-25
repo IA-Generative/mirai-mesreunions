@@ -1064,6 +1064,8 @@ export function mount(container /*, ctx */) {
   // Pré-charge les stats temporelles (cache 15min) pour que le calcul
   // d'ETA dans les tooltips soit dispo dès le 1er rollover.
   _fetchPipelineStats();
+  // Charge la section « Vidéos web importées » (slice 6 C3) — best-effort.
+  _loadAndRenderYoutubeImports();
 }
 
 export function unmount(/* container */) {
@@ -1268,4 +1270,104 @@ function _refreshMeetingsListIfPossible() {
   if (fn) {
     try { fn(); } catch (e) { /* best-effort */ }
   }
+  // Rafraîchir aussi la section « Vidéos web importées » (slice 6 C3).
+  _loadAndRenderYoutubeImports();
+}
+
+// ── Section « Vidéos web importées » (slice 6 C3) ──────────────────────
+//
+// Container injecté AVANT #sessions-list pour éviter toute interaction
+// avec le rendu legacy de la liste audio. Si l'API renvoie 0 items, on
+// cache la section pour ne pas polluer l'UI. Best-effort : toute erreur
+// API laisse la section silencieusement absente.
+
+const _YT_IMPORTS_CONTAINER_ID = 'youtube-imports-section';
+
+function _ensureYoutubeImportsContainer() {
+  let el = document.getElementById(_YT_IMPORTS_CONTAINER_ID);
+  if (el) return el;
+  const sessionsList = document.getElementById('sessions-list');
+  if (!sessionsList || !sessionsList.parentNode) return null;
+  el = document.createElement('div');
+  el.id = _YT_IMPORTS_CONTAINER_ID;
+  el.className = 'youtube-imports-section';
+  el.style.cssText = 'margin-bottom:1.2rem;';
+  sessionsList.parentNode.insertBefore(el, sessionsList);
+  return el;
+}
+
+function _formatDurationSec(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return '';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (h > 0) return `${h}h${String(m).padStart(2,'0')}`;
+  if (m > 0) return `${m}min`;
+  return `${s}s`;
+}
+
+function _escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function _loadAndRenderYoutubeImports() {
+  const el = _ensureYoutubeImportsContainer();
+  if (!el) return;
+  let items = [];
+  try {
+    const resp = await fetch('/api/youtube/my-imports', { credentials: 'same-origin' });
+    if (!resp.ok) {
+      // 401 / 502 / etc. : on cache silencieusement
+      el.style.display = 'none';
+      return;
+    }
+    const body = await resp.json();
+    items = (body && Array.isArray(body.items)) ? body.items : [];
+  } catch (err) {
+    el.style.display = 'none';
+    return;
+  }
+  if (items.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  const rows = items.map((it) => {
+    const title = _escapeHtml(it.title || '(sans titre)');
+    const channel = _escapeHtml(it.channel || '');
+    const dur = _formatDurationSec(it.duration_sec);
+    const chars = Number.isFinite(it.transcript_chars) ? it.transcript_chars : 0;
+    const url = _escapeHtml(it.canonical_url || '#');
+    const meetId = _escapeHtml(it.meeting_id || '');
+    const transcriptBadge = it.has_transcript
+      ? `<span style="color:#0a6c2e;font-size:.85em;">📝 ${chars.toLocaleString('fr-FR')} car.</span>`
+      : `<span style="color:#b00020;font-size:.85em;">⏳ pas encore</span>`;
+    return `
+      <div style="display:grid;grid-template-columns:1fr auto;gap:.5rem;
+                   padding:.5rem .75rem;border:1px solid #ddd;border-radius:.3rem;
+                   margin-bottom:.4rem;background:#fafafa;">
+        <div>
+          <div style="font-weight:600;">🎬 ${title}</div>
+          <div style="font-size:.85em;color:#555;">
+            ${channel ? channel + ' · ' : ''}${dur ? dur + ' · ' : ''}
+            ${transcriptBadge}
+          </div>
+        </div>
+        <div style="display:flex;gap:.4rem;align-items:center;">
+          <a href="${url}" target="_blank" rel="noopener"
+             style="font-size:.85em;text-decoration:none;color:#0a6c2e;"
+             title="Ouvrir sur YouTube">↗ source</a>
+        </div>
+      </div>
+    `;
+  }).join('');
+  el.innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:.6rem;margin-bottom:.5rem;">
+      <h3 style="margin:0;font-size:1.05rem;">🎬 Vidéos web importées</h3>
+      <span style="color:#777;font-size:.85em;">(${items.length})</span>
+    </div>
+    ${rows}
+  `;
 }
