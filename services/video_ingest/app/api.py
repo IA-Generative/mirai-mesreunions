@@ -124,6 +124,67 @@ def import_video():
     }), 202
 
 
+@bp.get("/video/my-bookmarks")
+@require_auth
+def list_my_bookmarks():
+    """Bookmarks de l'utilisateur courant joints aux metadata de source.
+    Renvoyés du plus récent au plus ancien. Limité à 50 par défaut.
+    Utilisé par les clients (Mes Réunions, Mes Collections) pour afficher
+    « mes vidéos web importées ».
+    """
+    limit = min(int(request.args.get("limit", "50")), 200)
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT b.id, b.video_source_id, b.bookmarked_at, b.context,
+                   b.context_id,
+                   s.provider, s.provider_video_id, s.canonical_url,
+                   s.title, s.channel, s.duration_sec,
+                   (SELECT t.language FROM video_transcripts t
+                      WHERE t.video_source_id = s.id
+                      ORDER BY (t.method = 'subtitle_manual') DESC,
+                               t.created_at DESC LIMIT 1) AS lang,
+                   (SELECT LENGTH(t.content_text) FROM video_transcripts t
+                      WHERE t.video_source_id = s.id
+                      ORDER BY (t.method = 'subtitle_manual') DESC,
+                               t.created_at DESC LIMIT 1) AS chars,
+                   (SELECT t.method FROM video_transcripts t
+                      WHERE t.video_source_id = s.id
+                      ORDER BY (t.method = 'subtitle_manual') DESC,
+                               t.created_at DESC LIMIT 1) AS method
+              FROM user_video_bookmarks b
+              JOIN video_sources s ON s.id = b.video_source_id
+             WHERE b.user_sub = %s
+             ORDER BY b.bookmarked_at DESC
+             LIMIT %s
+            """,
+            (g.user_sub, limit),
+        )
+        rows = cur.fetchall()
+    return jsonify({
+        "bookmarks": [
+            {
+                "bookmark_id": r[0],
+                "video_source_id": r[1],
+                "bookmarked_at": r[2].isoformat() if r[2] else None,
+                "context": r[3],
+                "context_id": r[4],
+                "provider": r[5],
+                "provider_video_id": r[6],
+                "canonical_url": r[7],
+                "title": r[8],
+                "channel": r[9],
+                "duration_sec": r[10],
+                "transcript_language": r[11],
+                "transcript_chars": r[12],
+                "transcript_method": r[13],
+                "has_transcript": r[11] is not None,
+            }
+            for r in rows
+        ],
+    })
+
+
 @bp.get("/video/jobs/<int:job_id>")
 @require_auth
 def get_job(job_id: int):

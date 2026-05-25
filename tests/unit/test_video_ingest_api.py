@@ -99,6 +99,62 @@ def test_import_cache_miss_enqueues_job(client):
     assert body["job_id"] == 42
 
 
+# ─── GET /video/my-bookmarks ──────────────────────────────────────────
+
+def test_my_bookmarks_empty(client):
+    cur = MagicMock()
+    cur.fetchall.return_value = []
+    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
+    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+        resp = client.get("/video/my-bookmarks")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"bookmarks": []}
+
+
+def test_my_bookmarks_returns_rich_payload(client):
+    from datetime import datetime, timezone
+    cur = MagicMock()
+    cur.fetchall.return_value = [
+        (
+            42, 1, datetime(2026, 5, 26, tzinfo=timezone.utc), "meeting", "m-9",
+            "youtube", "dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "Test Video", "Test Channel", 245,
+            "fr", 12345, "subtitle_manual",
+        ),
+    ]
+    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
+    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+        resp = client.get("/video/my-bookmarks")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert len(body["bookmarks"]) == 1
+    b = body["bookmarks"][0]
+    assert b["video_source_id"] == 1
+    assert b["title"] == "Test Video"
+    assert b["transcript_language"] == "fr"
+    assert b["transcript_chars"] == 12345
+    assert b["has_transcript"] is True
+
+
+def test_my_bookmarks_no_transcript_yet(client):
+    from datetime import datetime, timezone
+    cur = MagicMock()
+    cur.fetchall.return_value = [
+        (
+            42, 1, datetime(2026, 5, 26, tzinfo=timezone.utc), None, None,
+            "youtube", "dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "Test Video", "Test Channel", 245,
+            None, None, None,
+        ),
+    ]
+    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
+    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+        resp = client.get("/video/my-bookmarks")
+    b = resp.get_json()["bookmarks"][0]
+    assert b["has_transcript"] is False
+    assert b["transcript_language"] is None
+
+
 # ─── GET /video/jobs/<id> ──────────────────────────────────────────────
 
 def test_get_job_not_found(client):
