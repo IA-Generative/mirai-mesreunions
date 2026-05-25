@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — slice 2 livrée : YouTubeProvider (metadata yt-dlp + sous-titres youtube-transcript-api) + chunking 60-90s (70 tests verts) |
+| **Dernière mise à jour** | 2026-05-25 — slice 3 livrée : worker Postgres-native + orchestrateur pipeline (92 tests verts) |
 
 ---
 
@@ -153,7 +153,7 @@ V2 : `DailymotionProvider`.
 - [x] Schéma BDD `VideoSource` / `Transcript` / `UserVideoBookmark` _(+ `video_ingest_jobs` pour la file Postgres-native)_
 - [x] `YouTubeProvider` (yt-dlp + youtube-transcript-api) _— metadata + sous-titres (manuels prioritaires sur auto). Fallback audio (force_audio) reste à coder dans la slice ASR._
 - [x] Normalisation URL YouTube (formats `youtube.com/watch`, `youtu.be`, `shorts`, `embed`, `live`, `&t=`, paramètres parasites ; playlists et channels rejetés)
-- [ ] Pipeline d'ingestion async (worker existant à identifier dans le repo — Celery/Temporal/autre)
+- [x] Pipeline d'ingestion async — worker Postgres-native (D13) : claim `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` + poll fallback 5s, heartbeat 30s, watchdog 60s reprise orphelins
 - [ ] Fallback Whisper large-v3 sous flag `force_audio`
 - [ ] **Aucun stockage audio post-transcription** (test E2E à vérifier)
 - [ ] Index full-text `tsvector('french', content_text)`
@@ -278,6 +278,19 @@ V2 : `DailymotionProvider`.
   - Tests : 33 nouveaux cas, **70/70 verts** au total sur la suite `video_ingest_*`. Zéro appel réseau (mocks complets via `unittest.mock`).
 - **Bug intéressant rencontré** : algo chunking créait des chunks fantômes par chevauchement quand toute la transcription tenait dans 1 chunk. Fix = sortir explicitement quand `j >= n`.
 - **Reste** : slice 3 = worker Postgres-native (claim `SELECT FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` + lease/heartbeat + watchdog reprise orphelins). Slice 4 = API REST + ingestion pipeline. Slice 5 = MCP. Slice 6 = intégration Mes Réunions. Slice ASR (force_audio + Whisper) plus tard.
+- **Blocages** : aucun.
+
+### 2026-05-25 — Slice 3 : worker Postgres-native + orchestrateur
+- **Fait** :
+  - `app/db.py` — pool psycopg2 propre au service (zéro `libs.shared`), connexion `autocommit` requise pour `LISTEN/NOTIFY`. Config via `VIDEO_INGEST_DATABASE_URL` + `VIDEO_INGEST_DB_MIN/MAX_CONN`.
+  - `app/jobs.py` — file de jobs : `enqueue` (+ NOTIFY), `claim_next` (`FOR UPDATE SKIP LOCKED` + bump attempts + lease), `extend_lease`, `complete`, `fail` (avec troncature 2000 chars), `reset_orphans` (watchdog).
+  - `app/repo.py` — repositories raw SQL : `find_source_by_provider_id`, `upsert_source` (ON CONFLICT préserve les champs déjà connus), `insert_transcript` (ON CONFLICT remplace), `add_bookmark`, `has_transcript`.
+  - `app/orchestrator.py` — pipeline complet : routing provider → lookup dédup → HIT/MISS → fetch metadata → fetch sous-titres (sauf `force_audio`) → chunking → persistance → bookmark. `NeedsAudioFallback` levée quand sous-titres absents (sera interceptée en slice ASR pour requeue). `run_and_record` mappe les exceptions sur les états de la file.
+  - `app/worker.py` — boucle principale + 2 threads daemons (heartbeat 30s, watchdog 60s). `LISTEN/NOTIFY` via `select()` sur le socket Postgres avec fallback poll 5s. Identité worker = `hostname:pid` pour le debug.
+  - Tests : 22 nouveaux cas (13 orchestrateur + 9 jobs), **92/92 verts** au total. Mocks complets : zéro Postgres, zéro réseau.
+- **Bug évité** : la fonction `complete` reset `lease_until` à NULL et `error_message` à NULL — sinon un job retraité après `fail` garderait des résidus.
+- **À surveiller** : `claim_next` reprend aussi les `running` au lease dépassé (et pas seulement `pending`), ce qui est volontaire mais signifie qu'un job lent pourrait être pris en parallèle si le heartbeat tombe. Le `attempts +1` permet de détecter ces retries.
+- **Reste** : slice 4 = API REST (`POST /video/import` qui enqueue + endpoints lecture) ; slice 5 = MCP ; slice 6 = client Mes Réunions ; slice ASR (force_audio + Whisper) ; slice infra (Dockerfile + manifestes K8s + overlay prod-bêta avec NetworkPolicy mode A).
 - **Blocages** : aucun.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
