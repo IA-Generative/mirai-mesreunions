@@ -441,8 +441,18 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
                 if key == "last_error_message" and isinstance(val, str):
                     val = val[:4000]
                 setattr(rec, key, val)
-        if "last_error_kind" in fields or "last_error_message" in fields:
+        # Auto-set last_error_at SEULEMENT si on positionne réellement une
+        # erreur (kind ou message TRUTHY). Sinon, un reset explicite
+        # (kind=None pour effacer un échec antérieur après succès) tamponnerait
+        # à tort un horodatage d'erreur fraîche alors qu'il n'y a plus d'erreur.
+        _new_kind = fields.get("last_error_kind")
+        _new_msg = fields.get("last_error_message")
+        if _new_kind or _new_msg:
             rec.last_error_at = datetime.now(timezone.utc)
+        elif ("last_error_kind" in fields and _new_kind is None) and \
+             ("last_error_message" in fields and _new_msg is None):
+            # Reset volontaire : on efface aussi last_error_at pour cohérence.
+            rec.last_error_at = None
         now_ts = datetime.now(timezone.utc)
         # Heartbeat watchdog : chaque changement de statut/colonne signale
         # une activité du pipeline. Le watchdog scan ``last_activity_at``
@@ -641,6 +651,98 @@ def _orphan_watchdog_loop() -> None:
                              _ORPHAN_WATCHDOG_INTERVAL_S)
 
 
+# Budget + retry par étape LLM. Configurable via env pour réagir vite si
+# Mirai/LiteLLM est lent (augmenter) ou flaky (augmenter aussi).
+# Total worst case par étape = MAX_ATTEMPTS × BUDGET_SECONDS, mais s'arrête
+# au premier success. Avec MAX_ATTEMPTS=3 + BUDGET=90s + backoff 1+2+4s =
+# ~280s pire cas par étape, soit ~30 min pour la chaîne complète de 5 étapes
+# si TOUTES timeoutent (jamais observé en prod).
+_LLM_STEP_MAX_ATTEMPTS = int(os.environ.get("LLM_STEP_MAX_ATTEMPTS", "3"))
+_LLM_STEP_BUDGET_SECONDS = float(os.environ.get("LLM_STEP_BUDGET_SECONDS", "90"))
+
+
+def _llm_step_with_retry(step_name, callable_fn):
+    """Retry budget-bound autour d'un call LLM. Retourne (result, status_str).
+
+    ``status_str`` est l'une des valeurs :
+    - ``ok`` : succès, ``result`` est utilisable
+    - ``empty`` : succès mais réponse vide/None (modèle a renvoyé rien)
+    - ``budget_exceeded_after_N`` : timeout total dépassé après N tentatives
+    - ``failed_after_N_attempts:<ExceptionName>`` : épuisé sans succès
+
+    Backoff exponentiel borné 1s, 2s, 4s, 8s entre tentatives. Le call est
+    laissé tel quel — c'est l'appelant (mi.clean_oob, etc.) qui gère ses
+    propres timeouts HTTP. Le budget côté wrapper est un fusible global.
+    """
+    start = time.monotonic()
+    last_exc_name = None
+    for attempt in range(1, _LLM_STEP_MAX_ATTEMPTS + 1):
+        elapsed = time.monotonic() - start
+        if elapsed >= _LLM_STEP_BUDGET_SECONDS:
+            logger.warning(
+                "LLM step %s budget exceeded after %d attempts (%.0fs)",
+                step_name, attempt - 1, elapsed,
+            )
+            return None, f"budget_exceeded_after_{attempt-1}_attempts"
+        try:
+            result = callable_fn()
+            if result is None or (isinstance(result, str) and not result.strip()):
+                logger.info("LLM step %s returned empty (attempt %d)",
+                             step_name, attempt)
+                return None, "empty"
+            if attempt > 1:
+                logger.info("LLM step %s succeeded on attempt %d after retries",
+                             step_name, attempt)
+            return result, "ok"
+        except Exception as exc:
+            last_exc_name = type(exc).__name__
+            logger.warning(
+                "LLM step %s attempt %d/%d failed: %s",
+                step_name, attempt, _LLM_STEP_MAX_ATTEMPTS, exc,
+            )
+            if attempt < _LLM_STEP_MAX_ATTEMPTS:
+                backoff = min(2 ** (attempt - 1), 8)
+                time.sleep(backoff)
+    return None, f"failed_after_{_LLM_STEP_MAX_ATTEMPTS}_attempts:{last_exc_name}"
+
+
+# Libellés humains des étapes LLM, utilisés pour construire le
+# last_error_message structuré quand des étapes échouent. Synchronisé avec
+# le STEP_INFO côté frontend (legacy.js).
+_LLM_STEP_LABELS = {
+    "glossary_correction": "correction des sigles",
+    "suggest_metadata": "titre et points clés",
+    "cleaning": "nettoyage des hésitations",
+    "reformulation": "reformulation narrative",
+    "meeting_analysis": "compte-rendu structuré",
+    "absentee_summary": "résumé pour les absents",
+}
+
+
+def _build_chain_error_message(step_results: dict) -> str:
+    """Construit un message lisible pour last_error_message à partir
+    des statuts par étape. Liste explicitement les étapes échouées et
+    leur cause courte."""
+    failed = [(k, v) for k, v in step_results.items() if v != "ok"]
+    if not failed:
+        return ""
+    parts = []
+    for step_name, status in failed:
+        label = _LLM_STEP_LABELS.get(step_name, step_name)
+        if status == "empty":
+            reason = "le moteur n'a rien renvoyé"
+        elif status.startswith("budget_exceeded"):
+            reason = "délai dépassé (3 tentatives infructueuses)"
+        elif status.startswith("failed_after_"):
+            # ex : "failed_after_3_attempts:APIConnectionError"
+            exc = status.split(":", 1)[-1] if ":" in status else "erreur réseau"
+            reason = f"3 tentatives échouées ({exc})"
+        else:
+            reason = status
+        parts.append(f"{label} ({reason})")
+    return "Étapes incomplètes : " + " · ".join(parts) + ". Cliquez Re-générer pour relancer la chaîne."
+
+
 def _run_llm_chain_for_audio(
     base_for_llm: str,
     speaker_tagged: Optional[str],
@@ -680,65 +782,122 @@ def _run_llm_chain_for_audio(
         # Pas de LiteLLM configuré → on sort sans tenter aucune étape.
         return updates, status_delta
 
+    # Chaque étape passe par _llm_step_with_retry (3 tentatives, backoff
+    # 1s/2s/4s, budget total 90s par défaut, configurable via env). Les
+    # étapes échouées N'INTERROMPENT PAS la chaîne — celles d'après sont
+    # tentées avec base_for_llm en fallback. Cf bug "Déploiement et
+    # gouvernance" mai 2026 où cleaning crashait sans retry et coupait
+    # reformulation + meeting_analysis qui auraient marché.
+    step_results: dict = {}  # {step_name: 'ok' | 'empty' | 'failed_...'}
+
     # 3b-bis. Glossary correction.
     if KEVENT_GLOSSARY_CORRECTION_ENABLED and glossary:
-        corrected = mi.apply_glossary_correction(
-            base_for_llm, llm, LLM_MODEL_MEDIUM,
-            glossary_terms=glossary,
-            max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+        corrected, st = _llm_step_with_retry(
+            "glossary_correction",
+            lambda: mi.apply_glossary_correction(
+                base_for_llm, llm, LLM_MODEL_MEDIUM,
+                glossary_terms=glossary,
+                max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+            ),
         )
+        step_results["glossary_correction"] = st
         if corrected:
             updates["glossary_corrected_text"] = corrected
             base_for_llm = corrected
+        if st != "ok":
+            status_delta = "kevent_partially_completed"
 
     # 3b-ter. Suggested filename + key points (1er run uniquement).
     if include_metadata and KEVENT_FILENAME_SUGGESTION_ENABLED:
-        meta = mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL)
+        meta, st = _llm_step_with_retry(
+            "suggest_metadata",
+            lambda: mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL),
+        )
+        step_results["suggest_metadata"] = st
         if meta:
             if meta.get("title"):
                 updates["suggested_filename"] = meta["title"]
             kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
             if kp_serialized:
                 updates["key_points_summary"] = kp_serialized
+        if st != "ok":
+            status_delta = "kevent_partially_completed"
 
     # 3c. OOB cleaning.
     if KEVENT_OOB_CLEANING_ENABLED:
-        cleaned = mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM)
+        cleaned, st = _llm_step_with_retry(
+            "cleaning",
+            lambda: mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["cleaning"] = st
         if cleaned:
             updates["cleaned_text"] = cleaned
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
-    # 3d. Reformulation.
+    # 3d. Reformulation. Source = cleaned_text si dispo, sinon
+    # base_for_llm (fallback : même si cleaning a échoué on essaie).
     if KEVENT_REFORMULATION_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        reformulated = mi.reformulate(source, llm, LLM_MODEL_MEDIUM)
+        reformulated, st = _llm_step_with_retry(
+            "reformulation",
+            lambda: mi.reformulate(source, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["reformulation"] = st
         if reformulated:
             updates["reformulated_text"] = reformulated
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
-    # 3e. Meeting analysis.
+    # 3e. Meeting analysis. Fallback aussi sur base_for_llm.
     if KEVENT_MEETING_ANALYSIS_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        analysis = mi.analyse_meeting(
-            source, llm, LLM_MODEL_LARGE,
-            speaker_tagged_text=speaker_tagged,
+        analysis, st = _llm_step_with_retry(
+            "meeting_analysis",
+            lambda: mi.analyse_meeting(
+                source, llm, LLM_MODEL_LARGE,
+                speaker_tagged_text=speaker_tagged,
+            ),
         )
-        serialized = mi.serialize_analysis(analysis)
-        if serialized is not None:
-            updates["meeting_analysis_json"] = serialized
-        else:
+        step_results["meeting_analysis"] = st
+        if analysis is not None:
+            serialized = mi.serialize_analysis(analysis)
+            if serialized is not None:
+                updates["meeting_analysis_json"] = serialized
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
     # 3f. Absentee summary.
     if KEVENT_ABSENTEE_SUMMARY_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        summary = mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM)
+        summary, st = _llm_step_with_retry(
+            "absentee_summary",
+            lambda: mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["absentee_summary"] = st
         if summary:
             updates["absentee_summary"] = summary
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
+
+    # Si au moins une étape a échoué, construire un message structuré
+    # qui apparaîtra dans last_error_message côté UI (visible dans la
+    # tooltip status + (i) détaillé). Permet à l'utilisateur de voir
+    # exactement quelles étapes ont échoué et pourquoi en clair.
+    if status_delta == "kevent_partially_completed":
+        msg = _build_chain_error_message(step_results)
+        if msg:
+            updates["last_error_kind"] = "llm_chain_partial"
+            updates["last_error_message"] = msg
+        logger.info(
+            "LLM chain partial — step_results=%s",
+            ", ".join(f"{k}={v}" for k, v in step_results.items()),
+        )
+    else:
+        # Tous OK → on efface explicitement un éventuel last_error_*
+        # résiduel d'un run précédent qui aurait été partiellement échoué.
+        updates["last_error_kind"] = None
+        updates["last_error_message"] = None
 
     return updates, status_delta
 

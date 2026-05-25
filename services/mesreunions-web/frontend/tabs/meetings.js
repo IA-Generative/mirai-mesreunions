@@ -397,6 +397,7 @@ function _humanizeErrorKind(kind) {
     worker_crash:     "Le pipeline a planté pendant le traitement. Cliquez Relancer.",
     s3_object_purged: "L'audio a été supprimé du stockage (rétention dépassée). Non-relançable, supprimez la ligne.",
     s3_no_audio_path: "Pas de fichier audio associé à cette ligne. Non-relançable, supprimez la ligne.",
+    llm_chain_partial: "Une ou plusieurs étapes de compte-rendu n'ont pas pu se terminer (voir détail ci-dessous). Cliquez Re-générer pour relancer la chaîne — les étapes manquantes seront retentées.",
   };
   return M[kind] || `Erreur : ${kind}. Cliquez Relancer ou contactez un administrateur.`;
 }
