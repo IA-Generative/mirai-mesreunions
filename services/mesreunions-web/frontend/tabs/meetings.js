@@ -206,10 +206,10 @@ function renderHeader(fileCount, hasSelection) {
                 title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
           📥 Depuis MCR
         </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
-                data-action="meetings-new:toggle-sort"
-                title="Inverser l'ordre de tri (date de réunion)">
-          <span data-sort-label>Plus récent d'abord</span>
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+                data-action="meetings-new:import-from-youtube"
+                title="Importer depuis une URL YouTube (fonctionnalité à venir)">
+          📺 Import YouTube
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:resume-stuck"
@@ -742,11 +742,6 @@ function _onClick(ev) {
       _runBulkDownload(kind);
       break;
     }
-    case 'toggle-sort': {
-      const fn = _resolveLegacyFn('toggleSortDir');
-      if (fn) fn();
-      break;
-    }
     case 'resume-stuck': {
       _resumeStuckJobs(ev);
       break;
@@ -763,6 +758,17 @@ function _onClick(ev) {
     }
     case 'import-from-mcr': {
       _openMcrImportModal();
+      break;
+    }
+    case 'import-from-youtube': {
+      // Placeholder — feature à venir. Pour l'instant on signale juste à
+      // l'utilisateur que ce n'est pas encore actif. La vraie logique
+      // sera ajoutée dans un prochain chantier (URL YouTube → audio → pipeline).
+      if (window.showToast) {
+        window.showToast("Import YouTube : fonctionnalité à venir.", 'info');
+      } else {
+        alert("Import YouTube : fonctionnalité à venir.");
+      }
       break;
     }
     default:
@@ -1226,61 +1232,95 @@ function _countTrackedStatuses(ids) {
 
 function _showResumeStuckBanner(count, titles, ids) {
   _resumeStuckBannerCount = count | 0;
-  _resumeStuckBannerTitles = Array.isArray(titles) ? titles.slice(0, 5) : [];
+  _resumeStuckBannerTitles = Array.isArray(titles) ? titles.slice(0, 2) : [];
   _resumeStuckBannerIds = Array.isArray(ids) ? ids.slice() : [];
   if (_resumeStuckBannerTimer) {
     clearInterval(_resumeStuckBannerTimer);
     _resumeStuckBannerTimer = null;
   }
-  const render = (secs) => {
-    const host = document.querySelector('.meetings-tab-header')
-      || document.getElementById('sessions-list')
-      || document.body;
-    if (!host) return;
-    let bn = document.getElementById('mcr-resume-stuck-banner');
-    if (!bn) {
-      bn = document.createElement('div');
-      bn.id = 'mcr-resume-stuck-banner';
-      bn.style.cssText = (
-        'background:#dcfce7;border-left:4px solid #16a34a;color:#14532d;' +
-        'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
-        'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
-      );
-      host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+  const host = document.querySelector('.meetings-tab-header')
+    || document.getElementById('sessions-list')
+    || document.body;
+  if (!host) return;
+
+  // Build de la structure UNE SEULE FOIS. Les updates suivantes ne
+  // touchent que les nodes data-* spécifiques (chips + headline), pas
+  // tout l'innerHTML — sinon le re-render complet toutes les Xs faisait
+  // clignoter le bandeau (perçu comme bug par l'utilisateur).
+  let bn = document.getElementById('mcr-resume-stuck-banner');
+  if (!bn) {
+    bn = document.createElement('div');
+    bn.id = 'mcr-resume-stuck-banner';
+    bn.style.cssText = (
+      'background:#dcfce7;border-left:4px solid #16a34a;color:#14532d;' +
+      'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
+      'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
+    );
+    bn.innerHTML =
+      `<span style="font-size:1.1em;">🔄</span>` +
+      `<span data-resume-headline></span>` +
+      `<span data-resume-chips style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;"></span>` +
+      `<button type="button" data-resume-dismiss ` +
+      `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
+    host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+    const dismiss = bn.querySelector('[data-resume-dismiss]');
+    if (dismiss) dismiss.onclick = () => _clearResumeStuckBanner();
+  }
+  const headlineEl = bn.querySelector('[data-resume-headline]');
+  const chipsEl = bn.querySelector('[data-resume-chips]');
+
+  // Headline simple : titre principal (1er titre) + suffixe "et N autres"
+  // si plus d'une réunion. Pas d'IDs hexadécimaux qui parlent à personne.
+  const _formatTitleHeader = () => {
+    const n = _resumeStuckBannerCount;
+    const t0 = (_resumeStuckBannerTitles[0] || '').trim();
+    if (n <= 1) {
+      return t0 ? `« ${t0} »` : `1 réunion`;
     }
-    // Breakdown live des statuts (lit le cache à chaque tick).
+    if (t0) {
+      return `« ${t0} » et ${n - 1} autre${n - 1 > 1 ? 's' : ''}`;
+    }
+    return `${n} réunions`;
+  };
+
+  // Cache pour ne re-write le DOM que si le contenu a vraiment changé
+  // → zéro repaint quand l'état est stable.
+  let _lastHeadline = '';
+  let _lastChips = '';
+
+  const updateChips = () => {
     const k = _countTrackedStatuses(_resumeStuckBannerIds);
     const chips = [];
     if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
     if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
-    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en file</span>`);
-    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} en échec</span>`);
-    if (k.unknown > 0) chips.push(`<span style="background:#e5e7eb;border-radius:9999px;padding:1px 8px;">… ${k.unknown}</span>`);
-    const sample = _resumeStuckBannerTitles.join(', ');
-    const more = _resumeStuckBannerCount > _resumeStuckBannerTitles.length
-      ? ` (+${_resumeStuckBannerCount - _resumeStuckBannerTitles.length})` : '';
-    // Phrase principale : claire, courte, avec ETA réaliste.
-    const allDone = (k.completed + k.failed) === _resumeStuckBannerIds.length && _resumeStuckBannerIds.length > 0;
+    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en attente</span>`);
+    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} à revoir</span>`);
+
+    const totalKnown = k.completed + k.processing + k.queued + k.failed;
+    const allDone = totalKnown > 0 && (k.completed + k.failed) === _resumeStuckBannerIds.length;
+
     const headline = allDone
-      ? `<strong>Reprise terminée</strong> pour les ${_resumeStuckBannerCount} réunion(s).`
-      : `<strong>${_resumeStuckBannerCount} transcription(s) reprise(s)</strong> — la liste ci-dessous se met à jour toute seule, vous pouvez attendre. (${secs}s écoulées)`;
-    bn.innerHTML =
-      `<span style="font-size:1.1em;">🔄</span>` +
-      `<span>${headline}</span>` +
-      (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
-      `<span style="opacity:0.75;font-size:0.8em;">Concernées : ${sample}${more}</span>` +
-      `<button type="button" id="resume-stuck-banner-dismiss" ` +
-      `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
-    const dismiss = document.getElementById('resume-stuck-banner-dismiss');
-    if (dismiss) dismiss.onclick = () => _clearResumeStuckBanner();
+      ? `<strong>Terminé.</strong> ${_formatTitleHeader()}`
+      : `<strong>Reprise en cours</strong> · ${_formatTitleHeader()}`;
+    const chipsHtml = chips.join('');
+
+    if (headline !== _lastHeadline) {
+      headlineEl.innerHTML = headline;
+      _lastHeadline = headline;
+    }
+    if (chipsHtml !== _lastChips) {
+      chipsEl.innerHTML = chipsHtml;
+      _lastChips = chipsHtml;
+    }
   };
-  let secs = 0;
-  render(secs);
+
+  updateChips();
+  let elapsedMs = 0;
   _resumeStuckBannerTimer = setInterval(() => {
-    secs += 2;
-    render(secs);
-    if (secs >= 300) _clearResumeStuckBanner();  // étendu à 5 min — les CR mettent du temps
-  }, 2000);
+    elapsedMs += 5000;
+    updateChips();
+    if (elapsedMs >= 300000) _clearResumeStuckBanner();  // auto-disparait après 5 min
+  }, 5000);  // cadence relâchée à 5s — pas besoin de plus, et virte le clignotement
 }
 
 function _clearResumeStuckBanner() {

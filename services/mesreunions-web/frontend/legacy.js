@@ -22,13 +22,15 @@ let showAllDevices = false;
 // Ordre de tri courant pour la liste à plat des réunions. Persisté côté
 // localStorage pour survivre au reload. "desc" = plus récent d'abord (par
 // défaut, le plus naturel après ajout d'un upload).
+//
+// Note : le bouton toggle dans la barre d'actions "Mes réunions" a été
+// retiré (cf meetings.js, mai 2026). Mais le tableau index.html garde
+// des en-têtes triables (onclick setSortColumn) qui dépendent de l'état
+// ci-dessous → les setters restent en place.
 let _sortDir = (() => {
     try { return localStorage.getItem('mydevices.sort.dir') === 'asc' ? 'asc' : 'desc'; }
     catch (e) { return 'desc'; }
 })();
-// Colonne de tri (chantier UX-Refonte-3). 'date' = date de réunion (override
-// utilisateur sinon created_at) — défaut historique. 'title' = original_filename
-// alphabétique. 'duration' = audio_duration_seconds (null → tri en fin).
 let _sortKey = (() => {
     try {
         const k = localStorage.getItem('mydevices.sort.key');
@@ -40,13 +42,9 @@ function toggleSortDir() {
     _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
     try { localStorage.setItem('mydevices.sort.dir', _sortDir); } catch (e) {}
     _refreshSortToggleUi();
-    // Re-render à partir du snapshot existant sans rappeler l'API.
     loadSessions({ force: true });
 }
 
-// Setter sort-key + sort-dir combinés appelé par les <th> de l'en-tête
-// fr-table. Cliquer la même colonne toggle la direction ; cliquer une
-// autre colonne réinitialise à 'desc' (cas le plus utile au switch).
 window.setSortColumn = function setSortColumn(key) {
     if (key !== 'title' && key !== 'date' && key !== 'duration') return;
     if (_sortKey === key) {
@@ -68,8 +66,6 @@ function _refreshSortToggleUi() {
     if (btn) {
         const label = btn.querySelector('.sort-toggle-label');
         const arrow = btn.querySelector('.sort-toggle-arrow');
-        // Le toggle global agit sur la colonne courante (date par défaut).
-        // Libellé spécialisé selon la clé courante pour rester explicite.
         const isDesc = (_sortDir === 'desc');
         if (label) {
             if (_sortKey === 'title') {
@@ -82,7 +78,6 @@ function _refreshSortToggleUi() {
         }
         if (arrow) arrow.textContent = isDesc ? '▼' : '▲';
     }
-    // Reflète l'état actif sur l'en-tête fr-table (flèche colonne).
     const headers = document.querySelectorAll('[data-sort-col]');
     headers.forEach((th) => {
         const col = th.getAttribute('data-sort-col');
