@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — slice 1 livrée : migration 019 + squelette `services/video_ingest/` + parseur URL YouTube (37 tests verts) |
+| **Dernière mise à jour** | 2026-05-25 — Q7 résolue (D15) : egress A en prod-bêta, mode B prêt via le proxy rotatif d'`owuicore-main` |
 
 ---
 
@@ -196,6 +196,7 @@ V2 : `DailymotionProvider`.
 | D12 | 2026-05-25 | Provider Dailymotion reporté à V2 | Focaliser V1 sur YouTube, abstraction prête dès V1 |
 | D13 | 2026-05-25 | Orchestrateur async = **Postgres natif** (`SELECT … FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`), **pas de nouvelle dépendance** | Charge V1 modeste (imports manuels), transactionnalité `INSERT VideoSource + enqueue` élimine la classe « purgatoires » (ADR-0001), composant autonome → ne pas le coupler au RabbitMQ MirAI existant. **Veille** : réévaluer si le volume passe à un flux soutenu, ou si l'écosystème (procrastinate, pgmq, river-py…) mûrit suffisamment pour justifier une lib externe |
 | D14 | 2026-05-25 | **Mission = service mutualisé MirAI**, hébergé temporairement dans le repo « Mes Réunions » (en cours de rename `mirai-mesreunions` → `mirai-mesreunions`) et destiné à être **extrait dans son propre repo** dès maturité V1 | Le repo hôte devient explicitement « un client parmi d'autres » ; héberger durablement `video-ingest` dedans créerait une dette de couplage. Conséquences V1 : (a) zéro import Python croisé avec le code Mes Réunions, (b) tables préfixées `video_*` dans un schéma dédié, aucune FK vers les tables MirAI, (c) identité = `user_sub` opaque, pas de jointure, (d) interface = REST + MCP uniquement, (e) déployable indépendamment (Dockerfile + manifeste K8s autoporteurs). Critère de sortie : `git filter-repo --path services/video-ingest/` doit produire un repo viable |
+| D15 | 2026-05-25 | **Q7 — Egress vers youtube.com : A par défaut, B prête côté code** | **Mode A (prod-bêta interne)** : egress direct du pod via `CiliumNetworkPolicy` FQDN-aware autorisant `*.youtube.com`, `*.googlevideo.com`, `*.ytimg.com`. Pattern déjà éprouvé en CDS N1. **Mode B (cible ministérielle)** : aucun egress direct, tout passe par le **proxy rotatif existant `rotating-proxy.miraiku.svc:3128`** (cluster `brave-bassi`, ns `miraiku`) déjà déployé par `owuicore-main/infra/proxy/` — HAProxy + 4 Squid Scaleway = 20 IPs rotatives, Basic Auth `owui:<API_KEY>`. **Bascule A→B = config-only** : poser `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` dans l'overlay K8s + durcir la NetworkPolicy. Côté code, **rien à implémenter** : yt-dlp et `youtube-transcript-api` honorent ces variables nativement. Exigence permanente sur les futurs PRs : **aucun appel HTTP custom** (toujours passer par les libs qui respectent les env proxy) |
 
 ---
 
@@ -209,7 +210,7 @@ V2 : `DailymotionProvider`.
 | Q4 | Quotas par utilisateur sur les imports (anti-abus) ? | V1 ou V1.5 | _Ouvert_ |
 | Q5 | Logging d'audit : qui a importé quoi quand (pour traçabilité interne) ? | V1 | _Ouvert_ |
 | Q6 | Mention légale dans la modale d'import (responsabilité droits) ? | V1 | _Ouvert — recommandé_ |
-| Q7 | Sortie internet vers youtube.com : passerelle/proxy à configurer en environnement souverain ? | V1 | _À documenter dans README_ |
+| Q7 | Sortie internet vers youtube.com : passerelle/proxy à configurer en environnement souverain ? | V1 | **Résolu 2026-05-25 (D15)** : A par défaut (egress direct + Cilium FQDN allowlist en prod-bêta), B prête (proxy rotatif `rotating-proxy.miraiku.svc:3128` d'`owuicore-main`, bascule config-only via env vars) |
 | Q8 | Visibilité finale du corpus mutualisé (instance / direction / utilisateur) | V2 | Différée explicitement |
 
 ---
@@ -259,6 +260,11 @@ V2 : `DailymotionProvider`.
   - README `services/video_ingest/README.md` matérialise le pacte d'isolation D14 (règles pour chaque future PR).
 - **Reste** : `YouTubeProvider.fetch_metadata` + `.fetch_subtitles` (avec yt-dlp + youtube-transcript-api), worker Postgres-native, endpoints REST, outils MCP, intégration Mes Réunions.
 - **Blocages** : aucun. Q7 (sortie internet vers youtube.com en environnement souverain) à arbitrer avant le premier appel réseau réel.
+
+### 2026-05-25 — Q7 tranchée (D15) : egress A + B prête
+- **Fait** : décision actée (cf. D15). Mode A (egress direct + Cilium FQDN allowlist) en prod-bêta. Mode B (proxy rotatif) **réutilise l'infra existante** d'`owuicore-main/infra/proxy/` — `rotating-proxy.miraiku.svc:3128`, HAProxy + 4 Squid Scaleway, 20 IPs rotatives, Basic Auth — pas de nouvelle infra à déployer. Bascule A→B = config-only (3 env vars + durcissement NetworkPolicy).
+- **Implications code (à respecter dès slice 2)** : aucun appel HTTP custom ; tout passe par yt-dlp et youtube-transcript-api qui honorent `HTTP_PROXY`/`HTTPS_PROXY` nativement. Si un futur besoin oblige à coder un appel HTTP, utiliser `requests` avec `trust_env=True` (défaut) — jamais d'URL en dur sans respect des env proxy.
+- **Reste** : slice 2 = providers réels (yt-dlp metadata + youtube-transcript-api sous-titres).
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 

@@ -35,6 +35,68 @@ assumée par rapport au reste du repo (où les services sont en
 gymnastique `importlib`, et pour préfigurer le futur package
 `video_ingest` dans son propre repo.
 
+## Egress internet (Q7 / D15)
+
+Deux modes, **bascule config-only**, aucun code à modifier entre les deux.
+
+### Mode A — egress direct (par défaut, prod-bêta interne)
+
+Le pod parle directement à YouTube. Une `CiliumNetworkPolicy` FQDN-aware
+autorise uniquement les hôtes nécessaires :
+
+```yaml
+egress:
+  - toFQDNs:
+      - matchPattern: "*.youtube.com"
+      - matchPattern: "*.googlevideo.com"   # CDN audio/vidéo
+      - matchPattern: "*.ytimg.com"         # thumbnails
+    toPorts:
+      - ports: [{ port: "443", protocol: TCP }]
+```
+
+Pas de variable d'environnement particulière à poser : si `HTTP_PROXY`
+et `HTTPS_PROXY` sont absentes, yt-dlp et `youtube-transcript-api`
+appellent en direct.
+
+### Mode B — via proxy rotatif (environnement souverain)
+
+Tout l'egress passe par le **proxy rotatif existant déployé par
+`owuicore-main/infra/proxy/`** (HAProxy + 4 VMs Squid sur Scaleway,
+20 IPs rotatives, Basic Auth). Aucun nouveau composant à monter — on
+réutilise ce qui sert déjà à SearXNG et websnap.
+
+Service K8s côté `owuicore-main` : `rotating-proxy.miraiku.svc:3128`
+(cluster `brave-bassi`). Depuis un autre cluster, utiliser l'IP publique
+HAProxy avec Basic Auth (cf. README du proxy là-bas).
+
+Recette de bascule :
+
+1. Récupérer la clé API auprès du mainteneur d'`owuicore-main` (gérée hors-Git).
+2. Poser le secret K8s :
+   ```bash
+   kubectl create secret generic video-ingest-proxy \
+     --from-literal=url='http://owui:<API_KEY>@rotating-proxy.miraiku.svc:3128'
+   ```
+3. Patcher le Deployment `video-ingest` (via overlay kustomize) :
+   ```yaml
+   env:
+     - name: HTTP_PROXY
+       valueFrom: { secretKeyRef: { name: video-ingest-proxy, key: url } }
+     - name: HTTPS_PROXY
+       valueFrom: { secretKeyRef: { name: video-ingest-proxy, key: url } }
+     - name: NO_PROXY
+       value: "localhost,127.0.0.1,.svc,.cluster.local"
+   ```
+4. Durcir la `CiliumNetworkPolicy` : retirer la section `toFQDNs` YouTube,
+   ne laisser que l'egress vers `rotating-proxy` (port 3128).
+
+**Règle de codage permanente** : aucun appel HTTP custom dans le code de
+`video-ingest`. Toujours passer par `yt-dlp`, `youtube-transcript-api`,
+ou `requests` (avec `trust_env=True`, qui est le défaut) — toutes ces
+libs respectent `HTTP_PROXY`/`HTTPS_PROXY` automatiquement. Tout PR qui
+introduit `httpx.Client(proxy=None)` ou `urllib.request` sans respect de
+l'env doit être refusé.
+
 ## État courant
 
 | Brique | Statut |
