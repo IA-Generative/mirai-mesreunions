@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — création de la branche `feature/youtube-import` depuis `main` |
+| **Dernière mise à jour** | 2026-05-25 — Q1 résolu (orchestrateur = Postgres natif, cf. D13) |
 
 ---
 
@@ -194,6 +194,7 @@ V2 : `DailymotionProvider`.
 | D10 | 2026-05-25 | Visibilité données : décision différée jusqu'à V2 | Tout est conservé sans filtrage en V1 ; arbitrage au moment de l'intro RAG |
 | D11 | 2026-05-25 | Vidéo figée par défaut, `refetch` réservé admin | YouTube ne mute pas le contenu ; éviter refresh sauvage |
 | D12 | 2026-05-25 | Provider Dailymotion reporté à V2 | Focaliser V1 sur YouTube, abstraction prête dès V1 |
+| D13 | 2026-05-25 | Orchestrateur async = **Postgres natif** (`SELECT … FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`), **pas de nouvelle dépendance** | Charge V1 modeste (imports manuels), transactionnalité `INSERT VideoSource + enqueue` élimine la classe « purgatoires » (ADR-0001), composant autonome → ne pas le coupler au RabbitMQ MirAI existant. **Veille** : réévaluer si le volume passe à un flux soutenu, ou si l'écosystème (procrastinate, pgmq, river-py…) mûrit suffisamment pour justifier une lib externe |
 
 ---
 
@@ -201,7 +202,7 @@ V2 : `DailymotionProvider`.
 
 | # | Question | Échéance souhaitée | Réponse |
 |---|---|---|---|
-| Q1 | Quel orchestrateur de jobs async utiliser (Celery / Temporal / autre déjà en place dans le repo MirAI) ? | Avant début V1 | _À investiguer dans le repo, ne pas inventer_ |
+| Q1 | Quel orchestrateur de jobs async utiliser (Celery / Temporal / autre déjà en place dans le repo MirAI) ? | Avant début V1 | **Résolu 2026-05-25 (D13)** : Postgres natif, pas de nouvelle dépendance. À réévaluer si volume ou maturité des libs (procrastinate, pgmq) le justifient |
 | Q2 | Iframe YouTube standard ou composant maison pour lecteur horodaté ? | V1.5 | _Ouvert_ |
 | Q3 | Quel modèle pour post-traitement LLM (Mistral Small via API MirAI ?) ? | V1.5 | _Ouvert_ |
 | Q4 | Quotas par utilisateur sur les imports (anti-abus) ? | V1 ou V1.5 | _Ouvert_ |
@@ -237,6 +238,11 @@ V2 : `DailymotionProvider`.
 - **Fait** : Branche dédiée créée et spec versionnée dans `features-2-build/FEATURE_video-ingest.md` (le document devient ainsi suivi par Git).
 - **Reste** : Tout le développement V1 (cf. section 5). Première étape opérationnelle = résoudre Q1 (orchestrateur async) en explorant le repo avant d'écrire la moindre ligne de code.
 - **Blocages** : Q1 (orchestrateur async) — toujours à investiguer.
+
+### 2026-05-25 — Arbitrage Q1 : Postgres natif
+- **Fait** : Q1 tranché → orchestrateur Postgres natif (`SELECT … FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY`), zéro nouvelle dépendance (cf. D13). Composant `video-ingest` restera autonome du bus RabbitMQ MirAI.
+- **Reste** : démarrer le scaffolding (migration BDD jobs + `VideoSource`/`Transcript`/`UserVideoBookmark`, worker minimal, `YouTubeProvider`).
+- **Veille à tenir** : suivre l'évolution des libs Postgres-queue (procrastinate, pgmq, river-py) et basculer si le besoin (volume, fiabilité, ergonomie) le justifie.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
