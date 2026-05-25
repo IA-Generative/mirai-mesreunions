@@ -1283,6 +1283,9 @@ def _meeting_to_dict(m: Meeting, *, with_full: bool = False) -> dict:
         "summary": m.summary,
         "user_audio_file_id": str(m.user_audio_file_id) if m.user_audio_file_id else None,
         "preparation_id": str(m.preparation_id) if m.preparation_id else None,
+        # Pointeurs cross-service video-ingest (cf. migration 020 + D14).
+        "video_source_id": m.video_source_id,
+        "video_ingest_job_id": m.video_ingest_job_id,
         "drive_folder_id": m.drive_folder_id,
         "drive_sync_status": m.drive_sync_status,
         "drive_synced_at": m.drive_synced_at.isoformat() if m.drive_synced_at else None,
@@ -2078,6 +2081,29 @@ def create_meeting():
             if not p:
                 return jsonify({"error": "preparation_not_found"}), 404
 
+        # Pointeurs video-ingest (D14, optionnels) — utilisés à l'import
+        # YouTube : permet à GET /api/v1/meetings/youtube-imports de filtrer.
+        # Idempotence : si un meeting existe déjà pour ce video_ingest_job_id,
+        # on le renvoie au lieu d'en créer un doublon (le polling côté front
+        # peut retombe ici plusieurs fois sans casser).
+        vsid = data.get("video_source_id")
+        vjid = data.get("video_ingest_job_id")
+        if vjid is not None:
+            existing = (
+                db.query(Meeting)
+                .filter(Meeting.user_sub == user_sub,
+                        Meeting.video_ingest_job_id == int(vjid),
+                        Meeting.trashed_at.is_(None))
+                .first()
+            )
+            if existing:
+                logger.info("Meeting déjà existant pour job %s — réutilisé id=%s",
+                            vjid, existing.id)
+                return jsonify({
+                    "ok": True, "reused": True,
+                    "meeting": _meeting_to_dict(existing, with_full=True),
+                })
+
         m = Meeting(
             user_sub=user_sub,
             title=(data.get("title") or None),
@@ -2085,6 +2111,8 @@ def create_meeting():
             content=data.get("content"),
             user_audio_file_id=audio_id,
             preparation_id=prep_id,
+            video_source_id=int(vsid) if vsid is not None else None,
+            video_ingest_job_id=int(vjid) if vjid is not None else None,
             drive_folder_id=(data.get("drive_folder_id") or None),
         )
         db.add(m)
@@ -2126,6 +2154,11 @@ def list_meetings():
             q = q.filter(Meeting.trashed_at.isnot(None)).order_by(Meeting.trashed_at.desc())
         else:
             q = q.filter(Meeting.trashed_at.is_(None)).order_by(Meeting.created_at.desc())
+        # Filtre optionnel "source = video-ingest" : permet à mesreunions-web
+        # d'isoler les meetings YouTube/web sans tirer toute la liste.
+        only_video = (request.args.get("only_video") or "false").lower() in {"1", "true", "yes"}
+        if only_video:
+            q = q.filter(Meeting.video_source_id.isnot(None))
         rows = q.limit(limit).all()
         return jsonify({"meetings": [_meeting_to_dict(m) for m in rows]})
     finally:

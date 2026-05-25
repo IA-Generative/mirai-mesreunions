@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, String, Integer, DateTime, Boolean, Text, Float,
+    Column, String, Integer, BigInteger, DateTime, Boolean, Text, Float,
     Enum as SAEnum, ForeignKey, Index, JSON
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -536,6 +536,15 @@ class Meeting(InternalBase):
     user_audio_file_id = Column(_UUID_TYPE, nullable=True, index=True)
     # Lien optionnel vers la préparation amont (NULL si pas de prep).
     preparation_id = Column(_UUID_TYPE, nullable=True, index=True)
+
+    # Lien optionnel vers une source vidéo importée par le composant
+    # video-ingest (cf. migration 020 + features-2-build/FEATURE_video-ingest.md).
+    # Pointeurs OPAQUES (pas de FK cross-service, D14) — la résolution
+    # passe par /video/sources/<id> ou /video/jobs/<id>.
+    video_source_id = Column(BigInteger, nullable=True, index=True,
+                             comment="video_ingest.video_sources.id (no FK, cross-service)")
+    video_ingest_job_id = Column(BigInteger, nullable=True,
+                                  comment="video_ingest.video_ingest_jobs.id (no FK)")
 
     # Sync Drive best-effort.
     drive_folder_id = Column(Text, nullable=True)
