@@ -36,5 +36,17 @@ class YouTubeProvider:
     ) -> FetchedTranscript:
         return _subtitles.fetch(video_id, languages)
 
+    def fetch_audio(self, video_id: str, language: str = "fr") -> FetchedTranscript:
+        """Fallback ASR — non implémenté en V1, cf. INTEGRATION_NOTES.md §2.
+
+        Lève `NotImplementedError` explicite : l'orchestrateur intercepte
+        déjà ce cas via `NeedsAudioFallback` et le marque `failed` avec
+        message « needs_audio: … ».
+        """
+        raise NotImplementedError(
+            "fetch_audio (Whisper fallback) reste à implémenter — "
+            "cf. services/video_ingest/INTEGRATION_NOTES.md §2"
+        )
+
 
 __all__ = ["YouTubeProvider"]

@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — slice 3 livrée : worker Postgres-native + orchestrateur pipeline (92 tests verts) |
+| **Dernière mise à jour** | 2026-05-25 — slices 1-5 + infra livrées (113 tests verts) ; slices 6 (intégration Mes Réunions) et ASR documentées en attente d'exécution |
 
 ---
 
@@ -156,10 +156,10 @@ V2 : `DailymotionProvider`.
 - [x] Pipeline d'ingestion async — worker Postgres-native (D13) : claim `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` + poll fallback 5s, heartbeat 30s, watchdog 60s reprise orphelins
 - [ ] Fallback Whisper large-v3 sous flag `force_audio`
 - [ ] **Aucun stockage audio post-transcription** (test E2E à vérifier)
-- [ ] Index full-text `tsvector('french', content_text)`
-- [ ] Endpoints REST internes + 5 outils MCP V1
+- [x] Index full-text `tsvector('french', content_text)` _(colonne GENERATED ALWAYS AS … STORED + index GIN + endpoint /search avec ts_rank + ts_headline)_
+- [x] Endpoints REST internes + 5 outils MCP V1 _(7 endpoints REST + 5 tools MCP via FastMCP transport streamable-http)_
 - [ ] Intégration Mes Réunions : bouton, modale, statut `youtube_fetching`
-- [ ] Endpoint `video.purge` (admin)
+- [x] Endpoint `video.purge` (admin) _(DELETE /video/sources/<id> + tool MCP video_purge avec admin_token)_
 - [ ] Tests unit (parsing URL, dédup, sanitization) + intégration (mocks providers) + E2E manuel documenté
 
 ### V1.5 — Qualité
@@ -292,6 +292,15 @@ V2 : `DailymotionProvider`.
 - **À surveiller** : `claim_next` reprend aussi les `running` au lease dépassé (et pas seulement `pending`), ce qui est volontaire mais signifie qu'un job lent pourrait être pris en parallèle si le heartbeat tombe. Le `attempts +1` permet de détecter ces retries.
 - **Reste** : slice 4 = API REST (`POST /video/import` qui enqueue + endpoints lecture) ; slice 5 = MCP ; slice 6 = client Mes Réunions ; slice ASR (force_audio + Whisper) ; slice infra (Dockerfile + manifestes K8s + overlay prod-bêta avec NetworkPolicy mode A).
 - **Blocages** : aucun.
+
+### 2026-05-25 — Sessions autonome : slices 4 + 5 + infra livrées, slices 6 + ASR documentées
+- **Slice 4 (API REST)** : `app/api.py` (7 endpoints Flask) + `app/auth.py` (vérif JWT autonome via authlib + JWKS, cache 1h, rotation au KID inconnu, décorateurs require_auth/require_admin avec bypass DEV `VIDEO_INGEST_AUTH_DISABLED=1`). 21 nouveaux tests, **113/113 verts**.
+- **Slice 5 (MCP)** : `app/mcp_server.py` (FastMCP, transport `streamable-http`, port 8001). 5 tools : `video_import`, `video_get_metadata`, `video_get_transcript`, `video_search`, `video_purge` (avec admin_token via env). Appels directs aux fonctions Python (pas d'aller-retour HTTP loopback). Tests : import-time validé, E2E à faire en intégration.
+- **Slice infra** : `services/video_ingest/Dockerfile` autoporteur (pour extraction future, D14). `deploy/kubernetes/environments/prod-beta/internal/video-ingest.yaml` = Deployment API (gunicorn) + Deployment worker + Service ClusterIP + CiliumNetworkPolicy egress mode A (DNS + Postgres + FQDN YouTube + SSO JWKS). Ajouté à la kustomization, `kubectl kustomize` valide.
+- **Slice 6 (intégration Mes Réunions)** : non exécutée, documentée en détail dans [INTEGRATION_NOTES.md §1](../services/video_ingest/INTEGRATION_NOTES.md). Contrat API, blueprint Flask suggéré, migration BDD (`meetings.video_source_id` + `video_ingest_job_id`), HTML modale avec **mention légale (Q6 résolue)**, code de polling. À exécuter en main quand l'utilisateur sera disponible (touche du code existant, mieux vaut superviser).
+- **Slice ASR** : non exécutée, deux chemins documentés dans [INTEGRATION_NOTES.md §2](../services/video_ingest/INTEGRATION_NOTES.md). Recommandation = chemin A (réutiliser Kevent) plutôt que B (Whisper local). Stub `fetch_audio` ajouté dans `YouTubeProvider` qui lève `NotImplementedError` explicite. Test E2E « zéro audio résiduel » (DoD §10) défini.
+- **Checklist d'activation prod-bêta** posée dans INTEGRATION_NOTES.md §3 (migration → secret → kustomize apply → smoke → bout-en-bout).
+- **Blocages** : aucun bloqueur technique. Ce qui reste à humaniser : (a) wiring `mesreunions-web` (slice 6), (b) choix chemin ASR + implémentation, (c) Q4 (quotas) et Q5 (audit logging) toujours ouvertes — à câbler avant mise en prod largement ouverte.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 

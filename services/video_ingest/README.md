@@ -108,6 +108,11 @@ l'env doit être refusé.
 | Chunking temporel 60-90s avec chevauchement 15s | ✅ posé + tests |
 | Worker Postgres-native (claim FOR UPDATE SKIP LOCKED + LISTEN/NOTIFY + heartbeat + watchdog) | ✅ posé + tests |
 | Orchestrateur pipeline (lookup dédup → metadata → sous-titres → chunking → persistance → bookmark) | ✅ posé + tests |
+| API REST Flask + auth JWT autonome (7 endpoints) | ✅ posé + tests |
+| Serveur MCP (5 tools V1, transport streamable-http) | ✅ posé (test E2E à valider en intégration) |
+| Dockerfile autoporteur + manifestes K8s (mode A) | ✅ posé (kustomize valide) |
+| Intégration Mes Réunions (modale + statut + polling) | 📝 spec dans [INTEGRATION_NOTES.md](INTEGRATION_NOTES.md) §1 |
+| Fallback ASR (force_audio + Whisper via Kevent) | 📝 spec dans [INTEGRATION_NOTES.md](INTEGRATION_NOTES.md) §2 |
 | API REST `/import`, `/transcripts/{id}`, `/search` | ⏳ à faire |
 | Outils MCP V1 (5 tools) | ⏳ à faire |
 | Intégration client Mes Réunions | ⏳ à faire |
