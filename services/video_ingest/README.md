@@ -103,7 +103,9 @@ l'env doit être refusé.
 |---|---|
 | Schéma BDD initial (migration 019) | ✅ posé |
 | Parseur URL YouTube (dédup) | ✅ posé + tests |
-| Provider YouTube (metadata + sous-titres + audio) | ⏳ à faire |
+| Provider YouTube — metadata (yt-dlp) + sous-titres (youtube-transcript-api) | ✅ posé + tests |
+| Provider YouTube — fallback audio (force_audio + Whisper) | ⏳ à faire (slice ASR) |
+| Chunking temporel 60-90s avec chevauchement 15s | ✅ posé + tests |
 | Worker Postgres-native | ⏳ à faire |
 | API REST `/import`, `/transcripts/{id}`, `/search` | ⏳ à faire |
 | Outils MCP V1 (5 tools) | ⏳ à faire |

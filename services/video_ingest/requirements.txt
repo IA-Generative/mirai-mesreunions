@@ -1,0 +1,9 @@
+# Dépendances runtime du service `video-ingest` (cf. README règle d'isolation D14).
+# Volontairement séparées du `requirements.txt` racine pour faciliter
+# l'extraction future du composant dans son propre repo.
+#
+# Versions épinglées prudemment : yt-dlp casse régulièrement quand YouTube
+# change son API, prévoir un bump régulier (cf. point de vigilance §8).
+
+yt-dlp>=2025.1.0
+youtube-transcript-api>=1.0.0

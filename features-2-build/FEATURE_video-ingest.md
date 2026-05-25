@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — Q7 résolue (D15) : egress A en prod-bêta, mode B prêt via le proxy rotatif d'`owuicore-main` |
+| **Dernière mise à jour** | 2026-05-25 — slice 2 livrée : YouTubeProvider (metadata yt-dlp + sous-titres youtube-transcript-api) + chunking 60-90s (70 tests verts) |
 
 ---
 
@@ -151,7 +151,7 @@ V2 : `DailymotionProvider`.
 
 ### V1 — MVP partagé (objectif PI courant)
 - [x] Schéma BDD `VideoSource` / `Transcript` / `UserVideoBookmark` _(+ `video_ingest_jobs` pour la file Postgres-native)_
-- [ ] `YouTubeProvider` (yt-dlp + youtube-transcript-api)
+- [x] `YouTubeProvider` (yt-dlp + youtube-transcript-api) _— metadata + sous-titres (manuels prioritaires sur auto). Fallback audio (force_audio) reste à coder dans la slice ASR._
 - [x] Normalisation URL YouTube (formats `youtube.com/watch`, `youtu.be`, `shorts`, `embed`, `live`, `&t=`, paramètres parasites ; playlists et channels rejetés)
 - [ ] Pipeline d'ingestion async (worker existant à identifier dans le repo — Celery/Temporal/autre)
 - [ ] Fallback Whisper large-v3 sous flag `force_audio`
@@ -265,6 +265,20 @@ V2 : `DailymotionProvider`.
 - **Fait** : décision actée (cf. D15). Mode A (egress direct + Cilium FQDN allowlist) en prod-bêta. Mode B (proxy rotatif) **réutilise l'infra existante** d'`owuicore-main/infra/proxy/` — `rotating-proxy.miraiku.svc:3128`, HAProxy + 4 Squid Scaleway, 20 IPs rotatives, Basic Auth — pas de nouvelle infra à déployer. Bascule A→B = config-only (3 env vars + durcissement NetworkPolicy).
 - **Implications code (à respecter dès slice 2)** : aucun appel HTTP custom ; tout passe par yt-dlp et youtube-transcript-api qui honorent `HTTP_PROXY`/`HTTPS_PROXY` nativement. Si un futur besoin oblige à coder un appel HTTP, utiliser `requests` avec `trust_env=True` (défaut) — jamais d'URL en dur sans respect des env proxy.
 - **Reste** : slice 2 = providers réels (yt-dlp metadata + youtube-transcript-api sous-titres).
+
+### 2026-05-25 — Slice 2 : YouTubeProvider (metadata + sous-titres) + chunking
+- **Fait** :
+  - `services/video_ingest/app/types.py` — `VideoMetadata`, `TranscriptSegment`, `FetchedTranscript` (dataclasses immuables, pas de SQLAlchemy → testables isolément).
+  - `app/providers/base.py` — Protocol `VideoProvider` + hiérarchie d'erreurs (`ProviderError`, `VideoUnavailable`, `SubtitlesUnavailable`).
+  - `app/providers/youtube/metadata.py` — wrapper yt-dlp (skip_download=True). Mapping erreurs : private/removed/unavailable/blocked → `VideoUnavailable`, le reste → `ProviderError`. Pas d'appel HTTP custom (D15).
+  - `app/providers/youtube/subtitles.py` — wrapper youtube-transcript-api. Préférence manuels > auto. `TranscriptsDisabled` mappé sur `SubtitlesUnavailable`.
+  - `app/providers/youtube/__init__.py` — classe `YouTubeProvider` exposant le protocole.
+  - `app/chunking.py` — agrégateur 60-90s avec chevauchement 15s (Principe 8). Pur, anti-boucle infinie, gère segments unordered et payloads pathologiques.
+  - `services/video_ingest/requirements.txt` — deps service isolées du `requirements.txt` racine (yt-dlp + youtube-transcript-api).
+  - Tests : 33 nouveaux cas, **70/70 verts** au total sur la suite `video_ingest_*`. Zéro appel réseau (mocks complets via `unittest.mock`).
+- **Bug intéressant rencontré** : algo chunking créait des chunks fantômes par chevauchement quand toute la transcription tenait dans 1 chunk. Fix = sortir explicitement quand `j >= n`.
+- **Reste** : slice 3 = worker Postgres-native (claim `SELECT FOR UPDATE SKIP LOCKED` + `LISTEN/NOTIFY` + lease/heartbeat + watchdog reprise orphelins). Slice 4 = API REST + ingestion pipeline. Slice 5 = MCP. Slice 6 = intégration Mes Réunions. Slice ASR (force_audio + Whisper) plus tard.
+- **Blocages** : aucun.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
