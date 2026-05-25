@@ -543,6 +543,97 @@ export function renderList(sessions) {
   for (const id of _expandedIds) {
     _fetchAndRenderSummary(id);
   }
+
+  // Polling intelligent : tant qu'au moins une row est en statut
+  // non-terminal (transcription en cours), reload toutes les 15s pour
+  // que l'utilisateur voie les icônes bouger sans recharger la page.
+  // Stop automatiquement quand tout est terminé.
+  _maintainMeetingsActivityPoller(sessions);
+}
+
+// ── Polling auto liste tant qu'il y a des transcriptions actives ──
+//
+// Précédemment : aucun auto-refresh (cf legacy.js ligne ~5375 "Pas
+// d'auto-refresh setInterval"). Conséquence : l'utilisateur qui ouvre
+// la fiche, lance Re-générer, et attend, ne voyait plus rien évoluer
+// après les 6 setTimeout de _resumeStuckJobs (T+2s/8s/20s/45s/90s/180s).
+// Pour les chaînes LLM qui prennent > 3 min, frustrant.
+//
+// Solution : tick 15s qui n'est armé QUE si y'a au moins une row
+// active. Quand tout est terminé, le tick s'auto-désarme. Cap dur de
+// 30 min pour éviter un poller vampire en cas de bug d'état terminal.
+
+let _meetingsActivityPoller = null;
+let _meetingsActivityPollerStartedAt = 0;
+const _MEETINGS_ACTIVITY_POLL_INTERVAL_MS = 15000;
+const _MEETINGS_ACTIVITY_POLL_MAX_DURATION_MS = 30 * 60 * 1000;
+const _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES = new Set([
+  'pending', 'transferring', 'transcoding',
+  'kevent_queued', 'kevent_processing', 'kevent_transcribing',
+  'kevent_reprocessing', 'mcr_import_pending',
+]);
+const _MEETINGS_ACTIVE_UPLOAD_STATUSES = new Set([
+  'pending', 'scanning', 'transcoding', 'transferring',
+]);
+
+function _hasActiveTranscriptions(sessions) {
+  for (const sess of (sessions || [])) {
+    for (const f of (sess.files || [])) {
+      if (f.status && _MEETINGS_ACTIVE_UPLOAD_STATUSES.has(f.status)) return true;
+      const cached = _transcriptCache.get(f.id);
+      if (cached && cached.status && _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES.has(cached.status)) {
+        return true;
+      }
+      // Row qui vient juste d'apparaître ou pour qui le prefetch n'a pas
+      // encore tourné — on considère active par défaut, sinon on raterait
+      // les premières secondes après import/relance.
+      if (f.status === 'transferred' && !_transcriptCache.has(f.id)) return true;
+    }
+  }
+  return false;
+}
+
+function _stopMeetingsActivityPoller() {
+  if (_meetingsActivityPoller) {
+    clearInterval(_meetingsActivityPoller);
+    _meetingsActivityPoller = null;
+    _meetingsActivityPollerStartedAt = 0;
+  }
+}
+
+function _maintainMeetingsActivityPoller(sessions) {
+  const active = _hasActiveTranscriptions(sessions);
+  if (!active) {
+    _stopMeetingsActivityPoller();
+    return;
+  }
+  if (_meetingsActivityPoller) return;  // déjà armé
+  _meetingsActivityPollerStartedAt = Date.now();
+  _meetingsActivityPoller = setInterval(() => {
+    // Cap dur : si on poll depuis > 30 min sans converger, stop pour
+    // ne pas tourner à vide en cas de bug d'état terminal.
+    if (Date.now() - _meetingsActivityPollerStartedAt > _MEETINGS_ACTIVITY_POLL_MAX_DURATION_MS) {
+      _stopMeetingsActivityPoller();
+      return;
+    }
+    // Skip si onglet caché — pas la peine de recharger en background.
+    if (typeof document !== 'undefined' && document.hidden) return;
+    // Invalide le cache transcript des rows actives pour forcer
+    // un re-fetch frais à la prochaine render.
+    for (const sess of (_lastSessions || [])) {
+      for (const f of (sess.files || [])) {
+        const cached = _transcriptCache.get(f.id);
+        if (cached && cached.status &&
+            _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES.has(cached.status)) {
+          _transcriptCache.delete(f.id);
+        }
+      }
+    }
+    const reload = _resolveLegacyFn('loadSessions');
+    if (reload) {
+      try { reload({ force: true }); } catch (e) {}
+    }
+  }, _MEETINGS_ACTIVITY_POLL_INTERVAL_MS);
 }
 
 // Fetch transcript-status d'un fichier `transferred`, met en cache,
