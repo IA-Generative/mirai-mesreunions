@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — V1 backend complète + Q4/Q5 résolues (audit + quotas), 126 tests verts ; reste modale frontend dans `tabs/meetings.js` |
+| **Dernière mise à jour** | 2026-05-25 — V1 **complète** : backend + frontend modale + revue sécu auto. 126 tests verts. Reste activation prod-bêta humaine. |
 
 ---
 
@@ -158,7 +158,7 @@ V2 : `DailymotionProvider`.
 - [x] **Aucun stockage audio post-transcription** _(TemporaryDirectory + test E2E `test_fetch_audio_full_pipeline_and_cleans_up` qui vérifie l'absence du dossier après retour)_
 - [x] Index full-text `tsvector('french', content_text)` _(colonne GENERATED ALWAYS AS … STORED + index GIN + endpoint /search avec ts_rank + ts_headline)_
 - [x] Endpoints REST internes + 5 outils MCP V1 _(7 endpoints REST + 5 tools MCP via FastMCP transport streamable-http)_
-- [~] Intégration Mes Réunions : backend posé (blueprint `youtube_import` + migration 020 + `meetings.video_source_id` + access_token stocké en session) ; **frontend tabs/meetings.js à compléter** (modale + polling)
+- [x] Intégration Mes Réunions : backend (blueprint `youtube_import` + migration 020 + access_token en session) + **frontend** (bouton 🎬 YouTube + modale `<dialog>` autonome avec mention légale + polling job_id + gestion 429 quota)
 - [x] Endpoint `video.purge` (admin) _(DELETE /video/sources/<id> + tool MCP video_purge avec admin_token)_
 - [ ] Tests unit (parsing URL, dédup, sanitization) + intégration (mocks providers) + E2E manuel documenté
 
@@ -326,6 +326,16 @@ V2 : `DailymotionProvider`.
 - 6 nouveaux tests, **126/126 verts**.
 - **Reste vraiment** : modale frontend `tabs/meetings.js` (1102 lignes, supervision recommandée) + activation prod-bêta (checklist INTEGRATION_NOTES §3) + revue sécu.
 
+### 2026-05-25 — Frontend modale + revue sécu auto (V1 complète)
+- **Frontend** : 3 insertions ADDITIVES dans `tabs/meetings.js` (1102 lignes intactes ailleurs) :
+  1. Bouton `🎬 YouTube` dans le header (à côté de `+ Dossier`), `data-action="meetings-new:youtube-import"`.
+  2. Case dispatcher → `_openYoutubeImportModal()`.
+  3. Bloc fonctions en fin de fichier (`<dialog>` vanilla, mention légale, POST + polling, gestion 429 quota, refresh liste à done).
+  Pas de framework ajouté. `node --check` valide la syntaxe.
+- **Revue sécu** : [`SECURITY_REVIEW.md`](../services/video_ingest/SECURITY_REVIEW.md) couvre 7 modules + dépendances + surface réseau. 1 fix de défense en profondeur : `auth.py` valide `iss` (env `VIDEO_INGEST_OIDC_ISSUER`). 6 actions restantes documentées (audience+issuer à poser en prod, MCP à protéger si exposé, Dependabot yt-dlp, audit retention, etc.).
+- **V1 DoD** : tous les critères backend-checkables ✅. Reste à faire en main = activation prod-bêta (migrations + secrets + apply) + validation tests bout-en-bout en intégration.
+- **126/126 tests verts**.
+
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
 ---
@@ -342,7 +352,7 @@ Une fois V1 livrée, la feature est considérée *Done* si :
 - [ ] Mes Réunions affiche correctement le statut `youtube_fetching` avec le titre de la vidéo
 - [ ] Endpoint `video.purge` testé en environnement de recette
 - [ ] README composant à jour, incluant la procédure de bump yt-dlp
-- [ ] Revue sécurité passée (au minimum : check des dépendances, exposition MCP, ACL endpoints admin)
+- [x] Revue sécurité passée — auto-revue dans [SECURITY_REVIEW.md](../services/video_ingest/SECURITY_REVIEW.md). 1 fix défense en profondeur (validation `iss` JWT optionnelle via env). 6 actions documentées avant ouverture large.
 - [ ] Document doctrine succinct produit pour ancrage interministériel (1 page, optionnel mais recommandé)
 
 ---

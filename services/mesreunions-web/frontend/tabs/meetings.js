@@ -201,6 +201,11 @@ function renderHeader(fileCount, hasSelection) {
                 title="Importer un dossier entier (tous les audios à l'intérieur)">
           + Dossier
         </button>
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+                data-action="meetings-new:youtube-import"
+                title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
+          🎬 YouTube
+        </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:toggle-sort"
                 title="Inverser l'ordre de tri (date de réunion)">
@@ -713,6 +718,10 @@ function _onClick(ev) {
       if (input) input.click();
       break;
     }
+    case 'youtube-import': {
+      _openYoutubeImportModal();
+      break;
+    }
     default:
       break;
   }
@@ -1099,4 +1108,164 @@ export const updateDownloadButtons = window.updateDownloadButtons;
 // (bloc « rendu sessions-list »).
 if (typeof window !== 'undefined') {
   window.__meetingsTab = { mount, unmount, renderList };
+}
+
+// ── Import YouTube (slice 6 — cf. services/video_ingest) ──────────────
+//
+// Modale autonome, vanilla DOM (pas de framework). POST /api/youtube/import
+// puis polling /api/youtube/jobs/<id>. Toutes les insertions sont
+// additives — aucune fonction existante n'est modifiée. Si quelque chose
+// casse ici, le reste de l'onglet meetings reste intact.
+
+const _YT_MODAL_ID = 'youtube-import-modal';
+const _YT_POLL_INTERVAL_MS = 3000;
+const _YT_POLL_MAX_MS = 10 * 60 * 1000;  // 10 min — vidéos longues
+
+function _openYoutubeImportModal() {
+  let modal = document.getElementById(_YT_MODAL_ID);
+  if (modal) {
+    modal.querySelector('[data-yt-status]').textContent = '';
+    modal.querySelector('[data-yt-url]').value = '';
+    if (typeof modal.showModal === 'function') modal.showModal();
+    else modal.setAttribute('open', '');
+    return;
+  }
+  modal = document.createElement('dialog');
+  modal.id = _YT_MODAL_ID;
+  modal.className = 'youtube-import-modal';
+  modal.innerHTML = `
+    <form method="dialog" class="youtube-import-form">
+      <h3>Importer une vidéo YouTube</h3>
+      <label>
+        URL de la vidéo
+        <input type="url" required placeholder="https://youtu.be/..." data-yt-url
+               autocomplete="off" style="width:100%;padding:.4rem;margin:.3rem 0;">
+      </label>
+      <label>
+        Langue
+        <select data-yt-lang style="margin:.3rem 0;">
+          <option value="fr" selected>Français</option>
+          <option value="en">Anglais</option>
+        </select>
+      </label>
+      <label style="display:block;margin:.5rem 0;">
+        <input type="checkbox" data-yt-force-audio>
+        Forcer la transcription audio (Whisper) — plus lent, à utiliser
+        si les sous-titres sont absents ou de mauvaise qualité.
+      </label>
+      <p class="youtube-import-mention-legale" style="font-size:.85em;color:#666;margin:.5rem 0;">
+        En important une vidéo publique, vous certifiez disposer du
+        droit d'en transcrire le contenu pour un usage de réunion
+        interne. La vidéo n'est pas redistribuée ; seul son texte est
+        conservé.
+      </p>
+      <p data-yt-status style="margin:.5rem 0;color:#0a6c2e;font-weight:600;"></p>
+      <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:.8rem;">
+        <button type="button" data-yt-cancel class="meetings-tab-btn meetings-tab-btn--ghost">
+          Annuler
+        </button>
+        <button type="button" data-yt-submit class="meetings-tab-btn meetings-tab-btn--primary">
+          Importer
+        </button>
+      </div>
+    </form>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('[data-yt-cancel]').addEventListener('click', () => modal.close());
+  modal.querySelector('[data-yt-submit]').addEventListener('click', () => _submitYoutubeImport(modal));
+
+  if (typeof modal.showModal === 'function') modal.showModal();
+  else modal.setAttribute('open', '');
+}
+
+async function _submitYoutubeImport(modal) {
+  const url = modal.querySelector('[data-yt-url]').value.trim();
+  const language = modal.querySelector('[data-yt-lang]').value;
+  const forceAudio = modal.querySelector('[data-yt-force-audio]').checked;
+  const statusEl = modal.querySelector('[data-yt-status]');
+  const submitBtn = modal.querySelector('[data-yt-submit]');
+
+  if (!url) {
+    statusEl.style.color = '#b00020';
+    statusEl.textContent = 'URL requise.';
+    return;
+  }
+  submitBtn.disabled = true;
+  statusEl.style.color = '#0a6c2e';
+  statusEl.textContent = 'Envoi en cours…';
+
+  try {
+    const resp = await fetch('/api/youtube/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, language, force_audio: forceAudio }),
+    });
+    const body = await resp.json().catch(() => ({}));
+
+    if (resp.status === 200 && body.reused) {
+      statusEl.textContent = 'Vidéo déjà transcrite (cache) — apparaîtra dans votre liste.';
+      _refreshMeetingsListIfPossible();
+      setTimeout(() => modal.close(), 1500);
+      return;
+    }
+    if (resp.status === 202 && body.job_id) {
+      statusEl.textContent = `Transcription en cours (job ${body.job_id})…`;
+      _pollYoutubeJob(body.job_id, statusEl, modal);
+      return;
+    }
+    if (resp.status === 429) {
+      statusEl.style.color = '#b00020';
+      statusEl.textContent = `Quota atteint (${body.current}/${body.limit} imports sur 24h).`;
+      submitBtn.disabled = false;
+      return;
+    }
+    statusEl.style.color = '#b00020';
+    statusEl.textContent = body.error || `Erreur ${resp.status}`;
+    submitBtn.disabled = false;
+  } catch (err) {
+    statusEl.style.color = '#b00020';
+    statusEl.textContent = `Erreur réseau : ${err.message}`;
+    submitBtn.disabled = false;
+  }
+}
+
+async function _pollYoutubeJob(jobId, statusEl, modal) {
+  const deadline = Date.now() + _YT_POLL_MAX_MS;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, _YT_POLL_INTERVAL_MS));
+    try {
+      const resp = await fetch(`/api/youtube/jobs/${jobId}`);
+      const body = await resp.json().catch(() => ({}));
+      if (body.status === 'done') {
+        statusEl.textContent = 'Transcription terminée — chargement…';
+        _refreshMeetingsListIfPossible();
+        setTimeout(() => modal.close(), 1500);
+        return;
+      }
+      if (body.status === 'failed') {
+        statusEl.style.color = '#b00020';
+        statusEl.textContent = `Échec : ${body.error_message || 'erreur inconnue'}`;
+        modal.querySelector('[data-yt-submit]').disabled = false;
+        return;
+      }
+      // status pending/running → on continue à poller, affiche les attempts
+      statusEl.textContent = `Transcription en cours (job ${jobId}, tentative ${body.attempts || 1})…`;
+    } catch (err) {
+      // Erreur réseau ponctuelle → on retente au prochain tick
+      statusEl.textContent = `Polling (job ${jobId})… (${err.message})`;
+    }
+  }
+  statusEl.style.color = '#b00020';
+  statusEl.textContent = 'Délai dépassé. La transcription peut continuer en arrière-plan — vérifie ta liste plus tard.';
+  modal.querySelector('[data-yt-submit]').disabled = false;
+}
+
+function _refreshMeetingsListIfPossible() {
+  // legacy.js loadSessions() rafraîchit la liste, mais on peut aussi
+  // déclencher directement notre re-render si on a le cache à jour.
+  const fn = _resolveLegacyFn('loadSessions');
+  if (fn) {
+    try { fn(); } catch (e) { /* best-effort */ }
+  }
 }

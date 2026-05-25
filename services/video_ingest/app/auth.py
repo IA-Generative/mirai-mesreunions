@@ -78,10 +78,16 @@ def verify_bearer(token: str) -> dict:
         else:
             raise AuthError(f"JWT invalide : {e}") from e
 
-    # Validation des claims standards.
+    # Validation des claims standards (exp, iat, nbf auto par authlib).
     audience = os.environ.get("VIDEO_INGEST_OIDC_AUDIENCE")
+    issuer = os.environ.get("VIDEO_INGEST_OIDC_ISSUER")
     if audience:
         claims.options.setdefault("aud", {"essential": True, "value": audience})
+    if issuer:
+        # Défense en profondeur : si on a configuré l'issuer attendu, on
+        # refuse les tokens d'un autre realm (même si signés par la même
+        # clé pour une raison X).
+        claims.options.setdefault("iss", {"essential": True, "value": issuer})
     try:
         claims.validate()
     except JoseError as e:
