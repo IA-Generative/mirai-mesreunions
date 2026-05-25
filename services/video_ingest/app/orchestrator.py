@@ -78,30 +78,37 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
     metadata = provider.fetch_metadata(provider_video_id)
     video_source_id = repo.upsert_source(conn, metadata)
 
-    # 5. Sous-titres (sauf si force_audio explicite).
+    # 5. Stratégie de récupération du transcript.
+    languages = [job.language_pref] if job.language_pref else _DEFAULT_LANGUAGES
+    transcript = None
     if not job.force_audio:
-        languages = [job.language_pref] if job.language_pref else _DEFAULT_LANGUAGES
         try:
             transcript = provider.fetch_subtitles(provider_video_id, languages)
-        except SubtitlesUnavailable as e:
-            raise NeedsAudioFallback(
-                f"Sous-titres indisponibles pour {provider_video_id} : {e}"
-            ) from e
-        # 5b. Chunking → persistance.
-        segments_json = chunk(transcript.segments)
-        repo.insert_transcript(
-            conn, video_source_id=video_source_id,
-            transcript=transcript,
-            segments_json=segments_json,
-            content_text=transcript.full_text,       # V1 = raw (post-traitement LLM = V1.5)
-            content_text_raw=transcript.full_text,
-        )
-    else:
-        # 6. force_audio = on saute les sous-titres. V1 : pas encore d'ASR.
-        raise NeedsAudioFallback(
-            f"force_audio=True demandé pour {provider_video_id} mais le "
-            "fallback ASR n'est pas encore implémenté (slice ASR)."
-        )
+        except SubtitlesUnavailable:
+            # Bascule automatique sur ASR — Principe 1 : sous-titres
+            # prioritaires, mais on essaie quand même de servir l'usage
+            # plutôt que de marquer failed.
+            transcript = None
+
+    if transcript is None:
+        # Fallback ASR (chemin A : Kevent, cf. INTEGRATION_NOTES §2).
+        # Peut lever NotImplementedError si l'env Kevent n'est pas configuré
+        # ou si le provider n'a pas de fetch_audio — auquel cas on remonte
+        # `NeedsAudioFallback` pour un retry manuel.
+        try:
+            transcript = provider.fetch_audio(provider_video_id, language=languages[0])
+        except NotImplementedError as e:
+            raise NeedsAudioFallback(str(e)) from e
+
+    # 6. Chunking → persistance.
+    segments_json = chunk(transcript.segments)
+    repo.insert_transcript(
+        conn, video_source_id=video_source_id,
+        transcript=transcript,
+        segments_json=segments_json,
+        content_text=transcript.full_text,       # V1 = raw (post-traitement LLM = V1.5)
+        content_text_raw=transcript.full_text,
+    )
 
     # 7. Bookmark + retour.
     repo.add_bookmark(

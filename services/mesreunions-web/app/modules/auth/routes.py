@@ -165,6 +165,10 @@ def auth_callback():
         "name": userinfo.get("name", userinfo.get("preferred_username", "")),
     }
     session["id_token"] = token.get("id_token", "")
+    # Access token stocké pour les proxys serveur→serveur (ex. video-ingest).
+    # Court vécu — pas de risque de rotation ici, l'utilisateur refait un
+    # login à expiration.
+    session["access_token"] = token.get("access_token", "")
     session.pop("oidc_state", None)
     session.pop("oidc_nonce", None)
 

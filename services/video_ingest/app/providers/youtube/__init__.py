@@ -37,16 +37,13 @@ class YouTubeProvider:
         return _subtitles.fetch(video_id, languages)
 
     def fetch_audio(self, video_id: str, language: str = "fr") -> FetchedTranscript:
-        """Fallback ASR — non implémenté en V1, cf. INTEGRATION_NOTES.md §2.
+        """Fallback ASR via Kevent (cf. INTEGRATION_NOTES.md §2 chemin A).
 
-        Lève `NotImplementedError` explicite : l'orchestrateur intercepte
-        déjà ce cas via `NeedsAudioFallback` et le marque `failed` avec
-        message « needs_audio: … ».
+        Télécharge l'audio dans un TemporaryDirectory (fichier supprimé
+        immédiatement après transcription — DoD §10).
         """
-        raise NotImplementedError(
-            "fetch_audio (Whisper fallback) reste à implémenter — "
-            "cf. services/video_ingest/INTEGRATION_NOTES.md §2"
-        )
+        from . import audio as _audio
+        return _audio.fetch_audio_and_transcribe(video_id, language=language)
 
 
 __all__ = ["YouTubeProvider"]

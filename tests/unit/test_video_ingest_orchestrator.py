@@ -182,28 +182,50 @@ def test_video_unavailable_propagates():
             orchestrator.run_job(conn, [provider], _job())
 
 
-def test_subtitles_unavailable_becomes_needs_audio_fallback():
+def test_subtitles_unavailable_falls_back_to_audio():
+    """Slice ASR : bascule auto sur fetch_audio quand sous-titres absents
+    (Principe 1 — sous-titres prioritaires, mais on sert l'usage)."""
     conn = MagicMock()
     provider = _provider()
     provider.fetch_subtitles.side_effect = SubtitlesUnavailable("no captions")
 
     with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
-         patch.object(orchestrator.repo, "upsert_source", return_value=1):
-        with pytest.raises(orchestrator.NeedsAudioFallback):
-            orchestrator.run_job(conn, [provider], _job())
+         patch.object(orchestrator.repo, "upsert_source", return_value=1), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"):
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    provider.fetch_audio.assert_called_once_with("dQw4w9WgXcQ", language="fr")
+    assert result.reused is False
 
 
-def test_force_audio_currently_raises_needs_audio_fallback():
-    """V1 : force_audio est accepté en input mais non encore implémenté."""
+def test_force_audio_skips_subtitles_and_goes_to_audio():
     conn = MagicMock()
     provider = _provider()
 
     with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
-         patch.object(orchestrator.repo, "upsert_source", return_value=1):
-        with pytest.raises(orchestrator.NeedsAudioFallback):
-            orchestrator.run_job(conn, [provider], _job(force_audio=True))
+         patch.object(orchestrator.repo, "upsert_source", return_value=1), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"):
+        orchestrator.run_job(conn, [provider], _job(force_audio=True))
 
     provider.fetch_subtitles.assert_not_called()
+    provider.fetch_audio.assert_called_once()
+
+
+def test_fetch_audio_not_implemented_raises_needs_audio_fallback():
+    """Provider sans support audio (ex. Dailymotion en V2 sans ASR) →
+    on lève NeedsAudioFallback pour signaler que le job nécessite une
+    config supplémentaire."""
+    conn = MagicMock()
+    provider = _provider()
+    provider.fetch_subtitles.side_effect = SubtitlesUnavailable("no captions")
+    provider.fetch_audio.side_effect = NotImplementedError("ASR pas configuré")
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=1):
+        with pytest.raises(orchestrator.NeedsAudioFallback):
+            orchestrator.run_job(conn, [provider], _job())
 
 
 # ─── run_and_record : intégration file de jobs ─────────────────────────

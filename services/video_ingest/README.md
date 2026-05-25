@@ -111,8 +111,8 @@ l'env doit être refusé.
 | API REST Flask + auth JWT autonome (7 endpoints) | ✅ posé + tests |
 | Serveur MCP (5 tools V1, transport streamable-http) | ✅ posé (test E2E à valider en intégration) |
 | Dockerfile autoporteur + manifestes K8s (mode A) | ✅ posé (kustomize valide) |
-| Intégration Mes Réunions (modale + statut + polling) | 📝 spec dans [INTEGRATION_NOTES.md](INTEGRATION_NOTES.md) §1 |
-| Fallback ASR (force_audio + Whisper via Kevent) | 📝 spec dans [INTEGRATION_NOTES.md](INTEGRATION_NOTES.md) §2 |
+| Intégration Mes Réunions — proxy backend + migration 020 | ✅ posé (frontend `tabs/meetings.js` à compléter, cf. INTEGRATION_NOTES §1.4) |
+| Fallback ASR (force_audio + Whisper via Kevent) — chemin A | ✅ posé + tests (DoD §10 « zéro audio résiduel » couvert) |
 | API REST `/import`, `/transcripts/{id}`, `/search` | ⏳ à faire |
 | Outils MCP V1 (5 tools) | ⏳ à faire |
 | Intégration client Mes Réunions | ⏳ à faire |

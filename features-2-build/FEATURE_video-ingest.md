@@ -13,7 +13,7 @@
 | **Branche Git principale** | `feature/youtube-import` |
 | **Statut SAFe** | À initier — non encore positionnée dans un PI |
 | **Niveau** | Feature (composant transverse réutilisable) |
-| **Dernière mise à jour** | 2026-05-25 — slices 1-5 + infra livrées (113 tests verts) ; slices 6 (intégration Mes Réunions) et ASR documentées en attente d'exécution |
+| **Dernière mise à jour** | 2026-05-25 — V1 complète backend : 7 slices livrées (120 tests verts), reste à câbler la modale frontend dans `tabs/meetings.js` |
 
 ---
 
@@ -154,11 +154,11 @@ V2 : `DailymotionProvider`.
 - [x] `YouTubeProvider` (yt-dlp + youtube-transcript-api) _— metadata + sous-titres (manuels prioritaires sur auto). Fallback audio (force_audio) reste à coder dans la slice ASR._
 - [x] Normalisation URL YouTube (formats `youtube.com/watch`, `youtu.be`, `shorts`, `embed`, `live`, `&t=`, paramètres parasites ; playlists et channels rejetés)
 - [x] Pipeline d'ingestion async — worker Postgres-native (D13) : claim `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` + poll fallback 5s, heartbeat 30s, watchdog 60s reprise orphelins
-- [ ] Fallback Whisper large-v3 sous flag `force_audio`
-- [ ] **Aucun stockage audio post-transcription** (test E2E à vérifier)
+- [x] Fallback Whisper sous flag `force_audio` _(chemin Kevent retenu : `providers/youtube/audio.py` + `_kevent.py` mini-client autonome D14)_
+- [x] **Aucun stockage audio post-transcription** _(TemporaryDirectory + test E2E `test_fetch_audio_full_pipeline_and_cleans_up` qui vérifie l'absence du dossier après retour)_
 - [x] Index full-text `tsvector('french', content_text)` _(colonne GENERATED ALWAYS AS … STORED + index GIN + endpoint /search avec ts_rank + ts_headline)_
 - [x] Endpoints REST internes + 5 outils MCP V1 _(7 endpoints REST + 5 tools MCP via FastMCP transport streamable-http)_
-- [ ] Intégration Mes Réunions : bouton, modale, statut `youtube_fetching`
+- [~] Intégration Mes Réunions : backend posé (blueprint `youtube_import` + migration 020 + `meetings.video_source_id` + access_token stocké en session) ; **frontend tabs/meetings.js à compléter** (modale + polling)
 - [x] Endpoint `video.purge` (admin) _(DELETE /video/sources/<id> + tool MCP video_purge avec admin_token)_
 - [ ] Tests unit (parsing URL, dédup, sanitization) + intégration (mocks providers) + E2E manuel documenté
 
@@ -301,6 +301,24 @@ V2 : `DailymotionProvider`.
 - **Slice ASR** : non exécutée, deux chemins documentés dans [INTEGRATION_NOTES.md §2](../services/video_ingest/INTEGRATION_NOTES.md). Recommandation = chemin A (réutiliser Kevent) plutôt que B (Whisper local). Stub `fetch_audio` ajouté dans `YouTubeProvider` qui lève `NotImplementedError` explicite. Test E2E « zéro audio résiduel » (DoD §10) défini.
 - **Checklist d'activation prod-bêta** posée dans INTEGRATION_NOTES.md §3 (migration → secret → kustomize apply → smoke → bout-en-bout).
 - **Blocages** : aucun bloqueur technique. Ce qui reste à humaniser : (a) wiring `mesreunions-web` (slice 6), (b) choix chemin ASR + implémentation, (c) Q4 (quotas) et Q5 (audit logging) toujours ouvertes — à câbler avant mise en prod largement ouverte.
+
+### 2026-05-25 — Slices ASR + 6 (backend) livrées en autonomie
+- **Slice ASR (chemin A — Kevent)** :
+  - `providers/youtube/_kevent.py` — mini-client Kevent autonome (~110 lignes), strict minimum nécessaire (submit + poll), pas de réplication des 602 lignes du client `dmz-to-internal-bridge`. Vars d'env `VIDEO_INGEST_KEVENT_GATEWAY_URL` + `_API_KEY`.
+  - `providers/youtube/audio.py` — `fetch_audio_and_transcribe` : yt-dlp `bestaudio[ext=m4a]` dans un `TemporaryDirectory`, appel Kevent, mapping payload Whisper verbose_json → `FetchedTranscript`. **Audio supprimé garanti** à la sortie du `with`.
+  - `YouTubeProvider.fetch_audio` câblée à la vraie impl (plus de stub).
+  - `orchestrator.run_job` revu : bascule auto sur ASR quand sous-titres absents (`SubtitlesUnavailable` ne lève plus `NeedsAudioFallback`, on essaie d'abord `fetch_audio`). `NeedsAudioFallback` ne reste levée que si `fetch_audio` est elle-même indisponible (`NotImplementedError`).
+  - Test E2E **DoD §10 « zéro audio résiduel »** : vérifie que le TemporaryDirectory est bien supprimé après retour, y compris quand Kevent renvoie un payload vide.
+  - 7 nouveaux tests (6 audio + 0 orchestrateur réécrits, +1 nouveau).
+- **Slice 6 (backend Mes Réunions)** :
+  - Patch 2 lignes `modules/auth/routes.py` : `session["access_token"]` stocké au login (sera forwardé en Bearer aux proxys serveur→serveur).
+  - Nouveau module `services/mesreunions-web/app/modules/youtube_import/` : 2 routes (`POST /api/youtube/import`, `GET /api/youtube/jobs/<id>`) proxy vers `video-ingest`. Pattern identique à `modules/feedback/`. Env `VIDEO_INGEST_BASE_URL` (défaut = `http://video-ingest.audio-internal.svc.cluster.local:8000`).
+  - Blueprint enregistré dans `main.py`.
+  - Migration `020_meetings_youtube_link.sql` : `meetings.video_source_id` + `video_ingest_job_id` (pointeurs opaques, **pas de FK cross-service**, D14).
+- **Reste vraiment côté humain** :
+  - Frontend : ajouter la modale + le polling dans `tabs/meetings.js` (snippet HTML + JS dans INTEGRATION_NOTES.md §1.4).
+  - Q4 (quotas anti-abus) et Q5 (audit logging) : toujours ouverts.
+- **120/120 tests verts** côté `video_ingest`.
 
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
