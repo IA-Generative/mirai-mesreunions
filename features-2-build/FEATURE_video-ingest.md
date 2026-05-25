@@ -336,6 +336,19 @@ V2 : `DailymotionProvider`.
 - **V1 DoD** : tous les critères backend-checkables ✅. Reste à faire en main = activation prod-bêta (migrations + secrets + apply) + validation tests bout-en-bout en intégration.
 - **126/126 tests verts**.
 
+### 2026-05-26 — Wire complet Meeting + section UI « Vidéos web »
+- **Contexte** : après le 1er import bout-en-bout (Arthur Mensch / Assemblée nationale, 93 929 chars sous-titres), rien dans la liste « Mes réunions » → trou dans la slice 6 (proxy ne créait pas d'entrée `meetings`).
+- **C1 (video-ingest)** : nouvel endpoint `GET /video/my-bookmarks` qui retourne les bookmarks de l'user joints aux metadata source + stats transcript (lang, chars, method). 3 tests unit. **129/129 verts**.
+- **C2 (backend mesreunions-web)** :
+  - `libs/shared/app/models.py` : ajout `Meeting.video_source_id` + `video_ingest_job_id` (BigInteger, nullable, déjà en BDD via migration 020). Pointeurs opaques cross-service (D14).
+  - `device-token-authority` : `create_meeting` accepte les 2 champs, **idempotent** sur `video_ingest_job_id` (renvoie `reused=true` si déjà connu pour ce user_sub). `_meeting_to_dict` les sérialise. `list_meetings?only_video=1` filtre.
+  - `mesreunions-web /api/youtube/import` : si HIT cache (reused=true), crée Meeting immédiat. `/api/youtube/jobs/<id>` : si status=done, crée Meeting idempotent. Échec non bloquant.
+  - Nouveau `/api/youtube/my-imports` : list meetings YouTube de l'user enrichis par /video/my-bookmarks (titre, durée, transcript stats). Best-effort sur l'enrich.
+- **C3 (frontend)** : section additive `#youtube-imports-section` injectée avant `#sessions-list` dans `tabs/meetings.js`. Zéro modif du rendu legacy. Carte par vidéo (titre + channel + durée + badge transcript + lien source). Cache silencieux si 0 items. Refresh au mount + après chaque polling done.
+- **C4 deploy** : build + push image + rollout des 4 deployments (video-ingest-api/worker, mesreunions-web, device-token-authority). Smokes OK : health 200, idempotence vérifiée (replay → reused=true même id), endpoint list only_video=1 retourne le meeting.
+- **Non-régression** : 129/129 tests unit video_ingest verts. Tous les modules mesreunions-web s'importent (sessions, meetings, youtube_import). Aucun champ enlevé/modifié sur les schémas existants (additif uniquement).
+- **À faire au matin** : test bout-en-bout côté UI (hard-refresh service worker pour bypass cache JS) — un nouvel import doit faire apparaître la section « 🎬 Vidéos web importées » avec le titre Mensch.
+
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
 ---
