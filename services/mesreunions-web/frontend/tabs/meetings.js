@@ -1294,49 +1294,89 @@ if (typeof window !== 'undefined') {
 const _YT_MODAL_ID = 'youtube-import-modal';
 const _YT_POLL_INTERVAL_MS = 3000;
 const _YT_POLL_MAX_MS = 10 * 60 * 1000;  // 10 min — vidéos longues
+const _YT_BATCH_MAX = 10;                  // cap anti-abus côté UI
+
+// Style CSS du modal — injecté une seule fois. Le `<dialog>` natif est
+// positionné par défaut au top-left dans Chrome quand notre CSS global
+// (DSFR) override. On force ici un centrage + apparence propre.
+const _YT_MODAL_STYLE_ID = 'youtube-import-modal-style';
+function _ensureYoutubeModalStyle() {
+  if (document.getElementById(_YT_MODAL_STYLE_ID)) return;
+  const s = document.createElement('style');
+  s.id = _YT_MODAL_STYLE_ID;
+  s.textContent = `
+    dialog#${_YT_MODAL_ID} {
+      position: fixed; inset: 0; margin: auto;
+      width: min(560px, 92vw); max-height: 90vh;
+      padding: 1.4rem 1.6rem; border: 1px solid #ccc; border-radius: .5rem;
+      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+      background: #fff; color: inherit;
+      overflow: auto;
+    }
+    dialog#${_YT_MODAL_ID}::backdrop {
+      background: rgba(0,0,0,.45);
+    }
+    dialog#${_YT_MODAL_ID} h3 { margin: 0 0 .8rem; font-size: 1.15rem; }
+    dialog#${_YT_MODAL_ID} label { display: block; margin: .5rem 0 .2rem; font-weight: 600; }
+    dialog#${_YT_MODAL_ID} textarea,
+    dialog#${_YT_MODAL_ID} select {
+      width: 100%; padding: .5rem; font-family: inherit; font-size: .95rem;
+      border: 1px solid #bbb; border-radius: .25rem; box-sizing: border-box;
+    }
+    dialog#${_YT_MODAL_ID} textarea { resize: vertical; min-height: 6.5em; }
+    dialog#${_YT_MODAL_ID} .yt-checkbox { display: block; font-weight: 400; margin: .8rem 0; }
+    dialog#${_YT_MODAL_ID} .yt-hint { color: #666; font-size: .85em; margin: .25rem 0 .6rem; }
+    dialog#${_YT_MODAL_ID} .yt-status { margin: .8rem 0 .4rem; font-weight: 600; min-height: 1.4em; }
+    dialog#${_YT_MODAL_ID} .yt-status-list { font-weight: 400; margin: .3rem 0 .6rem; padding-left: 1.2rem; max-height: 8rem; overflow: auto; }
+    dialog#${_YT_MODAL_ID} .yt-status-list li { margin: .15rem 0; font-size: .85em; }
+    dialog#${_YT_MODAL_ID} .yt-actions { display: flex; gap: .5rem; justify-content: flex-end; margin-top: 1rem; }
+  `;
+  document.head.appendChild(s);
+}
 
 function _openYoutubeImportModal() {
+  _ensureYoutubeModalStyle();
   let modal = document.getElementById(_YT_MODAL_ID);
   if (modal) {
-    modal.querySelector('[data-yt-status]').textContent = '';
-    modal.querySelector('[data-yt-url]').value = '';
+    _resetYoutubeModal(modal);
     if (typeof modal.showModal === 'function') modal.showModal();
     else modal.setAttribute('open', '');
     return;
   }
   modal = document.createElement('dialog');
   modal.id = _YT_MODAL_ID;
-  modal.className = 'youtube-import-modal';
   modal.innerHTML = `
-    <form method="dialog" class="youtube-import-form">
-      <h3>Importer une vidéo YouTube</h3>
-      <label>
-        URL de la vidéo
-        <input type="url" required placeholder="https://youtu.be/..." data-yt-url
-               autocomplete="off" style="width:100%;padding:.4rem;margin:.3rem 0;">
-      </label>
-      <label>
-        Langue
-        <select data-yt-lang style="margin:.3rem 0;">
-          <option value="fr" selected>Français</option>
-          <option value="en">Anglais</option>
-        </select>
-      </label>
-      <label style="display:block;margin:.5rem 0;">
+    <form method="dialog">
+      <h3>Importer une ou plusieurs vidéos YouTube</h3>
+      <label for="yt-urls">URLs (1 par ligne, ${_YT_BATCH_MAX} max)</label>
+      <textarea id="yt-urls" data-yt-urls rows="5"
+                placeholder="https://youtu.be/...\nhttps://www.youtube.com/watch?v=..."
+                autocomplete="off" spellcheck="false"></textarea>
+      <p class="yt-hint">
+        Astuce : copie-colle ta liste depuis un mail, un brouillon ou un fichier .txt.
+        Une URL invalide stoppe les autres uniquement à sa ligne.
+      </p>
+      <label for="yt-lang">Langue préférée des sous-titres</label>
+      <select id="yt-lang" data-yt-lang>
+        <option value="fr" selected>Français</option>
+        <option value="en">Anglais</option>
+      </select>
+      <label class="yt-checkbox">
         <input type="checkbox" data-yt-force-audio>
         Forcer la transcription audio (Whisper) — plus lent, à utiliser
         si les sous-titres sont absents ou de mauvaise qualité.
       </label>
-      <p class="youtube-import-mention-legale" style="font-size:.85em;color:#666;margin:.5rem 0;">
+      <p class="yt-hint">
         En important une vidéo publique, vous certifiez disposer du
         droit d'en transcrire le contenu pour un usage de réunion
         interne. La vidéo n'est pas redistribuée ; seul son texte est
         conservé.
       </p>
-      <p data-yt-status style="margin:.5rem 0;color:#0a6c2e;font-weight:600;"></p>
-      <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:.8rem;">
+      <p class="yt-status" data-yt-status></p>
+      <ul class="yt-status-list" data-yt-status-list hidden></ul>
+      <div class="yt-actions">
         <button type="button" data-yt-cancel class="meetings-tab-btn meetings-tab-btn--ghost">
-          Annuler
+          Fermer
         </button>
         <button type="button" data-yt-submit class="meetings-tab-btn meetings-tab-btn--primary">
           Importer
@@ -1353,86 +1393,123 @@ function _openYoutubeImportModal() {
   else modal.setAttribute('open', '');
 }
 
+function _resetYoutubeModal(modal) {
+  const textarea = modal.querySelector('[data-yt-urls]');
+  if (textarea) textarea.value = '';
+  const status = modal.querySelector('[data-yt-status]');
+  if (status) { status.textContent = ''; status.style.color = ''; }
+  const list = modal.querySelector('[data-yt-status-list]');
+  if (list) { list.innerHTML = ''; list.hidden = true; }
+  const submit = modal.querySelector('[data-yt-submit]');
+  if (submit) submit.disabled = false;
+}
+
+function _parseUrls(raw) {
+  return (raw || '').split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .slice(0, _YT_BATCH_MAX);
+}
+
 async function _submitYoutubeImport(modal) {
-  const url = modal.querySelector('[data-yt-url]').value.trim();
+  const urls = _parseUrls(modal.querySelector('[data-yt-urls]').value);
   const language = modal.querySelector('[data-yt-lang]').value;
   const forceAudio = modal.querySelector('[data-yt-force-audio]').checked;
   const statusEl = modal.querySelector('[data-yt-status]');
+  const listEl = modal.querySelector('[data-yt-status-list]');
   const submitBtn = modal.querySelector('[data-yt-submit]');
 
-  if (!url) {
+  if (urls.length === 0) {
     statusEl.style.color = '#b00020';
-    statusEl.textContent = 'URL requise.';
+    statusEl.textContent = 'Entre au moins une URL.';
     return;
   }
   submitBtn.disabled = true;
   statusEl.style.color = '#0a6c2e';
-  statusEl.textContent = 'Envoi en cours…';
+  statusEl.textContent = `Envoi en cours (${urls.length} URL${urls.length > 1 ? 's' : ''})…`;
 
+  // Affichage par ligne : un <li> par URL avec état dynamique.
+  listEl.hidden = false;
+  listEl.innerHTML = urls.map((u, i) => `
+    <li data-yt-item="${i}">
+      <code>${_escapeHtml(u.slice(0, 70))}</code> — <span data-yt-item-status>en attente…</span>
+    </li>
+  `).join('');
+
+  // Lance toutes les imports en parallèle, suit chacune indépendamment.
+  const tasks = urls.map((url, idx) =>
+    _runSingleImport({ url, language, forceAudio, idx, modal, listEl })
+  );
+  const results = await Promise.allSettled(tasks);
+
+  const ok = results.filter((r) => r.status === 'fulfilled' && r.value === 'done').length;
+  const reused = results.filter((r) => r.status === 'fulfilled' && r.value === 'reused').length;
+  const failed = results.length - ok - reused;
+  statusEl.style.color = failed > 0 ? '#b00020' : '#0a6c2e';
+  statusEl.textContent = `Terminé : ${ok} importé(s), ${reused} déjà en cache, ${failed} en échec.`;
+  submitBtn.disabled = false;
+  _refreshMeetingsListIfPossible();
+}
+
+async function _runSingleImport({ url, language, forceAudio, idx, modal, listEl }) {
+  const itemStatus = listEl.querySelector(`[data-yt-item="${idx}"] [data-yt-item-status]`);
+  const setStatus = (txt, color) => {
+    if (!itemStatus) return;
+    itemStatus.textContent = txt;
+    if (color) itemStatus.style.color = color;
+  };
+  setStatus('envoi…');
+  let body;
   try {
     const resp = await fetch('/api/youtube/import', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, language, force_audio: forceAudio }),
     });
-    const body = await resp.json().catch(() => ({}));
-
+    body = await resp.json().catch(() => ({}));
     if (resp.status === 200 && body.reused) {
-      statusEl.textContent = 'Vidéo déjà transcrite (cache) — apparaîtra dans votre liste.';
-      _refreshMeetingsListIfPossible();
-      setTimeout(() => modal.close(), 1500);
-      return;
+      setStatus('déjà en cache ✓', '#0a6c2e');
+      return 'reused';
     }
     if (resp.status === 202 && body.job_id) {
-      statusEl.textContent = `Transcription en cours (job ${body.job_id})…`;
-      _pollYoutubeJob(body.job_id, statusEl, modal);
-      return;
+      setStatus(`job ${body.job_id}…`);
+      const result = await _pollJobUntilTerminal(body.job_id, setStatus);
+      return result;
     }
     if (resp.status === 429) {
-      statusEl.style.color = '#b00020';
-      statusEl.textContent = `Quota atteint (${body.current}/${body.limit} imports sur 24h).`;
-      submitBtn.disabled = false;
-      return;
+      setStatus(`quota atteint (${body.current}/${body.limit})`, '#b00020');
+      return 'failed';
     }
-    statusEl.style.color = '#b00020';
-    statusEl.textContent = body.error || `Erreur ${resp.status}`;
-    submitBtn.disabled = false;
+    setStatus(`erreur ${resp.status} : ${body.error || 'inconnue'}`, '#b00020');
+    return 'failed';
   } catch (err) {
-    statusEl.style.color = '#b00020';
-    statusEl.textContent = `Erreur réseau : ${err.message}`;
-    submitBtn.disabled = false;
+    setStatus(`réseau : ${err.message}`, '#b00020');
+    return 'failed';
   }
 }
 
-async function _pollYoutubeJob(jobId, statusEl, modal) {
+async function _pollJobUntilTerminal(jobId, setStatus) {
   const deadline = Date.now() + _YT_POLL_MAX_MS;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, _YT_POLL_INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, _YT_POLL_INTERVAL_MS));
     try {
       const resp = await fetch(`/api/youtube/jobs/${jobId}`);
       const body = await resp.json().catch(() => ({}));
       if (body.status === 'done') {
-        statusEl.textContent = 'Transcription terminée — chargement…';
-        _refreshMeetingsListIfPossible();
-        setTimeout(() => modal.close(), 1500);
-        return;
+        setStatus('terminé ✓', '#0a6c2e');
+        return 'done';
       }
       if (body.status === 'failed') {
-        statusEl.style.color = '#b00020';
-        statusEl.textContent = `Échec : ${body.error_message || 'erreur inconnue'}`;
-        modal.querySelector('[data-yt-submit]').disabled = false;
-        return;
+        setStatus(`échec : ${body.error_message || 'inconnu'}`, '#b00020');
+        return 'failed';
       }
-      // status pending/running → on continue à poller, affiche les attempts
-      statusEl.textContent = `Transcription en cours (job ${jobId}, tentative ${body.attempts || 1})…`;
+      setStatus(`en cours (tentative ${body.attempts || 1})…`);
     } catch (err) {
-      // Erreur réseau ponctuelle → on retente au prochain tick
-      statusEl.textContent = `Polling (job ${jobId})… (${err.message})`;
+      setStatus(`polling… (${err.message})`);
     }
   }
-  statusEl.style.color = '#b00020';
-  statusEl.textContent = 'Délai dépassé. La transcription peut continuer en arrière-plan — vérifie ta liste plus tard.';
-  modal.querySelector('[data-yt-submit]').disabled = false;
+  setStatus('délai dépassé — peut continuer en arrière-plan', '#b00020');
+  return 'failed';
 }
 
 function _refreshMeetingsListIfPossible() {

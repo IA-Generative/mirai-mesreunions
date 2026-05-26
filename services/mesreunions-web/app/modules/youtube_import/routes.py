@@ -54,9 +54,11 @@ def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int =
             headers={"Authorization": f"Bearer {bearer}"},
             json=json_body, timeout=timeout,
         )
-    except req.RequestException as exc:
+    except req.RequestException:
+        # On NE remonte PAS `{exc}` côté HTTP : peut contenir URL/headers
+        # internes ou stacktrace (CodeQL py/stack-trace-exposure).
         logger.exception("video-ingest unreachable")
-        return None, (f"video-ingest injoignable: {exc}", 502)
+        return None, ("video-ingest injoignable", 502)
     try:
         return (resp.status_code, resp.json()), None
     except ValueError:
@@ -146,9 +148,10 @@ def my_imports():
             "GET", "/api/v1/meetings",
             params={"user_sub": user_sub, "only_video": "1", "limit": "200"},
         )
-    except req.HTTPError as exc:
+    except req.HTTPError:
+        # Idem : on logue mais on n'expose pas le détail HTTP.
         logger.exception("list meetings only_video failed")
-        return jsonify({"error": f"liste meetings: {exc}"}), 502
+        return jsonify({"error": "liste meetings indisponible"}), 502
     meetings = (meetings_resp or {}).get("meetings", []) or []
 
     # 2. Bookmarks video-ingest pour enrichir (titre, durée, transcript stats).
