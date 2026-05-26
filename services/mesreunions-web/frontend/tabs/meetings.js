@@ -59,16 +59,16 @@ const UPLOAD_PIPELINE = {
 
 // Override par transcription_status (post-transfert, polling séparé).
 const TRANSCRIPT_PIPELINE = {
-  kevent_queued:                  { kind: 'processing', pct:  80, label: 'En file Kevent' },
-  kevent_processing:              { kind: 'processing', pct:  88, label: 'Transcription Whisper' },
-  kevent_transcribing:            { kind: 'processing', pct:  90, label: 'Transcription Whisper' },
+  kevent_queued:                  { kind: 'processing', pct:  80, label: 'En file d\'attente' },
+  kevent_processing:              { kind: 'processing', pct:  88, label: 'Transcription en cours' },
+  kevent_transcribing:            { kind: 'processing', pct:  90, label: 'Transcription en cours' },
   kevent_completed:               { kind: 'success',    pct: 100, label: 'Réunion prête' },
-  kevent_partially_completed:     { kind: 'partial',    pct: 100, label: 'Partiellement prête' },
-  kevent_failed:                  { kind: 'error',      pct: 100, label: 'Échec transcription' },
-  mcr_pushed:                     { kind: 'success',    pct: 100, label: 'Poussée vers MCR' },
-  mcr_auth_failed:                { kind: 'error',      pct: 100, label: 'Auth MCR refusée' },
-  mcr_rejected:                   { kind: 'error',      pct: 100, label: 'MCR a refusé' },
-  mcr_push_failed:                { kind: 'error',      pct: 100, label: 'Échec push MCR' },
+  kevent_partially_completed:     { kind: 'partial',    pct: 100, label: 'Réunion prête (partiellement)' },
+  kevent_failed:                  { kind: 'error',      pct: 100, label: 'Échec — relancer ?' },
+  mcr_pushed:                     { kind: 'success',    pct: 100, label: 'Envoyée à compte-rendu.mirai' },
+  mcr_auth_failed:                { kind: 'error',      pct: 100, label: 'Authentification refusée' },
+  mcr_rejected:                   { kind: 'error',      pct: 100, label: 'Refusée par compte-rendu.mirai' },
+  mcr_push_failed:                { kind: 'error',      pct: 100, label: 'Échec d\'envoi' },
   completed:                      { kind: 'success',    pct: 100, label: 'Réunion prête' },
   failed:                         { kind: 'error',      pct: 100, label: 'Échec' },
   processing:                     { kind: 'processing', pct:  88, label: 'En cours' },
@@ -202,6 +202,11 @@ function renderHeader(fileCount, hasSelection) {
           + Dossier
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+                data-action="meetings-new:import-from-mcr"
+                title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
+          📥 Depuis MCR
+        </button>
+        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
                 data-action="meetings-new:youtube-import"
                 title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
           🎬 YouTube
@@ -213,7 +218,7 @@ function renderHeader(fileCount, hasSelection) {
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:resume-stuck"
-                title="Relancer les transcriptions bloquées (>5min sans activité) OU en échec (kevent_failed)">
+                title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
           🔄 Relancer les bloqués
         </button>
       </div>
@@ -352,6 +357,17 @@ function _buildStatusTooltip(file, status) {
     }
   }
 
+  // Bloc erreur détaillée — surfacé quand status.kind === 'error' et qu'on
+  // a un last_error_kind en cache (migration 020 + endpoint transcript-status).
+  // Donne à l'utilisateur la cause + l'action possible.
+  if (status.kind === 'error' && cached && cached.errorKind) {
+    lines.push('');
+    lines.push('⚠ ' + _humanizeErrorKind(cached.errorKind));
+    if (cached.errorMessage) {
+      lines.push('   Détail : ' + cached.errorMessage);
+    }
+  }
+
   // Badge "relancé" persistant tant que le statut n'a pas bougé.
   const relaunch = _recentlyRelaunched.get(file.id);
   if (relaunch) {
@@ -363,6 +379,32 @@ function _buildStatusTooltip(file, status) {
   lines.push('Clic = ouvrir la fiche complète');
   lines.push('▾ = afficher le résumé inline');
   return lines.join('\n');
+}
+
+// Mappe un code last_error_kind (cf migration 020 + _REASON_TO_KIND côté
+// mcr_importer.py) vers une phrase utilisateur en français incluant
+// l'action possible. Tout kind non listé tombe sur un message générique.
+function _humanizeErrorKind(kind) {
+  const M = {
+    mcr_unavailable_on_source: "Audio et compte-rendu indisponibles sur Compte-Rendu Mirai. Vous pouvez supprimer cette ligne.",
+    mcr_audio_404:    "Audio non trouvé sur Compte-Rendu Mirai. Vous pouvez relancer ou supprimer.",
+    mcr_transcript_404: "Compte-rendu non trouvé sur Compte-Rendu Mirai. Vous pouvez relancer.",
+    mcr_audio_error:  "Erreur en récupérant l'audio depuis Compte-Rendu Mirai. Réessayez plus tard.",
+    mcr_transcript_error: "Erreur en récupérant le compte-rendu. Réessayez plus tard.",
+    mcr_auth_failed:  "Authentification refusée par Compte-Rendu Mirai. Reconnectez-vous puis relancez.",
+    mcr_oidc_auth:    "Session expirée. Reconnectez-vous puis relancez.",
+    mcr_oidc_other:   "Erreur d'authentification. Reconnectez-vous puis relancez.",
+    kevent_auth_failed:    "Accès au moteur de transcription refusé. Contactez un administrateur.",
+    kevent_applicative:    "Erreur du moteur de transcription. Vous pouvez relancer.",
+    kevent_client_unavailable: "Configuration du moteur de transcription manquante. Contactez un administrateur.",
+    kevent_no_job_id: "Le pipeline a redémarré sans avoir enregistré la transcription. Cliquez Relancer.",
+    cap_exceeded:     "5 tentatives automatiques épuisées. Cliquez Relancer pour forcer une nouvelle tentative.",
+    worker_crash:     "Le pipeline a planté pendant le traitement. Cliquez Relancer.",
+    s3_object_purged: "L'audio a été supprimé du stockage (rétention dépassée). Non-relançable, supprimez la ligne.",
+    s3_no_audio_path: "Pas de fichier audio associé à cette ligne. Non-relançable, supprimez la ligne.",
+    llm_chain_partial: "Une ou plusieurs étapes de compte-rendu n'ont pas pu se terminer (voir détail ci-dessous). Cliquez Re-générer pour relancer la chaîne — les étapes manquantes seront retentées.",
+  };
+  return M[kind] || `Erreur : ${kind}. Cliquez Relancer ou contactez un administrateur.`;
 }
 
 async function _fetchPipelineStats() {
@@ -506,6 +548,97 @@ export function renderList(sessions) {
   for (const id of _expandedIds) {
     _fetchAndRenderSummary(id);
   }
+
+  // Polling intelligent : tant qu'au moins une row est en statut
+  // non-terminal (transcription en cours), reload toutes les 15s pour
+  // que l'utilisateur voie les icônes bouger sans recharger la page.
+  // Stop automatiquement quand tout est terminé.
+  _maintainMeetingsActivityPoller(sessions);
+}
+
+// ── Polling auto liste tant qu'il y a des transcriptions actives ──
+//
+// Précédemment : aucun auto-refresh (cf legacy.js ligne ~5375 "Pas
+// d'auto-refresh setInterval"). Conséquence : l'utilisateur qui ouvre
+// la fiche, lance Re-générer, et attend, ne voyait plus rien évoluer
+// après les 6 setTimeout de _resumeStuckJobs (T+2s/8s/20s/45s/90s/180s).
+// Pour les chaînes LLM qui prennent > 3 min, frustrant.
+//
+// Solution : tick 15s qui n'est armé QUE si y'a au moins une row
+// active. Quand tout est terminé, le tick s'auto-désarme. Cap dur de
+// 30 min pour éviter un poller vampire en cas de bug d'état terminal.
+
+let _meetingsActivityPoller = null;
+let _meetingsActivityPollerStartedAt = 0;
+const _MEETINGS_ACTIVITY_POLL_INTERVAL_MS = 15000;
+const _MEETINGS_ACTIVITY_POLL_MAX_DURATION_MS = 30 * 60 * 1000;
+const _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES = new Set([
+  'pending', 'transferring', 'transcoding',
+  'kevent_queued', 'kevent_processing', 'kevent_transcribing',
+  'kevent_reprocessing', 'mcr_import_pending',
+]);
+const _MEETINGS_ACTIVE_UPLOAD_STATUSES = new Set([
+  'pending', 'scanning', 'transcoding', 'transferring',
+]);
+
+function _hasActiveTranscriptions(sessions) {
+  for (const sess of (sessions || [])) {
+    for (const f of (sess.files || [])) {
+      if (f.status && _MEETINGS_ACTIVE_UPLOAD_STATUSES.has(f.status)) return true;
+      const cached = _transcriptCache.get(f.id);
+      if (cached && cached.status && _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES.has(cached.status)) {
+        return true;
+      }
+      // Row qui vient juste d'apparaître ou pour qui le prefetch n'a pas
+      // encore tourné — on considère active par défaut, sinon on raterait
+      // les premières secondes après import/relance.
+      if (f.status === 'transferred' && !_transcriptCache.has(f.id)) return true;
+    }
+  }
+  return false;
+}
+
+function _stopMeetingsActivityPoller() {
+  if (_meetingsActivityPoller) {
+    clearInterval(_meetingsActivityPoller);
+    _meetingsActivityPoller = null;
+    _meetingsActivityPollerStartedAt = 0;
+  }
+}
+
+function _maintainMeetingsActivityPoller(sessions) {
+  const active = _hasActiveTranscriptions(sessions);
+  if (!active) {
+    _stopMeetingsActivityPoller();
+    return;
+  }
+  if (_meetingsActivityPoller) return;  // déjà armé
+  _meetingsActivityPollerStartedAt = Date.now();
+  _meetingsActivityPoller = setInterval(() => {
+    // Cap dur : si on poll depuis > 30 min sans converger, stop pour
+    // ne pas tourner à vide en cas de bug d'état terminal.
+    if (Date.now() - _meetingsActivityPollerStartedAt > _MEETINGS_ACTIVITY_POLL_MAX_DURATION_MS) {
+      _stopMeetingsActivityPoller();
+      return;
+    }
+    // Skip si onglet caché — pas la peine de recharger en background.
+    if (typeof document !== 'undefined' && document.hidden) return;
+    // Invalide le cache transcript des rows actives pour forcer
+    // un re-fetch frais à la prochaine render.
+    for (const sess of (_lastSessions || [])) {
+      for (const f of (sess.files || [])) {
+        const cached = _transcriptCache.get(f.id);
+        if (cached && cached.status &&
+            _MEETINGS_ACTIVE_TRANSCRIPT_STATUSES.has(cached.status)) {
+          _transcriptCache.delete(f.id);
+        }
+      }
+    }
+    const reload = _resolveLegacyFn('loadSessions');
+    if (reload) {
+      try { reload({ force: true }); } catch (e) {}
+    }
+  }, _MEETINGS_ACTIVITY_POLL_INTERVAL_MS);
 }
 
 // Fetch transcript-status d'un fichier `transferred`, met en cache,
@@ -530,6 +663,9 @@ async function _prefetchTranscriptStatus(fileId) {
       // transcription_started_at exposé par transcript-status (fiche
       // détaillée) — utilisé pour calculer Écoulé / Estimé restant.
       startedAt: data.transcription_started_at || null,
+      errorKind: data.last_error_kind || null,
+      errorMessage: data.last_error_message || null,
+      errorAt: data.last_error_at || null,
       fetchedAt: Date.now(),
     });
     // Auto-clear du badge "Relancé" : si le statut a bougé depuis la
@@ -595,6 +731,9 @@ async function _fetchAndRenderSummary(fileId) {
       kp: data.key_points_summary || '',
       outputs: data.outputs || {},
       startedAt: data.transcription_started_at || null,
+      errorKind: data.last_error_kind || null,
+      errorMessage: data.last_error_message || null,
+      errorAt: data.last_error_at || null,
       fetchedAt: Date.now(),
     });
     const relaunch2 = _recentlyRelaunched.get(fileId);
@@ -688,7 +827,7 @@ function _onClick(ev) {
       break;
     }
     case 'bulk-download-menu': {
-      _toggleBulkDownloadMenu(e);
+      _toggleBulkDownloadMenu(ev);
       break;
     }
     case 'bulk-download-audio':
@@ -699,13 +838,8 @@ function _onClick(ev) {
       _runBulkDownload(kind);
       break;
     }
-    case 'toggle-sort': {
-      const fn = _resolveLegacyFn('toggleSortDir');
-      if (fn) fn();
-      break;
-    }
     case 'resume-stuck': {
-      _resumeStuckJobs(e);
+      _resumeStuckJobs(ev);
       break;
     }
     case 'pick-files': {
@@ -716,6 +850,10 @@ function _onClick(ev) {
     case 'pick-folder': {
       const input = document.getElementById('local-upload-folder-input');
       if (input) input.click();
+      break;
+    }
+    case 'import-from-mcr': {
+      _openMcrImportModal();
       break;
     }
     case 'youtube-import': {
@@ -901,7 +1039,12 @@ async function _runBulkDownload(kind) {
 async function _resumeStuckJobs(ev) {
   const btn = ev && ev.target && ev.target.closest('[data-action="meetings-new:resume-stuck"]');
   const originalLabel = btn ? btn.innerHTML : '';
-  if (btn) { btn.disabled = true; btn.textContent = 'Analyse…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Recherche…'; }
+  // Toast persistant pendant l'analyse — sinon le user ne sait pas si l'app
+  // a entendu le clic. Disparait remplacé par le résultat final.
+  if (window.showToast) {
+    window.showToast('🔍 Recherche des transcriptions à relancer…', 'info', 8000);
+  }
   try {
     const resp = await fetch('/api/files/resume-stuck-jobs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -948,13 +1091,42 @@ async function _resumeStuckJobs(ev) {
     // Detail explicite dans le toast (et fallback alert).
     const sample = titles.slice(0, 5).join(', ');
     const more = titles.length > 5 ? ` (+${titles.length - 5})` : '';
-    const msg = `🔄 ${claimed} transcription(s) relancée(s) : ${sample}${more}`;
+    const msg = `🔄 ${claimed} réunion(s) relancée(s) : ${sample}${more}`;
     if (window.showToast) window.showToast(msg, 'success');
     else window.alert(msg);
 
+    // Bandeau VISIBLE persistant — disparait au prochain reload réussi
+    // ou au clic ×. Reste affiché pendant que les statuts évoluent
+    // (kevent_queued → kevent_processing → kevent_completed/_failed).
+    // ids passés explicitement → le bandeau peut afficher un breakdown
+    // live des statuts (✓ prête / 🔄 en cours / ⏳ en file / ⚠ échec).
+    _showResumeStuckBanner(claimed, titles, ids);
+
     // Refresh la liste pour montrer les nouveaux statuts ("kevent_queued").
+    // Puis re-refresh échelonnés pour suivre la transition vers le statut
+    // terminal (kevent_processing → kevent_completed OU kevent_failed) sans
+    // que l'user ait à F5 lui-même. Si un job replante, la croix rouge
+    // ré-apparait automatiquement après ~30-60s.
     const reload = _resolveLegacyFn('loadSessions');
-    if (reload) await reload({ force: true });
+    if (reload) {
+      await reload({ force: true });
+      // Invalidation périodique du cache transcript pour TOUTES les rows
+      // relancées — sinon le polling local pourrait servir un statut stale.
+      const refreshIds = () => {
+        for (const fid of ids) _transcriptCache.delete(fid);
+        try { reload({ force: true }); } catch (e) {}
+      };
+      // Premier refresh AGRESSIF à T+2s pour que l'utilisateur voie
+      // l'icône passer de "Échec" à "En file d'attente" immédiatement.
+      // Sans ça, l'impression d'"il ne se passe rien" pendant 5s pousse à
+      // re-cliquer ou à recharger manuellement (déjà signalé en prod).
+      setTimeout(refreshIds, 2000);
+      setTimeout(refreshIds, 8000);
+      setTimeout(refreshIds, 20000);
+      setTimeout(refreshIds, 45000);
+      setTimeout(refreshIds, 90000);
+      setTimeout(refreshIds, 180000);
+    }
 
     // Highlight visuel temporaire (3.5s) sur les rows relancées pour que
     // l'utilisateur voie EXACTEMENT lesquelles ont été reprises. CSS
@@ -1370,4 +1542,586 @@ async function _loadAndRenderYoutubeImports() {
     </div>
     ${rows}
   `;
+}
+
+// ── Bandeau persistant "transcriptions relancées" ───────────────────
+//
+// Toast 4s = trop court pour suivre des reprises de transcription qui
+// prennent 30s-2min. On ajoute un bandeau vert en haut de l'onglet "Mes
+// réunions" qui compte les secondes écoulées + liste les titres relancés.
+// Auto-disparait à 180s ou au clic ×.
+
+let _resumeStuckBannerTimer = null;
+let _resumeStuckBannerCount = 0;
+let _resumeStuckBannerTitles = [];
+let _resumeStuckBannerIds = [];
+
+// Compte les statuts actuels des rows relancées, depuis le cache transcript.
+// Renvoie { processing, completed, failed, queued, unknown }.
+function _countTrackedStatuses(ids) {
+  const out = { processing: 0, completed: 0, failed: 0, queued: 0, unknown: 0 };
+  for (const fid of ids) {
+    const cached = _transcriptCache.get(fid);
+    const s = (cached && cached.status) || '';
+    if (s === 'kevent_completed' || s === 'kevent_partially_completed' || s === 'completed') {
+      out.completed += 1;
+    } else if (s === 'kevent_failed' || s === 'failed' ||
+               (s && s.indexOf('_failed') !== -1)) {
+      out.failed += 1;
+    } else if (s === 'kevent_processing' || s === 'kevent_transcribing' ||
+               s === 'processing') {
+      out.processing += 1;
+    } else if (s === 'kevent_queued' || s === 'pending' || s === 'mcr_import_pending') {
+      out.queued += 1;
+    } else {
+      out.unknown += 1;
+    }
+  }
+  return out;
+}
+
+function _showResumeStuckBanner(count, titles, ids) {
+  _resumeStuckBannerCount = count | 0;
+  _resumeStuckBannerTitles = Array.isArray(titles) ? titles.slice(0, 2) : [];
+  _resumeStuckBannerIds = Array.isArray(ids) ? ids.slice() : [];
+  if (_resumeStuckBannerTimer) {
+    clearInterval(_resumeStuckBannerTimer);
+    _resumeStuckBannerTimer = null;
+  }
+  const host = document.querySelector('.meetings-tab-header')
+    || document.getElementById('sessions-list')
+    || document.body;
+  if (!host) return;
+
+  // Build de la structure UNE SEULE FOIS. Les updates suivantes ne
+  // touchent que les nodes data-* spécifiques (chips + headline), pas
+  // tout l'innerHTML — sinon le re-render complet toutes les Xs faisait
+  // clignoter le bandeau (perçu comme bug par l'utilisateur).
+  let bn = document.getElementById('mcr-resume-stuck-banner');
+  if (!bn) {
+    bn = document.createElement('div');
+    bn.id = 'mcr-resume-stuck-banner';
+    bn.style.cssText = (
+      'background:#dcfce7;border-left:4px solid #16a34a;color:#14532d;' +
+      'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
+      'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
+    );
+    bn.innerHTML =
+      `<span style="font-size:1.1em;">🔄</span>` +
+      `<span data-resume-headline></span>` +
+      `<span data-resume-chips style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;"></span>` +
+      `<button type="button" data-resume-dismiss ` +
+      `style="margin-left:auto;background:none;border:0;color:#14532d;cursor:pointer;font-size:1.1em;">×</button>`;
+    host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+    const dismiss = bn.querySelector('[data-resume-dismiss]');
+    if (dismiss) dismiss.onclick = () => _clearResumeStuckBanner();
+  }
+  const headlineEl = bn.querySelector('[data-resume-headline]');
+  const chipsEl = bn.querySelector('[data-resume-chips]');
+
+  // Headline simple : titre principal (1er titre) + suffixe "et N autres"
+  // si plus d'une réunion. Pas d'IDs hexadécimaux qui parlent à personne.
+  const _formatTitleHeader = () => {
+    const n = _resumeStuckBannerCount;
+    const t0 = (_resumeStuckBannerTitles[0] || '').trim();
+    if (n <= 1) {
+      return t0 ? `« ${t0} »` : `1 réunion`;
+    }
+    if (t0) {
+      return `« ${t0} » et ${n - 1} autre${n - 1 > 1 ? 's' : ''}`;
+    }
+    return `${n} réunions`;
+  };
+
+  // Cache pour ne re-write le DOM que si le contenu a vraiment changé
+  // → zéro repaint quand l'état est stable.
+  let _lastHeadline = '';
+  let _lastChips = '';
+
+  const updateChips = () => {
+    const k = _countTrackedStatuses(_resumeStuckBannerIds);
+    const chips = [];
+    if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
+    if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
+    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en attente</span>`);
+    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} à revoir</span>`);
+
+    const totalKnown = k.completed + k.processing + k.queued + k.failed;
+    const allDone = totalKnown > 0 && (k.completed + k.failed) === _resumeStuckBannerIds.length;
+
+    const headline = allDone
+      ? `<strong>Terminé.</strong> ${_formatTitleHeader()}`
+      : `<strong>Reprise en cours</strong> · ${_formatTitleHeader()}`;
+    const chipsHtml = chips.join('');
+
+    if (headline !== _lastHeadline) {
+      headlineEl.innerHTML = headline;
+      _lastHeadline = headline;
+    }
+    if (chipsHtml !== _lastChips) {
+      chipsEl.innerHTML = chipsHtml;
+      _lastChips = chipsHtml;
+    }
+  };
+
+  updateChips();
+  let elapsedMs = 0;
+  _resumeStuckBannerTimer = setInterval(() => {
+    elapsedMs += 5000;
+    updateChips();
+    if (elapsedMs >= 300000) _clearResumeStuckBanner();  // auto-disparait après 5 min
+  }, 5000);  // cadence relâchée à 5s — pas besoin de plus, et virte le clignotement
+}
+
+function _clearResumeStuckBanner() {
+  if (_resumeStuckBannerTimer) {
+    clearInterval(_resumeStuckBannerTimer);
+    _resumeStuckBannerTimer = null;
+  }
+  const bn = document.getElementById('mcr-resume-stuck-banner');
+  if (bn) bn.remove();
+}
+
+
+// ── MCR import : bandeau persistant "import en cours" ────────────────
+//
+// Toast disparait en 4s — trop court pour une opération de ~1min. On
+// ajoute en plus un bandeau jaune en haut de l'onglet "Mes réunions"
+// qui reste visible jusqu'à ce que les rows apparaissent (ou ~2 min
+// max). L'utilisateur sait que ça travaille même s'il regarde ailleurs.
+
+let _mcrImportBannerTimer = null;
+let _mcrImportBannerExpected = 0;
+
+function _showMcrImportInProgressBanner(expectedCount) {
+  _mcrImportBannerExpected = Math.max(0, expectedCount | 0);
+  if (_mcrImportBannerTimer) {
+    clearInterval(_mcrImportBannerTimer);
+    _mcrImportBannerTimer = null;
+  }
+  const _startSnapshotIds = new Set(
+    (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean)
+  );
+  const render = (secs) => {
+    const host = document.querySelector('.meetings-tab-header')
+      || document.getElementById('sessions-list')
+      || document.body;
+    if (!host) return;
+    let bn = document.getElementById('mcr-import-progress-banner');
+    if (!bn) {
+      bn = document.createElement('div');
+      bn.id = 'mcr-import-progress-banner';
+      bn.style.cssText = (
+        'background:#fef3c7;border-left:4px solid #f59e0b;color:#78350f;' +
+        'padding:0.55rem 0.85rem;margin:0.4rem 0;border-radius:4px;' +
+        'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
+      );
+      host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+    }
+    // Compte les rows NOUVELLES apparues depuis le clic "Importer".
+    const currentIds = (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean);
+    const newIds = currentIds.filter(id => !_startSnapshotIds.has(id));
+    const arrived = newIds.length;
+    const k = _countTrackedStatuses(newIds);
+    const chips = [];
+    if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
+    if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
+    if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en file</span>`);
+    if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} en échec</span>`);
+    const remaining = Math.max(0, _mcrImportBannerExpected - arrived);
+    const headline = arrived >= _mcrImportBannerExpected && _mcrImportBannerExpected > 0
+      ? `<strong>Toutes les ${_mcrImportBannerExpected} réunions sont arrivées.</strong> Suivez le traitement ci-dessous.`
+      : `<strong>${arrived}/${_mcrImportBannerExpected} réunion(s) arrivée(s) depuis compte-rendu.mirai</strong> — ${remaining > 0 ? remaining + ' attendue(s) dans quelques secondes' : 'finalisation…'}. (${secs}s écoulées)`;
+    bn.innerHTML =
+      `<span style="font-size:1.1em;">📥</span>` +
+      `<span>${headline}</span>` +
+      (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
+      `<button type="button" id="mcr-import-banner-dismiss" ` +
+      `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
+    const dismiss = document.getElementById('mcr-import-banner-dismiss');
+    if (dismiss) {
+      dismiss.onclick = () => _clearMcrImportBanner();
+    }
+  };
+  let secs = 0;
+  render(secs);
+  _mcrImportBannerTimer = setInterval(() => {
+    secs += 2;
+    render(secs);
+    if (secs >= 300) _clearMcrImportBanner();  // 5 min — les CR peuvent prendre du temps
+  }, 2000);
+}
+
+function _clearMcrImportBanner() {
+  if (_mcrImportBannerTimer) {
+    clearInterval(_mcrImportBannerTimer);
+    _mcrImportBannerTimer = null;
+  }
+  const bn = document.getElementById('mcr-import-progress-banner');
+  if (bn) bn.remove();
+}
+
+
+// ── MCR import modal ──────────────────────────────────────────────────
+//
+// Liste les réunions de compte-rendu.mirai pour l'utilisateur connecté,
+// permet d'en cocher plusieurs, et déclenche un import asynchrone côté
+// backend. Cf services/mesreunions-web/app/modules/mcr_import/routes.py.
+
+let _mcrModalEl = null;
+
+function _openMcrImportModal() {
+  _closeMcrImportModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'mcr-modal-overlay';
+  overlay.style.cssText = (
+    'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:1000;' +
+    'display:flex;align-items:center;justify-content:center;'
+  );
+  overlay.innerHTML = `
+    <div class="mcr-modal" role="dialog" aria-modal="true"
+         style="background:#fff;border-radius:0.5rem;width:min(900px,90vw);
+                max-height:85vh;display:flex;flex-direction:column;
+                box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding:1rem 1.25rem;border-bottom:1px solid #e5e7eb;
+                  display:flex;align-items:center;justify-content:space-between;">
+        <h3 style="margin:0;font-size:1.1rem;">📥 Importer depuis MCR</h3>
+        <button type="button" data-mcr-action="close"
+                style="background:none;border:0;font-size:1.5rem;cursor:pointer;
+                       line-height:1;color:#64748b;">×</button>
+      </div>
+      <div style="padding:0.75rem 1.25rem;display:flex;gap:0.5rem;align-items:center;
+                  border-bottom:1px solid #f1f5f9;">
+        <input type="text" data-mcr-search placeholder="Rechercher…"
+               style="flex:1;padding:0.4rem 0.6rem;border:1px solid #cbd5e1;
+                      border-radius:0.3rem;font-size:0.9rem;">
+        <label style="font-size:0.85rem;color:#475569;display:inline-flex;
+                      align-items:center;gap:0.3rem;">
+          <input type="checkbox" data-mcr-fallback checked>
+          Importer la transcription si pas d'audio
+        </label>
+      </div>
+      <div data-mcr-body style="flex:1;overflow:auto;padding:0.5rem 1.25rem;
+                                 font-size:0.9rem;">
+        <p style="color:#64748b;padding:1rem 0;">Chargement…</p>
+      </div>
+      <div style="padding:0.75rem 1.25rem;border-top:1px solid #e5e7eb;
+                  display:flex;justify-content:space-between;align-items:center;
+                  gap:0.5rem;">
+        <span data-mcr-status style="font-size:0.85rem;color:#475569;"></span>
+        <div style="display:flex;gap:0.5rem;">
+          <button type="button" data-mcr-action="export"
+                  class="meetings-tab-btn meetings-tab-btn--ghost"
+                  title="Télécharge un CSV de toutes tes réunions MCR (toutes pages)">
+            📥 Exporter CSV
+          </button>
+          <button type="button" data-mcr-action="close"
+                  class="meetings-tab-btn meetings-tab-btn--ghost">Annuler</button>
+          <button type="button" data-mcr-action="submit"
+                  class="meetings-tab-btn meetings-tab-btn--primary"
+                  disabled>Importer la sélection</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  _mcrModalEl = overlay;
+
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) {
+      _closeMcrImportModal();
+    }
+    const btn = ev.target.closest('[data-mcr-action]');
+    if (!btn) return;
+    const action = btn.getAttribute('data-mcr-action');
+    if (action === 'close') _closeMcrImportModal();
+    if (action === 'submit') _submitMcrImport();
+    if (action === 'export') _exportMcrCsv();
+  });
+
+  const search = overlay.querySelector('[data-mcr-search]');
+  let searchTimer = null;
+  search.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => _loadMcrMeetings(1, search.value.trim()), 300);
+  });
+
+  _loadMcrMeetings(1, '');
+}
+
+function _closeMcrImportModal() {
+  if (_mcrModalEl) {
+    _mcrModalEl.remove();
+    _mcrModalEl = null;
+  }
+}
+
+async function _loadMcrMeetings(page, search) {
+  if (!_mcrModalEl) return;
+  const body = _mcrModalEl.querySelector('[data-mcr-body]');
+  body.innerHTML = '<p style="color:#64748b;padding:1rem 0;">Chargement…</p>';
+  try {
+    const params = new URLSearchParams({ page: String(page), page_size: '20' });
+    if (search) params.set('search', search);
+    const resp = await fetch(`/api/mcr/meetings?${params.toString()}`, {
+      credentials: 'same-origin',
+    });
+    if (resp.status === 401) {
+      body.innerHTML = (
+        '<p style="color:#b91c1c;">Reconnecte-toi pour activer l\'import depuis MCR ' +
+        '(refresh_token absent ou expiré).</p>'
+      );
+      return;
+    }
+    if (resp.status === 403) {
+      body.innerHTML = (
+        '<p style="color:#b91c1c;">Ton compte n\'a pas accès à ' +
+        'compte-rendu.mirai.</p>'
+      );
+      return;
+    }
+    if (!resp.ok) {
+      body.innerHTML = `<p style="color:#b91c1c;">Erreur MCR (HTTP ${resp.status}).</p>`;
+      return;
+    }
+    const data = await resp.json();
+    const items = data.data || [];
+    if (items.length === 0) {
+      body.innerHTML = (
+        '<p style="color:#64748b;padding:1rem 0;">Aucune réunion trouvée sur ' +
+        'compte-rendu.mirai pour ton compte.</p>'
+      );
+      return;
+    }
+    const rows = items.map((m) => {
+      const esc = (s) => String(s || '').replace(/[<>&"']/g, (c) => ({
+        '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;',
+      })[c]);
+      // Row "pourrie" côté MCR (validator pydantic) — exposée via _broken=true
+      // par le backend pour que l'utilisateur voie EXACTEMENT la position en
+      // erreur, sans la cocher (id=null → non importable).
+      if (m._broken) {
+        const tooltip = esc((m._mcr_error || '').slice(0, 500));
+        // Extrait l'indice technique du body MCR : platform_id partiel
+        // (ex "...apq-smlr-zlv") et la plateforme (VISIO/WEBCONF/…).
+        const platformMatch = /not supported for platform (\w+)/.exec(m._mcr_error || '');
+        const platform = platformMatch ? platformMatch[1] : '?';
+        const idMatch = /platform_id['\"]?:\s*['\"]([^'\"]+)['\"]/.exec(m._mcr_error || '');
+        const partialId = idMatch ? idMatch[1] : '?';
+        return `<tr style="background:#fef2f2;color:#991b1b;">
+          <td><input type="checkbox" disabled></td>
+          <td style="padding:0.4rem 0.5rem;" colspan="3" title="${tooltip}">
+            <strong>⚠️ Réunion impossible à récupérer (position ${m._slot ?? '?'})</strong>
+            <div style="font-size:0.75rem;color:#7f1d1d;opacity:0.85;margin-top:2px;">
+              Type de réunion : <code>${esc(platform)}</code>.
+              Cette réunion contient un identifiant que compte-rendu.mirai
+              ne sait pas relire actuellement. Pour la débloquer : la
+              supprimer ou modifier son type directement sur compte-rendu.mirai.
+            </div>
+          </td>
+        </tr>`;
+      }
+      const d = m.start_date || m.creation_date || '';
+      const dateStr = d ? new Date(d).toLocaleString('fr-FR') : '';
+      return `<tr>
+        <td><input type="checkbox" data-mcr-pick value="${m.id}"></td>
+        <td style="padding:0.4rem 0.5rem;">${esc(m.name)}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;white-space:nowrap;">${dateStr}</td>
+        <td style="padding:0.4rem 0.5rem;color:#64748b;font-size:0.85rem;white-space:nowrap;">${esc(m.status)}</td>
+      </tr>`;
+    }).join('');
+    const fallbackNotice = data._fallback_used ? `
+      <div style="background:#fef3c7;border-left:3px solid #f59e0b;
+                  padding:0.5rem 0.75rem;margin-bottom:0.5rem;font-size:0.85rem;color:#78350f;">
+        ⚠️ ${data._broken_count || 0} réunion(s) sur cette page sont impossibles à
+        récupérer depuis compte-rendu.mirai (erreur côté serveur). Les autres
+        restent importables normalement.
+      </div>` : '';
+    const pager = `
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  margin-top:0.75rem;color:#64748b;font-size:0.85rem;">
+        <span>${data.total_items || 0} réunion(s) — page ${data.page || page} / ${data.total_pages || 1}</span>
+        <div style="display:flex;gap:0.3rem;">
+          ${page > 1 ? `<button type="button" data-mcr-page="${page-1}" class="meetings-tab-btn meetings-tab-btn--ghost">‹ Précédent</button>` : ''}
+          ${page < (data.total_pages || 1) ? `<button type="button" data-mcr-page="${page+1}" class="meetings-tab-btn meetings-tab-btn--ghost">Suivant ›</button>` : ''}
+        </div>
+      </div>
+    `;
+    body.innerHTML = `
+      ${fallbackNotice}
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:#f8fafc;text-align:left;">
+          <th style="padding:0.4rem 0.5rem;"></th>
+          <th style="padding:0.4rem 0.5rem;">Nom</th>
+          <th style="padding:0.4rem 0.5rem;">Date</th>
+          <th style="padding:0.4rem 0.5rem;">Statut</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${pager}
+    `;
+    body.querySelectorAll('[data-mcr-page]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const p = parseInt(b.getAttribute('data-mcr-page'), 10) || 1;
+        _loadMcrMeetings(p, search);
+      });
+    });
+    body.querySelectorAll('[data-mcr-pick]').forEach((cb) => {
+      cb.addEventListener('change', _updateMcrSubmitState);
+    });
+    _updateMcrSubmitState();
+  } catch (err) {
+    console.error('mcr list error', err);
+    body.innerHTML = '<p style="color:#b91c1c;">Erreur réseau.</p>';
+  }
+}
+
+function _updateMcrSubmitState() {
+  if (!_mcrModalEl) return;
+  const picks = _mcrModalEl.querySelectorAll('[data-mcr-pick]:checked');
+  const submit = _mcrModalEl.querySelector('[data-mcr-action="submit"]');
+  const status = _mcrModalEl.querySelector('[data-mcr-status]');
+  submit.disabled = picks.length === 0;
+  status.textContent = picks.length === 0
+    ? ''
+    : `${picks.length} réunion(s) sélectionnée(s)`;
+}
+
+async function _submitMcrImport() {
+  if (!_mcrModalEl) return;
+  const picks = Array.from(_mcrModalEl.querySelectorAll('[data-mcr-pick]:checked'))
+    .map((cb) => cb.value);
+  if (picks.length === 0) return;
+  const fallback = _mcrModalEl.querySelector('[data-mcr-fallback]').checked;
+  const submit = _mcrModalEl.querySelector('[data-mcr-action="submit"]');
+  submit.disabled = true;
+  submit.textContent = 'Import en cours…';
+  try {
+    const resp = await fetch('/api/mcr/import', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ meeting_ids: picks, fallback_transcript: fallback }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      alert(`Échec de l'import : HTTP ${resp.status}\n${err.slice(0, 300)}`);
+      submit.disabled = false;
+      submit.textContent = 'Importer la sélection';
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    const published = data.published ?? picks.length;
+    _closeMcrImportModal();
+    // Toast court ET bandeau persistant en haut de la liste : le toast
+    // disparait en 4s, le bandeau reste jusqu'à apparition des rows.
+    const msg = `✓ ${published} réunion(s) en cours d'import depuis compte-rendu.mirai. Elles vont apparaître dans la liste — comptez environ 1 minute pour la transcription et le compte-rendu.`;
+    if (window.showToast) window.showToast(msg, 'success');
+    _showMcrImportInProgressBanner(published);
+    // Le worker côté ingester met ~2-5s à créer les rows en DB. On fait
+    // plusieurs reloads échelonnés pour rafraîchir l'UI au fil de l'apparition.
+    const reload = _resolveLegacyFn('loadSessions');
+    if (reload) {
+      reload();
+      // T+2s : montre les premières rows arrivées (worker ingester pose
+      // la row en DB après ~1-3s). Sans ça, on attendait 3-5s muet.
+      setTimeout(() => reload({ force: true }), 2000);
+      setTimeout(() => reload({ force: true }), 6000);
+      setTimeout(() => reload({ force: true }), 15000);
+      setTimeout(() => reload({ force: true }), 30000);
+      setTimeout(() => reload({ force: true }), 60000);
+      setTimeout(() => reload({ force: true }), 120000);
+    }
+  } catch (err) {
+    console.error('mcr import error', err);
+    alert('Erreur réseau pendant l\'import.');
+    submit.disabled = false;
+    submit.textContent = 'Importer la sélection';
+  }
+}
+
+
+// ── Export CSV de toute la liste MCR ─────────────────────────────────
+//
+// Boucle GET /api/mcr/meetings sur toutes les pages (page_size=50) jusqu'à
+// total_pages, agrège, génère un CSV téléchargeable. Inclut les rows _broken
+// (avec marqueur visible) pour que le user ait l'inventaire complet.
+
+async function _exportMcrCsv() {
+  if (!_mcrModalEl) return;
+  const exportBtn = _mcrModalEl.querySelector('[data-mcr-action="export"]');
+  const status = _mcrModalEl.querySelector('[data-mcr-status]');
+  const orig = exportBtn.textContent;
+  exportBtn.disabled = true;
+  exportBtn.textContent = '⏳ Export en cours…';
+
+  const allRows = [];
+  let page = 1;
+  let totalPages = 1;
+  const pageSize = 50;
+  try {
+    do {
+      status.textContent = `Téléchargement page ${page}…`;
+      const resp = await fetch(`/api/mcr/meetings?page=${page}&page_size=${pageSize}`, {
+        credentials: 'same-origin',
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      totalPages = data.total_pages || 1;
+      const items = data.data || [];
+      for (const m of items) allRows.push(m);
+      page += 1;
+      if (page > 200) break;  // safety stop
+    } while (page <= totalPages);
+
+    status.textContent = `Génération CSV (${allRows.length} lignes)…`;
+    const csv = _buildMcrCsv(allRows);
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const dlUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = dlUrl;
+    a.download = `mcr-meetings-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(dlUrl);
+    status.textContent = `✅ Export terminé (${allRows.length} réunions)`;
+  } catch (err) {
+    console.error('mcr export error', err);
+    alert('Erreur pendant l\'export CSV : ' + err.message);
+    status.textContent = '❌ Export échoué';
+  } finally {
+    exportBtn.disabled = false;
+    exportBtn.textContent = orig;
+  }
+}
+
+function _buildMcrCsv(rows) {
+  const cols = ['id', 'name', 'name_platform', 'status', 'creation_date',
+                'start_date', 'end_date', 'meeting_platform_id', 'url', 'notes',
+                'broken', 'broken_reason'];
+  const head = cols.join(';');
+  const esc = (v) => {
+    if (v === null || v === undefined) return '';
+    let s = String(v);
+    if (/[";\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  };
+  const lines = rows.map((m) => {
+    if (m._broken) {
+      return [
+        '', m.name || '', 'BROKEN', 'BROKEN', '', '', '', '', '', '',
+        'true', (m._mcr_error || '').slice(0, 300),
+      ].map(esc).join(';');
+    }
+    return [
+      m.id ?? '', m.name ?? '', m.name_platform ?? '', m.status ?? '',
+      m.creation_date ?? '', m.start_date ?? '', m.end_date ?? '',
+      m.meeting_platform_id ?? '', m.url ?? '', m.notes ?? '',
+      'false', '',
+    ].map(esc).join(';');
+  });
+  return [head, ...lines].join('\r\n');
 }

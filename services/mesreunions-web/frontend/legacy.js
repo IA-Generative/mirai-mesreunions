@@ -22,13 +22,15 @@ let showAllDevices = false;
 // Ordre de tri courant pour la liste à plat des réunions. Persisté côté
 // localStorage pour survivre au reload. "desc" = plus récent d'abord (par
 // défaut, le plus naturel après ajout d'un upload).
+//
+// Note : le bouton toggle dans la barre d'actions "Mes réunions" a été
+// retiré (cf meetings.js, mai 2026). Mais le tableau index.html garde
+// des en-têtes triables (onclick setSortColumn) qui dépendent de l'état
+// ci-dessous → les setters restent en place.
 let _sortDir = (() => {
     try { return localStorage.getItem('mydevices.sort.dir') === 'asc' ? 'asc' : 'desc'; }
     catch (e) { return 'desc'; }
 })();
-// Colonne de tri (chantier UX-Refonte-3). 'date' = date de réunion (override
-// utilisateur sinon created_at) — défaut historique. 'title' = original_filename
-// alphabétique. 'duration' = audio_duration_seconds (null → tri en fin).
 let _sortKey = (() => {
     try {
         const k = localStorage.getItem('mydevices.sort.key');
@@ -40,13 +42,9 @@ function toggleSortDir() {
     _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
     try { localStorage.setItem('mydevices.sort.dir', _sortDir); } catch (e) {}
     _refreshSortToggleUi();
-    // Re-render à partir du snapshot existant sans rappeler l'API.
     loadSessions({ force: true });
 }
 
-// Setter sort-key + sort-dir combinés appelé par les <th> de l'en-tête
-// fr-table. Cliquer la même colonne toggle la direction ; cliquer une
-// autre colonne réinitialise à 'desc' (cas le plus utile au switch).
 window.setSortColumn = function setSortColumn(key) {
     if (key !== 'title' && key !== 'date' && key !== 'duration') return;
     if (_sortKey === key) {
@@ -68,8 +66,6 @@ function _refreshSortToggleUi() {
     if (btn) {
         const label = btn.querySelector('.sort-toggle-label');
         const arrow = btn.querySelector('.sort-toggle-arrow');
-        // Le toggle global agit sur la colonne courante (date par défaut).
-        // Libellé spécialisé selon la clé courante pour rester explicite.
         const isDesc = (_sortDir === 'desc');
         if (label) {
             if (_sortKey === 'title') {
@@ -82,7 +78,6 @@ function _refreshSortToggleUi() {
         }
         if (arrow) arrow.textContent = isDesc ? '▼' : '▲';
     }
-    // Reflète l'état actif sur l'en-tête fr-table (flèche colonne).
     const headers = document.querySelectorAll('[data-sort-col]');
     headers.forEach((th) => {
         const col = th.getAttribute('data-sort-col');
@@ -1818,6 +1813,40 @@ function _parseSpeakerTagged(text) {
     return blocks;
 }
 
+// Re-monte le corrector sur place (sans location.reload) après une
+// modification serveur de la transcription (delete-hidden-blocks ou
+// re-filter). Conserve la position de scroll de la page + le panneau
+// détail ouvert — sinon location.reload rafraîchit toute la page et
+// l'utilisateur retombe sur la liste des réunions, frustrant.
+//
+// Stratégie : invalide le cache transcript-text (sinon le refetch
+// retournerait le vieux contenu en RAM), reset le flag mounted, vide
+// le container, puis re-call mountTranscriptCorrector qui ré-execute
+// la chaîne fetch + parse + render avec le nouveau speaker_tagged_text.
+async function _remountCorrectorInPlace(container, fileId) {
+    if (!container || !fileId) return;
+    const savedScrollY = window.scrollY;
+    // CRITIQUE : un élément <audio> retiré du DOM continue de jouer si
+    // l'objet JS est gardé vivant par une closure (les event listeners
+    // timeupdate de mountTranscriptCorrector le maintiennent en référence).
+    // Sans pause + reset src explicites, le nouveau corrector affiche un
+    // nouvel <audio> ET l'ancien continue → 2 sources qui jouent en
+    // décalage = symptôme "son doublé" signalé en prod.
+    container.querySelectorAll('audio').forEach((a) => {
+        try { a.pause(); } catch (e) {}
+        try { a.removeAttribute('src'); a.load(); } catch (e) {}
+    });
+    if (typeof _invalidateTranscriptTextCache === 'function') {
+        try { _invalidateTranscriptTextCache(fileId); } catch (e) {}
+    }
+    container.dataset.correctorMounted = '0';
+    container.innerHTML = '';
+    await mountTranscriptCorrector(container);
+    // Restaure le scroll : mountTranscriptCorrector peut avoir grandi/
+    // rétréci le DOM, le browser peut avoir clampé. Force-restore.
+    window.scrollTo(0, savedScrollY);
+}
+
 async function mountTranscriptCorrector(container) {
     if (!container || container.dataset.correctorMounted === '1') return;
     const fileId = container.getAttribute('data-corrector-for') || '';
@@ -2005,6 +2034,83 @@ async function mountTranscriptCorrector(container) {
         </div>
       </div>
     `;
+    // État des blocs barrés (mig 022) — partagé entre les boutons par-bloc
+    // et la toolbar batch. Persisté server-side via PATCH /hidden-blocks
+    // après chaque toggle (debounced 500ms — évite de hammer la DB en cas
+    // de toggle rapide en série).
+    const crossedSet = new Set((data.hidden_block_indices || []).map(Number));
+    const _renderCount = () => {
+      const toolbar = container.querySelector('[data-tc-toolbar]');
+      if (toolbar) {
+        const cntEl = toolbar.querySelector('[data-tc-crossed-count]');
+        if (cntEl) cntEl.textContent = String(crossedSet.size);
+        const delBtn = toolbar.querySelector('[data-tc-delete-crossed]');
+        if (delBtn) delBtn.disabled = crossedSet.size === 0;
+      }
+    };
+    let _persistTimer = null;
+    const _setSaveStatus = (state) => {
+      // state ∈ 'pending' | 'saved' | 'error'
+      const ind = container.querySelector('[data-tc-save-status]');
+      if (!ind) return;
+      const map = {
+        pending: { txt: '💾 Sauvegarde…', color: '#92400e', bg: '#fef3c7' },
+        saved:   { txt: '✓ Modifications sauvegardées', color: '#14532d', bg: '#dcfce7' },
+        error:   { txt: '⚠ Sauvegarde échouée (retry au prochain clic)', color: '#7f1d1d', bg: '#fee2e2' },
+      };
+      const m = map[state] || {txt: '', color: '#64748b', bg: 'transparent'};
+      ind.textContent = m.txt;
+      ind.style.color = m.color;
+      ind.style.background = m.bg;
+      ind.style.opacity = m.txt ? '1' : '0';
+      if (state === 'saved') {
+        // Fade-out après 2s pour ne pas encombrer.
+        setTimeout(() => {
+          if (ind.textContent === m.txt) ind.style.opacity = '0';
+        }, 2000);
+      }
+    };
+    const _persistCrossed = () => {
+      _setSaveStatus('pending');
+      if (_persistTimer) clearTimeout(_persistTimer);
+      _persistTimer = setTimeout(async () => {
+        try {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/hidden-blocks`, {
+            method: 'PATCH', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({indices: Array.from(crossedSet)}),
+          });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          _setSaveStatus('saved');
+        } catch (e) {
+          _setSaveStatus('error');
+        }
+      }, 500);
+    };
+    // Toolbar : checkbox afficher barrés + bouton supprimer batch + bouton
+    // re-filtrer. Insérée juste après le notice, au-dessus des blocs.
+    const toolbarHtml = `
+      <div class="tc-toolbar" data-tc-toolbar
+           style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;padding:0.4rem 0.6rem;background:#f9fafb;border-radius:6px;margin:0.5rem 0;font-size:0.83rem;">
+        <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer;">
+          <input type="checkbox" data-tc-show-crossed checked />
+          Afficher les blocs barrés
+        </label>
+        <button type="button" data-tc-delete-crossed
+                style="padding:0.2rem 0.7rem;border:1px solid #b91c1c;background:#fff;color:#b91c1c;border-radius:4px;cursor:pointer;font-size:0.82rem;"
+                title="Retire définitivement les blocs barrés de la transcription. Action irréversible. Les compte-rendus dérivés (CR, reformulation) seront invalidés et à régénérer.">
+          🗑 Supprimer les blocs barrés (<span data-tc-crossed-count>0</span>)
+        </button>
+        <button type="button" data-tc-re-filter
+                style="padding:0.2rem 0.7rem;border:1px solid #1d4ed8;background:#fff;color:#1d4ed8;border-radius:4px;cursor:pointer;font-size:0.82rem;"
+                title="Réapplique la liste des phrases interdites de l'admin sur cette transcription. Utile si de nouvelles entrées ont été ajoutées après la transcription initiale.">
+          🧹 Re-filtrer avec la liste admin
+        </button>
+        <span style="color:#64748b;font-size:0.75rem;margin-left:auto;">
+          Survol d'un bloc → 🚫 pour le barrer (réversible, sauvé auto).
+        </span>
+        <span data-tc-save-status
+              style="font-size:0.72rem;padding:1px 8px;border-radius:9999px;opacity:0;transition:opacity 0.3s;"></span>
+      </div>`;
     container.innerHTML = `
       <details class="transcript-corrector">
         <summary class="transcript-corrector-summary">
@@ -2017,9 +2123,10 @@ async function mountTranscriptCorrector(container) {
           ${playerHtml}
         </div>
         ${noticeHtml}
+        ${toolbarHtml}
         <div class="transcript-corrector-blocks">
           ${blocks.map((b, i) => `
-            <div class="tc-block" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
+            <div class="tc-block${crossedSet.has(i) ? ' is-crossed' : ''}" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
               <button type="button" class="tc-play" data-tc-play="${b.start}"
                       title="${audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')'}"
                       ${audioPurged ? 'disabled' : ''}>▶</button>
@@ -2030,6 +2137,8 @@ async function mountTranscriptCorrector(container) {
                       title="Renommer cet interlocuteur partout">✏️</button>
               <span class="tc-time">${_fmtTimecode(b.start)} → ${_fmtTimecode(b.end)}</span>
               <span class="tc-text" data-tc-text="${i}">${_renderBlockText(b)}</span>
+              <button type="button" class="tc-cross" data-tc-cross="${i}"
+                      title="Barrer ce bloc (réversible, sauvé automatiquement). Sera exclu des exports et de la prochaine génération de CR.">🚫</button>
             </div>
           `).join('')}
         </div>
@@ -2038,6 +2147,113 @@ async function mountTranscriptCorrector(container) {
              hidden></div>
       </details>
     `;
+    _renderCount();
+    // Styles barré + masquage (1× idempotent via id check).
+    // Position absolute pour le bouton 🚫 : sinon il ajoute une 6e colonne
+    // à la grille `.tc-block` (qui est grid-template-columns à 5 cols dans
+    // index.html) → bloc qui passe à 2 lignes pour les segments courts.
+    if (!document.getElementById('tc-crossed-styles')) {
+      const st = document.createElement('style');
+      st.id = 'tc-crossed-styles';
+      st.textContent = `
+        .tc-block { position: relative; }
+        .tc-block .tc-cross {
+          position: absolute;
+          top: 0.15rem;
+          right: 0.25rem;
+          padding: 0;
+          line-height: 1;
+          font-size: 0.85rem;
+          background: none;
+          border: 0;
+          cursor: pointer;
+          opacity: 0;
+          transition: opacity 0.15s;
+          z-index: 2;
+        }
+        .tc-block:hover .tc-cross,
+        .tc-block:focus-within .tc-cross { opacity: 0.55; }
+        .tc-block .tc-cross:hover { opacity: 1 !important; }
+        .tc-block.is-crossed { opacity: 0.55; }
+        .tc-block.is-crossed .tc-text,
+        .tc-block.is-crossed .tc-speaker { text-decoration: line-through; }
+        .tc-block.is-crossed .tc-cross {
+          opacity: 1 !important;
+          color: #b91c1c;
+        }
+        details.transcript-corrector.is-hide-crossed .tc-block.is-crossed { display: none; }
+      `;
+      document.head.appendChild(st);
+    }
+    // Wire: clic 🚫 toggle, checkbox afficher/masquer, bouton supprimer batch, bouton re-filter.
+    container.addEventListener('click', async (ev) => {
+      const cb = ev.target && ev.target.closest('[data-tc-cross]');
+      if (cb) {
+        const idx = parseInt(cb.getAttribute('data-tc-cross'), 10);
+        const blk = cb.closest('.tc-block');
+        if (crossedSet.has(idx)) {
+          crossedSet.delete(idx);
+          if (blk) blk.classList.remove('is-crossed');
+        } else {
+          crossedSet.add(idx);
+          if (blk) blk.classList.add('is-crossed');
+        }
+        _renderCount();
+        _persistCrossed();
+        return;
+      }
+      const del = ev.target && ev.target.closest('[data-tc-delete-crossed]');
+      if (del) {
+        if (!confirm(`Supprimer définitivement ${crossedSet.size} bloc(s) ? Action irréversible. Les comptes-rendus dérivés seront invalidés.`)) return;
+        try {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/delete-hidden-blocks`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+          });
+          if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
+          const d = await r.json();
+          // Re-monte le corrector sur place plutôt que location.reload() qui
+          // ferait perdre le scroll + ré-afficher la liste des réunions.
+          await _remountCorrectorInPlace(container, fileId);
+          if (window.showToast) window.showToast(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Compte-rendus dérivés à régénérer.`, 'success');
+          else alert(`✓ ${d.deleted || 0} bloc(s) supprimé(s). Les compte-rendus dérivés (CR, reformulation) ont été vidés — cliquez "Re-générer" pour les recréer.`);
+        } catch (e) { alert('Erreur : ' + e.message); }
+        return;
+      }
+      const rf = ev.target && ev.target.closest('[data-tc-re-filter]');
+      if (rf) {
+        if (!confirm('Réappliquer la liste des phrases interdites (admin) à cette transcription ? Si des phrases matchent, les compte-rendus dérivés (CR, reformulation) seront vidés et à régénérer.')) return;
+        try {
+          const r = await fetch(`/api/file/${encodeURIComponent(fileId)}/re-filter`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+          });
+          if (!r.ok) { alert('Échec : HTTP ' + r.status); return; }
+          const d = await r.json();
+          if (d.dropped_lines === 0) {
+            // Message plus diagnostic — l'user peut conclure à tort que la
+            // liste n'est pas chargée alors qu'aucune ligne ne matche.
+            const msg = `Aucune ligne de cette transcription ne matche la liste des phrases interdites configurées en admin.\n\n` +
+                        `Si vous attendiez un nettoyage : vérifiez que la phrase EXACTE est bien dans la liste (admin-console) — le match est insensible à la casse mais sans regex.\n\n` +
+                        `Astuce : pour barrer manuellement un bloc visible, survolez-le et cliquez 🚫.`;
+            alert(msg);
+            return;
+          }
+          // Re-monte le corrector sur place (pas de reload qui ferait
+          // perdre le scroll et ré-afficher la liste des réunions).
+          await _remountCorrectorInPlace(container, fileId);
+          const sample = (d.samples || []).slice(0, 3).map(s => '« ' + (s || '').slice(0, 80) + ' »').join(', ');
+          if (window.showToast) window.showToast(`✓ ${d.dropped_lines} ligne(s) retirée(s)${sample ? ' : ' + sample : ''}. CR à régénérer.`, 'success');
+          else alert(`✓ ${d.dropped_lines} ligne(s) retirée(s)${sample ? '. Exemples : ' + sample : ''}. Compte-rendus dérivés invalidés.`);
+        } catch (e) { alert('Erreur : ' + e.message); }
+        return;
+      }
+    });
+    container.addEventListener('change', (ev) => {
+      const cb = ev.target && ev.target.closest('[data-tc-show-crossed]');
+      if (cb) {
+        const det = container.querySelector('details.transcript-corrector');
+        if (det) det.classList.toggle('is-hide-crossed', !cb.checked);
+      }
+    });
 
     const audio = container.querySelector('.transcript-corrector-audio');
     const blocksEls = Array.from(container.querySelectorAll('.tc-block'));
@@ -2099,6 +2315,7 @@ async function mountTranscriptCorrector(container) {
     // Index plat des words pour binary-search dans le timeupdate karaoke
     // (perf : un audio d'1h peut avoir ~10k words, on évite l'itération
     // linéaire à chaque tick). Les words sont déjà ordonnés par ``s``.
+    // ``const`` sur l'array (mutation via splice OK pour _tcRebuildAfterEdit).
     const wordsFlat = [];
     blocks.forEach((b, blockIdx) => {
         if (!b.words) return;
@@ -2109,6 +2326,70 @@ async function mountTranscriptCorrector(container) {
         });
     });
     let lastActiveWordEl = null;
+
+    // Exposé pour _patchVisibleTranscriptOccurrences (édition correct-term) :
+    // re-render des spans `.tc-word` d'un bloc après modification du texte,
+    // puis reconstruction de wordsFlat. Sans ça, l'édition écrase
+    // textContent et le karaoke ne retrouve plus les spans timestamps
+    // → highlight mot silencieusement cassé.
+    container._tcRebuildBlockTextAfterEdit = (blockEl, newText) => {
+        const blockIdx = blocksEls.indexOf(blockEl);
+        if (blockIdx < 0 || !blocks[blockIdx]) {
+            // Bloc non trouvé : fallback sécurité, contente-toi de textContent.
+            const t = blockEl.querySelector('.tc-text');
+            if (t) t.textContent = newText;
+            return;
+        }
+        const b = blocks[blockIdx];
+        const blockDur = (b.end || 0) - (b.start || 0);
+        // Re-tokenize sur espaces. Garde les mots avec leur ponctuation
+        // adjacente (split simple).
+        const words = (newText || '').trim().split(/\s+/).filter(Boolean);
+        const tcText = blockEl.querySelector('.tc-text');
+        if (!tcText) return;
+        if (words.length === 0 || blockDur <= 0) {
+            tcText.textContent = newText || '';
+            b.text = newText || '';
+            b.words = [];
+        } else {
+            // Distribution char-count : poids par mot ≈ longueur + 1
+            // (espace implicite). Même heuristique que le fallback init
+            // quand Whisper ne fournit pas de timestamps exploitables.
+            const weights = words.map(w => Math.max(1, w.length + 1));
+            const total = weights.reduce((a, c) => a + c, 0);
+            const newWords = [];
+            let cumul = 0;
+            const spans = [];
+            for (let i = 0; i < words.length; i++) {
+                const s = b.start + (cumul / total) * blockDur;
+                cumul += weights[i];
+                const e = b.start + (cumul / total) * blockDur;
+                newWords.push({ w: words[i], s, e });
+                spans.push(
+                    `<span class="tc-word" data-tc-w-s="${s}" data-tc-w-e="${e}">${escapeHtml(words[i])}</span>`
+                );
+            }
+            tcText.innerHTML = spans.join(' ');
+            b.text = newText;
+            b.words = newWords;
+        }
+        // Reconstruit wordsFlat depuis tous les blocs (in-place via splice
+        // pour ne pas casser la closure timeupdate qui le référence par ID).
+        wordsFlat.length = 0;
+        blocks.forEach((bb, bi) => {
+            if (!bb.words) return;
+            bb.words.forEach((w, wIdx) => {
+                if (typeof w.s === 'number' && typeof w.e === 'number') {
+                    wordsFlat.push({ s: w.s, e: w.e, blockIdx: bi, wIdx });
+                }
+            });
+        });
+        // Reset le pointeur du dernier mot actif (peut référencer un span
+        // détruit par notre innerHTML replacement).
+        if (lastActiveWordEl && !document.contains(lastActiveWordEl)) {
+            lastActiveWordEl = null;
+        }
+    };
 
     // Compensation latence audio output : ``audio.currentTime`` reflète la
     // position DÉCODÉE par le navigateur, pas l'instant où le son sort
@@ -3362,6 +3643,10 @@ function _patchVisibleTranscriptOccurrences(fileId, oldTerm, newTerm) {
     );
     if (!corrector) return;
     const oldLower = oldTerm.toLowerCase();
+    // Si le corrector a exposé _tcRebuildBlockTextAfterEdit (mountTranscript
+    // Corrector l'attache), on l'utilise pour préserver les spans `.tc-word`
+    // (sinon textContent=… écrase les spans et casse le karaoke).
+    const rebuild = corrector._tcRebuildBlockTextAfterEdit;
     corrector.querySelectorAll('.tc-text').forEach((el) => {
         const txt = el.textContent || '';
         if (txt.toLowerCase().indexOf(oldLower) < 0) return;
@@ -3373,6 +3658,17 @@ function _patchVisibleTranscriptOccurrences(fileId, oldTerm, newTerm) {
             const re = new RegExp(oldTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
             updated = txt.replace(re, newTerm);
         }
+        if (typeof rebuild === 'function') {
+            const blockEl = el.closest('.tc-block');
+            if (blockEl) {
+                rebuild(blockEl, updated);
+                return;
+            }
+        }
+        // Fallback : si le rebuild n'est pas accessible (ex : on n'est pas
+        // dans la vue "Transcription de la réunion"), patch textContent
+        // simple. Le karaoke ne sera pas restauré dans ce cas mais c'est OK
+        // car il n'est rendu que dans cette vue précisément.
         el.textContent = updated;
     });
 }

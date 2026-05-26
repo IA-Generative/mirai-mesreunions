@@ -46,6 +46,7 @@ def _install_requests_stub():
     requests_stub.HTTPError = _RequestException
     requests_stub.post = MagicMock()
     requests_stub.put = MagicMock()
+    requests_stub.get = MagicMock()
     requests_stub._Resp = _Resp
     sys.modules["requests"] = requests_stub
     return requests_stub
@@ -57,6 +58,16 @@ _REQ = _install_requests_stub()
 def _resp(status_code=200, json_data=None, text=""):
     return _REQ._Resp(status_code=status_code, json_data=json_data, text=text)
 
+
+# Ensure libs.shared.app is loaded as a real package BEFORE mcr_client tries
+# to ``from libs.shared.app.mirai_oidc import ...``. Other tests in the suite
+# may have registered ``libs.shared.app`` in sys.modules as a non-package via
+# importlib.spec_from_file_location, which would cause the from-import to
+# fail with "'libs.shared.app' is not a package". Forcing a fresh import here
+# is cheap and order-independent.
+for _stale in [k for k in list(sys.modules) if k == "libs" or k.startswith("libs.")]:
+    del sys.modules[_stale]
+import libs.shared.app.mirai_oidc  # noqa: F401  (just to populate sys.modules)
 
 # Now load mcr_client
 MODULE_PATH = os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "mcr_client.py")
@@ -79,6 +90,7 @@ def _client():
 def _reset_mocks():
     _REQ.post.reset_mock(side_effect=True, return_value=True)
     _REQ.put.reset_mock(side_effect=True, return_value=True)
+    _REQ.get.reset_mock(side_effect=True, return_value=True)
 
 
 # --- Constructor ----------------------------------------------------------
@@ -216,3 +228,119 @@ def test_upload_binary_network_failure_raises_transient_error():
     _REQ.put.side_effect = _REQ.RequestException("conn reset")
     with pytest.raises(MOD.MCRTransientError):
         _client().upload_binary("https://signed/", b"audio-data", "audio/mp4")
+
+
+# --- Pull: list_meetings -------------------------------------------------
+
+def test_list_meetings_200_returns_paginated_dict():
+    payload = {"total_items": 2, "total_pages": 1, "page": 1,
+               "data": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]}
+    _REQ.get.return_value = _resp(200, json_data=payload)
+    out = _client().list_meetings("AT", page=1, page_size=10)
+    assert out == payload
+    # URL was the gateway + /api/meetings (no trailing slash — MCR redirects
+    # trailing-slash to non-slash but downgrades to http:// which the CNP
+    # frontend-egress blocks; cf bug 2026-05-23 prod-bêta first deploy).
+    args, kwargs = _REQ.get.call_args
+    assert args[0].endswith("/api/meetings")
+    assert kwargs["params"] == {"page": 1, "page_size": 10}
+    assert kwargs["headers"]["Authorization"] == "Bearer AT"
+
+
+def test_list_meetings_with_search_propagates_param():
+    _REQ.get.return_value = _resp(200, json_data={"data": []})
+    _client().list_meetings("AT", page=2, page_size=20, search="kevin")
+    _, kwargs = _REQ.get.call_args
+    assert kwargs["params"]["search"] == "kevin"
+    assert kwargs["params"]["page"] == 2
+
+
+def test_list_meetings_401_raises_auth_error():
+    _REQ.get.return_value = _resp(401, text="invalid token")
+    with pytest.raises(MOD.MCRAuthError):
+        _client().list_meetings("AT")
+
+
+def test_list_meetings_500_raises_transient_error():
+    _REQ.get.return_value = _resp(500)
+    with pytest.raises(MOD.MCRTransientError):
+        _client().list_meetings("AT")
+
+
+def test_list_meetings_network_failure_raises_transient_error():
+    _REQ.get.side_effect = _REQ.RequestException("conn reset")
+    with pytest.raises(MOD.MCRTransientError):
+        _client().list_meetings("AT")
+
+
+# --- Pull: download_audio ------------------------------------------------
+
+def test_download_audio_200_returns_response_unchanged():
+    resp = _resp(200)
+    _REQ.get.return_value = resp
+    out = _client().download_audio("AT", "42")
+    assert out is resp
+    args, kwargs = _REQ.get.call_args
+    assert args[0].endswith("/api/meetings/42/audio")
+    assert kwargs["stream"] is True
+
+
+def test_download_audio_404_raises_applicative_error_with_clear_msg():
+    # close() should be called even on the missing branch (cleanup)
+    class _R(_REQ._Resp):
+        def __init__(self):
+            super().__init__(status_code=404)
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+    resp = _R()
+    _REQ.get.return_value = resp
+    with pytest.raises(MOD.MCRApplicativeError) as exc:
+        _client().download_audio("AT", "missing")
+    assert "No audio available" in str(exc.value)
+    assert resp.closed is True
+
+
+def test_download_audio_403_raises_auth_error():
+    _REQ.get.return_value = _resp(403)
+    with pytest.raises(MOD.MCRAuthError):
+        _client().download_audio("AT", "42")
+
+
+def test_download_audio_500_raises_transient_error():
+    _REQ.get.return_value = _resp(500)
+    with pytest.raises(MOD.MCRTransientError):
+        _client().download_audio("AT", "42")
+
+
+# --- Pull: download_transcription_docx -----------------------------------
+
+def test_download_transcription_docx_200_returns_bytes():
+    fake = _resp(200)
+    fake.content = b"PK\x03\x04 fake docx body"
+    _REQ.post.return_value = fake
+    out = _client().download_transcription_docx("AT", "42")
+    assert out == b"PK\x03\x04 fake docx body"
+    args, kwargs = _REQ.post.call_args
+    assert args[0].endswith("/api/meetings/42/transcription")
+    assert kwargs["headers"]["Authorization"] == "Bearer AT"
+
+
+def test_download_transcription_docx_404_raises_applicative():
+    _REQ.post.return_value = _resp(404)
+    with pytest.raises(MOD.MCRApplicativeError) as exc:
+        _client().download_transcription_docx("AT", "missing")
+    assert "No transcription available" in str(exc.value)
+
+
+def test_download_transcription_docx_410_raises_applicative():
+    _REQ.post.return_value = _resp(410)
+    with pytest.raises(MOD.MCRApplicativeError):
+        _client().download_transcription_docx("AT", "missing")
+
+
+def test_download_transcription_docx_500_raises_transient_error():
+    _REQ.post.return_value = _resp(500)
+    with pytest.raises(MOD.MCRTransientError):
+        _client().download_transcription_docx("AT", "42")

@@ -107,23 +107,43 @@ _ITEMS_IN_URL = re.compile(r"/(?:items|folders)/([^/?#\s]+)")
 
 
 def extract_folder_id(value: str) -> Optional[str]:
-    """Return the bare Drive item id from a raw id or from a Drive URL.
+    """Return the bare Drive item id from a raw id or from a Drive URL."""
+    fid, _ = extract_folder_id_and_host(value)
+    return fid
 
-    None if the input is empty or contains only whitespace. The function does
-    not validate the id format — the Drive backend is the source of truth
-    and will return 404 on a bad id.
+
+def extract_folder_id_and_host(value: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse l'input user et retourne (folder_id, hostname).
+
+    Cas :
+      - URL Drive ``https://X/.../items/<id>/...`` ou ``.../folders/<id>``
+        → (id, X)
+      - URL Drive sans match items/folders → (None, X) ; le caller refusera
+      - ID nu (sans / ni espace) → (id, None) ; le caller utilise le base URL
+        par défaut (DRIVE_BASE_URL env)
+      - vide / blanc → (None, None)
     """
     if not value:
-        return None
+        return None, None
     stripped = value.strip()
     if not stripped:
-        return None
+        return None, None
+    host: Optional[str] = None
+    # Hostname si URL : on parse avant la recherche de l'id pour gérer aussi
+    # le cas "URL sans /items/" (Drive root, partage de dossier explorer/...).
+    if stripped.startswith("http://") or stripped.startswith("https://"):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(stripped)
+            host = (parsed.hostname or None)
+        except Exception:
+            host = None
     match = _ITEMS_IN_URL.search(stripped)
     if match:
-        return match.group(1)
+        return match.group(1), host
     if "/" in stripped or " " in stripped:
-        return None
-    return stripped
+        return None, host
+    return stripped, host
 
 
 # ─── Corpus assembly ──────────────────────────────────────────────
@@ -228,10 +248,20 @@ def assemble_corpus(
             logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
             used.append({"name": name, "id": item_id, "status": "error_download"})
             continue
-        except DriveTransientError:
-            # Surface transient errors so the route can return 502 — partial
-            # corpus would mislead the LLM. Re-raise.
-            raise
+        except DriveTransientError as exc:
+            # 2026-05-24 : on bascule en best-effort sur les transient errors
+            # spécifiques à UN document — vu en prod des HTTP 500 systématiques
+            # sur certains fichiers Drive (bug applicatif côté drive-backend).
+            # Avant : raise → toute la génération échouait. Maintenant : on
+            # skip le doc fautif et on continue ; le brief sera construit sur
+            # les autres docs (mention "[…fichier indisponible]" si jamais
+            # tous ratent en cascade, le caller détectera corpus vide).
+            logger.warning(
+                "meeting_prep: drive transient error on %s (skip + continue): %s",
+                item_id, exc,
+            )
+            used.append({"name": name, "id": item_id, "status": "error_transient"})
+            continue
 
         text = extract_text(body, content_type, filename_hint=name, max_chars=per_doc_max_chars)
         if not text:

@@ -57,6 +57,13 @@ NON_TERMINAL_STATUSES = (
     "kevent_queued",
     "kevent_transcribing",
     "kevent_processing",
+    # Reprocess LLM (cf puller.reprocess_audio) — peut bloquer si le worker
+    # gunicorn est SIGKILL pendant la chaîne LLM (sync, peut dépasser 5min).
+    # Inclus ici pour que _mark_capped_as_failed le sorte du purgatoire.
+    "kevent_reprocessing",
+    # Import MCR : la row est créée en pending ; si le worker mcr_importer
+    # n'aboutit pas (timeout, MCR transitoire), elle reste bloquée ici.
+    "mcr_import_pending",
 )
 
 # Statuts terminaux qu'on peut RE-tenter si l'utilisateur le demande
@@ -66,6 +73,7 @@ NON_TERMINAL_STATUSES = (
 RETRYABLE_TERMINAL_STATUSES = (
     "kevent_failed",
     "failed",
+    "mcr_import_failed",
 )
 
 _POD_HOSTNAME = os.environ.get("HOSTNAME") or socket.gethostname()
@@ -105,26 +113,45 @@ def _scan_stuck(session_factory, *, user_sub: Optional[str] = None,
         if not include_failed:
             retry_cap_clause = "AND COALESCE(reprocess_version, 0) < :max_retries"
 
+        # En mode user-explicite (include_failed=True via le bouton "Relancer
+        # les bloqués"), on ignore le délai stale : l'utilisateur a demandé
+        # un retry MAINTENANT, pas dans 5 minutes.
+        stale_clause = (
+            "AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)"
+            if not include_failed else ""
+        )
+        # Exclusion non-retryable : certains last_error_kind décrivent un
+        # échec terminal qui ne sera JAMAIS résolu en réessayant.
+        # L'utilisateur doit supprimer la ligne, pas la relancer.
+        #   - mcr_unavailable_on_source : audio ET transcript 404 sur MCR
+        #   - s3_object_purged : blob audio retiré de S3 par lifecycle
+        #   - s3_no_audio_path : row sans référence S3 (création anormale)
         q = sql_text(("""
             SELECT id::text, user_sub
               FROM user_audio_files
              WHERE transcription_status = ANY(:statuses)
-               AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)
+               {stale}
                AND created_at > :age_cutoff
                AND (pipeline_claim_at IS NULL OR pipeline_claim_at < :claim_cutoff)
+               AND (last_error_kind IS NULL OR last_error_kind NOT IN (
+                       'mcr_unavailable_on_source',
+                       's3_object_purged',
+                       's3_no_audio_path'))
                {retry_cap}
                {user_filter}
              ORDER BY last_activity_at ASC NULLS FIRST
              LIMIT :limit
-        """).replace("{retry_cap}", retry_cap_clause)
+        """).replace("{stale}", stale_clause)
+            .replace("{retry_cap}", retry_cap_clause)
             .replace("{user_filter}", "AND user_sub = :user_sub" if user_sub else ""))
         params = {
             "statuses": statuses,
-            "stale_cutoff": stale_cutoff,
             "age_cutoff": age_cutoff,
             "claim_cutoff": claim_cutoff,
             "limit": limit,
         }
+        if not include_failed:
+            params["stale_cutoff"] = stale_cutoff
         if not include_failed:
             params["max_retries"] = MAX_AUTO_RETRIES
         if user_sub:
@@ -165,17 +192,125 @@ def _try_claim(session_factory, audio_id: str) -> bool:
         db.close()
 
 
-def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog") -> dict:
-    """Appelle le moteur de full-reprocess pour un audio donné.
+def resume_one(audio_id: str, user_sub: str, *, reason: str = "watchdog",
+                session_factory=None) -> dict:
+    """Reprise d'un job bloqué. Branche selon l'origine :
 
-    Wrap autour de ``_reset_and_resubmit_kevent_pipeline`` pour isoler la
-    dépendance circulaire (le watchdog est importé par puller, et appelle
-    une fonction de puller).
+      - row 'mcr_import' SANS stored_filename → republier sur QUEUE_MCR_IMPORT
+        (le worker mcr_importer ré-essaiera download audio puis fallback
+        transcript + chaîne LLM)
+      - autres rows → ``_reset_and_resubmit_kevent_pipeline`` (Whisper + LLM)
     """
-    # Import différé pour éviter le cycle puller ↔ watchdog au module load.
+    # Inspect d'abord la row pour décider du chemin.
+    if session_factory is not None:
+        try:
+            from libs.shared.app.models import UserAudioFile
+            db = session_factory()
+            try:
+                row = (
+                    db.query(UserAudioFile)
+                    .filter(UserAudioFile.id == audio_id,
+                            UserAudioFile.user_sub == user_sub)
+                    .first()
+                )
+                # Routage selon origin + état :
+                #   - mcr_import SANS stored_filename → republish queue MCR
+                #     (worker tentera audio puis fallback transcript)
+                #   - mcr_import AVEC stored_filename (audio déjà uploadé) →
+                #     path kevent normal (Whisper sur l'audio S3)
+                #   - autres origins → path kevent
+                if row is not None and row.origin == "mcr_import" and not row.stored_filename:
+                    return _resume_mcr_import(audio_id, user_sub, row, reason=reason,
+                                              session_factory=session_factory)
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("resume_one: inspection origin failed for %s, fallback kevent path", audio_id)
+
+    # Default : pipeline kevent (audio + LLM).
     from app.puller import _reset_and_resubmit_kevent_pipeline
     code, payload = _reset_and_resubmit_kevent_pipeline(audio_id, user_sub, reason=reason)
     return {"audio_id": audio_id, "http_code": code, **payload}
+
+
+def _resume_mcr_import(audio_id: str, user_sub: str, row, *, reason: str,
+                       session_factory=None) -> dict:
+    """Re-publie une row mcr_import sur QUEUE_MCR_IMPORT.
+
+    Reset DB AVANT publish (statut=mcr_import_pending, last_activity_at=NOW,
+    bump reprocess_version, append reprocess_history) puis publie le message.
+    Sans cet UPDATE, la row restait en `mcr_import_failed` indéfiniment et le
+    watchdog suivant la re-claimait en boucle (cf
+    `_reset_and_resubmit_kevent_pipeline` qui suit le même pattern).
+
+    Le claim watchdog (pipeline_claim_at) n'est PAS libéré : il sert d'anti-
+    double-publish pendant que le worker MCR consomme. Il expire naturellement
+    après 90s, alignée sur la durée de turnaround typique du worker.
+    """
+    from libs.shared.app.config import RabbitMQConfig
+    from libs.shared.app.models import UserAudioFile
+    from libs.shared.app.queue_helper import QUEUE_MCR_IMPORT, publish_message
+
+    # 1) UPDATE atomique avant publish — sinon la row reste en mcr_import_failed
+    #    et le watchdog suivant la re-pickerait en boucle infinie.
+    new_version: int = 0
+    if session_factory is not None:
+        try:
+            db = session_factory()
+            try:
+                uaf = db.query(UserAudioFile).filter(UserAudioFile.id == audio_id).first()
+                if uaf is None:
+                    logger.warning("resume_one: mcr_import row %s disappeared before reset", audio_id)
+                    return {"audio_id": audio_id, "http_code": 404, "error": "not_found"}
+                prev_entry = {
+                    "version": int(uaf.reprocess_version or 0),
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "type": reason,
+                    "prev_status": uaf.transcription_status,
+                }
+                history = list(uaf.reprocess_history or [])
+                history.append(prev_entry)
+                if len(history) > 5:
+                    history = history[-5:]
+                new_version = int(uaf.reprocess_version or 0) + 1
+                uaf.transcription_status = "mcr_import_pending"
+                uaf.last_activity_at = datetime.now(timezone.utc)
+                uaf.reprocess_version = new_version
+                uaf.reprocess_history = history
+                uaf.last_reprocessed_at = datetime.now(timezone.utc)
+                db.commit()
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("resume_one: mcr_import db reset failed for %s", audio_id)
+            return {"audio_id": audio_id, "http_code": 500, "error": "db_reset_failed"}
+
+    # 2) Publish sur la queue (worker consommera et appellera _set_failed ou
+    #    rebasculera en 'pending' selon le résultat MCR).
+    try:
+        message = {
+            "user_audio_file_id": audio_id,
+            "mcr_meeting_id": row.mcr_meeting_id,
+            "user_sub": user_sub,
+            "user_email": row.user_email or "",
+            "fallback_transcript": True,
+        }
+        publish_message(RabbitMQConfig(), QUEUE_MCR_IMPORT, message)
+        logger.info(
+            "resume_one: mcr_import reset+publish row=%s mcr_meeting_id=%s reprocess_version=%s reason=%s",
+            audio_id, row.mcr_meeting_id, new_version, reason,
+        )
+        return {
+            "audio_id": audio_id,
+            "http_code": 202,
+            "reprocessed": True,
+            "mode": "mcr_import_republish",
+            "mcr_meeting_id": row.mcr_meeting_id,
+            "reprocess_version": new_version,
+        }
+    except Exception as exc:
+        logger.exception("resume_one: mcr_import publish failed for %s", audio_id)
+        return {"audio_id": audio_id, "http_code": 500, "error": str(exc)}
 
 
 def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
@@ -200,7 +335,8 @@ def scan_and_resume(session_factory, *, user_sub: Optional[str] = None,
             skipped += 1
             continue
         try:
-            r = resume_one(audio_id, owner_sub, reason="watchdog")
+            r = resume_one(audio_id, owner_sub, reason="watchdog",
+                            session_factory=session_factory)
             resumed.append(r)
         except Exception:
             logger.exception("watchdog: resume_one failed for %s", audio_id)
@@ -227,7 +363,12 @@ def _mark_capped_as_failed(session_factory) -> int:
                    transcription_completed_at = COALESCE(transcription_completed_at, NOW()),
                    last_activity_at = NOW(),
                    pipeline_claim_at = NULL,
-                   pipeline_claim_pod = NULL
+                   pipeline_claim_pod = NULL,
+                   last_error_at = NOW(),
+                   last_error_kind = 'cap_exceeded',
+                   last_error_message = format(
+                       '%s tentatives automatiques épuisées sur le statut %s (cap MAX_AUTO_RETRIES). Cliquer Relancer pour forcer une nouvelle tentative.',
+                       :max_retries, transcription_status)
              WHERE transcription_status = ANY(:statuses)
                AND COALESCE(reprocess_version, 0) >= :max_retries
                AND (last_activity_at IS NULL OR last_activity_at < :stale_cutoff)
@@ -273,15 +414,45 @@ def _watchdog_loop(session_factory):
             logger.exception("pipeline_watchdog tick crashed (continuing)")
 
 
+_WATCHDOG_FLOCK_FH = None  # garde la référence sinon GC ferme le fd → relâche le lock
+
+
 def start_watchdog(session_factory):
-    """Lance le thread daemon. Idempotent + opt-out via env."""
-    global _watchdog_started
+    """Lance le thread daemon. Idempotent + opt-out via env.
+
+    Garde *inter-worker* via flock sur ``/tmp/pipeline_watchdog.lock`` : sous
+    gunicorn pre-fork (N workers/pod), le flag in-memory ``_watchdog_started``
+    n'empêche pas chaque worker de démarrer son propre thread → 2× scan
+    démultiplié par pod. Le flock POSIX exclusif non-bloquant garantit
+    qu'un seul worker du pod tient le rôle ; les autres no-op silencieusement.
+    """
+    global _watchdog_started, _WATCHDOG_FLOCK_FH
     if os.environ.get("PIPELINE_WATCHDOG_DISABLED") == "1":
         logger.info("pipeline_watchdog disabled via env")
         return
     with _watchdog_lock:
         if _watchdog_started:
             return
+        # Acquérir le flock inter-worker AVANT de marquer started, sinon on
+        # set le flag puis on échoue à prendre le lock → faux idempotent.
+        try:
+            import fcntl
+            lock_path = os.environ.get("PIPELINE_WATCHDOG_LOCK_PATH",
+                                       "/tmp/pipeline_watchdog.lock")
+            fh = open(lock_path, "w")
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError):
+                fh.close()
+                logger.info(
+                    "pipeline_watchdog: lock %s held by sibling worker → skip start",
+                    lock_path,
+                )
+                return
+            _WATCHDOG_FLOCK_FH = fh  # garde la ref pour empêcher GC + close
+        except ImportError:
+            # fcntl indisponible (Windows) — fallback flag in-memory.
+            logger.warning("pipeline_watchdog: fcntl unavailable, falling back to in-process flag only")
         _watchdog_started = True
     t = threading.Thread(
         target=_watchdog_loop,

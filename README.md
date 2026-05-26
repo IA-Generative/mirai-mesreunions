@@ -1,16 +1,31 @@
-# Mes Réunions — pipeline sécurisé d'upload, transcription et compte-rendu
+# Mes Réunions — intelligence de la réunion, du cycle de vie complet, sur données sensibles
 
-> Service souverain de captation audio par QR code, avec cloisonnement zone externe / zone interne, transcription Whisper + diarisation pyannote, et génération de comptes-rendus structurés par LLM. Conçu pour les ministères français — design DSFR, déploiement Scaleway, SSO Keycloak.
+> **Mission** : couvrir tout le cycle de vie d'une réunion efficace — de sa préparation à la capitalisation des décisions — pour produire de l'impact organisationnel mesurable, **sans jamais quitter un périmètre de confiance souverain**.
+>
+> **Positionnement** : pas un énième outil de transcription. Une *« suite intelligence de la réunion »* qui accompagne l'agent sur 4 étapes :
+
+| Étape | Ce que fait l'outil | Bénéfice utilisateur |
+|---|---|---|
+| **1. Préparer** | Brief généré depuis Drive (LiteLLM), glossaire métier extrait automatiquement, prompts spécialisés (1:1, projet, comité, brainstorm), chaînage série via `series_parent_id` pour les réunions récurrentes | L'agent arrive en réunion avec le contexte, les acronymes, l'historique. Moins d'imprécisions sur le live. |
+| **2. Capturer** | Multi-sources : PWA mobile QR, upload web, import Compte-Rendu Mirai, à venir YouTube + autres visios. La même chaîne accepte toutes les entrées. | Aucune contrainte sur la modalité — l'agent choisit ce qui convient à la situation. |
+| **3. Comprendre** | Transcription Whisper + diarisation pyannote + chaîne LLM (correction sigles via glossaire, nettoyage des hésitations, reformulation, compte-rendu 5 sections, résumé pour absents). Chaque étape avec retry borné, statut clair, fallback gracieux. | Compte-rendu structuré exploitable, pas un mur de texte brut. Mêmes garanties quelle que soit la source. |
+| **4. Capitaliser** | Glossaire utilisateur qui s'enrichit à chaque brief (réutilisé sur les transcriptions futures), chaînage des réunions récurrentes, éditeur de transcription pour corriger sigles et masquer parasites, pré-filtrage admin des scories Whisper. | La connaissance accumulée rend les sessions suivantes plus précises. L'outil apprend du contexte de l'organisation. |
+
+> **3 invariants transverses** garantissent que ce cycle de vie reste industrialisable :
+> 1. **Données sensibles par construction** : conçu pour les ministères français, cloisonnement DMZ/interne strict (PULL uniquement côté interne), aucune donnée audio ne sort du périmètre souverain. Identification SSO Keycloak, chiffrement au repos et en transit.
+> 2. **Architecture sécurisée auditable** : 9 services nommés explicitement, séparation des rôles, pas de magie. Tout le cheminement d'un audio est traçable et testable. Conformité DSFR, déploiement sur infrastructure maîtrisée (Kubernetes, registry et bases hébergés dans le périmètre de l'organisation).
+> 3. **Processus résilients** : chaîne de traitement avec retry borné par budget (3 tentatives, backoff, fusible 90s par étape), watchdog avec séparation explicite *liveness vs progress* pour ne jamais laisser une opération dans un état en cours éternel, statut terminal explicite avec cause utilisateur compréhensible et action recommandée. Cf [ADR-0001](docs/adr/0001-pipeline-liveness-vs-progress.md), [ADR-0002](docs/adr/0002-pipeline-status-enum-source-of-truth.md), [chantier résilience](docs/chantier-resilience-batch-processing.md).
 
 ---
 
 ## 1. À qui ça sert (et à quoi)
 
-- **Pour l'agent en réunion** : un QR code généré depuis le poste de travail → captation depuis le mobile (PWA installable) → compte-rendu structuré dans Mes Réunions sans manipulation de fichier.
-- **Pour l'administrateur** : un parcours d'enrôlement de devices, une corbeille, un suivi du pipeline, un éditeur de glossaire personnel.
-- **Pour l'architecte** : un exemple concret de cloisonnement DMZ/interne avec PULL strict (aucun flux HTTP entrant côté interne hors un trigger optionnel filtré).
+- **Pour l'agent en réunion** : (1) avant la réunion, un brief préparatoire généré depuis ses documents Drive, avec le glossaire métier extrait automatiquement ; (2) pendant la réunion, captation par QR code (PWA mobile) ou par toute autre source disponible ; (3) après, un compte-rendu structuré directement exploitable, sans manipulation de fichier ; (4) sur la durée, les glossaires et briefs accumulés rendent chaque session suivante plus précise.
+- **Pour l'administrateur** : un parcours d'enrôlement de devices, une corbeille, un suivi du pipeline, un éditeur de glossaire personnel, une console admin pour le pré-filtrage des transcriptions parasites.
+- **Pour l'architecte** : un exemple concret de cloisonnement DMZ/interne avec PULL strict (aucun flux HTTP entrant côté interne hors un trigger optionnel filtré), une chaîne LLM résiliente avec retry borné par budget, un watchdog avec séparation explicite *liveness vs progress*. Tout est documenté en ADR (`docs/adr/`).
+- **Pour le commanditaire** : une *intelligence de la réunion* compatible avec un cahier des charges « données sensibles, opérateur souverain, audit traçable » — défendable devant un auditeur sécurité.
 
-**Sous-titre produit** : *« Concentrez-vous sur la réunion. »*
+**Sous-titre produit** : *« L'intelligence de vos réunions, dans un périmètre de confiance. »*
 
 ---
 
@@ -29,6 +44,20 @@
 ---
 
 ## 3. Vue d'ensemble
+
+### 3.0 Multi-sources : une chaîne, plusieurs entrées
+
+Le système accepte plusieurs sources d'entrée, qui rejoignent toutes le même pipeline d'intelligence (transcription → diarisation → correction sigles → nettoyage → reformulation → CR structuré → résumé pour absents) :
+
+| Source | Statut | Description |
+|---|---|---|
+| **PWA mobile (QR code)** | ✅ Production | Captation in situ avec device-token éphémère 15j. Cas d'usage principal. |
+| **Upload web direct** | ✅ Production | Drag-drop d'un fichier audio depuis le poste, ou import de dossier entier. |
+| **Import depuis Compte-Rendu Mirai** | ✅ Production | Récupération d'enregistrements depuis la plateforme visio ministérielle. |
+| **Import YouTube** | 🚧 Placeholder | URL YouTube → audio → pipeline (à implémenter dans un prochain chantier). |
+| **Connecteurs visio additionnels** | 📋 Backlog | Architecture pensée pour accueillir d'autres sources (Teams, Webex, Zoom, etc.) via le même bus interne. |
+
+Quelle que soit la source, la suite est identique : ClamAV → normalisation audio → bus AMQP interne → orchestrateur → backends transcription/LLM → restitution dans « Mes Réunions ». L'utilisateur ne voit qu'une seule liste, un seul format de compte-rendu, un seul jeu de garanties.
 
 ### 3.1 Le principe en une phrase
 
@@ -292,7 +321,7 @@ Le script `deploy/scripts/commit-push-build.sh` :
 1. `git push`
 2. `ssh root@<vm-diarization-host>` (cloud build VM)
 3. `docker buildx build --platform linux/amd64`
-4. `docker push` registry SCW
+4. `docker push` vers le registry de l'infrastructure cible
 5. `kubectl set image` (rollout strategy `surge=100%` pour fast rollouts)
 
 ### 7.2 Cert-manager + DNS-01 (CNAME delegation)
@@ -304,7 +333,7 @@ Pour chaque nouvel hôte, créer dans la zone parente :
 _acme-challenge.<host>   CNAME   _acme-challenge.<host>.acme.<organisation-domain>.
 ```
 
-Sans ce CNAME, le challenge échoue avec `domain not found` (le webhook Scaleway ne gère que la sous-zone déléguée).
+Sans ce CNAME, le challenge échoue avec `domain not found` (le webhook DNS de l'opérateur ne gère que la sous-zone déléguée).
 
 ### 7.3 Autoscaling
 

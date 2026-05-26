@@ -660,16 +660,57 @@ async function _saveDetailParticipants() {
 }
 
 // ─── Sources Drive + test d'accès (Lot 1) ────────────────────────────────
+//
+// Affiche aussi la liste des documents qui ont servi à construire le brief
+// (champ `documents` retourné par /api/preparations), avec un badge par
+// statut. Si certains ont été skippés (error_download / error_transient /
+// skipped_unsupported_or_empty), un bandeau d'alerte le signale au user.
+const _DOC_STATUS_META = {
+  ingested:                       { icon: '✓',  color: '#15803d', label: 'utilisé' },
+  error_download:                 { icon: '✗',  color: '#b91c1c', label: 'fichier introuvable ou accès refusé' },
+  error_transient:                { icon: '⚠️', color: '#b45309', label: 'le Drive a refusé le téléchargement (à réessayer)' },
+  skipped_unsupported_or_empty:   { icon: '⊘',  color: '#64748b', label: 'format non lisible ou document vide' },
+  skipped_total_cap:              { icon: '⊘',  color: '#64748b', label: 'tronqué (limite globale atteinte)' },
+};
+
 function _renderDriveSourcesBlock(brief) {
   const box = document.getElementById('brief-detail-drive-sources');
   if (!box) return;
   const folderId = brief && (brief.drive_folder_id || (brief.drive && brief.drive.folder_id));
   if (!folderId) { box.innerHTML = ''; return; }
+  const docs = Array.isArray(brief && brief.documents) ? brief.documents : [];
+  const skipped = docs.filter((d) => d.status && d.status !== 'ingested');
+  const ingested = docs.filter((d) => d.status === 'ingested');
+  // Bandeau d'alerte si au moins 1 doc a été skippé/error.
+  const alertHtml = skipped.length > 0 ? `
+    <div class="fr-alert fr-alert--warning fr-alert--sm" style="margin-top:0.5rem;">
+      <p><strong>${skipped.length} document(s) non inclus</strong> dans le brief
+      (${ingested.length} utilisé(s) sur ${docs.length}). Si le brief
+      semble incomplet, vérifie les documents marqués ✗ ou ⚠️ ci-dessous.</p>
+    </div>` : '';
+  // Liste détaillée des docs (collapsible si long).
+  const docsListHtml = docs.length > 0 ? `
+    <details style="margin-top:0.4rem;">
+      <summary style="cursor:pointer;color:#475569;font-size:0.85em;">
+        ${docs.length} document(s) Drive analysé(s) — ${ingested.length} utilisé(s)${skipped.length ? `, ${skipped.length} non inclus` : ''}
+      </summary>
+      <ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85em;list-style:none;padding:0;">
+        ${docs.map((d) => {
+          const meta = _DOC_STATUS_META[d.status] || { icon: '?', color: '#64748b', label: d.status || '?' };
+          return `<li style="padding:2px 0;">
+            <span style="color:${meta.color};font-weight:600;display:inline-block;width:1.4em;">${meta.icon}</span>
+            ${_esc(d.name || d.id || '(sans nom)')}
+            <span style="color:#94a3b8;font-size:0.9em;">— ${_esc(meta.label)}</span>
+          </li>`;
+        }).join('')}
+      </ul>
+    </details>` : '';
   box.innerHTML =
     '<strong>Sources Drive :</strong> ' +
     `<code style="font-size:0.85em;">${_esc(folderId)}</code> ` +
     '<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary fr-icon-search-line fr-btn--icon-left"' +
     ' data-action="test-drive-detail">Vérifier l\'accès</button>' +
+    alertHtml + docsListHtml +
     '<div id="brief-detail-drive-test-result" style="margin-top:0.4rem;"></div>';
 }
 

@@ -148,19 +148,57 @@ class DriveClient:
             raise DriveAuthError("Keycloak returned no access_token")
         return access_token
 
+    # ── Helpers internes ─────────────────────────────────────
+
+    def _get_with_retry(self, url: str, *, access_token: str,
+                         timeout: Optional[int] = None,
+                         max_attempts: int = 3,
+                         label: str = "GET"):
+        """GET avec retry exponentiel sur RequestException (ConnectionReset,
+        timeout, DNS, etc.).
+
+        On force `Connection: close` pour ne PAS réutiliser le pool de
+        connexions de requests entre 2 appels. Constat prod 2026-05-24 :
+        le LB devant le Drive ferme silencieusement les sockets idle, et
+        urllib3 réutilise la conn morte → ConnectionResetError sur EVERY
+        retry. Une nouvelle TCP par requête contourne le bug.
+
+        On NE retry PAS les 4xx/5xx applicatifs : le caller veut savoir
+        si c'est auth vs not_found vs transient. Seul le RequestException
+        au niveau socket déclenche le retry.
+        """
+        import time as _time
+        last_exc = None
+        delay = 0.5
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Connection": "close",
+        }
+        for attempt in range(1, max_attempts + 1):
+            try:
+                # Chaque appel a sa propre Session pour éviter qu'urllib3
+                # ré-utilise un pool de connexions partagé via le singleton
+                # req.get(). Session fermée explicitement après usage.
+                with req.Session() as s:
+                    return s.get(url, headers=headers, timeout=timeout or self.timeout)
+            except req.RequestException as exc:
+                last_exc = exc
+                if attempt == max_attempts:
+                    break
+                logger.warning(
+                    "drive_client.%s retry %d/%d after %s: %s",
+                    label, attempt, max_attempts, type(exc).__name__, exc,
+                )
+                _time.sleep(delay)
+                delay *= 3
+        raise DriveTransientError(f"Drive {label} unreachable after {max_attempts} attempts: {last_exc}") from last_exc
+
     # ── Step 2: metadata ─────────────────────────────────────
 
     def get_item(self, access_token: str, item_id: str) -> dict:
         """GET /api/v1.0/items/{id}/ → item metadata dict."""
         url = f"{self.base_url}{_API_PREFIX}/items/{item_id}/"
-        try:
-            resp = req.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=self.timeout,
-            )
-        except req.RequestException as exc:
-            raise DriveTransientError(f"Drive GET item unreachable: {exc}") from exc
+        resp = self._get_with_retry(url, access_token=access_token, label=f"GET item {item_id}")
         self._raise_for_status(resp, context=f"GET items/{item_id}")
         try:
             data = resp.json()
@@ -182,14 +220,8 @@ class DriveClient:
         entries which is more than enough for a meeting prep UI.
         """
         url = f"{self.base_url}{_API_PREFIX}/items/{parent_id}/children/"
-        try:
-            resp = req.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=self.timeout,
-            )
-        except req.RequestException as exc:
-            raise DriveTransientError(f"Drive list children unreachable: {exc}") from exc
+        resp = self._get_with_retry(url, access_token=access_token,
+                                     label=f"list children {parent_id}")
         self._raise_for_status(resp, context=f"GET items/{parent_id}/children")
         try:
             data = resp.json()
@@ -236,11 +268,41 @@ class DriveClient:
             download_url = f"{self.base_url}{_API_PREFIX}/items/{item_id}/download/"
             send_bearer = True
 
-        headers = {"Authorization": f"Bearer {access_token}"} if send_bearer else {}
-        try:
-            resp = req.get(download_url, headers=headers, timeout=self.download_timeout, stream=False)
-        except req.RequestException as exc:
-            raise DriveTransientError(f"Drive download unreachable: {exc}") from exc
+        # Retry sur ConnectionReset/timeout — fréquent sur les gros docs.
+        # Pour la branche presigned-S3 sans bearer on n'utilise pas le helper
+        # (signature spécifique), on garde l'ancien flow + retry inline.
+        import time as _time
+        last_exc = None
+        delay = 0.5
+        max_attempts = 3
+        resp = None
+        headers = {"Connection": "close"}
+        if send_bearer:
+            headers["Authorization"] = f"Bearer {access_token}"
+        # DEBUG : log la première URL téléchargée pour diagnostiquer où ça
+        # plante. À retirer une fois le bug RST résolu.
+        logger.info(
+            "drive_client.download_item: item=%s download_url=%s send_bearer=%s",
+            item_id, download_url[:200], send_bearer,
+        )
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with req.Session() as s:
+                    resp = s.get(download_url, headers=headers,
+                                  timeout=self.download_timeout, stream=False)
+                break
+            except req.RequestException as exc:
+                last_exc = exc
+                if attempt == max_attempts:
+                    raise DriveTransientError(
+                        f"Drive download unreachable after {max_attempts} attempts: {exc}"
+                    ) from exc
+                logger.warning(
+                    "drive_client.download_item retry %d/%d for item=%s: %s",
+                    attempt, max_attempts, item_id, exc,
+                )
+                _time.sleep(delay)
+                delay *= 3
         if resp.status_code in (401, 403):
             raise DriveAuthError(
                 f"Drive download {resp.status_code} for item {item_id}",

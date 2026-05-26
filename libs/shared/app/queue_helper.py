@@ -18,6 +18,7 @@ QUEUE_TRANSCODE = "transcode"
 QUEUE_FILE_READY = "file_ready"
 QUEUE_TRANSCRIPTION = "transcription"
 QUEUE_INTERNAL_PULL = "internal_pull"
+QUEUE_MCR_IMPORT = "mcr_import"
 
 RETRY_HEADER = "x-retry-count"
 DEFAULT_MAX_RETRIES = max(0, int(os.getenv("QUEUE_MAX_RETRIES", "5")))
@@ -90,6 +91,7 @@ def declare_queues(cfg: RabbitMQConfig):
         QUEUE_FILE_READY,
         QUEUE_TRANSCRIPTION,
         QUEUE_INTERNAL_PULL,
+        QUEUE_MCR_IMPORT,
     ]:
         channel.queue_declare(queue=queue_name, durable=True)
         logger.info("Declared queue: %s", queue_name)

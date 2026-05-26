@@ -327,6 +327,67 @@ def _build_llm_client() -> Optional[LLMClient]:
         return None
 
 
+def _persist_terminal_error(db, uaf, *, kind: str, message: str,
+                             status: str = "kevent_failed") -> None:
+    """Marque une row en statut terminal d'échec + remplit last_error_*.
+
+    Utilisé par les pré-checks de _reset_and_resubmit_kevent_pipeline (S3
+    purgé, no_audio_path) pour transformer une 410 muette en statut DB
+    explicite que l'UI peut surfacer. La transaction est commit ici —
+    appelant peut continuer son flux normal (return après).
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        uaf.transcription_status = status
+        if uaf.transcription_completed_at is None:
+            uaf.transcription_completed_at = now
+        uaf.last_activity_at = now
+        uaf.last_error_at = now
+        uaf.last_error_kind = kind
+        uaf.last_error_message = message[:4000]
+        # Libérer le claim watchdog : aucun pod ne doit re-pickup une row
+        # qu'on vient de marquer définitivement.
+        uaf.pipeline_claim_at = None
+        uaf.pipeline_claim_pod = None
+        db.commit()
+        logger.info(
+            "reset+resubmit: row %s marked terminal kind=%s status=%s",
+            uaf.id, kind, status,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("_persist_terminal_error: write failed for %s", uaf.id)
+
+
+def _touch_last_activity(audio_file_id) -> None:
+    """Heartbeat léger : UPDATE last_activity_at=NOW pour un audio_id.
+
+    Appelé à chaque poll Kevent (cf ``_on_kevent_poll``) pour éviter que le
+    pipeline_watchdog ne considère la row stale et la "vole" en cours de
+    transcription (cf bug docs/BUG_WATCHDOG_STEAL.md — root cause des rows
+    bouclant à reprocess_version > 40 en mai 2026).
+
+    Pas de full ORM ni de heartbeat sur d'autres colonnes : on veut l'écriture
+    la plus légère possible (1 UPDATE par poll Kevent toutes les 3s).
+    """
+    if SessionLocal is None:
+        return
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(text(
+                "UPDATE user_audio_files SET last_activity_at = NOW() WHERE id = :id"
+            ), {"id": str(audio_file_id)})
+            db.commit()
+        finally:
+            db.close()
+    except Exception:
+        # Heartbeat best-effort — si DB temporairement down on n'interrompt
+        # PAS le pipeline (le watchdog reprendra le job sur la prochaine row
+        # stale, c'est précisément ce qu'on évite ici mais cas dégradé).
+        logger.exception("kevent poll heartbeat failed for %s", audio_file_id)
+
+
 def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
     """
     Update transcription_status and any other named columns on a UserAudioFile row.
@@ -362,6 +423,10 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         "reprocessed_with_meeting_id",
         "last_reprocessed_at",
         "reprocess_history",
+        # Observabilité erreur (migration 020) — last_error_at posé
+        # automatiquement quand kind ou message est fourni.
+        "last_error_kind",
+        "last_error_message",
     }
     db = SessionLocal()
     try:
@@ -373,7 +438,21 @@ def _set_user_audio_status(audio_file_id, status: str, **fields) -> None:
         rec.transcription_status = status
         for key, val in fields.items():
             if key in allowed:
+                if key == "last_error_message" and isinstance(val, str):
+                    val = val[:4000]
                 setattr(rec, key, val)
+        # Auto-set last_error_at SEULEMENT si on positionne réellement une
+        # erreur (kind ou message TRUTHY). Sinon, un reset explicite
+        # (kind=None pour effacer un échec antérieur après succès) tamponnerait
+        # à tort un horodatage d'erreur fraîche alors qu'il n'y a plus d'erreur.
+        _new_kind = fields.get("last_error_kind")
+        _new_msg = fields.get("last_error_message")
+        if _new_kind or _new_msg:
+            rec.last_error_at = datetime.now(timezone.utc)
+        elif ("last_error_kind" in fields and _new_kind is None) and \
+             ("last_error_message" in fields and _new_msg is None):
+            # Reset volontaire : on efface aussi last_error_at pour cohérence.
+            rec.last_error_at = None
         now_ts = datetime.now(timezone.utc)
         # Heartbeat watchdog : chaque changement de statut/colonne signale
         # une activité du pipeline. Le watchdog scan ``last_activity_at``
@@ -563,11 +642,105 @@ def _orphan_watchdog_loop() -> None:
                     _set_user_audio_status(
                         audio_id, "kevent_failed",
                         transcription_engine="kevent",
+                        last_error_kind="kevent_no_job_id",
+                        last_error_message="Pipeline Kevent orphelin (pas de job_id Kevent assigné, probable crash avant submit).",
                     )
                     logger.warning("orphan watchdog: row %s has no kevent_job_id, marked failed", audio_id)
         except Exception:
             logger.exception("orphan watchdog scan failed (non-fatal, retry in %ss)",
                              _ORPHAN_WATCHDOG_INTERVAL_S)
+
+
+# Budget + retry par étape LLM. Configurable via env pour réagir vite si
+# Mirai/LiteLLM est lent (augmenter) ou flaky (augmenter aussi).
+# Total worst case par étape = MAX_ATTEMPTS × BUDGET_SECONDS, mais s'arrête
+# au premier success. Avec MAX_ATTEMPTS=3 + BUDGET=90s + backoff 1+2+4s =
+# ~280s pire cas par étape, soit ~30 min pour la chaîne complète de 5 étapes
+# si TOUTES timeoutent (jamais observé en prod).
+_LLM_STEP_MAX_ATTEMPTS = int(os.environ.get("LLM_STEP_MAX_ATTEMPTS", "3"))
+_LLM_STEP_BUDGET_SECONDS = float(os.environ.get("LLM_STEP_BUDGET_SECONDS", "90"))
+
+
+def _llm_step_with_retry(step_name, callable_fn):
+    """Retry budget-bound autour d'un call LLM. Retourne (result, status_str).
+
+    ``status_str`` est l'une des valeurs :
+    - ``ok`` : succès, ``result`` est utilisable
+    - ``empty`` : succès mais réponse vide/None (modèle a renvoyé rien)
+    - ``budget_exceeded_after_N`` : timeout total dépassé après N tentatives
+    - ``failed_after_N_attempts:<ExceptionName>`` : épuisé sans succès
+
+    Backoff exponentiel borné 1s, 2s, 4s, 8s entre tentatives. Le call est
+    laissé tel quel — c'est l'appelant (mi.clean_oob, etc.) qui gère ses
+    propres timeouts HTTP. Le budget côté wrapper est un fusible global.
+    """
+    start = time.monotonic()
+    last_exc_name = None
+    for attempt in range(1, _LLM_STEP_MAX_ATTEMPTS + 1):
+        elapsed = time.monotonic() - start
+        if elapsed >= _LLM_STEP_BUDGET_SECONDS:
+            logger.warning(
+                "LLM step %s budget exceeded after %d attempts (%.0fs)",
+                step_name, attempt - 1, elapsed,
+            )
+            return None, f"budget_exceeded_after_{attempt-1}_attempts"
+        try:
+            result = callable_fn()
+            if result is None or (isinstance(result, str) and not result.strip()):
+                logger.info("LLM step %s returned empty (attempt %d)",
+                             step_name, attempt)
+                return None, "empty"
+            if attempt > 1:
+                logger.info("LLM step %s succeeded on attempt %d after retries",
+                             step_name, attempt)
+            return result, "ok"
+        except Exception as exc:
+            last_exc_name = type(exc).__name__
+            logger.warning(
+                "LLM step %s attempt %d/%d failed: %s",
+                step_name, attempt, _LLM_STEP_MAX_ATTEMPTS, exc,
+            )
+            if attempt < _LLM_STEP_MAX_ATTEMPTS:
+                backoff = min(2 ** (attempt - 1), 8)
+                time.sleep(backoff)
+    return None, f"failed_after_{_LLM_STEP_MAX_ATTEMPTS}_attempts:{last_exc_name}"
+
+
+# Libellés humains des étapes LLM, utilisés pour construire le
+# last_error_message structuré quand des étapes échouent. Synchronisé avec
+# le STEP_INFO côté frontend (legacy.js).
+_LLM_STEP_LABELS = {
+    "glossary_correction": "correction des sigles",
+    "suggest_metadata": "titre et points clés",
+    "cleaning": "nettoyage des hésitations",
+    "reformulation": "reformulation narrative",
+    "meeting_analysis": "compte-rendu structuré",
+    "absentee_summary": "résumé pour les absents",
+}
+
+
+def _build_chain_error_message(step_results: dict) -> str:
+    """Construit un message lisible pour last_error_message à partir
+    des statuts par étape. Liste explicitement les étapes échouées et
+    leur cause courte."""
+    failed = [(k, v) for k, v in step_results.items() if v != "ok"]
+    if not failed:
+        return ""
+    parts = []
+    for step_name, status in failed:
+        label = _LLM_STEP_LABELS.get(step_name, step_name)
+        if status == "empty":
+            reason = "le moteur n'a rien renvoyé"
+        elif status.startswith("budget_exceeded"):
+            reason = "délai dépassé (3 tentatives infructueuses)"
+        elif status.startswith("failed_after_"):
+            # ex : "failed_after_3_attempts:APIConnectionError"
+            exc = status.split(":", 1)[-1] if ":" in status else "erreur réseau"
+            reason = f"3 tentatives échouées ({exc})"
+        else:
+            reason = status
+        parts.append(f"{label} ({reason})")
+    return "Étapes incomplètes : " + " · ".join(parts) + ". Cliquez Re-générer pour relancer la chaîne."
 
 
 def _run_llm_chain_for_audio(
@@ -609,65 +782,122 @@ def _run_llm_chain_for_audio(
         # Pas de LiteLLM configuré → on sort sans tenter aucune étape.
         return updates, status_delta
 
+    # Chaque étape passe par _llm_step_with_retry (3 tentatives, backoff
+    # 1s/2s/4s, budget total 90s par défaut, configurable via env). Les
+    # étapes échouées N'INTERROMPENT PAS la chaîne — celles d'après sont
+    # tentées avec base_for_llm en fallback. Cf bug "Déploiement et
+    # gouvernance" mai 2026 où cleaning crashait sans retry et coupait
+    # reformulation + meeting_analysis qui auraient marché.
+    step_results: dict = {}  # {step_name: 'ok' | 'empty' | 'failed_...'}
+
     # 3b-bis. Glossary correction.
     if KEVENT_GLOSSARY_CORRECTION_ENABLED and glossary:
-        corrected = mi.apply_glossary_correction(
-            base_for_llm, llm, LLM_MODEL_MEDIUM,
-            glossary_terms=glossary,
-            max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+        corrected, st = _llm_step_with_retry(
+            "glossary_correction",
+            lambda: mi.apply_glossary_correction(
+                base_for_llm, llm, LLM_MODEL_MEDIUM,
+                glossary_terms=glossary,
+                max_terms_per_call=KEVENT_GLOSSARY_MAX_TERMS_PER_CALL,
+            ),
         )
+        step_results["glossary_correction"] = st
         if corrected:
             updates["glossary_corrected_text"] = corrected
             base_for_llm = corrected
+        if st != "ok":
+            status_delta = "kevent_partially_completed"
 
     # 3b-ter. Suggested filename + key points (1er run uniquement).
     if include_metadata and KEVENT_FILENAME_SUGGESTION_ENABLED:
-        meta = mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL)
+        meta, st = _llm_step_with_retry(
+            "suggest_metadata",
+            lambda: mi.suggest_metadata(base_for_llm, llm, LLM_MODEL_SMALL),
+        )
+        step_results["suggest_metadata"] = st
         if meta:
             if meta.get("title"):
                 updates["suggested_filename"] = meta["title"]
             kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
             if kp_serialized:
                 updates["key_points_summary"] = kp_serialized
+        if st != "ok":
+            status_delta = "kevent_partially_completed"
 
     # 3c. OOB cleaning.
     if KEVENT_OOB_CLEANING_ENABLED:
-        cleaned = mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM)
+        cleaned, st = _llm_step_with_retry(
+            "cleaning",
+            lambda: mi.clean_oob(base_for_llm, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["cleaning"] = st
         if cleaned:
             updates["cleaned_text"] = cleaned
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
-    # 3d. Reformulation.
+    # 3d. Reformulation. Source = cleaned_text si dispo, sinon
+    # base_for_llm (fallback : même si cleaning a échoué on essaie).
     if KEVENT_REFORMULATION_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        reformulated = mi.reformulate(source, llm, LLM_MODEL_MEDIUM)
+        reformulated, st = _llm_step_with_retry(
+            "reformulation",
+            lambda: mi.reformulate(source, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["reformulation"] = st
         if reformulated:
             updates["reformulated_text"] = reformulated
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
-    # 3e. Meeting analysis.
+    # 3e. Meeting analysis. Fallback aussi sur base_for_llm.
     if KEVENT_MEETING_ANALYSIS_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        analysis = mi.analyse_meeting(
-            source, llm, LLM_MODEL_LARGE,
-            speaker_tagged_text=speaker_tagged,
+        analysis, st = _llm_step_with_retry(
+            "meeting_analysis",
+            lambda: mi.analyse_meeting(
+                source, llm, LLM_MODEL_LARGE,
+                speaker_tagged_text=speaker_tagged,
+            ),
         )
-        serialized = mi.serialize_analysis(analysis)
-        if serialized is not None:
-            updates["meeting_analysis_json"] = serialized
-        else:
+        step_results["meeting_analysis"] = st
+        if analysis is not None:
+            serialized = mi.serialize_analysis(analysis)
+            if serialized is not None:
+                updates["meeting_analysis_json"] = serialized
+        if st != "ok":
             status_delta = "kevent_partially_completed"
 
     # 3f. Absentee summary.
     if KEVENT_ABSENTEE_SUMMARY_ENABLED:
         source = updates.get("cleaned_text") or base_for_llm
-        summary = mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM)
+        summary, st = _llm_step_with_retry(
+            "absentee_summary",
+            lambda: mi.summarise_for_absentee(source, llm, LLM_MODEL_MEDIUM),
+        )
+        step_results["absentee_summary"] = st
         if summary:
             updates["absentee_summary"] = summary
-        else:
+        if st != "ok":
             status_delta = "kevent_partially_completed"
+
+    # Si au moins une étape a échoué, construire un message structuré
+    # qui apparaîtra dans last_error_message côté UI (visible dans la
+    # tooltip status + (i) détaillé). Permet à l'utilisateur de voir
+    # exactement quelles étapes ont échoué et pourquoi en clair.
+    if status_delta == "kevent_partially_completed":
+        msg = _build_chain_error_message(step_results)
+        if msg:
+            updates["last_error_kind"] = "llm_chain_partial"
+            updates["last_error_message"] = msg
+        logger.info(
+            "LLM chain partial — step_results=%s",
+            ", ".join(f"{k}={v}" for k, v in step_results.items()),
+        )
+    else:
+        # Tous OK → on efface explicitement un éventuel last_error_*
+        # résiduel d'un run précédent qui aurait été partiellement échoué.
+        updates["last_error_kind"] = None
+        updates["last_error_message"] = None
 
     return updates, status_delta
 
@@ -816,7 +1046,9 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     client = _build_kevent_client()
     if client is None:
         _set_user_audio_status(audio_file_id, "kevent_failed",
-                               transcription_engine="kevent")
+                               transcription_engine="kevent",
+                               last_error_kind="kevent_client_unavailable",
+                               last_error_message="Client Kevent non initialisé (config gateway/token manquante).")
         return
 
     # Read the audio bytes once, reuse for both transcribe + diarize.
@@ -853,6 +1085,15 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 )
             except Exception:
                 pass  # déjà loggé dans notify_external_status
+
+    def _on_kevent_poll(_kevent_status: str):
+        """Heartbeat last_activity_at à chaque poll Kevent.
+
+        Sans ça, le watchdog (STALE_THRESHOLD_S=300s) vole la row pendant
+        que Kevent transcrit un long audio → boucle infinie de re-submits
+        (cf root cause des rows à reprocess_version > 40, mai 2026).
+        """
+        _touch_last_activity(audio_file_id)
 
     def _on_kevent_submitted(job_id: str):
         """Persiste le kevent_job_id en DB dès que le gateway accepte le job.
@@ -911,6 +1152,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_poll=_on_kevent_poll,
                 on_submitted=_on_kevent_submitted,
                 initial_prompt=initial_prompt_for_whisper,
             )
@@ -940,6 +1182,7 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 poll_interval=KEVENT_ASYNC_POLL_INTERVAL_SECONDS,
                 timeout=async_timeout,
                 on_status=_on_kevent_status,
+                on_poll=_on_kevent_poll,
                 on_submitted=_on_kevent_submitted,
             )
         return client.diarize(
@@ -955,10 +1198,15 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     # mobile alors que la transcription a silencieusement échoué).
     external_file_id = (payload or {}).get("file_id") or str(audio_file_id)
 
-    def _push_failure(status: str, message: str):
+    def _push_failure(status: str, message: str, *,
+                       error_kind: str | None = None,
+                       error_message: str | None = None):
+        extra: dict = {"transcription_engine": "kevent"}
+        if error_kind:
+            extra["last_error_kind"] = error_kind
+            extra["last_error_message"] = error_message or message
         try:
-            _set_user_audio_status(audio_file_id, status,
-                                   transcription_engine="kevent")
+            _set_user_audio_status(audio_file_id, status, **extra)
         except Exception:
             logger.exception("Failed to persist %s status for %s",
                              status, audio_file_id)
@@ -969,12 +1217,14 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
 
     try:
         transcription = _kevent_transcribe()
-    except KeventAuthError:
+    except KeventAuthError as exc:
         logger.exception("Kevent auth error on transcription for %s", audio_file_id)
         _push_failure(
             "kevent_failed",
             "Accès au backend IA refusé. La transcription automatique n'a "
             "pas pu démarrer — contactez un administrateur.",
+            error_kind="kevent_auth_failed",
+            error_message=f"KeventAuthError: {exc}",
         )
         return
     except KeventApplicativeError as exc:
@@ -983,9 +1233,23 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
             "kevent_failed",
             "Erreur du backend IA pendant la transcription. Réessayez "
             "ultérieurement ou contactez un administrateur.",
+            error_kind="kevent_applicative",
+            error_message=f"KeventApplicativeError: {exc}",
         )
         return
     # KeventTransientError propagates → queue retry handles it.
+
+    # Pré-filtrage des scories Whisper (hallucinations sous-titrages
+    # YouTube, intros vidéo, etc.) AVANT les étapes LLM downstream —
+    # sinon le cleaning/reformulation/CR LLM travaillent sur du texte
+    # pollué. Cf migration 021 + admin-console pour gestion de la liste.
+    try:
+        from app.forbidden_phrases import filter_whisper_segments
+        if SessionLocal is not None:
+            transcription = filter_whisper_segments(transcription, SessionLocal)
+    except Exception:
+        logger.exception("forbidden_phrases: filtering failed for %s, continuing without",
+                          audio_file_id)
 
     # Le champ "text" de Whisper est un seul long string sans \n, peu
     # lisible. On reconstruit à partir de "segments" (découpage naturel
@@ -1816,6 +2080,15 @@ def audio_lookup():
             "meeting_id": meeting_id,
             "preparation_id": preparation_id,
             "meeting_brief_id": preparation_id,  # alias legacy
+            # Observabilité erreur (mig 020) + édition user (mig 022) — sans
+            # ces 4 champs ici, leur PATCH écrit en DB mais l'UI au retour
+            # voit '[]' / null car le GET ne renvoie pas le champ.
+            "last_error_at": (
+                row.last_error_at.isoformat() if row.last_error_at else None
+            ),
+            "last_error_kind": row.last_error_kind,
+            "last_error_message": row.last_error_message,
+            "hidden_block_indices": list(row.hidden_block_indices or []),
         })
     except Exception:
         logger.exception("audio_lookup failed")
@@ -2127,47 +2400,73 @@ def reprocess_audio(audio_id: str):
             uaf.transcription_status = "kevent_reprocessing"
             uaf.reprocess_version = new_version
             uaf.reprocess_history = history
+            uaf.last_activity_at = datetime.now(timezone.utc)
             db.commit()
         except Exception:
             db.rollback()
             logger.exception("reprocess: failed to commit reprocessing status for %s", audio_id)
             return jsonify({"error": "db_write_failed"}), 500
 
-        # Relance la chaîne LLM via la sous-fonction composable.
-        # SKIP transcription / diarisation / speaker_naming.
+        # Snapshot des inputs LLM AVANT close() de la session courante :
+        # le thread daemon n'a plus accès à ``uaf`` après db.close() dans
+        # le ``finally`` ci-dessous. On capture les attributs en locales.
         base_for_llm = uaf.speaker_tagged_text or uaf.glossary_corrected_text or uaf.transcription_text
         speaker_tagged = uaf.speaker_tagged_text
-        llm = _build_llm_client()
-        chain_updates, chain_status = _run_llm_chain_for_audio(
-            base_for_llm, speaker_tagged,
-            llm=llm,
-            glossary_terms=effective_glossary,
-            include_metadata=False,  # garde le filename/key_points existants
-        )
+        _audio_id_local = audio_id
+        _new_version_local = new_version
+        _brief_id_local = brief_id
+        _effective_glossary_local = list(effective_glossary)
+        _brief_terms_added_local = brief_terms_added
 
-        # Status final + tracking reprocess.
-        final_status = (
-            "kevent_completed"
-            if chain_status == "kevent_completed"
-            else "kevent_partially_completed"
-        )
-        chain_updates["reprocessed_with_meeting_id"] = brief_id
-        chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
-        _set_user_audio_status(audio_id, final_status, **chain_updates)
-
-        logger.info(
-            "reprocess: audio=%s done version=%d brief_id=%s glossary_terms=%d outputs=%d",
-            audio_id, new_version, brief_id, len(effective_glossary), len(chain_updates),
-        )
-        return jsonify({
-            "reprocessed": True,
-            "glossary_terms_used": len(effective_glossary),
-            "brief_terms_added": brief_terms_added,
-            "version": new_version,
-            "status": final_status,
-        }), 200
     finally:
         db.close()
+
+    # Async daemon — la chaîne LLM peut prendre 5-15 min sur un long
+    # transcript, gunicorn --timeout 300 SIGKILL le worker sinon. Le pattern
+    # est aligné sur /full-reprocess (cf endpoint full_reprocess_audio).
+    def _run_reprocess():
+        try:
+            llm = _build_llm_client()
+            chain_updates, chain_status = _run_llm_chain_for_audio(
+                base_for_llm, speaker_tagged,
+                llm=llm,
+                glossary_terms=_effective_glossary_local,
+                include_metadata=False,  # garde le filename/key_points existants
+            )
+            final_status = (
+                "kevent_completed"
+                if chain_status == "kevent_completed"
+                else "kevent_partially_completed"
+            )
+            chain_updates["reprocessed_with_meeting_id"] = _brief_id_local
+            chain_updates["last_reprocessed_at"] = datetime.now(timezone.utc)
+            _set_user_audio_status(_audio_id_local, final_status, **chain_updates)
+            logger.info(
+                "reprocess: audio=%s done version=%d brief_id=%s glossary_terms=%d outputs=%d",
+                _audio_id_local, _new_version_local, _brief_id_local,
+                len(_effective_glossary_local), len(chain_updates),
+            )
+        except Exception:
+            logger.exception("reprocess: LLM chain crashed for %s", _audio_id_local)
+            try:
+                _set_user_audio_status(
+                    _audio_id_local, "kevent_partially_completed",
+                    last_error_kind="worker_crash",
+                    last_error_message="La régénération du compte-rendu a crashé. Cliquez Re-générer pour relancer.",
+                )
+            except Exception:
+                logger.exception("reprocess: status_failed write also failed")
+
+    threading.Thread(target=_run_reprocess, name=f"reprocess-{audio_id[:8]}",
+                      daemon=True).start()
+
+    return jsonify({
+        "reprocessed": True,
+        "glossary_terms_used": len(_effective_glossary_local),
+        "brief_terms_added": _brief_terms_added_local,
+        "version": _new_version_local,
+        "status": "kevent_reprocessing",
+    }), 202
 
 
 def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
@@ -2197,13 +2496,33 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
         if not uaf:
             return 404, {"error": "not_found"}
         if not uaf.stored_filename:
+            # Marquer terminal explicite : pas d'audio S3 référencé, retry
+            # inutile. Cas pathologique (création de row sans upload réussi).
+            _persist_terminal_error(
+                db, uaf,
+                kind="s3_no_audio_path",
+                message="Pas de référence S3 sur la row (création de row sans upload réussi). Non-relançable.",
+            )
             return 410, {"error": "no_audio_path"}
         try:
             if not object_exists(s3_internal_cfg, uaf.stored_filename):
+                # Blob S3 purgé (rétention dépassée ou suppression manuelle).
+                # Pas la peine de re-soumettre Kevent, ça plantera pareil.
+                _persist_terminal_error(
+                    db, uaf,
+                    kind="s3_object_purged",
+                    message=(
+                        f"L'audio S3 ({uaf.stored_filename}) a été purgé "
+                        "et n'est plus récupérable. Vous pouvez supprimer "
+                        "cette ligne."
+                    ),
+                )
                 return 410, {"error": "audio_purged"}
-        except Exception:
+        except Exception as exc:
             logger.exception("reset+resubmit: s3 probe failed for %s", audio_id)
-            return 503, {"error": "s3_unavailable"}
+            # Erreur transitoire S3 — on n'écrit pas last_error_kind pour
+            # ne pas marquer définitivement, le watchdog réessaiera.
+            return 503, {"error": "s3_unavailable", "detail": str(exc)[:200]}
 
         prev_entry = {
             "version": int(uaf.reprocess_version or 0),
@@ -2273,7 +2592,9 @@ def _reset_and_resubmit_kevent_pipeline(audio_id: str, user_sub: str,
             logger.exception("reset+resubmit: pipeline crashed for %s", audio_id)
             try:
                 _set_user_audio_status(audio_id, "kevent_failed",
-                                       transcription_engine="kevent")
+                                       transcription_engine="kevent",
+                                       last_error_kind="worker_crash",
+                                       last_error_message="Exception non gérée pendant le re-traitement Kevent (voir logs ingester pour la stacktrace).")
             except Exception:
                 logger.exception("reset+resubmit: status_failed write also failed")
 
@@ -2524,6 +2845,8 @@ def full_reprocess_audio(audio_id: str):
                 _set_user_audio_status(
                     audio_id, "kevent_failed",
                     transcription_engine="kevent",
+                    last_error_kind="worker_crash",
+                    last_error_message="Exception non gérée pendant /full-reprocess (voir logs ingester pour la stacktrace).",
                 )
             except Exception:
                 logger.exception("full-reprocess: status_failed write also failed")
@@ -2540,6 +2863,253 @@ def full_reprocess_audio(audio_id: str):
         "status": "kevent_queued",
         "reprocess_version": new_version,
     }), 202
+
+
+# ─── Édition utilisateur de la transcription ───────────────────────
+# (migration 022 hidden_block_indices + migration 021 forbidden_phrases)
+#
+# Trois endpoints :
+#   PATCH /api/v1/audio/<id>/hidden-blocks       → upsert liste indices
+#   POST  /api/v1/audio/<id>/delete-hidden-blocks → applique (irréversible)
+#   POST  /api/v1/audio/<id>/re-filter           → applique forbidden phrases
+#                                                  rétroactivement sur la
+#                                                  transcription actuelle
+
+
+def _reparse_speaker_tagged_blocks(text: str) -> list[dict]:
+    """Parser server-side du speaker_tagged_text — miroir du
+    _parseSpeakerTagged côté legacy.js. Format attendu :
+
+        **Speaker** _(M:SS → M:SS)_
+        > texte ligne 1
+        > texte ligne 2
+
+    Retourne une liste de dicts {speaker, start, end, text, header_line,
+    body_lines} où header_line + body_lines sont les lignes brutes
+    originelles (pour pouvoir reconstruire à l'identique).
+    """
+    if not text:
+        return []
+    import re as _re
+    head_re = _re.compile(
+        r"^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*→\s*(\d+):(\d+(?:\.\d+)?)\)_"
+    )
+    blocks: list[dict] = []
+    current: Optional[dict] = None
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        m = head_re.match(line)
+        if m:
+            if current is not None:
+                blocks.append(current)
+            current = {
+                "speaker": m.group(1).strip(),
+                "start": int(m.group(2)) * 60 + float(m.group(3)),
+                "end": int(m.group(4)) * 60 + float(m.group(5)),
+                "header_line": raw,
+                "body_lines": [],
+            }
+        elif current is not None and line.startswith(">"):
+            current["body_lines"].append(raw)
+        # lignes vides : ignorées (séparateurs entre blocs)
+    if current is not None:
+        blocks.append(current)
+    return blocks
+
+
+def _rebuild_speaker_tagged(blocks: list[dict]) -> str:
+    """Inverse de _reparse_speaker_tagged_blocks — recompose le texte."""
+    out: list[str] = []
+    for b in blocks:
+        out.append(b.get("header_line", ""))
+        out.extend(b.get("body_lines", []))
+        out.append("")  # séparateur visuel
+    return "\n".join(out).rstrip() + "\n"
+
+
+@app.route("/api/v1/audio/<audio_id>/hidden-blocks", methods=["PATCH"])
+def api_patch_hidden_blocks(audio_id: str):
+    """Upsert la liste des indices de blocs barrés (réversible).
+
+    Body : ``{user_sub: str, indices: [int]}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    raw_indices = data.get("indices") or []
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    try:
+        indices = sorted({int(i) for i in raw_indices if int(i) >= 0})
+    except (TypeError, ValueError):
+        return jsonify({"error": "indices must be list of non-negative ints"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        uaf.hidden_block_indices = indices
+        db.commit()
+        return jsonify({"ok": True, "indices": indices})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/delete-hidden-blocks", methods=["POST"])
+def api_delete_hidden_blocks(audio_id: str):
+    """Applique la suppression (irréversible) des blocs barrés.
+
+    Recompose speaker_tagged_text sans les blocs masqués + vide la liste
+    hidden_block_indices. La transcription_text brute n'est PAS touchée
+    (les indices référencent les blocs speaker_tagged uniquement).
+
+    Body : ``{user_sub: str}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        hidden = set(uaf.hidden_block_indices or [])
+        if not hidden:
+            return jsonify({"deleted": 0, "kept": 0, "reason": "no_hidden_blocks"})
+        blocks = _reparse_speaker_tagged_blocks(uaf.speaker_tagged_text or "")
+        if not blocks:
+            return jsonify({"deleted": 0, "kept": 0,
+                             "reason": "no_blocks_parseable"})
+        kept = [b for i, b in enumerate(blocks) if i not in hidden]
+        deleted_count = len(blocks) - len(kept)
+        new_text = _rebuild_speaker_tagged(kept) if kept else ""
+        uaf.speaker_tagged_text = new_text
+        uaf.hidden_block_indices = []
+        # Invalide les textes dérivés LLM : ils ont été générés sur l'ancien
+        # texte qui contenait les blocs maintenant supprimés. Le user devra
+        # cliquer "Re-générer" pour avoir des CR cohérents (ou /full-reprocess).
+        uaf.cleaned_text = None
+        uaf.reformulated_text = None
+        uaf.meeting_analysis_json = None
+        uaf.absentee_summary = None
+        uaf.key_points_summary = None
+        uaf.last_activity_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info(
+            "delete-hidden-blocks: audio=%s deleted=%d kept=%d",
+            audio_id, deleted_count, len(kept),
+        )
+        return jsonify({"deleted": deleted_count, "kept": len(kept),
+                         "llm_outputs_invalidated": True})
+    finally:
+        db.close()
+
+
+@app.route("/api/v1/audio/<audio_id>/re-filter", methods=["POST"])
+def api_re_filter_forbidden(audio_id: str):
+    """Réapplique la liste des phrases interdites (migration 021)
+    rétroactivement sur la transcription existante.
+
+    Utile quand un admin a ajouté de nouveaux patterns après que la
+    réunion soit déjà transcrite. Ne re-soumet PAS à Kevent — applique
+    juste le filtre côté texte. Pour un retraitement complet (re-Whisper
+    + re-CR), utiliser /full-reprocess.
+
+    Body : ``{user_sub: str}``.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "db_unavailable"}), 503
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    db = SessionLocal()
+    try:
+        from libs.shared.app.models import UserAudioFile
+        from app.forbidden_phrases import (
+            get_forbidden_phrases, _segment_matches_any,
+        )
+        uaf = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.id == audio_id,
+                    UserAudioFile.user_sub == user_sub)
+            .first()
+        )
+        if not uaf:
+            return jsonify({"error": "not_found"}), 404
+        phrases = get_forbidden_phrases(SessionLocal, force_refresh=True)
+        if not phrases:
+            return jsonify({"dropped_lines": 0, "reason": "no_active_phrases"})
+        dropped_lines: list[str] = []
+        # Filtre transcription_text (joint de lignes par segment).
+        if uaf.transcription_text:
+            kept_lines: list[str] = []
+            for line in uaf.transcription_text.split("\n"):
+                m = _segment_matches_any(line, phrases)
+                if m:
+                    dropped_lines.append(line.strip())
+                else:
+                    kept_lines.append(line)
+            uaf.transcription_text = "\n".join(kept_lines).strip()
+        # Filtre speaker_tagged_text au niveau LIGNES `> ...` (intra-bloc).
+        if uaf.speaker_tagged_text:
+            blocks = _reparse_speaker_tagged_blocks(uaf.speaker_tagged_text)
+            for b in blocks:
+                cleaned_body: list[str] = []
+                for body_line in b["body_lines"]:
+                    txt = body_line.lstrip(">").strip()
+                    m = _segment_matches_any(txt, phrases)
+                    if m:
+                        dropped_lines.append(txt)
+                    else:
+                        cleaned_body.append(body_line)
+                b["body_lines"] = cleaned_body
+            # Drop les blocs vidés (header sans body)
+            blocks = [b for b in blocks if b["body_lines"]]
+            uaf.speaker_tagged_text = _rebuild_speaker_tagged(blocks)
+        if dropped_lines:
+            # Invalide les outputs LLM par cohérence (mêmes raisons que
+            # delete-hidden-blocks).
+            uaf.cleaned_text = None
+            uaf.reformulated_text = None
+            uaf.meeting_analysis_json = None
+            uaf.absentee_summary = None
+            uaf.key_points_summary = None
+            uaf.last_activity_at = datetime.now(timezone.utc)
+            db.commit()
+            logger.info(
+                "re-filter: audio=%s dropped %d line(s) — sample: %s",
+                audio_id, len(dropped_lines),
+                ", ".join(repr(l[:80]) for l in dropped_lines[:3]),
+            )
+            return jsonify({"dropped_lines": len(dropped_lines),
+                             "samples": dropped_lines[:5],
+                             "llm_outputs_invalidated": True})
+        return jsonify({"dropped_lines": 0, "reason": "nothing_matched"})
+    finally:
+        db.close()
 
 
 # ─── User feedback (migration 015) ─────────────────────────────────
@@ -3382,6 +3952,15 @@ def create_app():
             start_watchdog(SessionLocal)
     except Exception:
         logger.exception("pipeline_watchdog launch failed (non-fatal)")
+
+    # MCR import worker — consumes QUEUE_MCR_IMPORT and pulls audio/transcript
+    # from compte-rendu.mirai. Idempotent start (no-op if already running).
+    try:
+        from app.mcr_importer import start_mcr_importer
+        if SessionLocal is not None:
+            start_mcr_importer(SessionLocal, rabbit_cfg=rabbit_cfg)
+    except Exception:
+        logger.exception("mcr_importer launch failed (non-fatal)")
     if INTERNAL_PUSH_TRIGGER_TOKEN:
         logger.info("Pull trigger HTTP endpoint enabled (allowlist=%s)",
                     _TRIGGER_IP_ALLOWLIST_RAW or "<empty>")

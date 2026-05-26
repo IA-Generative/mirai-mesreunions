@@ -167,6 +167,34 @@ class UploadTokenOption(ExternalBase):
     )
 
 
+class PreparationGenerationJob(ExternalBase):
+    """Store partagé multi-pod des jobs de génération de brief.
+
+    Remplace l'ancien in-memory dict de generation_jobs.py qui ne
+    fonctionnait qu'en single-replica. Avec 2+ pods, le polling tombait
+    parfois sur un pod différent du worker → 404 "Job introuvable".
+
+    Hébergé en postgres-external parce que mesreunions-web y a accès
+    direct (creds via external-db-secret). Le job est éphémère (TTL 1h
+    via gc) donc pas besoin de le mettre en postgres-internal.
+    """
+    __tablename__ = "preparation_generation_jobs"
+
+    id = Column(String(64), primary_key=True)  # uuid4 hex
+    user_sub = Column(String(255), nullable=False, index=True)
+    phase = Column(String(40), nullable=False, default="queued",
+                   comment="queued|init|test_drive|listing_docs|reading_doc|"
+                           "generating_llm|persisting|extracting_glossary|done|failed")
+    current_doc = Column(Text, nullable=True)
+    docs_processed = Column(Integer, nullable=False, default=0)
+    docs_total = Column(Integer, nullable=False, default=0)
+    preparation_id = Column(String(64), nullable=True)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+
 # ─── Zone Interne ───────────────────────────────────────────
 
 class IssuedToken(InternalBase):
@@ -273,11 +301,18 @@ class UserAudioFile(InternalBase):
     audio_quality_score = Column(Float, nullable=True)
     audio_duration_seconds = Column(Float, nullable=True)
 
+    # Origine de la ligne : upload web (mesreunions-web), mobile (PWA depot),
+    # ou import depuis MCR (compte-rendu.mirai). Persisté pour différencier les
+    # cas dans l'UI (badge "venu de MCR") + dédoublonnage à l'import.
+    origin = Column(String(20), nullable=False, default="upload",
+                    comment="upload | mobile | mcr_import")
+
     # Transcription — final text produced by whichever backend ran.
     transcription_status = Column(String(50), default="pending",
                                   comment=(
                                       "stub: pending|disabled|processing|completed|failed | "
-                                      "mcr: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
+                                      "mcr push: mcr_pushed|mcr_auth_failed|mcr_rejected|mcr_push_failed | "
+                                      "mcr import: mcr_import_pending|mcr_imported|mcr_transcript_only|mcr_import_failed | "
                                       "kevent: kevent_transcribing|kevent_queued|"
                                       "kevent_processing|kevent_completed|"
                                       "kevent_partially_completed|kevent_failed"
@@ -365,6 +400,22 @@ class UserAudioFile(InternalBase):
     # UPDATE atomique avec WHERE (pipeline_claim_at IS NULL OR < NOW()-90s).
     pipeline_claim_at = Column(DateTime(timezone=True), nullable=True)
     pipeline_claim_pod = Column(String(128), nullable=True)
+
+    # ─── Observabilité erreur (migration 020) ────────────────────────
+    # Peuplé par tous les call-sites passant en *_failed (mcr_importer,
+    # pipeline_watchdog._mark_capped_as_failed, puller Kevent path).
+    # Permet de débugger depuis la DB et de surfacer un message UI clair.
+    last_error_at = Column(DateTime(timezone=True), nullable=True)
+    last_error_kind = Column(String(64), nullable=True)
+    last_error_message = Column(Text, nullable=True)
+
+    # ─── Édition utilisateur (migration 022) ─────────────────────────
+    # Liste d'indices de blocs (speaker_tagged) que l'utilisateur a
+    # marqués comme "à supprimer". Affichés barrés dans l'éditeur,
+    # exclus des exports. Définitivement retirés par
+    # POST /api/file/<id>/delete-hidden-blocks. Reset à [] sur reprocess.
+    hidden_block_indices = Column(_JSON_TYPE, nullable=False, default=list,
+                                   server_default="[]")
 
     __table_args__ = (
         Index("ix_user_audio_user", "user_sub"),
@@ -653,4 +704,40 @@ class TranscriptionEvent(InternalBase):
     __table_args__ = (
         Index("ix_transcription_event_file_created", "audio_file_id", "created_at"),
         Index("ix_transcription_event_code_created", "original_session_code", "created_at"),
+    )
+
+
+class TranscriptionForbiddenPhrase(InternalBase):
+    """Phrase à filtrer automatiquement des transcriptions Whisper.
+
+    Liste curée par l'admin (cf admin-console). Appliquée par le pipeline
+    entre la transcription Whisper et les étapes LLM downstream (cf
+    services/dmz-to-internal-bridge/app/forbidden_phrases.py). Sans ce
+    filtre, des scories d'entraînement Whisper (sous-titrages YouTube,
+    intros vidéo, etc.) polluent les CR LLM.
+
+    ``ordering`` pilote l'ordre d'évaluation : les patterns LONGS doivent
+    matcher avant les courts pour ne pas être masqués (ex : "Sous-titrage
+    Société Radio-Canada" doit avoir un ordering INFÉRIEUR à
+    "Société Radio-Canada", sinon le second mange le premier).
+
+    ``is_active`` permet de désactiver sans perdre l'audit trail. Préférer
+    le toggle à un DELETE quand la phrase a déjà été appliquée
+    historiquement.
+    """
+    __tablename__ = "transcription_forbidden_phrases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    phrase = Column(Text, nullable=False, unique=True)
+    ordering = Column(Integer, nullable=False, default=1000)
+    is_active = Column(Boolean, nullable=False, default=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True),
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True),
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_forbidden_phrases_active_order", "is_active", "ordering"),
     )

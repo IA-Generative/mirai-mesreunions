@@ -147,16 +147,38 @@ class KeventClient:
 
     @staticmethod
     def _whisper_safe_filename(filename: str) -> str:
-        """Renomme l'extension pour matcher la whitelist du gateway Whisper.
+        """Renomme l'extension + sanitise pour matcher la whitelist gateway
+        et résister au shell/disque côté Whisper.
 
-        Le gateway accepte ``.mp3 .wav .m4a .ogg .flac``. Le audio-normalizer
-        produit du ``.mp4`` (container MP4 + AAC), qui est sémantiquement
-        identique à ``.m4a`` côté contenu. On renomme juste l'extension du
-        multipart sans toucher aux bytes, sinon le gateway répond
-        ``400: extension ".mp4" not accepted``.
+        1) Strip path components (``Pitch my epic/X.mp3`` → ``X.mp3``)
+           sinon Whisper interprète ``/`` comme un sous-dossier inexistant
+           lors de l'écriture sur disque → fichier perdu silencieusement.
+           Vu en prod 2026-05-24 (Pitch my epic/2026-05-20_13_45_46.mp3).
+        2) Remplace TOUS les caractères "ambigus" pour le shell/disque
+           (``'`` ``"`` ``;`` ``&`` ``|`` ``$`` ``\\`` etc) par ``_``.
+           Garde lettres/chiffres/dash/underscore/dot/espace/accents.
+           Protège contre tout chaînage de cmd, mauvaise quoting,
+           filesystems exotiques côté worker Whisper.
+        3) Renomme ``.mp4`` → ``.m4a`` (whitelist gateway : mp3 wav m4a
+           ogg flac ; audio-normalizer produit du .mp4 = AAC en container
+           MP4, sémantiquement identique au m4a).
         """
         if not filename:
             return filename
+        # 1) Basename — strip / et \.
+        for sep in ("/", "\\"):
+            if sep in filename:
+                filename = filename.rsplit(sep, 1)[-1]
+        # 2) Sanitize : remplace tout caractère non-sûr par '_'. On garde
+        # alphanumériques (Unicode word chars couvre les accents), point,
+        # dash, underscore, espace. Tout le reste → '_'.
+        import re
+        filename = re.sub(r"[^\w\.\-\s]", "_", filename, flags=re.UNICODE)
+        # Collapse les '_' multiples consécutifs pour rester lisible.
+        filename = re.sub(r"_{2,}", "_", filename).strip(" _")
+        if not filename:
+            filename = "audio"
+        # 3) Extension mapping.
         lower = filename.lower()
         if lower.endswith(".mp4"):
             return filename[:-4] + ".m4a"
@@ -174,6 +196,18 @@ class KeventClient:
 
     @staticmethod
     def _raise_for_status(resp, context: str) -> None:
+        # Log systématique du résultat HTTP pour observabilité (sans corps).
+        # Avant cet ajout, les codes Kevent n'apparaissaient nulle part dans
+        # les logs → impossible de débugger les boucles infinies.
+        try:
+            body_len = len(resp.content or b"")
+        except Exception:
+            body_len = -1
+        if resp.status_code < 400:
+            logger.info("Kevent %s → %d (body=%dB)", context, resp.status_code, body_len)
+        else:
+            logger.warning("Kevent %s → %d body=%s",
+                           context, resp.status_code, (resp.text or "")[:500])
         if resp.status_code in (401, 403):
             raise KeventAuthError(f"{context} → {resp.status_code} (Authorization header rejected by Kevent)")
         if resp.status_code >= 500:
@@ -342,15 +376,24 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_poll: Optional[Callable[[str], None]] = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         time_fn: Callable[[], float] = time.monotonic,
     ) -> dict:
         """Poll get_job until status is terminal, then return the full body.
 
-        ``on_status(status)`` is called every time the status changes — used
+        ``on_status(status)`` is called every time the status CHANGES — used
         by callers to push intermediate progress (queued, processing) to the
-        DB / UI without re-implementing state tracking. ``sleep_fn`` and
-        ``time_fn`` are injected for testability.
+        DB / UI without re-implementing state tracking.
+
+        ``on_poll(status)`` est appelé à CHAQUE itération de poll (changement
+        ou non), avec le status courant. Critique pour rafraîchir le
+        ``last_activity_at`` côté DB sur les longs jobs — sans ça le watchdog
+        considère la row stale après ``STALE_THRESHOLD_S`` (300s) et la vole
+        en cours de pipeline. Cf root cause des boucles `reprocess_version`
+        > 40 documentée en mai 2026.
+
+        ``sleep_fn`` et ``time_fn`` sont injectés pour testabilité.
 
         Raises:
           - KeventApplicativeError if the job ends in ``status=failed``
@@ -369,6 +412,11 @@ class KeventClient:
                     except Exception:
                         logger.exception("on_status callback failed (non-fatal)")
                 last_status = status
+            if on_poll is not None:
+                try:
+                    on_poll(status)
+                except Exception:
+                    logger.exception("on_poll callback failed (non-fatal)")
             if status in _TERMINAL_STATUSES:
                 if status == "failed":
                     err = body.get("error") or "kevent reported job failed without an error message"
@@ -399,6 +447,7 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_poll: Optional[Callable[[str], None]] = None,
         on_submitted: Optional[Callable[[str], None]] = None,
         initial_prompt: Optional[str] = None,
     ) -> dict:
@@ -440,7 +489,7 @@ class KeventClient:
         return self.wait_for_job(
             service_type, job_id,
             poll_interval=poll_interval, timeout=timeout,
-            on_status=on_status,
+            on_status=on_status, on_poll=on_poll,
         )
 
     def diarize_async(
@@ -453,6 +502,7 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_poll: Optional[Callable[[str], None]] = None,
         on_submitted: Optional[Callable[[str], None]] = None,
     ) -> dict:
         """Async equivalent of ``diarize``.
@@ -479,7 +529,7 @@ class KeventClient:
         return self.wait_for_job(
             service_type, job_id,
             poll_interval=poll_interval, timeout=timeout,
-            on_status=on_status,
+            on_status=on_status, on_poll=on_poll,
         )
 
     # Helper pour la reprise post-restart : on a déjà un job_id en DB, on
@@ -492,12 +542,13 @@ class KeventClient:
         poll_interval: float = 3.0,
         timeout: float = 600.0,
         on_status: Optional[Callable[[str], None]] = None,
+        on_poll: Optional[Callable[[str], None]] = None,
     ) -> dict:
         """Poll un job déjà soumis (utile au boot pour récupérer un orphan)."""
         return self.wait_for_job(
             service_type, job_id,
             poll_interval=poll_interval, timeout=timeout,
-            on_status=on_status,
+            on_status=on_status, on_poll=on_poll,
         )
 
     # ── Step 2: diarisation ─────────────────────────────────
