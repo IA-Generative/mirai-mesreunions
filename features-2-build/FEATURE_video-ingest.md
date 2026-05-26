@@ -349,6 +349,14 @@ V2 : `DailymotionProvider`.
 - **Non-régression** : 129/129 tests unit video_ingest verts. Tous les modules mesreunions-web s'importent (sessions, meetings, youtube_import). Aucun champ enlevé/modifié sur les schémas existants (additif uniquement).
 - **À faire au matin** : test bout-en-bout côté UI (hard-refresh service worker pour bypass cache JS) — un nouvel import doit faire apparaître la section « 🎬 Vidéos web importées » avec le titre Mensch.
 
+### 2026-05-26 — Régression MCR + modale + CodeQL #29
+- **Régression critique découverte** : ma branche avait été basée sur `main` (sans `mcr_import`) au lieu de `feat/import-from-mcr` (où vivait `mcr_import`). Le rollout image a écrasé `mesreunions-web` sans le module MCR. **Fix** : merge `feat/import-from-mcr` dans ma branche → récupère 84 commits dont `app/modules/mcr_import/`. Conflits sur `app/main.py` (registration blueprints) et `frontend/tabs/meetings.js` (bouton header + dispatcher + 842 lignes en fin de fichier). Résolus en gardant **les deux** features (MCR + YouTube).
+- **CodeQL `py/stack-trace-exposure` #29** sur `youtube_import/routes.py:151` : les `f"…: {exc}"` exposaient le détail HTTPError aux clients. Sanitisé : `logger.exception()` côté serveur, message générique côté API (les 2 emplacements concernés).
+- **Modale UI** :
+  - **1a (positionnement bizarre)** : CSS du DSFR override le style natif de `<dialog>`. Injection d'un `<style>` dédié (centrage `position:fixed; inset:0; margin:auto;`, backdrop assombri, width responsive, padding propre, overflow auto). Plus de chevauchement avec le header de page.
+  - **1b (multi-URL)** : remplace l'input par un textarea 5 lignes (1 URL/ligne, cap 10 pour anti-abus UI). Imports lancés en parallèle, liste `<ul>` qui montre l'état par ligne (envoi → polling → ok/échec/cache). Résumé final à la fin (N importés / M cache / K échec).
+- **Post-fix smoke** : health 200 OK, modules `mcr_import` + `youtube_import` tous deux chargés, Meeting YouTube (vsid=1) toujours en BDD, 129/129 tests unit verts.
+
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
 ---
