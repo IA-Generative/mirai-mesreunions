@@ -535,7 +535,10 @@ export function renderList(sessions) {
   // error/processing) au lieu de laisser kind=queued par défaut. Le call
   // updateRowStatus() update juste la pastille + tooltip de la row
   // concernée, pas tout le DOM.
-  for (const { f } of entries) {
+  // Skip entries YouTube (pas de file → pas de status à pré-fetch).
+  for (const e of entries) {
+    if (e.kind !== 'audio') continue;
+    const f = e.f;
     if (f.status === 'transferred' && !_transcriptCache.has(f.id)) {
       _prefetchTranscriptStatus(f.id);
     }
