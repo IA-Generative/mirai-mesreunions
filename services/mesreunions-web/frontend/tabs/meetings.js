@@ -212,11 +212,6 @@ function renderHeader(fileCount, hasSelection) {
           🎬 YouTube
         </button>
         <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
-                data-action="meetings-new:toggle-sort"
-                title="Inverser l'ordre de tri (date de réunion)">
-          <span data-sort-label>Plus récent d'abord</span>
-        </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
                 data-action="meetings-new:resume-stuck"
                 title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
           🔄 Relancer les bloqués
@@ -511,24 +506,26 @@ export function renderList(sessions) {
   const container = document.getElementById('sessions-list');
   if (!container) return;
 
-  // Aplatit + trie par date desc (date de réunion override sinon upload).
+  // Aplatit audio + injecte YouTube imports (cache) → trie unifié par date desc.
   const entries = [];
   for (const s of (sessions || [])) {
     for (const f of (s.uploads || [])) {
-      entries.push({ f, s });
+      entries.push({ kind: 'audio', f, s, sortDate: f.meeting_datetime || f.created_at });
     }
   }
-  entries.sort((a, b) => {
-    const da = new Date(a.f.meeting_datetime || a.f.created_at).getTime();
-    const db = new Date(b.f.meeting_datetime || b.f.created_at).getTime();
-    return db - da;
-  });
+  for (const yt of _youtubeImportsCache) {
+    entries.push({ kind: 'youtube', yt, sortDate: yt.created_at });
+  }
+  entries.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
 
   const headerHtml = renderHeader(entries.length, _selectedIds.size > 0);
   const listHtml = entries.length
-    ? entries.map(({ f, s }) => renderRow(f, s)).join('')
+    ? entries.map((e) => e.kind === 'youtube' ? renderYoutubeRow(e.yt) : renderRow(e.f, e.s)).join('')
     : renderEmpty();
   container.innerHTML = `${headerHtml}<div class="meetings-tab-list">${listHtml}</div>`;
+
+  // Refresh YouTube imports en async — re-render à la fin si la liste change.
+  _refreshYoutubeImportsCache();
 
   // Toggle classe body pour CSS bulk-mode (révèle checkboxes).
   document.body.classList.toggle('meetings-bulk-active', _selectedIds.size > 0 || _altPressed);
@@ -1236,8 +1233,9 @@ export function mount(container /*, ctx */) {
   // Pré-charge les stats temporelles (cache 15min) pour que le calcul
   // d'ETA dans les tooltips soit dispo dès le 1er rollover.
   _fetchPipelineStats();
-  // Charge la section « Vidéos web importées » (slice 6 C3) — best-effort.
-  _loadAndRenderYoutubeImports();
+  // Pré-charge le cache imports YouTube ; la suite est intégrée dans
+  // renderList qui les mélange aux rows audio par date desc.
+  _refreshYoutubeImportsCache({ force: true });
 }
 
 export function unmount(/* container */) {
@@ -1432,7 +1430,7 @@ async function _submitYoutubeImport(modal) {
   listEl.hidden = false;
   listEl.innerHTML = urls.map((u, i) => `
     <li data-yt-item="${i}">
-      <code>${_escapeHtml(u.slice(0, 70))}</code> — <span data-yt-item-status>en attente…</span>
+      <code>${escapeHtml(u.slice(0, 70))}</code> — <span data-yt-item-status>en attente…</span>
     </li>
   `).join('');
 
@@ -1513,112 +1511,97 @@ async function _pollJobUntilTerminal(jobId, setStatus) {
 }
 
 function _refreshMeetingsListIfPossible() {
-  // legacy.js loadSessions() rafraîchit la liste, mais on peut aussi
-  // déclencher directement notre re-render si on a le cache à jour.
+  // legacy.js loadSessions() rafraîchit la liste audio, qui à son tour
+  // appelle renderList() qui injecte les imports YouTube via cache + refresh.
   const fn = _resolveLegacyFn('loadSessions');
   if (fn) {
     try { fn(); } catch (e) { /* best-effort */ }
   }
-  // Rafraîchir aussi la section « Vidéos web importées » (slice 6 C3).
-  _loadAndRenderYoutubeImports();
+  // Force aussi un refresh direct du cache YouTube + re-render si la liste
+  // a déjà été rendue (cas HIT cache où loadSessions n'apporte rien de neuf).
+  _refreshYoutubeImportsCache({ force: true });
 }
 
-// ── Section « Vidéos web importées » (slice 6 C3) ──────────────────────
+// ── Intégration imports YouTube dans la liste meetings ──────────────────
 //
-// Container injecté AVANT #sessions-list pour éviter toute interaction
-// avec le rendu legacy de la liste audio. Si l'API renvoie 0 items, on
-// cache la section pour ne pas polluer l'UI. Best-effort : toute erreur
-// API laisse la section silencieusement absente.
+// Les imports YouTube apparaissent comme des rows AU MILIEU de la liste
+// audio (triés ensemble par date desc), pas dans une section séparée.
+// Le cache _youtubeImportsCache évite un fetch /api/youtube/my-imports
+// à chaque re-render (renderList peut être appelée plusieurs fois par
+// seconde). Refresh async + re-render si changement.
 
-const _YT_IMPORTS_CONTAINER_ID = 'youtube-imports-section';
+let _youtubeImportsCache = [];
+let _youtubeImportsCacheKey = '';
+let _youtubeImportsRefreshInFlight = false;
 
-function _ensureYoutubeImportsContainer() {
-  let el = document.getElementById(_YT_IMPORTS_CONTAINER_ID);
-  if (el) return el;
-  const sessionsList = document.getElementById('sessions-list');
-  if (!sessionsList || !sessionsList.parentNode) return null;
-  el = document.createElement('div');
-  el.id = _YT_IMPORTS_CONTAINER_ID;
-  el.className = 'youtube-imports-section';
-  el.style.cssText = 'margin-bottom:1.2rem;';
-  sessionsList.parentNode.insertBefore(el, sessionsList);
-  return el;
-}
-
-function _formatDurationSec(sec) {
-  if (!Number.isFinite(sec) || sec <= 0) return '';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  if (h > 0) return `${h}h${String(m).padStart(2,'0')}`;
-  if (m > 0) return `${m}min`;
-  return `${s}s`;
-}
-
-function _escapeHtml(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-async function _loadAndRenderYoutubeImports() {
-  const el = _ensureYoutubeImportsContainer();
-  if (!el) return;
-  let items = [];
+async function _refreshYoutubeImportsCache(opts) {
+  if (_youtubeImportsRefreshInFlight) return;
+  _youtubeImportsRefreshInFlight = true;
   try {
     const resp = await fetch('/api/youtube/my-imports', { credentials: 'same-origin' });
-    if (!resp.ok) {
-      // 401 / 502 / etc. : on cache silencieusement
-      el.style.display = 'none';
-      return;
-    }
+    if (!resp.ok) return;
     const body = await resp.json();
-    items = (body && Array.isArray(body.items)) ? body.items : [];
+    const items = (body && Array.isArray(body.items)) ? body.items : [];
+    const key = JSON.stringify(items.map((i) => [i.meeting_id, i.has_transcript, i.title]));
+    if (key !== _youtubeImportsCacheKey || (opts && opts.force)) {
+      _youtubeImportsCache = items;
+      _youtubeImportsCacheKey = key;
+      // Si la liste a déjà été rendue, on re-render avec les nouveaux items.
+      if (_lastSessions !== undefined) {
+        renderList(_lastSessions);
+      }
+    }
   } catch (err) {
-    el.style.display = 'none';
-    return;
+    // best-effort silencieux
+  } finally {
+    _youtubeImportsRefreshInFlight = false;
   }
-  if (items.length === 0) {
-    el.style.display = 'none';
-    return;
-  }
-  el.style.display = 'block';
-  const rows = items.map((it) => {
-    const title = _escapeHtml(it.title || '(sans titre)');
-    const channel = _escapeHtml(it.channel || '');
-    const dur = _formatDurationSec(it.duration_sec);
-    const chars = Number.isFinite(it.transcript_chars) ? it.transcript_chars : 0;
-    const url = _escapeHtml(it.canonical_url || '#');
-    const meetId = _escapeHtml(it.meeting_id || '');
-    const transcriptBadge = it.has_transcript
-      ? `<span style="color:#0a6c2e;font-size:.85em;">📝 ${chars.toLocaleString('fr-FR')} car.</span>`
-      : `<span style="color:#b00020;font-size:.85em;">⏳ pas encore</span>`;
-    return `
-      <div style="display:grid;grid-template-columns:1fr auto;gap:.5rem;
-                   padding:.5rem .75rem;border:1px solid #ddd;border-radius:.3rem;
-                   margin-bottom:.4rem;background:#fafafa;">
-        <div>
-          <div style="font-weight:600;">🎬 ${title}</div>
-          <div style="font-size:.85em;color:#555;">
-            ${channel ? channel + ' · ' : ''}${dur ? dur + ' · ' : ''}
-            ${transcriptBadge}
-          </div>
-        </div>
-        <div style="display:flex;gap:.4rem;align-items:center;">
-          <a href="${url}" target="_blank" rel="noopener"
-             style="font-size:.85em;text-decoration:none;color:#0a6c2e;"
-             title="Ouvrir sur YouTube">↗ source</a>
-        </div>
+}
+
+function _ytDurationLabel(sec) {
+  if (!Number.isFinite(sec) || sec <= 0) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return `${h}h${String(m).padStart(2,'0')}`;
+  return `${m}min`;
+}
+
+function renderYoutubeRow(yt) {
+  // Row visuellement alignée avec renderRow() audio : grille
+  // check / status / title / date / dur. La case check + chevron
+  // sont rendus inactifs (les actions audio ne s'appliquent pas).
+  const title = escapeHtml(yt.title || '(sans titre)');
+  const channel = escapeHtml(yt.channel || '');
+  const dateLabel = formatDate(yt.created_at, { withTime: true });
+  const durLabel = _ytDurationLabel(yt.duration_sec);
+  const url = escapeHtml(yt.canonical_url || '#');
+  const ready = yt.has_transcript;
+  const statusKind = ready ? 'success' : 'queued';
+  const statusLabel = ready
+    ? `Sous-titres ${yt.transcript_language || ''} récupérés (${(yt.transcript_chars || 0).toLocaleString('fr-FR')} car.)`
+    : 'Transcription en cours…';
+  const sourceLabel = channel ? `YouTube — ${channel}` : 'YouTube';
+
+  return `<div class="meeting-row meeting-row--youtube" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
+    <div class="meeting-row-main">
+      <label class="meeting-row-check meeting-row-check--disabled" title="Sélection non disponible pour les vidéos YouTube">
+        <input type="checkbox" disabled />
+      </label>
+      <span class="meeting-row-status meeting-row-status--youtube"
+            aria-label="Statut : ${escapeHtml(statusLabel)}"
+            title="${escapeHtml(statusLabel)}">
+        ${statusIcon(statusKind, ready ? 100 : 10, !ready)}
+      </span>
+      <div class="meeting-row-title-wrap">
+        <a class="meeting-row-title-btn" href="${url}" target="_blank" rel="noopener"
+           title="${title} — ouvrir sur YouTube">
+          <span class="meeting-row-title-text">🎬 ${title}</span>
+        </a>
       </div>
-    `;
-  }).join('');
-  el.innerHTML = `
-    <div style="display:flex;align-items:baseline;gap:.6rem;margin-bottom:.5rem;">
-      <h3 style="margin:0;font-size:1.05rem;">🎬 Vidéos web importées</h3>
-      <span style="color:#777;font-size:.85em;">(${items.length})</span>
+      <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
+      <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
     </div>
-    ${rows}
-  `;
+  </div>`;
 }
 
 // ── Bandeau persistant "transcriptions relancées" ───────────────────
