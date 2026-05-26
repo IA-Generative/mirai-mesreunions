@@ -860,6 +860,11 @@ function _onClick(ev) {
       _openYoutubeImportModal();
       break;
     }
+    case 'yt-open-source': {
+      const url = el.getAttribute('data-yt-url') || '';
+      if (url) window.open(url, '_blank', 'noopener,noreferrer');
+      break;
+    }
     default:
       break;
   }
@@ -1596,10 +1601,12 @@ function renderYoutubeRow(yt) {
         ${statusIcon(statusKind, ready ? 100 : 10, !ready)}
       </span>
       <div class="meeting-row-title-wrap">
-        <a class="meeting-row-title-btn" href="${url}" target="_blank" rel="noopener"
-           title="${title} — ouvrir sur YouTube">
+        <button type="button" class="meeting-row-title-btn"
+                data-action="meetings-new:yt-open-source"
+                data-yt-url="${url}"
+                title="${title} — ouvrir sur YouTube (nouvel onglet)">
           <span class="meeting-row-title-text">🎬 ${title}</span>
-        </a>
+        </button>
       </div>
       <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
