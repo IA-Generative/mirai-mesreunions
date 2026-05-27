@@ -1575,20 +1575,60 @@ function _ytDurationLabel(sec) {
 }
 
 function renderYoutubeRow(yt) {
-  // Row visuellement alignée avec renderRow() audio : grille
-  // check / status / title / date / dur. La case check + chevron
-  // sont rendus inactifs (les actions audio ne s'appliquent pas).
+  // C7 — row YouTube avec status dynamique reflétant le pipeline LLM
+  // (materialization_status : pending|processing|done|failed).
+  // Si done + user_audio_file_id → titre cliquable vers la fiche détail
+  // standard, sinon vers la source YouTube en nouvel onglet.
   const title = escapeHtml(yt.title || '(sans titre)');
   const channel = escapeHtml(yt.channel || '');
   const dateLabel = formatDate(yt.created_at, { withTime: true });
   const durLabel = _ytDurationLabel(yt.duration_sec);
   const url = escapeHtml(yt.canonical_url || '#');
-  const ready = yt.has_transcript;
-  const statusKind = ready ? 'success' : 'queued';
-  const statusLabel = ready
-    ? `Sous-titres ${yt.transcript_language || ''} récupérés (${(yt.transcript_chars || 0).toLocaleString('fr-FR')} car.)`
-    : 'Transcription en cours…';
-  const sourceLabel = channel ? `YouTube — ${channel}` : 'YouTube';
+  const ms = yt.materialization_status || 'pending';
+  const uafId = yt.user_audio_file_id || '';
+
+  // Mapping materialization_status → kind + label tooltip.
+  let statusKind, statusLabel, statusPct, animated;
+  if (ms === 'done') {
+    statusKind = 'success';
+    statusPct = 100;
+    animated = false;
+    const chars = yt.transcript_chars || 0;
+    statusLabel = `Compte-rendu prêt — ${chars.toLocaleString('fr-FR')} car. ${yt.transcript_language || ''} (${yt.transcript_method || ''})`;
+  } else if (ms === 'failed') {
+    statusKind = 'error';
+    statusPct = 0;
+    animated = false;
+    statusLabel = `Échec du traitement : ${escapeHtml(yt.transcription_status || 'erreur inconnue')}`;
+  } else if (ms === 'processing') {
+    statusKind = 'processing';
+    statusPct = 60;
+    animated = true;
+    statusLabel = `Traitement IA en cours (${escapeHtml(yt.transcription_status || 'kevent_processing')})…`;
+  } else {
+    // pending — placeholder créé, video-ingest pas encore terminé
+    statusKind = 'queued';
+    statusPct = 15;
+    animated = true;
+    statusLabel = 'Import YouTube en cours (récupération des sous-titres)…';
+  }
+
+  // Action du clic titre :
+  // - done + uafId → ouvre la fiche détail standard (data-action meetings-new:open-detail)
+  // - sinon → ouvre la source YouTube en nouvel onglet
+  const canOpenDetail = (ms === 'done') && uafId;
+  const titleAction = canOpenDetail ? 'meetings-new:open-detail' : 'meetings-new:yt-open-source';
+  const titleData = canOpenDetail
+    ? `data-file-id="${escapeHtml(uafId)}"`
+    : `data-yt-url="${url}"`;
+  const titleTooltip = canOpenDetail
+    ? `${title} — clic pour ouvrir le compte-rendu`
+    : `${title} — clic pour ouvrir sur YouTube (nouvel onglet)`;
+
+  // Icône source distincte pour YouTube (extension de sourceIcon).
+  const youtubeSourceIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/>
+  </svg>`;
 
   return `<div class="meeting-row meeting-row--youtube" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
     <div class="meeting-row-main">
@@ -1598,14 +1638,14 @@ function renderYoutubeRow(yt) {
       <span class="meeting-row-status meeting-row-status--youtube"
             aria-label="Statut : ${escapeHtml(statusLabel)}"
             title="${escapeHtml(statusLabel)}">
-        ${statusIcon(statusKind, ready ? 100 : 10, !ready)}
+        ${statusIcon(statusKind, statusPct, animated)}
       </span>
       <div class="meeting-row-title-wrap">
         <button type="button" class="meeting-row-title-btn"
-                data-action="meetings-new:yt-open-source"
-                data-yt-url="${url}"
-                title="${title} — ouvrir sur YouTube (nouvel onglet)">
-          <span class="meeting-row-title-text">🎬 ${title}</span>
+                data-action="${titleAction}"
+                ${titleData}
+                title="${escapeHtml(titleTooltip)}">
+          <span class="meeting-row-title-text">${youtubeSourceIcon} ${title}</span>
         </button>
       </div>
       <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>

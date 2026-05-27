@@ -255,6 +255,7 @@ def my_imports():
 
         out.append({
             "meeting_id": m.get("id"),
+            "user_audio_file_id": m.get("user_audio_file_id"),
             "created_at": m.get("created_at"),
             "video_source_id": vsid,
             "video_ingest_job_id": m.get("video_ingest_job_id"),
