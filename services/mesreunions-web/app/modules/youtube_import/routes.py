@@ -313,6 +313,15 @@ def my_imports():
     # 3. Merge. Le titre courant prend en priorité le suggested_filename
     # LLM (C6 — vient du UAF post-pipeline) puis le titre vidéo brut puis
     # le title placeholder.
+    # SLA : on considère qu'un placeholder pending depuis > 60s sans UAF
+    # est "stale" — soit le hook materialize a été silencieusement skippé
+    # (env manquante côté video-ingest), soit internal-ingester n'est pas
+    # joignable, soit le pipeline LLM est bloqué amont. Le front peut
+    # afficher un badge "retard de matérialisation" et un user technique
+    # peut investiguer.
+    from datetime import datetime, timezone
+    STALE_THRESHOLD_SEC = 60
+    now_utc = datetime.now(timezone.utc)
     out = []
     for m in meetings:
         vsid = m.get("video_source_id")
@@ -332,6 +341,27 @@ def my_imports():
             materialization_status = "failed"
         else:
             materialization_status = "processing"
+        # Détection placeholder stale (materialize muet)
+        stale = False
+        placeholder_age_s: int | None = None
+        if materialization_status == "pending":
+            created_raw = m.get("created_at")
+            if created_raw:
+                try:
+                    created_dt = datetime.fromisoformat(
+                        created_raw.replace("Z", "+00:00")
+                    )
+                    placeholder_age_s = int((now_utc - created_dt).total_seconds())
+                    if placeholder_age_s > STALE_THRESHOLD_SEC:
+                        stale = True
+                        logger.warning(
+                            "Placeholder Meeting %s stale: %ss sans UAF "
+                            "(vsid=%s, job=%s) — materialize hook muet ?",
+                            m.get("id"), placeholder_age_s, vsid,
+                            m.get("video_ingest_job_id"),
+                        )
+                except (ValueError, AttributeError):
+                    pass
 
         out.append({
             "meeting_id": m.get("id"),
@@ -352,6 +382,8 @@ def my_imports():
             "has_transcript": meta.get("has_transcript", False),
             # C6 — preview CR pour la fiche détail + status liste dynamique
             "materialization_status": materialization_status,
+            "stale": stale,
+            "placeholder_age_seconds": placeholder_age_s,
             "transcription_status": audio_preview.get("transcription_status"),
             "key_points_summary": audio_preview.get("key_points_summary"),
             "has_meeting_analysis": audio_preview.get("has_meeting_analysis", False),

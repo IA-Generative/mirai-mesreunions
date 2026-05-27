@@ -1764,7 +1764,14 @@ function renderYoutubeRow(yt) {
     statusKind = 'queued';
     statusPct = 15;
     animated = true;
-    statusLabel = 'Import YouTube en cours (récupération des sous-titres)…';
+    if (yt.stale) {
+      // Materialize muet (hook backend silencieusement skippé) ou
+      // pipeline LLM bloqué amont. On désanime + tooltip explicite.
+      animated = false;
+      statusLabel = `Matérialisation en retard (placeholder créé il y a ${yt.placeholder_age_seconds || '?'}s sans pipeline IA déclenché). Re-tente l'import ou contacte le support.`;
+    } else {
+      statusLabel = 'Import YouTube en cours (récupération des sous-titres)…';
+    }
   }
 
   // Action du clic titre :

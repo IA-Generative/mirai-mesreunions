@@ -362,6 +362,24 @@ def purge_source(source_id: int):
 
 
 def create_app() -> Flask:
+    # Fail-fast : si VIDEO_INGEST_MATERIALIZE_REQUIRED=true, on refuse de
+    # booter sans l'URL materialize + token. Évite le faux positif de
+    # succès observé en prod-bêta (HIT cache répond reused=true mais la
+    # row n'apparaît jamais dans Mes Réunions, parce que le hook est
+    # silencieusement skippé). En mode standalone D14, la var reste
+    # absente → comportement best-effort historique.
+    import os
+    if os.environ.get("VIDEO_INGEST_MATERIALIZE_REQUIRED", "").lower() == "true":
+        missing = [
+            k for k in ("VIDEO_INGEST_MATERIALIZE_URL", "VIDEO_INGEST_INTERNAL_API_TOKEN")
+            if not os.environ.get(k)
+        ]
+        if missing:
+            raise RuntimeError(
+                "VIDEO_INGEST_MATERIALIZE_REQUIRED=true mais env var(s) "
+                f"manquante(s) : {', '.join(missing)}. Refuse de booter "
+                "pour éviter les imports silencieusement non matérialisés."
+            )
     app = Flask("video_ingest")
     app.register_blueprint(bp)
     return app

@@ -87,6 +87,18 @@ def _wait_for_notification(timeout_s: int) -> None:
 
 def run_forever(stop_event: threading.Event | None = None) -> None:
     """Point d'entrée principal du worker. Bloque jusqu'à `stop_event`."""
+    # Fail-fast cohérent avec api.py create_app() : refuse de tourner
+    # sans hook materialize quand on a déclaré qu'il est obligatoire.
+    if os.environ.get("VIDEO_INGEST_MATERIALIZE_REQUIRED", "").lower() == "true":
+        missing = [
+            k for k in ("VIDEO_INGEST_MATERIALIZE_URL", "VIDEO_INGEST_INTERNAL_API_TOKEN")
+            if not os.environ.get(k)
+        ]
+        if missing:
+            raise RuntimeError(
+                "VIDEO_INGEST_MATERIALIZE_REQUIRED=true mais env var(s) "
+                f"manquante(s) : {', '.join(missing)}. Refuse de booter."
+            )
     stop_event = stop_event or threading.Event()
     current_job_id_ref: dict = {"id": None}
 
