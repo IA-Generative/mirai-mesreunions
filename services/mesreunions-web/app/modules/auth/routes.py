@@ -166,9 +166,12 @@ def auth_callback():
     }
     session["id_token"] = token.get("id_token", "")
     # Access token stocké pour les proxys serveur→serveur (ex. video-ingest).
-    # Court vécu — pas de risque de rotation ici, l'utilisateur refait un
-    # login à expiration.
+    # Refresh token aussi (durée SSO Session Idle Keycloak ≈ 30 min par défaut)
+    # pour permettre un refresh silencieux quand l'access expire pendant que
+    # l'user est encore actif sur la page.
     session["access_token"] = token.get("access_token", "")
+    if token.get("refresh_token"):
+        session["refresh_token"] = token.get("refresh_token")
     session.pop("oidc_state", None)
     session.pop("oidc_nonce", None)
 

@@ -43,8 +43,55 @@ def _user_sub() -> str | None:
     return u.get("sub") or None
 
 
-def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int = 10):
-    """Appel proxyé vers video-ingest avec le Bearer OIDC de l'user."""
+def _refresh_access_token_if_possible() -> bool:
+    """Tente un refresh silencieux de l'access_token via le refresh_token
+    stocké en session au login. Retourne True si l'access_token a été
+    rafraîchi avec succès et écrit en session, False sinon.
+
+    Best-effort : aucun log d'erreur sensible, juste succès/échec.
+    """
+    rt = session.get("refresh_token")
+    if not rt:
+        return False
+    try:
+        from libs.shared.app.config import OIDCConfig  # noqa: E402
+        cfg = OIDCConfig()
+        token_url = cfg.issuer.rstrip("/") + "/protocol/openid-connect/token"
+        resp = req.post(
+            token_url,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": cfg.client_id,
+                "client_secret": cfg.client_secret,
+            },
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            logger.warning("OIDC refresh HTTP %d", resp.status_code)
+            return False
+        body = resp.json()
+        new_at = body.get("access_token")
+        if not new_at:
+            return False
+        session["access_token"] = new_at
+        # Keycloak renvoie un nouveau refresh_token (rotation)
+        if body.get("refresh_token"):
+            session["refresh_token"] = body["refresh_token"]
+        logger.info("OIDC access_token refreshed silently")
+        return True
+    except Exception:
+        logger.exception("OIDC refresh failed (non-fatal)")
+        return False
+
+
+def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int = 10,
+                       _retry_after_refresh: bool = True):
+    """Appel proxyé vers video-ingest avec le Bearer OIDC de l'user.
+
+    Sur 401 (access_token expiré), tente UNE FOIS un refresh silencieux
+    via le refresh_token stocké en session puis retry l'appel original.
+    """
     bearer = _bearer()
     if not bearer:
         return None, ("session expirée, reconnexion requise", 401)
@@ -59,6 +106,11 @@ def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int =
         # internes ou stacktrace (CodeQL py/stack-trace-exposure).
         logger.exception("video-ingest unreachable")
         return None, ("video-ingest injoignable", 502)
+    # 401 → tenter UN refresh silencieux + retry.
+    if resp.status_code == 401 and _retry_after_refresh:
+        if _refresh_access_token_if_possible():
+            return _call_video_ingest(method, path, json_body=json_body,
+                                       timeout=timeout, _retry_after_refresh=False)
     try:
         return (resp.status_code, resp.json()), None
     except ValueError:
