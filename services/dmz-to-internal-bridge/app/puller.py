@@ -3906,6 +3906,189 @@ def term_sources(audio_id: str):
         db.close()
 
 
+# ─── Materialize externe (C3 — plan video-ingest) ──────────────────────────────
+#
+# Endpoint provider-agnostic appelé par les connecteurs externes
+# (video-ingest YouTube, futur mcp-mcr, mcp-dictaphone-dinum, ...) après
+# qu'ils ont récupéré transcript + segments depuis leur source. Crée un
+# user_audio_files "virtuel" qui court-circuite scan/transcode/transfer/
+# Whisper et lance directement le pipeline LLM existant.
+#
+# Cf. plan ~/.claude/plans/l-importation-de-fichier-youtube-nifty-frost.md (C3)
+# Cf. external_source.flatten_segments_to_synthetic_words pour le format
+# canonique des segments.
+
+@app.route("/api/v1/external-source/materialize", methods=["POST"])
+def materialize_external_source():
+    """Crée un user_audio_files virtuel à partir d'un transcript externe.
+
+    Payload (JSON) :
+      provider            : str  ('youtube' | 'mcr' | 'dictaphone-dinum' | ...)
+      source_resource_id  : str  (id opaque côté source, ex. video_id YouTube)
+      source_canonical_url: str  (URL canonique pour affichage)
+      user_sub            : str  (sub OIDC propriétaire)
+      meeting_id          : str  (UUID Meeting placeholder optionnel)
+      title               : str  (titre brut, sera remplacé par suggested_filename)
+      channel             : str  (auteur/chaîne)
+      duration_sec        : int  (durée audio/vidéo)
+      language            : str  (ex. 'fr')
+      transcript_text     : str  (concat des segments)
+      segments            : list[{start_seconds, end_seconds, text, speaker?}]
+      words_json          : list[{w, s, e}]  (optionnel — sinon synthétisé)
+      method              : str  ('subtitle_manual' | 'subtitle_auto' | 'asr_whisper' | 'external_transcript')
+      external_video_source_id: int  (pour video-ingest, l'id de video_sources)
+      extra_metadata      : dict (tout ce qui ne rentre pas dans le canonique)
+
+    Réponse :
+      200 {ok: true, audio_file_id: <uuid>, reused: bool}
+      400 si payload invalide
+      401 si token absent/invalide
+      500 si DB write fail
+    """
+    from app.external_source import (
+        validate_materialize_payload, materialize_payload_to_uaf_kwargs,
+        MaterializeValidationError,
+    )
+
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "DB not ready"}), 503
+
+    data = request.get_json(silent=True) or {}
+    try:
+        validated = validate_materialize_payload(data)
+    except MaterializeValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    uaf_kwargs = materialize_payload_to_uaf_kwargs(validated)
+    user_sub = validated["user_sub"]
+    external_vsid = validated["external_video_source_id"]
+    meeting_id_arg = validated["meeting_id"]
+    provider = validated["provider"]
+
+    db = SessionLocal()
+    try:
+        # Idempotence : 1 UAF par (user_sub, external_video_source_id).
+        existing = None
+        if external_vsid is not None:
+            existing = (
+                db.query(UserAudioFile)
+                  .filter(UserAudioFile.user_sub == user_sub,
+                          UserAudioFile.external_video_source_id == int(external_vsid))
+                  .first()
+            )
+        if existing:
+            audio_id_str = str(existing.id)
+            if meeting_id_arg:
+                try:
+                    if existing.meeting_id is None:
+                        existing.meeting_id = meeting_id_arg
+                        db.commit()
+                except Exception:
+                    db.rollback()
+            return jsonify({
+                "ok": True,
+                "audio_file_id": audio_id_str,
+                "reused": True,
+                "transcription_status": existing.transcription_status,
+            }), 200
+
+        # Création UAF virtuel — status='kevent_processing' pour démarrer
+        # le pipeline directement (skip scan/transcode/transfer/whisper).
+        now = datetime.now(timezone.utc)
+        uaf = UserAudioFile(
+            **uaf_kwargs,
+            transcription_started_at=now,
+            last_activity_at=now,
+        )
+        db.add(uaf)
+        db.flush()
+        audio_id = uaf.id
+        audio_id_str = str(audio_id)
+
+        if meeting_id_arg:
+            try:
+                m = db.query(Meeting).filter(Meeting.id == meeting_id_arg).first()
+                if m and m.user_audio_file_id is None:
+                    m.user_audio_file_id = audio_id
+            except Exception:
+                logger.exception("materialize: failed to link meeting %s → uaf %s",
+                                 meeting_id_arg, audio_id_str)
+        db.commit()
+        logger.info(
+            "materialize: created uaf=%s user=%s provider=%s vsid=%s meeting=%s "
+            "transcript_chars=%d",
+            audio_id_str, user_sub[:12], provider, external_vsid, meeting_id_arg,
+            len(uaf_kwargs["transcription_text"]),
+        )
+
+        base_for_llm = uaf_kwargs["transcription_text"]
+        speaker_tagged = uaf_kwargs["transcription_text"]
+        audio_id_local = audio_id_str
+        user_sub_local = user_sub
+
+    except Exception:
+        db.rollback()
+        logger.exception("materialize: db write failed")
+        return jsonify({"error": "db_write_failed"}), 500
+    finally:
+        db.close()
+
+    # Lance la chaîne LLM en thread daemon (pattern aligné sur
+    # /api/v1/audio/<id>/reprocess). Le pipeline meeting-intelligence
+    # existant (glossary_correction → cleaning → reformulation →
+    # meeting_analysis → suggest_metadata → key_points_summary) tourne
+    # exactement comme pour un audio uploadé classique.
+    def _run_chain():
+        try:
+            # Fusion glossaire user (statique + user_glossary).
+            effective_glossary: list[str] = list(_GLOSSARY_TERMS)
+            seen = set(effective_glossary)
+            try:
+                _gdb = SessionLocal()
+                from app.glossary_loader import load_user_glossary
+                for t in load_user_glossary(user_sub_local, _gdb) or set():
+                    if t and t not in seen:
+                        effective_glossary.append(t)
+                        seen.add(t)
+                _gdb.close()
+            except Exception:
+                logger.exception("materialize: failed to load user glossary for %s",
+                                 user_sub_local)
+
+            llm = _build_llm_client()
+            chain_updates, chain_status = _run_llm_chain_for_audio(
+                base_for_llm, speaker_tagged,
+                llm=llm,
+                glossary_terms=effective_glossary,
+                include_metadata=True,
+            )
+            chain_updates["transcription_completed_at"] = datetime.now(timezone.utc)
+            _set_user_audio_status(audio_id_local, chain_status, **chain_updates)
+            logger.info(
+                "materialize: chain done audio=%s status=%s outputs=%d",
+                audio_id_local, chain_status, len(chain_updates),
+            )
+        except Exception:
+            logger.exception("materialize: chain failed for audio=%s", audio_id_local)
+            try:
+                _set_user_audio_status(audio_id_local, "kevent_failed",
+                                       transcription_completed_at=datetime.now(timezone.utc))
+            except Exception:
+                logger.exception("materialize: failed to set failed status")
+
+    t = threading.Thread(target=_run_chain, name=f"materialize-{audio_id_local}", daemon=True)
+    t.start()
+
+    return jsonify({
+        "ok": True,
+        "audio_file_id": audio_id_local,
+        "reused": False,
+        "transcription_status": "kevent_processing",
+    }), 200
+
+
 def create_app():
     global SessionLocal, _purge_thread_started, _pull_loop_thread_started, _orphan_resume_started, _orphan_watchdog_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
