@@ -1662,9 +1662,16 @@ function renderYoutubeRow(yt) {
 
   return `<div class="meeting-row meeting-row--youtube" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
     <div class="meeting-row-main">
-      <label class="meeting-row-check meeting-row-check--disabled" title="Sélection non disponible pour les vidéos YouTube">
-        <input type="checkbox" disabled />
-      </label>
+      <button type="button"
+              class="meeting-row-check"
+              data-action="meetings-new:yt-delete-meeting"
+              data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}"
+              data-yt-title="${escapeHtml(title)}"
+              title="Supprimer cet import (mise à la corbeille)"
+              aria-label="Supprimer cet import"
+              style="background:none;border:none;cursor:pointer;color:#b00020;font-size:1.1em;line-height:1;padding:0 .3em;">
+        ✕
+      </button>
       <span class="meeting-row-status meeting-row-status--youtube"
             aria-label="Statut : ${escapeHtml(statusLabel)}"
             title="${escapeHtml(statusLabel)}">
@@ -1683,12 +1690,6 @@ function renderYoutubeRow(yt) {
            data-yt-url="${url}"
            title="Ouvrir la vidéo source sur YouTube (nouvel onglet)"
            style="color:#1d4ed8;text-decoration:none;">↗</a>
-        <button type="button" class="meeting-row-chevron"
-                data-action="meetings-new:yt-delete-meeting"
-                data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}"
-                data-yt-title="${escapeHtml(title)}"
-                title="Supprimer cet import (mise à la corbeille)"
-                style="color:#b00020;">🗑</button>
       </div>
       <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
