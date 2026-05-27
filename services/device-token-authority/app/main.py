@@ -2234,6 +2234,45 @@ def get_meeting(meeting_id: str):
         db.close()
 
 
+@app.route("/api/v1/meetings/<meeting_id>/link-video", methods=["PATCH", "POST"])
+def link_video_to_meeting(meeting_id: str):
+    """C5 — lie un Meeting placeholder à sa source video-ingest.
+
+    Body : user_sub, video_source_id (BigInt), video_ingest_job_id (BigInt opt).
+    Idempotent : ne touche pas un Meeting déjà lié (préserve les anciens IDs).
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    vsid = data.get("video_source_id")
+    vjid = data.get("video_ingest_job_id")
+    if not user_sub or vsid is None:
+        return jsonify({"error": "user_sub and video_source_id required"}), 400
+
+    db = SessionLocal()
+    try:
+        m = (
+            db.query(Meeting)
+            .filter(Meeting.id == meeting_id,
+                    Meeting.user_sub == user_sub,
+                    Meeting.trashed_at.is_(None))
+            .first()
+        )
+        if not m:
+            return jsonify({"error": "not_found"}), 404
+        # Idempotent : pose si vide.
+        if m.video_source_id is None:
+            m.video_source_id = int(vsid)
+        if vjid is not None and m.video_ingest_job_id is None:
+            m.video_ingest_job_id = int(vjid)
+        db.commit()
+        db.refresh(m)
+        return jsonify({"ok": True, "meeting": _meeting_to_dict(m, with_full=True)})
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/meetings/<meeting_id>/rename", methods=["POST"])
 def rename_meeting(meeting_id: str):
     """Renomme le titre d'un meeting (≤120 car.)."""

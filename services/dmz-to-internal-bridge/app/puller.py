@@ -4010,8 +4010,19 @@ def materialize_external_source():
         if meeting_id_arg:
             try:
                 m = db.query(Meeting).filter(Meeting.id == meeting_id_arg).first()
-                if m and m.user_audio_file_id is None:
-                    m.user_audio_file_id = audio_id
+                if m:
+                    # Lien UAF placé toujours si absent.
+                    if m.user_audio_file_id is None:
+                        m.user_audio_file_id = audio_id
+                    # C5 — Remplir aussi video_source_id + video_ingest_job_id
+                    # sur le Meeting placeholder (créé en amont par
+                    # mesreunions-web /api/youtube/import avant l'appel
+                    # video-ingest).
+                    if external_vsid is not None and m.video_source_id is None:
+                        m.video_source_id = int(external_vsid)
+                    vij = data.get("video_ingest_job_id")
+                    if vij is not None and m.video_ingest_job_id is None:
+                        m.video_ingest_job_id = int(vij)
             except Exception:
                 logger.exception("materialize: failed to link meeting %s → uaf %s",
                                  meeting_id_arg, audio_id_str)

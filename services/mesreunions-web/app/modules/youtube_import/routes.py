@@ -70,36 +70,96 @@ def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int =
 @bp.post("/import")
 @require_auth
 def import_youtube():
+    """C5 — placeholder Meeting immédiat (variation insert+update).
+
+    Workflow :
+      1. Crée IMMÉDIATEMENT un Meeting placeholder côté device-token-authority
+         (title = URL brute, video_source_id et video_ingest_job_id null
+         pour l'instant — seront posés par la suite via PATCH ou re-POST
+         idempotent côté materialize).
+      2. Forward la demande à video-ingest avec context_id=meeting_id ;
+         le hook materialize (C4) côté video-ingest passera ce meeting_id
+         à internal-ingester qui liera l'UAF virtuel au Meeting placeholder.
+      3. Renvoie {meeting_id, job_id?, video_source_id?} au front pour
+         qu'il puisse rafraîchir la liste tout de suite (avec status
+         intermédiaire "en cours d'import").
+    """
     payload = request.get_json(silent=True) or {}
     url = (payload.get("url") or "").strip()
     if not url:
         return jsonify({"error": "url requise"}), 400
 
+    user_sub = _user_sub()
+    if not user_sub:
+        return jsonify({"error": "user inconnu"}), 401
+
+    # 1. Création immédiate du placeholder Meeting (best-effort).
+    placeholder_meeting_id = _create_placeholder_meeting(user_sub=user_sub, url=url)
+
+    # 2. Forward à video-ingest avec context_id = meeting_id (le hook
+    #    materialize côté video-ingest passera ce meeting_id à
+    #    internal-ingester).
     forwarded = {
         "url": url,
         "language": payload.get("language", "fr"),
         "force_audio": bool(payload.get("force_audio", False)),
         "context": "meeting",
-        "context_id": payload.get("context_id"),
+        "context_id": placeholder_meeting_id or payload.get("context_id"),
     }
     result, err = _call_video_ingest("POST", "/video/import",
                                       json_body=forwarded, timeout=15)
     if err:
         msg, status = err
-        return jsonify({"error": msg}), status
+        return jsonify({
+            "error": msg,
+            "meeting_id": placeholder_meeting_id,  # exposé pour rollback front
+        }), status
     status, body = result
 
-    # HIT cache (200 + reused=true) → on crée TOUT DE SUITE le Meeting,
-    # pas besoin d'attendre un polling.
+    # 3. HIT cache (200 + reused=true) → lier la source directement au meeting.
     if status == 200 and body.get("reused") and body.get("video_source_id"):
         try:
-            _ensure_meeting_from_video(
-                user_sub=_user_sub(), video_source_id=body["video_source_id"],
-                video_ingest_job_id=None,  # HIT cache : pas de job
+            m = _ensure_meeting_from_video(
+                user_sub=user_sub, video_source_id=body["video_source_id"],
+                video_ingest_job_id=None,
+                existing_meeting_id=placeholder_meeting_id,
             )
+            if m:
+                body["meeting_id"] = m.get("id")
         except Exception:
             logger.exception("création Meeting (HIT cache) a échoué — non bloquant")
+    elif placeholder_meeting_id:
+        # MISS — on remonte le meeting_id pour que le front rafraîchisse
+        # la liste immédiatement avec le placeholder.
+        body["meeting_id"] = placeholder_meeting_id
+
     return jsonify(body), status
+
+
+def _create_placeholder_meeting(*, user_sub: str, url: str) -> str | None:
+    """Crée un Meeting placeholder via device-token-authority.
+
+    Title temporaire = URL pour que la row apparaisse dans la liste
+    avec un libellé identifiable. Sera remplacé par suggested_filename
+    LLM quand le pipeline meeting-intelligence aura fini.
+
+    Best-effort : si l'appel échoue, on continue sans (le placeholder
+    apparaîtra plus tard via le polling).
+    """
+    try:
+        resp = request_internal_device_api(
+            "POST", "/api/v1/meetings",
+            json_body={
+                "user_sub": user_sub,
+                "title": (url[:200] if url else "Import en cours"),
+            },
+            timeout=10,
+        )
+        meeting = (resp or {}).get("meeting") or {}
+        return meeting.get("id")
+    except Exception:
+        logger.exception("placeholder Meeting creation failed (non-fatal)")
+        return None
 
 
 # ─── GET /jobs/<id> + création Meeting au done ─────────────────────────
@@ -191,18 +251,43 @@ def my_imports():
 def _ensure_meeting_from_video(
     *, user_sub: str | None, video_source_id: int,
     video_ingest_job_id: int | None,
+    existing_meeting_id: str | None = None,
 ) -> dict | None:
     """Appelle device-token-authority POST /api/v1/meetings.
 
     Idempotence côté serveur : si un Meeting existe déjà pour ce
     `video_ingest_job_id`, l'API renvoie `reused=true` avec le Meeting
-    existant. Pour les HIT cache (job_id=None), on ne peut pas être
-    idempotent par job_id → on accepte le risque d'un doublon (rare,
-    l'utilisateur clique 2 fois sur Importer en moins de 2 s sur la
-    même URL déjà ingérée).
+    existant.
+
+    Si `existing_meeting_id` est fourni (cas C5 — placeholder déjà créé
+    avant l'appel video-ingest), on tente d'abord de lier la source vidéo
+    à ce placeholder via PATCH ; si ça échoue, fallback sur POST classique.
     """
     if not user_sub or not video_source_id:
         return None
+
+    # C5 — placeholder pré-créé : on lie la source au Meeting existant.
+    if existing_meeting_id:
+        try:
+            patch_resp = request_internal_device_api(
+                "PATCH", f"/api/v1/meetings/{existing_meeting_id}/link-video",
+                json_body={
+                    "user_sub": user_sub,
+                    "video_source_id": int(video_source_id),
+                    "video_ingest_job_id": int(video_ingest_job_id) if video_ingest_job_id is not None else None,
+                },
+                timeout=10,
+            )
+            meeting = (patch_resp or {}).get("meeting")
+            if meeting:
+                logger.info("Meeting placeholder %s linked to video_source=%s",
+                            existing_meeting_id, video_source_id)
+                return meeting
+        except Exception:
+            # Endpoint pas dispo (ancienne version device-token-authority) ou
+            # autre échec → fallback sur POST classique ci-dessous.
+            logger.warning("PATCH /meetings/<id>/link-video failed, fallback to POST")
+
     body: dict = {
         "user_sub": user_sub,
         "video_source_id": int(video_source_id),

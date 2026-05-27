@@ -192,6 +192,9 @@ def _notify_materialize(
         "segments": segments_json,
         "method": method,
         "external_video_source_id": video_source_id,
+        # C5 — propagation du job_id pour que le Meeting placeholder soit
+        # entièrement renseigné (meetings.video_ingest_job_id).
+        "video_ingest_job_id": job.id,
     }
     try:
         resp = requests.post(
