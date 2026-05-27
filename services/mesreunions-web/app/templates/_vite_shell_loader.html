@@ -6,5 +6,5 @@
 <script type="module" src="{{ vite_dev_url }}/@vite/client"></script>
 <script type="module" src="{{ vite_dev_url }}/shell.js"></script>
 {% else %}
-<script type="module" src="{{ url_for('static', filename='dist/shell.js') }}"></script>
+<script type="module" src="{{ url_for('static', filename='dist/shell.js') }}?v={{ asset_version }}"></script>
 {% endif %}

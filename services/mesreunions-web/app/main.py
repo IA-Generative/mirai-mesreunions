@@ -55,9 +55,37 @@ _VITE_DEV = os.getenv("VITE_DEV", "").lower() in {"1", "true", "yes"}
 _VITE_DEV_URL = os.getenv("VITE_DEV_URL", "http://localhost:5173").rstrip("/")
 
 
+def _compute_asset_version() -> str:
+    """Cache-busting pour shell.js (non content-hashed par vite).
+
+    Source de vérité dans l'ordre :
+      1. env BUILD_ID (injecté par build-push-scw.sh)
+      2. mtime du fichier shell.js (change à chaque build)
+      3. timestamp boot fallback
+    """
+    bid = os.getenv("BUILD_ID", "").strip()
+    if bid:
+        return bid
+    try:
+        path = os.path.join(
+            os.path.dirname(__file__), "static", "dist", "shell.js"
+        )
+        return str(int(os.path.getmtime(path)))
+    except OSError:
+        import time as _t
+        return str(int(_t.time()))
+
+
+_ASSET_VERSION = _compute_asset_version()
+
+
 @app.context_processor
 def _inject_vite_dev():
-    return {"vite_dev": _VITE_DEV, "vite_dev_url": _VITE_DEV_URL}
+    return {
+        "vite_dev": _VITE_DEV,
+        "vite_dev_url": _VITE_DEV_URL,
+        "asset_version": _ASSET_VERSION,
+    }
 
 
 if _VITE_DEV:
