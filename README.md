@@ -53,11 +53,19 @@ Le système accepte plusieurs sources d'entrée, qui rejoignent toutes le même 
 |---|---|---|
 | **PWA mobile (QR code)** | ✅ Production | Captation in situ avec device-token éphémère 15j. Cas d'usage principal. |
 | **Upload web direct** | ✅ Production | Drag-drop d'un fichier audio depuis le poste, ou import de dossier entier. |
-| **Import depuis Compte-Rendu Mirai** | ✅ Production | Récupération d'enregistrements depuis la plateforme visio ministérielle. |
-| **Import YouTube** | 🚧 Placeholder | URL YouTube → audio → pipeline (à implémenter dans un prochain chantier). |
-| **Connecteurs visio additionnels** | 📋 Backlog | Architecture pensée pour accueillir d'autres sources (Teams, Webex, Zoom, etc.) via le même bus interne. |
+| **Import depuis Compte-Rendu Mirai** | ✅ Production | Récupération d'enregistrements depuis la plateforme visio ministérielle. À harmoniser en V4 avec le pattern Meeting Source Connector (cf. ci-dessous). |
+| **Import YouTube** | ✅ Production | Premier connecteur du pattern unifié — URL → sous-titres ou audio → pipeline LLM complet → CR structuré. Cf. [`docs/connectors/youtube.md`](docs/connectors/youtube.md). |
+| **Connecteur DINUM Dictaphone** | 📋 V5 planifié | Récupération depuis la PWA d'enregistrement DINUM (WhisperX natif, segments + words + diarisation). |
+| **Connecteurs supplémentaires** | 📋 V10+ | Dailymotion, Vimeo, Webex, Teams, Zoom Cloud, SRT/VTT manuels, podcasts RSS — chacun ~1-2 jours grâce au contrat partagé. |
 
-Quelle que soit la source, la suite est identique : ClamAV → normalisation audio → bus AMQP interne → orchestrateur → backends transcription/LLM → restitution dans « Mes Réunions ». L'utilisateur ne voit qu'une seule liste, un seul format de compte-rendu, un seul jeu de garanties.
+Quelle que soit la source, la suite est identique : pipeline LLM commun (`puller._run_llm_chain_for_audio`) → glossary_correction → cleaning → reformulation → meeting_analysis → suggest_metadata → key_points_summary. **Ajouter une fonction d'import à MirAI = écrire un connecteur respectant le contrat**, pas modifier le pipeline ni le frontend.
+
+**Pattern « Meeting Source Connector »** — architecture universelle d'ingestion :
+
+- 📐 Décision architecturale : [`docs/adr/0003-meeting-source-connectors.md`](docs/adr/0003-meeting-source-connectors.md)
+- 📊 Vue d'ensemble & diagrammes : [`docs/architecture/meeting-source-connectors.md`](docs/architecture/meeting-source-connectors.md)
+- 📜 Spec normative (contrat partagé) : [`docs/contract/meeting-source-connector-spec.md`](docs/contract/meeting-source-connector-spec.md)
+- 🎬 Connecteur de référence (YouTube) : [`docs/connectors/youtube.md`](docs/connectors/youtube.md)
 
 ### 3.1 Le principe en une phrase
 

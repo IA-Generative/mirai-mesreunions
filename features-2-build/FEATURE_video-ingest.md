@@ -357,6 +357,33 @@ V2 : `DailymotionProvider`.
   - **1b (multi-URL)** : remplace l'input par un textarea 5 lignes (1 URL/ligne, cap 10 pour anti-abus UI). Imports lancés en parallèle, liste `<ul>` qui montre l'état par ligne (envoi → polling → ok/échec/cache). Résumé final à la fin (N importés / M cache / K échec).
 - **Post-fix smoke** : health 200 OK, modules `mcr_import` + `youtube_import` tous deux chargés, Meeting YouTube (vsid=1) toujours en BDD, 129/129 tests unit verts.
 
+### 2026-05-27 — Refonte vers pattern universel + livraison MVP C0→C8
+
+**Pivot architectural** : la V1 YouTube cloisonnée (`video_ingest.video_transcripts` séparée, zéro intégration au pipeline) a été remplacée par le pattern **Meeting Source Connector** universel — tout import dans MirAI alimente désormais le même pipeline meeting-intelligence via un endpoint `materialize` provider-agnostique.
+
+ADR-0003 acté : [`docs/adr/0003-meeting-source-connectors.md`](../docs/adr/0003-meeting-source-connectors.md).
+
+**Slices livrées en autonomie cette session** :
+
+- **C0** (commit `1934bf2`) — Script `tests/run-regression-campaign.sh` + baseline 129 video_ingest + 483 historique = 612 tests verts.
+- **C1** (commit `efe036c`) — Migration 022 : `user_audio_files.source_type` (ENUM) + `external_video_source_id` (BigInt) + `stored_filename` désormais nullable. Appliquée en prod-bêta sur postgres-internal (99 rows historiques en `'upload'`, idempotente).
+- **C2** (commit `54484b4`) — Modèle SQLAlchemy `UserAudioFile` étendu + `_audio_file_to_meeting_dict` sérialise les 2 nouveaux champs. 6 tests unit.
+- **C3** (commit `bad2843`) — Endpoint `POST /api/v1/external-source/materialize` côté dmz-to-internal-bridge. Helpers purs (`flatten_segments_to_synthetic_words`, `validate_materialize_payload`, `materialize_payload_to_uaf_kwargs`, `derive_source_type`, `synthetic_session_code`) extraits dans `external_source.py` pour testabilité isolée. 29 tests unit. Smoke prod-bêta : UAF virtuel créé en `kevent_processing`, pipeline LLM tourne (~30-60s), `transcription_status='kevent_completed'`, `suggested_filename` + `key_points_summary` + `meeting_analysis_json` peuplés. Idempotent sur `(user_sub, external_video_source_id)`.
+- **C4** (commit `c0e6e4a`) — Hook `_notify_materialize` dans `video_ingest/orchestrator.py` best-effort vers internal-ingester. Config via env `VIDEO_INGEST_MATERIALIZE_URL` + `VIDEO_INGEST_INTERNAL_API_TOKEN`. Skip propre si URL vide (mode standalone D14). Échec HTTP/timeout → log warning, job continue. 7 nouveaux tests. K8s : env vars + NetworkPolicy CNP autorisant egress vers internal-ingester:8090.
+- **C5** (commit `ec24c1a`) — Placeholder Meeting immédiat à l'import. `youtube_import/routes.py` crée le Meeting AVANT l'appel video-ingest, passe son `id` en `context_id` pour que le hook materialize lie l'UAF au placeholder existant. Endpoint `PATCH /api/v1/meetings/<id>/link-video` côté device-token-authority (idempotent, ne touche pas si déjà rempli). Le hook materialize remplit `meetings.user_audio_file_id` + `video_source_id` + `video_ingest_job_id`.
+- **C6** (commit `66973f1`) — Endpoint `GET /api/v1/meetings?with_audio_preview=1` joint batch les colonnes UAF (transcription_status, suggested_filename, key_points_summary, has_meeting_analysis). `/api/youtube/my-imports` enrichi : calcule `materialization_status` (pending/processing/done/failed) pour status dynamique frontend, prend le titre dans l'ordre `suggested_filename` LLM > video.title brut > placeholder.
+- **C7** (commit `6d64108`) — `renderYoutubeRow` reflète maintenant l'état réel du pipeline : 4 kinds visuels selon `materialization_status`, tooltip détaillé, SVG YouTube inline, click titre ouvre la fiche détail si `done + user_audio_file_id` sinon redirige vers YouTube.
+- **C8** (en cours) — Docs pattern complets : ADR-0003, `docs/architecture/meeting-source-connectors.md` avec diagrammes (vue système + séquence import YouTube), `docs/contract/meeting-source-connector-spec.md` v1.0.0 normative, `docs/connectors/youtube.md` détaillée. README racine mis à jour pour refléter le pattern universel.
+
+**État final** : 654 tests verts total (136 video_ingest + 518 historique), 0 régression, 9 commits C0→C8 pushés. Pipeline LLM bout-en-bout validé en prod-bêta sur smoke test (`smoke-user-c3`). Rollout des slices C4-C7 en attente du retour de l'API server K8s (panne réseau Scaleway temporaire constatée pendant la session).
+
+**Évolutions planifiées** (cf. plan ~/.claude/plans/l-importation-de-fichier-youtube-nifty-frost.md) :
+- V2 — Player YouTube + karaoke
+- V3 — Renommage canonique `source_resource_id` + extraction `mirai-video-ingest`
+- V4 — Connecteur `mcp-mcr` (harmonisation du module legacy `mcr_import/`)
+- V5 — Connecteur `mcp-dictaphone-dinum`
+- V6-V10+ — Multi-format audio bulk, `mcp-local-files`, refacto PWA-mobile, Registry MCP central, autres providers
+
 ### _(prochaine entrée à ajouter par le coding assistant)_
 
 ---
