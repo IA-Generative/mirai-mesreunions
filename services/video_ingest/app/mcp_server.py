@@ -38,7 +38,15 @@ from .repo import (
 
 log = logging.getLogger(__name__)
 
-mcp = FastMCP("video-ingest")
+import os as _os
+
+# Bind explicite 0.0.0.0:8001 — sinon FastMCP par défaut écoute sur
+# 127.0.0.1, et le pod K8s n'est pas joignable depuis le Service ClusterIP.
+mcp = FastMCP(
+    "video-ingest",
+    host=_os.environ.get("VIDEO_INGEST_MCP_BIND_HOST", "0.0.0.0"),
+    port=int(_os.environ.get("VIDEO_INGEST_MCP_BIND_PORT", "8001")),
+)
 
 _PROVIDERS = [YouTubeProvider()]
 
@@ -85,6 +93,34 @@ def video_import(
         )
     return {"status": "pending", "reused": False,
             "video_source_id": None, "job_id": job_id}
+
+
+@mcp.tool()
+def video_get_job(job_id: int, user_sub: str) -> dict[str, Any]:
+    """Statut d'un job d'ingestion pour polling client.
+
+    Renvoie `{id, status, video_source_id, reused, error_message,
+    attempts, created_at, completed_at}` ou `{error}` si introuvable
+    ou si le job ne lui appartient pas.
+
+    `status` ∈ {pending, running, done, failed}.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """SELECT id, status, video_source_id, reused, error_message,
+                      attempts, created_at, completed_at, user_sub
+                 FROM video_ingest_jobs WHERE id = %s""",
+            (job_id,),
+        )
+        row = cur.fetchone()
+    if not row or row[8] != user_sub:
+        return {"error": "job introuvable"}
+    return {
+        "id": row[0], "status": row[1], "video_source_id": row[2],
+        "reused": row[3], "error_message": row[4], "attempts": row[5],
+        "created_at": row[6].isoformat() if row[6] else None,
+        "completed_at": row[7].isoformat() if row[7] else None,
+    }
 
 
 @mcp.tool()

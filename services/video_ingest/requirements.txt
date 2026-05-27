@@ -11,3 +11,6 @@ youtube-transcript-api>=1.0.0
 # BDD : psycopg2 direct, sans SQLAlchemy ORM (cf. README D14 — raw SQL
 # pour minimiser les deps lors de l'extraction du composant).
 psycopg2-binary>=2.9.0
+
+# MCP SDK (transport streamable-http) — expose les 5 tools.
+mcp>=1.2.0

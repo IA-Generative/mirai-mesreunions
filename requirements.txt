@@ -25,3 +25,6 @@ python-pptx==1.0.2
 # `next_occurrence_at` à partir d'un dict {freq, interval, byweekday,
 # byhour, byminute, until} et d'une date de référence).
 python-dateutil==2.9.0.post0
+# MCP SDK pour exposer video-ingest (et autres connecteurs) via le
+# transport streamable-http. Consommé par Open WebUI et agents.
+mcp>=1.2.0
