@@ -190,6 +190,34 @@ def get_job(job_id: int):
     return jsonify(body), status
 
 
+# ─── DELETE /meetings/<id> : suppression d'un import YouTube ──────────────
+
+@bp.delete("/meetings/<meeting_id>")
+@require_auth
+def delete_youtube_meeting(meeting_id: str):
+    """Mise à la corbeille d'un Meeting issu d'un import YouTube.
+
+    Délègue à device-token-authority DELETE /api/v1/meetings/<id> qui
+    soft-delete le meeting (pose trashed_at). L'UAF lié (s'il existe)
+    reste avec sa transcription et son CR — la fiche détail reste
+    consultable depuis la corbeille via les endpoints existants.
+    """
+    user_sub = _user_sub()
+    if not user_sub:
+        return jsonify({"error": "user inconnu"}), 401
+
+    try:
+        resp = request_internal_device_api(
+            "DELETE", f"/api/v1/meetings/{meeting_id}",
+            json_body={"user_sub": user_sub},
+            timeout=10,
+        )
+        return jsonify(resp or {"ok": True}), 200
+    except req.HTTPError:
+        logger.exception("DELETE meeting failed for %s", meeting_id)
+        return jsonify({"error": "suppression indisponible"}), 502
+
+
 # ─── GET /my-imports : liste enrichie ──────────────────────────────────
 
 @bp.get("/my-imports")

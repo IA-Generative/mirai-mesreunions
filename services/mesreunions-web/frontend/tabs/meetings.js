@@ -865,6 +865,13 @@ function _onClick(ev) {
       if (url) window.open(url, '_blank', 'noopener,noreferrer');
       break;
     }
+    case 'yt-delete-meeting': {
+      const mid = el.getAttribute('data-yt-meeting-id') || '';
+      const title = el.getAttribute('data-yt-title') || '';
+      if (!mid) break;
+      _deleteYoutubeMeeting(mid, title);
+      break;
+    }
     default:
       break;
   }
@@ -1518,6 +1525,29 @@ async function _pollJobUntilTerminal(jobId, setStatus) {
   return 'failed';
 }
 
+async function _deleteYoutubeMeeting(meetingId, title) {
+  const label = title ? `"${title}"` : 'cet import';
+  if (!window.confirm(`Mettre ${label} à la corbeille ?\n\n(supprime aussi le compte-rendu généré)`)) {
+    return;
+  }
+  try {
+    const resp = await fetch(`/api/youtube/meetings/${encodeURIComponent(meetingId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      alert(`Échec suppression : ${body.error || resp.status}`);
+      return;
+    }
+    // Force refresh immédiat de la liste.
+    _refreshMeetingsListIfPossible();
+  } catch (err) {
+    alert(`Erreur réseau : ${err.message}`);
+  }
+}
+
+
 function _refreshMeetingsListIfPossible() {
   // legacy.js loadSessions() rafraîchit la liste audio, qui à son tour
   // appelle renderList() qui injecte les imports YouTube via cache + refresh.
@@ -1647,6 +1677,18 @@ function renderYoutubeRow(yt) {
                 title="${escapeHtml(titleTooltip)}">
           <span class="meeting-row-title-text">${youtubeSourceIcon} ${title}</span>
         </button>
+        <a href="${url}" target="_blank" rel="noopener"
+           class="meeting-row-chevron"
+           data-action="meetings-new:yt-open-source"
+           data-yt-url="${url}"
+           title="Ouvrir la vidéo source sur YouTube (nouvel onglet)"
+           style="color:#1d4ed8;text-decoration:none;">↗</a>
+        <button type="button" class="meeting-row-chevron"
+                data-action="meetings-new:yt-delete-meeting"
+                data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}"
+                data-yt-title="${escapeHtml(title)}"
+                title="Supprimer cet import (mise à la corbeille)"
+                style="color:#b00020;">🗑</button>
       </div>
       <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
