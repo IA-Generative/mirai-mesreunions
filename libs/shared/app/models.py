@@ -295,7 +295,10 @@ class UserAudioFile(InternalBase):
 
     original_session_code = Column(String(10), nullable=False, comment="Code simple d'origine")
     original_filename = Column(String(512), nullable=False)
-    stored_filename = Column(String(512), nullable=False)
+    # stored_filename est nullable depuis la migration 022 : les rows d'origine
+    # external (transcript YouTube sans audio S3) n'ont pas de fichier stocké.
+    # Les rows 'upload' continuent de l'avoir non-NULL via contrainte applicative.
+    stored_filename = Column(String(512), nullable=True)
 
     file_size_bytes = Column(Integer, nullable=False)
     audio_quality_score = Column(Float, nullable=True)
@@ -306,6 +309,23 @@ class UserAudioFile(InternalBase):
     # cas dans l'UI (badge "venu de MCR") + dédoublonnage à l'import.
     origin = Column(String(20), nullable=False, default="upload",
                     comment="upload | mobile | mcr_import")
+
+    # Nature du contenu (migration 022) — dimension orthogonale à `origin` :
+    #  - 'upload' : audio classique avec pipeline scan/transcode/transfer/whisper
+    #  - 'youtube_subtitle' : transcript YouTube récupéré, pas d'audio S3,
+    #    pipeline démarre directement à kevent_processing avec transcription_text
+    #    pré-rempli
+    #  - 'youtube_audio' : audio YouTube téléchargé (force_audio=true), Whisper
+    #    Kevent appelé normalement
+    # Sera étendu V4 (MCR) et V5 (DINUM). String pour rester compatible SQLite
+    # (tests) tout en mappant sur l'ENUM Postgres en prod.
+    source_type = Column(String(32), nullable=False, default="upload",
+                         comment="upload | youtube_subtitle | youtube_audio | (futur : external_transcript)")
+
+    # Pointeur opaque vers video_ingest.video_sources.id (cross-service D14,
+    # pas de FK). Renseigné pour les rows source_type != 'upload'.
+    external_video_source_id = Column(BigInteger, nullable=True, index=True,
+                                       comment="video_ingest.video_sources.id (opaque, pas de FK)")
 
     # Transcription — final text produced by whichever backend ran.
     transcription_status = Column(String(50), default="pending",

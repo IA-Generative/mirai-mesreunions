@@ -1315,6 +1315,10 @@ def _audio_file_to_meeting_dict(uaf: UserAudioFile) -> dict:
             if uaf.reprocessed_with_meeting_id else None
         ),
         "last_reprocessed_at": uaf.last_reprocessed_at.isoformat() if uaf.last_reprocessed_at else None,
+        # Migration 022 — nature de la source pour différencier audio classique
+        # des imports external (YouTube, MCR, DINUM, ...).
+        "source_type": getattr(uaf, "source_type", "upload"),
+        "external_video_source_id": getattr(uaf, "external_video_source_id", None),
     }
 
 
