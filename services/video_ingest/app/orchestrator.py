@@ -78,6 +78,23 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
             conn, user_sub=job.user_sub, video_source_id=existing_id,
             context=job.context, context_id=job.context_id,
         )
+        # Hook materialize aussi sur HIT cache : sinon le user obtient
+        # une row mais sans CR (pipeline LLM jamais déclenché). On
+        # recharge le transcript depuis la BDD et on notifie.
+        try:
+            src = repo.load_source(conn, existing_id)
+            tr = repo.load_best_transcript(conn, existing_id, language=job.language_pref)
+            if src and tr:
+                _notify_materialize_from_cache(
+                    provider_name=provider.name,
+                    provider_video_id=src["provider_video_id"],
+                    video_source_id=existing_id,
+                    job=job,
+                    source_meta=src,
+                    transcript_db=tr,
+                )
+        except Exception:
+            log.exception("HIT cache materialize hook failed (non-fatal)")
         return IngestResult(video_source_id=existing_id, reused=True)
 
     # 4. MISS (ou source sans transcript) : fetch metadata + upsert.
@@ -211,6 +228,71 @@ def _notify_materialize(
         return
     log.info(
         "materialize hook OK: vsid=%s user=%s meeting=%s",
+        video_source_id, job.user_sub[:12], payload["meeting_id"],
+    )
+
+
+def _notify_materialize_from_cache(
+    *,
+    provider_name: str,
+    provider_video_id: str,
+    video_source_id: int,
+    job: Job,
+    source_meta: dict,
+    transcript_db: dict,
+) -> None:
+    """Variante de _notify_materialize pour le chemin HIT cache.
+
+    Construit le payload depuis les données déjà en BDD (pas de
+    metadata/transcript fraîchement fetchés). Idempotent côté
+    internal-ingester : si l'UAF existe déjà pour ce
+    (user_sub, external_video_source_id), réutilise au lieu de créer.
+    """
+    url = os.environ.get("VIDEO_INGEST_MATERIALIZE_URL", "").strip()
+    if not url:
+        return
+    token = os.environ.get("VIDEO_INGEST_INTERNAL_API_TOKEN", "").strip()
+    if not token:
+        return
+    timeout = int(os.environ.get("VIDEO_INGEST_MATERIALIZE_TIMEOUT", "10"))
+
+    method = transcript_db.get("method", "subtitle_auto")
+    if method.startswith("asr_"):
+        method = "asr_whisper"
+    segments_json = transcript_db.get("segments_json") or []
+    content_text = transcript_db.get("content_text") or ""
+
+    payload = {
+        "provider": provider_name,
+        "source_resource_id": provider_video_id,
+        "source_canonical_url": source_meta.get("canonical_url"),
+        "user_sub": job.user_sub,
+        "meeting_id": job.context_id if job.context == "meeting" else None,
+        "title": source_meta.get("title") or "",
+        "channel": source_meta.get("channel") or "",
+        "duration_sec": source_meta.get("duration_sec") or 0,
+        "language": transcript_db.get("language") or "fr",
+        "transcript_text": content_text,
+        "segments": segments_json,
+        "method": method,
+        "external_video_source_id": video_source_id,
+        "video_ingest_job_id": job.id,
+    }
+    try:
+        resp = requests.post(
+            url, json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        log.warning("materialize-from-cache hook unreachable: %s", e)
+        return
+    if resp.status_code >= 400:
+        log.warning("materialize-from-cache hook HTTP %d : %s",
+                    resp.status_code, resp.text[:200])
+        return
+    log.info(
+        "materialize-from-cache hook OK: vsid=%s user=%s meeting=%s",
         video_source_id, job.user_sub[:12], payload["meeting_id"],
     )
 

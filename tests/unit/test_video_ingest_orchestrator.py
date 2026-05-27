@@ -394,10 +394,40 @@ def test_materialize_skipped_when_token_missing(monkeypatch):
     mock_post.assert_not_called()
 
 
-def test_materialize_not_called_on_cache_hit(monkeypatch):
-    """HIT cache → pas de transcript fraîchement inséré, donc pas de materialize."""
+def test_materialize_called_on_cache_hit(monkeypatch):
+    """HIT cache → materialize est aussi appelé (rejoue le pipeline LLM
+    sans re-fetch YouTube). C'est ce qui permet à un user qui ré-importe
+    une URL déjà connue de quand même avoir son CR généré."""
     monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
     monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "tok")
+    conn = MagicMock()
+    provider = _provider()
+    mock_resp = MagicMock(status_code=200)
+
+    src = {"provider": "youtube", "provider_video_id": "dQw4w9WgXcQ",
+           "canonical_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+           "title": "Mensch", "channel": "AN", "duration_sec": 4930}
+    tr = {"id": 1, "language": "fr", "method": "subtitle_auto",
+          "content_text": "transcript", "segments_json": [{"start_seconds":0,"end_seconds":5,"text":"transcript"}]}
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=777), \
+         patch.object(orchestrator.repo, "has_transcript", return_value=True), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.repo, "load_source", return_value=src), \
+         patch.object(orchestrator.repo, "load_best_transcript", return_value=tr), \
+         patch.object(orchestrator.requests, "post", return_value=mock_resp) as mock_post:
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    assert result.reused is True
+    mock_post.assert_called_once()
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["external_video_source_id"] == 777
+    assert payload["title"] == "Mensch"
+
+
+def test_materialize_cache_hit_skipped_when_url_empty(monkeypatch):
+    """HIT cache + MATERIALIZE_URL vide → skip propre (mode standalone)."""
+    monkeypatch.delenv("VIDEO_INGEST_MATERIALIZE_URL", raising=False)
     conn = MagicMock()
     provider = _provider()
 

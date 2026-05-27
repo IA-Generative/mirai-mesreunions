@@ -880,6 +880,14 @@ function _onClick(ev) {
       if (url) window.open(url, '_blank', 'noopener,noreferrer');
       break;
     }
+    case 'yt-open-detail': {
+      // L'UAF n'est pas encore connu en cache local. On re-fetch
+      // /api/youtube/my-imports pour voir s'il est apparu entretemps.
+      // Si oui → on ouvre la fiche standard. Sinon → message d'attente.
+      const meetingId = el.getAttribute('data-yt-meeting-id') || '';
+      _openYoutubeDetail(meetingId);
+      break;
+    }
     case 'yt-delete-meeting': {
       const mid = el.getAttribute('data-yt-meeting-id') || '';
       const title = el.getAttribute('data-yt-title') || '';
@@ -1486,6 +1494,14 @@ async function _submitYoutubeImport(modal) {
   statusEl.textContent = `Terminé : ${ok} importé(s), ${reused} déjà en cache, ${failed} en échec.`;
   submitBtn.disabled = false;
   _refreshMeetingsListIfPossible();
+  // Si tout s'est bien passé, on ferme la modale automatiquement après
+  // un court délai (laisse le user lire le résumé). En cas d'échec, on
+  // laisse ouverte pour qu'il voie le détail par URL.
+  if (failed === 0) {
+    setTimeout(() => {
+      try { modal.close(); } catch (e) { /* déjà fermée */ }
+    }, 1500);
+  }
 }
 
 async function _runSingleImport({ url, language, forceAudio, idx, modal, listEl }) {
@@ -1548,6 +1564,37 @@ async function _pollJobUntilTerminal(jobId, setStatus) {
   setStatus('délai dépassé — peut continuer en arrière-plan', '#b00020');
   return 'failed';
 }
+
+async function _openYoutubeDetail(meetingId) {
+  // Tentative 1 : cache local
+  let yt = _youtubeImportsCache.find((y) => y.meeting_id === meetingId);
+  if (yt && yt.user_audio_file_id) {
+    const fn = _resolveLegacyFn('showFileDetail');
+    if (fn) { fn(yt.user_audio_file_id); return; }
+  }
+  // Tentative 2 : refresh cache
+  try {
+    const resp = await fetch('/api/youtube/my-imports', { credentials: 'same-origin' });
+    if (resp.ok) {
+      const body = await resp.json();
+      const items = (body && Array.isArray(body.items)) ? body.items : [];
+      _youtubeImportsCache = items;
+      yt = items.find((y) => y.meeting_id === meetingId);
+      if (yt && yt.user_audio_file_id) {
+        const fn = _resolveLegacyFn('showFileDetail');
+        if (fn) { fn(yt.user_audio_file_id); return; }
+      }
+    }
+  } catch (e) { /* fall through */ }
+  // Pas d'UAF dispo : message d'attente.
+  window.alert(
+    "Le compte-rendu est en cours de génération.\n\n" +
+    "La fiche détaillée s'ouvrira automatiquement quand le pipeline IA " +
+    "aura terminé (typiquement 30-90 secondes après l'import). Réessaye " +
+    "dans un instant."
+  );
+}
+
 
 async function _deleteYoutubeMeeting(meetingId, title) {
   const label = title ? `"${title}"` : 'cet import';
@@ -1668,16 +1715,19 @@ function renderYoutubeRow(yt) {
   }
 
   // Action du clic titre :
-  // - done + uafId → ouvre la fiche détail standard (data-action meetings-new:open-detail)
-  // - sinon → ouvre la source YouTube en nouvel onglet
-  const canOpenDetail = (ms === 'done') && uafId;
-  const titleAction = canOpenDetail ? 'meetings-new:open-detail' : 'meetings-new:yt-open-source';
+  // - UAF disponible → ouvre la fiche détail standard (open-detail)
+  // - UAF pas encore prêt (pipeline LLM en cours) → action dédiée
+  //   yt-open-detail qui refresh le cache et ouvre la fiche dès que
+  //   l'UAF apparaît (ou affiche un message « en cours »).
+  // Le titre n'ouvre JAMAIS YouTube — pour ça il y a le bouton ↗.
+  const canOpenDetail = !!uafId;
+  const titleAction = canOpenDetail ? 'meetings-new:open-detail' : 'meetings-new:yt-open-detail';
   const titleData = canOpenDetail
     ? `data-file-id="${escapeHtml(uafId)}"`
-    : `data-yt-url="${url}"`;
+    : `data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}"`;
   const titleTooltip = canOpenDetail
     ? `${title} — clic pour ouvrir le compte-rendu`
-    : `${title} — clic pour ouvrir sur YouTube (nouvel onglet)`;
+    : `${title} — compte-rendu en cours de génération`;
 
   // Icône source distincte pour YouTube (extension de sourceIcon).
   const youtubeSourceIcon = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -1702,7 +1752,7 @@ function renderYoutubeRow(yt) {
   return `<div class="meeting-row meeting-row--youtube${isExpanded ? ' is-expanded' : ''}${isSelected ? ' is-selected' : ''}" data-file-id="${escapeHtml(fileIdForActions)}" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
     <div class="meeting-row-main">
       <label class="meeting-row-check" title="Sélectionner (Alt)">
-        <input type="checkbox" data-meeting-check="${escapeHtml(fileIdForActions)}" ${isSelected ? 'checked' : ''} ${uafId ? '' : 'disabled'} />
+        <input type="checkbox" data-meeting-check="${escapeHtml(fileIdForActions)}" ${isSelected ? 'checked' : ''} />
       </label>
       <button type="button" class="meeting-row-status meeting-row-status--youtube"
               ${canOpenDetail ? `data-action="meetings-new:open-detail" data-file-id="${escapeHtml(uafId)}"` : ''}

@@ -89,6 +89,61 @@ def insert_transcript(
         return cur.fetchone()[0]
 
 
+def load_source(conn, video_source_id: int) -> dict | None:
+    """Charge les metadata d'une source vidéo existante. Utilisé en HIT
+    cache pour re-déclencher materialize sans re-fetch YouTube."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """SELECT provider, provider_video_id, canonical_url, title, channel,
+                      duration_sec
+                 FROM video_sources WHERE id = %s""",
+            (video_source_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "provider": row[0],
+            "provider_video_id": row[1],
+            "canonical_url": row[2],
+            "title": row[3],
+            "channel": row[4],
+            "duration_sec": row[5],
+        }
+
+
+def load_best_transcript(conn, video_source_id: int, *, language: str | None = None) -> dict | None:
+    """Charge le meilleur transcript existant pour une source (manuels
+    prioritaires, fallback sur la langue demandée puis n'importe laquelle)."""
+    with conn.cursor() as cur:
+        if language:
+            cur.execute(
+                """SELECT id, language, method, content_text, segments_json
+                     FROM video_transcripts
+                    WHERE video_source_id = %s AND language = %s
+                    ORDER BY (method = 'subtitle_manual') DESC, created_at DESC LIMIT 1""",
+                (video_source_id, language),
+            )
+        else:
+            cur.execute(
+                """SELECT id, language, method, content_text, segments_json
+                     FROM video_transcripts
+                    WHERE video_source_id = %s
+                    ORDER BY (method = 'subtitle_manual') DESC, created_at DESC LIMIT 1""",
+                (video_source_id,),
+            )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "language": row[1],
+            "method": row[2],
+            "content_text": row[3],
+            "segments_json": row[4] or [],
+        }
+
+
 def add_bookmark(
     conn,
     *,
