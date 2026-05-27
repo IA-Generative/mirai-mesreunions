@@ -1,0 +1,17 @@
+=== Campagne de non-régression — Wed May 27 02:43:46 CEST 2026 ===
+Tag : after-C3
+
+── Run 1 : tests/unit/test_video_ingest_*.py ──
+.........                                                                [100%]============================= 129 passed in 0.36s ==============================
+
+── Run 2 : tests/unit/ (hors video_ingest) ──
+FAILED tests/unit/test_mcr_client.py::test_download_audio_403_raises_auth_errorFAILED tests/unit/test_meeting_prep.py::test_assemble_corpus_propagates_drive_transient======================== 20 failed, 518 passed in 2.12s ========================
+
+── Compteurs ──
+video_ingest : 129 passed / 0 failed
+historique   : 518 passed / 20 failed
+total passed : 647
+
+✓ Historique : 518 ≥ baseline 489
+  (baseline relevée à 518)
+

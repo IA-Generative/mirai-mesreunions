@@ -267,3 +267,145 @@ def test_run_and_record_maps_errors_to_failed(exc_factory, expected_prefix):
     comp.assert_not_called()
     fail_mock.assert_called_once()
     assert fail_mock.call_args.kwargs["error"].startswith(expected_prefix)
+
+
+# ─── Hook materialize (C4 — plan video-ingest) ─────────────────────────
+
+def test_materialize_skipped_when_url_env_empty(monkeypatch):
+    """(i) MATERIALIZE_URL vide → skip propre, pas d'exception."""
+    monkeypatch.delenv("VIDEO_INGEST_MATERIALIZE_URL", raising=False)
+    conn = MagicMock()
+    provider = _provider()
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post") as mock_post:
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    assert result.video_source_id == 555
+    mock_post.assert_not_called()  # URL vide → pas d'appel
+
+
+def test_materialize_called_after_insert_transcript_when_configured(monkeypatch):
+    """(g) Materialize appelé après insert_transcript."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://internal-ingester:8090/api/v1/external-source/materialize")
+    monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "fake-token-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+    conn = MagicMock()
+    provider = _provider()
+    mock_resp = MagicMock(status_code=200)
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript") as ins, \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post", return_value=mock_resp) as mock_post:
+        orchestrator.run_job(conn, [provider], _job())
+
+    # materialize appelé après insert_transcript
+    assert ins.called
+    mock_post.assert_called_once()
+    call = mock_post.call_args
+    assert call.args[0].startswith("http://internal-ingester")
+    assert call.kwargs["headers"]["Authorization"].startswith("Bearer fake-token")
+
+
+def test_materialize_payload_contains_canonical_fields(monkeypatch):
+    """(j) Payload contient provider, source_resource_id, user_sub, meeting_id,
+    transcript_text, segments[], language."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
+    monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "tok")
+    conn = MagicMock()
+    provider = _provider()
+    mock_resp = MagicMock(status_code=200)
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post", return_value=mock_resp) as mock_post:
+        orchestrator.run_job(conn, [provider], _job(context_id="meeting-uuid-42"))
+
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["provider"] == "youtube"
+    assert payload["source_resource_id"] == "dQw4w9WgXcQ"
+    assert payload["user_sub"] == "user-123"
+    assert payload["meeting_id"] == "meeting-uuid-42"
+    assert payload["transcript_text"] == "hello world"
+    assert isinstance(payload["segments"], list)
+    assert payload["language"] == "fr"
+    assert payload["method"] == "subtitle_manual"
+    assert payload["external_video_source_id"] == 555
+
+
+def test_materialize_http_failure_does_not_invalidate_job(monkeypatch):
+    """(h) Échec HTTP (502) loggé mais n'invalide PAS le job → result OK."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
+    monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "tok")
+    conn = MagicMock()
+    provider = _provider()
+    mock_resp = MagicMock(status_code=502, text="bad gateway")
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post", return_value=mock_resp):
+        # NE doit PAS lever
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    assert result.video_source_id == 555
+    assert result.reused is False
+
+
+def test_materialize_timeout_does_not_invalidate_job(monkeypatch):
+    """Échec réseau (timeout/connection) loggé mais n'invalide pas le job."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
+    monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "tok")
+    conn = MagicMock()
+    provider = _provider()
+
+    import requests as _req
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post", side_effect=_req.ConnectTimeout("boom")):
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    assert result.video_source_id == 555  # job continue OK
+
+
+def test_materialize_skipped_when_token_missing(monkeypatch):
+    """URL configurée mais TOKEN vide → skip (config incomplete)."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
+    monkeypatch.delenv("VIDEO_INGEST_INTERNAL_API_TOKEN", raising=False)
+    conn = MagicMock()
+    provider = _provider()
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=555), \
+         patch.object(orchestrator.repo, "insert_transcript"), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post") as mock_post:
+        orchestrator.run_job(conn, [provider], _job())
+
+    mock_post.assert_not_called()
+
+
+def test_materialize_not_called_on_cache_hit(monkeypatch):
+    """HIT cache → pas de transcript fraîchement inséré, donc pas de materialize."""
+    monkeypatch.setenv("VIDEO_INGEST_MATERIALIZE_URL", "http://x/materialize")
+    monkeypatch.setenv("VIDEO_INGEST_INTERNAL_API_TOKEN", "tok")
+    conn = MagicMock()
+    provider = _provider()
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=777), \
+         patch.object(orchestrator.repo, "has_transcript", return_value=True), \
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator.requests, "post") as mock_post:
+        result = orchestrator.run_job(conn, [provider], _job())
+
+    assert result.reused is True
+    mock_post.assert_not_called()

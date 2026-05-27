@@ -18,7 +18,11 @@ honorée, cf. D15).
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
+
+import requests
 
 from . import jobs as jobs_mod
 from . import repo
@@ -30,6 +34,8 @@ from .providers.base import (
     VideoProvider,
     VideoUnavailable,
 )
+
+log = logging.getLogger(__name__)
 
 
 _DEFAULT_LANGUAGES = ["fr", "en"]
@@ -115,7 +121,95 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
         conn, user_sub=job.user_sub, video_source_id=video_source_id,
         context=job.context, context_id=job.context_id,
     )
+
+    # 7bis. Hook materialize (C4) — best-effort, n'invalide pas le job.
+    # Notifie internal-ingester pour qu'il crée un UAF virtuel et lance le
+    # pipeline meeting-intelligence (glossary_correction → cleaning →
+    # reformulation → meeting_analysis → suggested_filename → key_points).
+    # Si MATERIALIZE_URL est vide, skip silencieux (mode standalone D14).
+    _notify_materialize(
+        provider_name=provider.name,
+        provider_video_id=provider_video_id,
+        video_source_id=video_source_id,
+        job=job,
+        metadata=metadata,
+        transcript=transcript,
+        segments_json=segments_json,
+    )
+
     return IngestResult(video_source_id=video_source_id, reused=False)
+
+
+def _notify_materialize(
+    *,
+    provider_name: str,
+    provider_video_id: str,
+    video_source_id: int,
+    job: Job,
+    metadata,
+    transcript,
+    segments_json: list,
+) -> None:
+    """Hook best-effort vers internal-ingester /api/v1/external-source/materialize.
+
+    Configurable par env :
+      - VIDEO_INGEST_MATERIALIZE_URL : URL complète de l'endpoint
+        (ex. http://internal-ingester:8090/api/v1/external-source/materialize)
+      - VIDEO_INGEST_INTERNAL_API_TOKEN : token Bearer partagé avec
+        internal-ingester (INTERNAL_API_TOKEN du monorepo)
+      - VIDEO_INGEST_MATERIALIZE_TIMEOUT : timeout secondes (défaut 10)
+
+    Si MATERIALIZE_URL vide → skip propre (mode standalone D14 : video-ingest
+    extrait dans son propre repo ne notifie personne).
+    Si l'appel échoue → log warning, n'invalide PAS le job.
+    """
+    url = os.environ.get("VIDEO_INGEST_MATERIALIZE_URL", "").strip()
+    if not url:
+        log.debug("materialize hook skip: VIDEO_INGEST_MATERIALIZE_URL empty")
+        return
+    token = os.environ.get("VIDEO_INGEST_INTERNAL_API_TOKEN", "").strip()
+    if not token:
+        log.warning("materialize hook skip: VIDEO_INGEST_INTERNAL_API_TOKEN empty (set both URL+TOKEN)")
+        return
+    timeout = int(os.environ.get("VIDEO_INGEST_MATERIALIZE_TIMEOUT", "10"))
+
+    # Mapping provider+transcript method → method canonique du contrat.
+    method = transcript.method  # 'subtitle_manual' | 'subtitle_auto' | 'asr_whisper_kevent'
+    if method.startswith("asr_"):
+        method = "asr_whisper"
+
+    payload = {
+        "provider": provider_name,
+        "source_resource_id": provider_video_id,
+        "source_canonical_url": metadata.canonical_url,
+        "user_sub": job.user_sub,
+        "meeting_id": job.context_id if job.context == "meeting" else None,
+        "title": metadata.title or "",
+        "channel": metadata.channel or "",
+        "duration_sec": metadata.duration_sec or 0,
+        "language": transcript.language,
+        "transcript_text": transcript.full_text,
+        "segments": segments_json,
+        "method": method,
+        "external_video_source_id": video_source_id,
+    }
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except requests.RequestException as e:
+        log.warning("materialize hook unreachable: %s — job continues, manual retry possible", e)
+        return
+    if resp.status_code >= 400:
+        log.warning("materialize hook HTTP %d : %s", resp.status_code, resp.text[:200])
+        return
+    log.info(
+        "materialize hook OK: vsid=%s user=%s meeting=%s",
+        video_source_id, job.user_sub[:12], payload["meeting_id"],
+    )
 
 
 def _select_provider(providers: list[VideoProvider], url: str) -> VideoProvider:
