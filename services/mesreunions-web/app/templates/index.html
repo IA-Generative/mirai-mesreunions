@@ -1380,24 +1380,6 @@
         body.meetings-bulk-active .meeting-row-check {
             opacity: 1; pointer-events: auto;
         }
-        /* Sur les imports YouTube, la checkbox est toujours visible
-           (l'astuce Alt+clic est moins intuitive sur un usage occasionnel). */
-        .meeting-row--youtube .meeting-row-check {
-            opacity: .55; pointer-events: auto;
-        }
-        .meeting-row--youtube:hover .meeting-row-check {
-            opacity: 1;
-        }
-        /* Reserver la 1ère colonne 20px sur les rows YouTube (override
-           du grid-template-columns par défaut qui mettait 0 pour cacher). */
-        .meeting-row--youtube .meeting-row-main {
-            grid-template-columns:
-                20px                       /* checkbox YouTube visible */
-                20px                       /* status */
-                minmax(0, 1fr)             /* titre + chevron */
-                auto                       /* date */
-                4.5em;                     /* durée */
-        }
         .meeting-row-check input { width: 13px; height: 13px; cursor: pointer; margin: 0; }
         .meeting-row-status {
             width: 20px; height: 20px;

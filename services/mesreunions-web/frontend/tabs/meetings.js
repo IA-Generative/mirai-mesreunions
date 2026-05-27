@@ -1744,9 +1744,12 @@ function renderYoutubeRow(yt) {
   // le titre puis appellera deleteFile() comme pour un audio). Si pas
   // d'uafId (anciens imports pré-C5) → fallback action yt-delete-meeting
   // qui utilise meeting_id côté backend.
-  const isExpanded = _expandedIds.has(uafId || ('yt:' + yt.meeting_id));
-  const isSelected = _selectedIds.has(uafId);
   const fileIdForActions = uafId || ('yt:' + yt.meeting_id);
+  const isExpanded = _expandedIds.has(fileIdForActions);
+  // Le selected set utilise data-meeting-check = fileIdForActions, donc
+  // c'est la même clé qu'on vérifie ici (ne PAS utiliser uafId qui peut
+  // être null pour les rows YouTube en cours de matérialisation).
+  const isSelected = _selectedIds.has(fileIdForActions);
   const deleteAction = uafId ? 'meetings-new:delete-one' : 'meetings-new:yt-delete-meeting';
   const deleteData = uafId
     ? `data-file-id="${escapeHtml(uafId)}"`
