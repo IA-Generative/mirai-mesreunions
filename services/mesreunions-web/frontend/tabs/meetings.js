@@ -1625,14 +1625,11 @@ async function _openYoutubeDetail(meetingId) {
     } catch (e) { /* retry */ }
   }
 
-  // Pas d'UAF après 12s : message + refresh liste (l'UAF arrivera
-  // dans les secondes qui suivent, l'user pourra cliquer le titre).
+  // Pas d'UAF après 12s : on reste silencieux et on refresh la liste.
+  // La row apparaîtra dès que le pipeline backend l'aura matérialisée
+  // (typiquement 30-90s post-import) — l'user pourra alors cliquer le
+  // titre. Pas de popup intrusive.
   _refreshMeetingsListIfPossible();
-  window.alert(
-    "L'import est lancé mais la matérialisation backend prend plus de temps " +
-    "que prévu.\n\nLa fiche apparaîtra dans la liste « Mes réunions » dès " +
-    "que le pipeline IA aura récupéré les sous-titres. Recharge si besoin."
-  );
 }
 
 
