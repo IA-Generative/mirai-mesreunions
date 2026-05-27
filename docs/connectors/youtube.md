@@ -92,6 +92,22 @@ Toute modification frontend nécessite un **hard-refresh** côté navigateur pou
 ### Conflit `requests` dans la suite de tests
 Des tests historiques (test_meeting_intelligence.py, test_glossary_correction_step.py, etc.) font `sys.modules["requests"] = stub` au top-level. Empêche la collection globale `pytest tests/unit/`. Le script `tests/run-regression-campaign.sh` contourne via 2 runs séparés.
 
+## Fiche détail YouTube (V1 — comportement réutilisé)
+
+La fiche détail standard de `legacy.js` (`mountTranscriptCorrector`) fonctionne **sans modification** pour les UAF YouTube grâce à deux mécanismes existants :
+
+1. **Endpoints `/api/file/transcript-status/<id>`, `/api/file/transcript-text/<id>/...`, `/api/file/transcript-words/<id>`** : ils interrogent la table `user_audio_files`, qui contient bien les rows YouTube avec leur `transcription_text`, `transcription_words_json`, `meeting_analysis_json`, `key_points_summary`, `suggested_filename`. Le rendu s'affiche tel quel.
+
+2. **Mécanisme `audioPurged`** : quand le `data-audio-url` est vide (cas YouTube : pas de fichier audio S3 lié), le rendu remplace le `<audio>` player par un bandeau d'information. Les corrections par texte restent possibles.
+
+Conséquences :
+- ✅ Le compte-rendu (analyse 5-section + résumé + glossaire + nettoyage) s'affiche normalement.
+- ✅ Le transcript par segments avec timestamps est rendu.
+- ⚠️ Pas de player audio (volontaire — pas de fichier).
+- 📋 V2 — Player vidéo YouTube IFrame + karaoke segment-sync remplacera le bandeau « audio purgé » par une expérience native.
+
+Pour la V2, le besoin sera de transiter `source_type` + `canonical_url` jusqu'au container DOM de la fiche, puis de remplacer le bloc `audioPurged` par un IFrame YouTube + polling `getCurrentTime()` couplé au surlignage segment-level existant.
+
 ## Procédure d'extraction (D14 — quand maturité OK)
 
 Cf. `services/video_ingest/EXTRACTION_CHECKLIST.md` (à compléter en V3).
