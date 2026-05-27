@@ -232,6 +232,40 @@ def _notify_materialize(
     )
 
 
+def notify_materialize_from_cache(
+    *,
+    provider_name: str,
+    provider_video_id: str,
+    video_source_id: int,
+    user_sub: str,
+    context: str | None,
+    context_id: str | None,
+    source_meta: dict,
+    transcript_db: dict,
+    job_id: int = 0,
+) -> None:
+    """Variante publique (sans préfixe `_`) pour usage depuis api.py.
+
+    Permet de déclencher materialize en HIT cache synchrone (côté
+    `POST /video/import` qui ne passe pas par le worker). Mêmes
+    paramètres effectifs mais sans objet Job complet.
+    """
+    fake_job = Job(
+        id=job_id, url=source_meta.get("canonical_url") or "",
+        user_sub=user_sub, context=context, context_id=context_id,
+        language_pref=transcript_db.get("language"),
+        force_audio=False, attempts=0,
+    )
+    _notify_materialize_from_cache(
+        provider_name=provider_name,
+        provider_video_id=provider_video_id,
+        video_source_id=video_source_id,
+        job=fake_job,
+        source_meta=source_meta,
+        transcript_db=transcript_db,
+    )
+
+
 def _notify_materialize_from_cache(
     *,
     provider_name: str,

@@ -25,6 +25,7 @@ from . import audit
 from . import db
 from . import jobs as jobs_mod
 from . import quotas
+from . import repo
 from .auth import require_admin, require_auth
 from .providers.youtube import url as yt_url
 from .providers.youtube import YouTubeProvider
@@ -86,6 +87,27 @@ def import_video():
                 video_source_id=existing, reused=True, job_id=None,
                 context=payload.get("context"), context_id=payload.get("context_id"),
             )
+            # Hook materialize en HIT cache synchrone : sinon l'user
+            # obtient une row sans CR (le worker n'est pas appelé donc
+            # le hook habituel dans orchestrator.run_job ne tourne pas).
+            # Best-effort : n'invalide pas la réponse 200.
+            try:
+                src = repo.load_source(conn, existing)
+                tr = repo.load_best_transcript(conn, existing, language=language_pref)
+                if src and tr:
+                    from .orchestrator import notify_materialize_from_cache
+                    notify_materialize_from_cache(
+                        provider_name=provider_name,
+                        provider_video_id=provider_video_id,
+                        video_source_id=existing,
+                        user_sub=g.user_sub,
+                        context=payload.get("context"),
+                        context_id=payload.get("context_id"),
+                        source_meta=src,
+                        transcript_db=tr,
+                    )
+            except Exception:
+                log.exception("HIT cache materialize from api.py failed (non-fatal)")
             return jsonify({
                 "status": "ready",
                 "reused": True,
