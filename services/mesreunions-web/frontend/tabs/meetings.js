@@ -811,10 +811,22 @@ function _onClick(ev) {
       break;
     }
     case 'delete-one': {
+      // Audio classique : cherche dans _lastSessions.uploads
       const file = _findFile(fileId);
-      if (!file) return;
-      const fn = _resolveLegacyFn('deleteFile');
-      if (fn) fn(fileId, file.original_filename || '');
+      if (file) {
+        const fn = _resolveLegacyFn('deleteFile');
+        if (fn) fn(fileId, file.original_filename || '');
+        break;
+      }
+      // YouTube avec UAF lié : cherche dans le cache YouTube (le fileId
+      // est l'user_audio_file_id). Même endpoint DELETE /api/file/<id>
+      // (mécanisme unifié), juste le titre vient d'une source différente.
+      const yt = _youtubeImportsCache.find((y) => y.user_audio_file_id === fileId);
+      if (yt) {
+        const fn = _resolveLegacyFn('deleteFile');
+        if (fn) fn(fileId, yt.title || yt.canonical_url || 'Import YouTube');
+        break;
+      }
       break;
     }
     case 'bulk-delete': {
@@ -1660,23 +1672,32 @@ function renderYoutubeRow(yt) {
     <path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/>
   </svg>`;
 
-  return `<div class="meeting-row meeting-row--youtube" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
+  // Structure 100% identique à renderRow audio pour que toutes les
+  // actions (bulk delete via Alt, expand, delete-one) marchent
+  // uniformément. Si uafId présent → data-file-id=uafId (le dispatcher
+  // `delete-one` ira chercher dans _youtubeImportsCache pour récupérer
+  // le titre puis appellera deleteFile() comme pour un audio). Si pas
+  // d'uafId (anciens imports pré-C5) → fallback action yt-delete-meeting
+  // qui utilise meeting_id côté backend.
+  const isExpanded = _expandedIds.has(uafId || ('yt:' + yt.meeting_id));
+  const isSelected = _selectedIds.has(uafId);
+  const fileIdForActions = uafId || ('yt:' + yt.meeting_id);
+  const deleteAction = uafId ? 'meetings-new:delete-one' : 'meetings-new:yt-delete-meeting';
+  const deleteData = uafId
+    ? `data-file-id="${escapeHtml(uafId)}"`
+    : `data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}" data-yt-title="${escapeHtml(title)}"`;
+
+  return `<div class="meeting-row meeting-row--youtube${isExpanded ? ' is-expanded' : ''}${isSelected ? ' is-selected' : ''}" data-file-id="${escapeHtml(fileIdForActions)}" data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}">
     <div class="meeting-row-main">
-      <button type="button"
-              class="meeting-row-check"
-              data-action="meetings-new:yt-delete-meeting"
-              data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}"
-              data-yt-title="${escapeHtml(title)}"
-              title="Supprimer cet import (mise à la corbeille)"
-              aria-label="Supprimer cet import"
-              style="background:none;border:none;cursor:pointer;color:#b00020;font-size:1.1em;line-height:1;padding:0 .3em;">
-        ✕
-      </button>
-      <span class="meeting-row-status meeting-row-status--youtube"
-            aria-label="Statut : ${escapeHtml(statusLabel)}"
-            title="${escapeHtml(statusLabel)}">
+      <label class="meeting-row-check" title="Sélectionner (Alt)">
+        <input type="checkbox" data-meeting-check="${escapeHtml(fileIdForActions)}" ${isSelected ? 'checked' : ''} ${uafId ? '' : 'disabled'} />
+      </label>
+      <button type="button" class="meeting-row-status meeting-row-status--youtube"
+              ${canOpenDetail ? `data-action="meetings-new:open-detail" data-file-id="${escapeHtml(uafId)}"` : ''}
+              aria-label="Statut : ${escapeHtml(statusLabel)}"
+              title="${escapeHtml(statusLabel)}">
         ${statusIcon(statusKind, statusPct, animated)}
-      </span>
+      </button>
       <div class="meeting-row-title-wrap">
         <button type="button" class="meeting-row-title-btn"
                 data-action="${titleAction}"
@@ -1684,16 +1705,43 @@ function renderYoutubeRow(yt) {
                 title="${escapeHtml(titleTooltip)}">
           <span class="meeting-row-title-text">${youtubeSourceIcon} ${title}</span>
         </button>
-        <a href="${url}" target="_blank" rel="noopener"
-           class="meeting-row-chevron"
-           data-action="meetings-new:yt-open-source"
-           data-yt-url="${url}"
-           title="Ouvrir la vidéo source sur YouTube (nouvel onglet)"
-           style="color:#1d4ed8;text-decoration:none;">↗</a>
+        <button type="button" class="meeting-row-chevron"
+                data-action="meetings-new:toggle-expand"
+                data-file-id="${escapeHtml(fileIdForActions)}"
+                aria-expanded="${isExpanded}"
+                title="${isExpanded ? 'Masquer les actions' : 'Afficher les actions'}">
+          ${chevronIcon()}
+        </button>
       </div>
       <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
     </div>
+    ${isExpanded ? `<div class="meeting-row-expanded">
+      <div class="meeting-row-expanded-row">
+        <span class="meeting-row-source" title="Source vidéo web — YouTube">
+          ${youtubeSourceIcon}
+          <span class="meeting-row-source-label">${channel ? 'YouTube — ' + channel : 'YouTube'}</span>
+        </span>
+        <span class="meeting-row-created">Importée le ${escapeHtml(dateLabel)}</span>
+      </div>
+      <div class="meeting-row-expanded-actions">
+        ${canOpenDetail ? `<button type="button" class="meeting-row-action-btn"
+                data-action="meetings-new:open-detail"
+                data-file-id="${escapeHtml(uafId)}">
+          Ouvrir la fiche complète
+        </button>` : ''}
+        <a class="meeting-row-action-btn" href="${url}" target="_blank" rel="noopener"
+           data-action="meetings-new:yt-open-source" data-yt-url="${url}"
+           style="text-decoration:none;">
+          ↗ Voir sur YouTube
+        </a>
+        <button type="button" class="meeting-row-action-btn meeting-row-action-btn--danger"
+                data-action="${deleteAction}"
+                ${deleteData}>
+          Mettre à la corbeille
+        </button>
+      </div>
+    </div>` : ''}
   </div>`;
 }
 
