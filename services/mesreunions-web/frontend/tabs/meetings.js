@@ -1737,13 +1737,13 @@ function renderYoutubeRow(yt) {
     const chars = yt.transcript_chars || 0;
     statusLabel = `Compte-rendu prêt — ${chars.toLocaleString('fr-FR')} car. ${yt.transcript_language || ''} (${yt.transcript_method || ''})`;
   } else if (ms === 'failed') {
-    // Pastille rouge ✕ (même convention que les audios en kevent_failed) :
-    // signale un vrai échec du pipeline LLM. Seul ce cas est rouge.
-    // L'utilisateur peut supprimer ou réimporter.
-    statusKind = 'error';
+    // Pas de pastille rouge — visuel discret (gris). Le détail
+    // d'échec reste dans le tooltip + l'utilisateur peut supprimer
+    // ou réimporter via le chevron expand.
+    statusKind = 'queued';
     statusPct = 0;
     animated = false;
-    statusLabel = `Échec du traitement : ${escapeHtml(yt.transcription_status || 'erreur inconnue')}. Vous pouvez supprimer ou réimporter cette vidéo.`;
+    statusLabel = `Traitement non finalisé (${escapeHtml(yt.transcription_status || '?')}) — supprimable ou réimportable.`;
   } else if (ms === 'processing') {
     statusKind = 'processing';
     statusPct = 60;
