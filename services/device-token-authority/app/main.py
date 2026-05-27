@@ -2164,7 +2164,40 @@ def list_meetings():
         if only_video:
             q = q.filter(Meeting.video_source_id.isnot(None))
         rows = q.limit(limit).all()
-        return jsonify({"meetings": [_meeting_to_dict(m) for m in rows]})
+
+        # C6 — enrichissement avec preview audio (transcription_status,
+        # suggested_filename, key_points_summary, has_meeting_analysis)
+        # pour les meetings liés à un UAF. Batch IN(...) pour éviter N+1.
+        with_audio = (request.args.get("with_audio_preview") or "false").lower() in {"1", "true", "yes"}
+        audio_preview_by_id: dict = {}
+        if with_audio:
+            uaf_ids = [m.user_audio_file_id for m in rows if m.user_audio_file_id]
+            if uaf_ids:
+                uaf_rows = (
+                    db.query(UserAudioFile)
+                    .filter(UserAudioFile.id.in_(uaf_ids))
+                    .all()
+                )
+                for u in uaf_rows:
+                    audio_preview_by_id[str(u.id)] = {
+                        "transcription_status": u.transcription_status,
+                        "suggested_filename": u.suggested_filename,
+                        "key_points_summary": u.key_points_summary,
+                        "has_meeting_analysis": u.meeting_analysis_json is not None,
+                        "has_summary": (u.key_points_summary is not None
+                                        or u.meeting_analysis_json is not None),
+                        "source_type": getattr(u, "source_type", "upload"),
+                    }
+
+        def _serialize(m):
+            d = _meeting_to_dict(m)
+            if with_audio and m.user_audio_file_id:
+                preview = audio_preview_by_id.get(str(m.user_audio_file_id))
+                if preview:
+                    d["audio_preview"] = preview
+            return d
+
+        return jsonify({"meetings": [_serialize(m) for m in rows]})
     finally:
         db.close()
 

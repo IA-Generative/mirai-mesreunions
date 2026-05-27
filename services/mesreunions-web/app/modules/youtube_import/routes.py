@@ -202,19 +202,25 @@ def my_imports():
     if not user_sub:
         return jsonify({"error": "user inconnu"}), 401
 
-    # 1. Meetings YouTube côté device-token-authority (filter only_video=1).
+    # 1. Meetings YouTube côté device-token-authority avec preview UAF
+    # (C6 — transcription_status, suggested_filename, key_points_summary).
     try:
         meetings_resp = request_internal_device_api(
             "GET", "/api/v1/meetings",
-            params={"user_sub": user_sub, "only_video": "1", "limit": "200"},
+            params={
+                "user_sub": user_sub,
+                "only_video": "1",
+                "with_audio_preview": "1",
+                "limit": "200",
+            },
         )
     except req.HTTPError:
-        # Idem : on logue mais on n'expose pas le détail HTTP.
         logger.exception("list meetings only_video failed")
         return jsonify({"error": "liste meetings indisponible"}), 502
     meetings = (meetings_resp or {}).get("meetings", []) or []
 
-    # 2. Bookmarks video-ingest pour enrichir (titre, durée, transcript stats).
+    # 2. Bookmarks video-ingest pour enrichir (titre vidéo brut, durée,
+    # transcript stats côté video_ingest.video_transcripts).
     bookmarks_by_source = {}
     result, err = _call_video_ingest("GET", "/video/my-bookmarks")
     if not err:
@@ -224,17 +230,38 @@ def my_imports():
     else:
         logger.warning("my-bookmarks enrichment failed (non-fatal): %s", err)
 
-    # 3. Merge.
+    # 3. Merge. Le titre courant prend en priorité le suggested_filename
+    # LLM (C6 — vient du UAF post-pipeline) puis le titre vidéo brut puis
+    # le title placeholder.
     out = []
     for m in meetings:
         vsid = m.get("video_source_id")
         meta = bookmarks_by_source.get(vsid, {})
+        audio_preview = m.get("audio_preview") or {}
+        # Calcul du materialization_status pour le front :
+        # - 'pending' : UAF pas encore créé (placeholder seul)
+        # - 'processing' : UAF en cours de pipeline (kevent_processing/transcribing)
+        # - 'done' : UAF terminé (kevent_completed/partially)
+        # - 'failed' : UAF en échec (kevent_failed)
+        ts = audio_preview.get("transcription_status") or ""
+        if not audio_preview:
+            materialization_status = "pending"
+        elif ts.startswith("kevent_completed") or ts == "kevent_partially_completed":
+            materialization_status = "done"
+        elif ts == "kevent_failed" or ts.startswith("mcr_") and "failed" in ts:
+            materialization_status = "failed"
+        else:
+            materialization_status = "processing"
+
         out.append({
             "meeting_id": m.get("id"),
             "created_at": m.get("created_at"),
             "video_source_id": vsid,
             "video_ingest_job_id": m.get("video_ingest_job_id"),
-            "title": meta.get("title") or m.get("title") or "(sans titre)",
+            "title": (audio_preview.get("suggested_filename")
+                      or meta.get("title")
+                      or m.get("title")
+                      or "(sans titre)"),
             "channel": meta.get("channel"),
             "duration_sec": meta.get("duration_sec"),
             "canonical_url": meta.get("canonical_url"),
@@ -242,6 +269,11 @@ def my_imports():
             "transcript_chars": meta.get("transcript_chars"),
             "transcript_method": meta.get("transcript_method"),
             "has_transcript": meta.get("has_transcript", False),
+            # C6 — preview CR pour la fiche détail + status liste dynamique
+            "materialization_status": materialization_status,
+            "transcription_status": audio_preview.get("transcription_status"),
+            "key_points_summary": audio_preview.get("key_points_summary"),
+            "has_meeting_analysis": audio_preview.get("has_meeting_analysis", False),
         })
     return jsonify({"items": out})
 
