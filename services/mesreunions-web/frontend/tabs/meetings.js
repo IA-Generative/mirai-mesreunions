@@ -1715,12 +1715,25 @@ function _ytDurationLabel(sec) {
   return `${m}min`;
 }
 
+function _cleanYoutubeTitle(raw) {
+  if (!raw) return '(sans titre)';
+  // Retire les emojis "LIVE indicator" et autres caractères ornementaux
+  // que YouTube met en tête de titre (🔴 pour les diffusions live/replay,
+  // ⚡ flash news, 🆕 nouveauté, etc.). On garde les emojis significatifs
+  // au milieu du titre (auteur les a vraiment écrits) — on ne strip que
+  // ceux en début/fin du texte. Trim final pour les espaces résiduels.
+  return raw
+    .replace(/^[\s🔴🆕⚡🚨⭐🟢🟡🟣🔵🟠⏰📢]+/u, '')
+    .replace(/[\s🔴🆕⚡🚨]+$/u, '')
+    .trim() || '(sans titre)';
+}
+
 function renderYoutubeRow(yt) {
   // C7 — row YouTube avec status dynamique reflétant le pipeline LLM
   // (materialization_status : pending|processing|done|failed).
   // Si done + user_audio_file_id → titre cliquable vers la fiche détail
   // standard, sinon vers la source YouTube en nouvel onglet.
-  const title = escapeHtml(yt.title || '(sans titre)');
+  const title = escapeHtml(_cleanYoutubeTitle(yt.title));
   const channel = escapeHtml(yt.channel || '');
   const dateLabel = formatDate(yt.created_at, { withTime: true });
   const durLabel = _ytDurationLabel(yt.duration_sec);
