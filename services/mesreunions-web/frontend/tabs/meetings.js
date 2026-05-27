@@ -811,20 +811,23 @@ function _onClick(ev) {
       break;
     }
     case 'delete-one': {
-      // Audio classique : cherche dans _lastSessions.uploads
+      // Audio classique : cherche dans _lastSessions.uploads (zone externe
+      // → endpoint /api/file/<id> via deleteFile legacy).
       const file = _findFile(fileId);
       if (file) {
         const fn = _resolveLegacyFn('deleteFile');
         if (fn) fn(fileId, file.original_filename || '');
         break;
       }
-      // YouTube avec UAF lié : cherche dans le cache YouTube (le fileId
-      // est l'user_audio_file_id). Même endpoint DELETE /api/file/<id>
-      // (mécanisme unifié), juste le titre vient d'une source différente.
-      const yt = _youtubeImportsCache.find((y) => y.user_audio_file_id === fileId);
+      // YouTube : zone interne (pas d'UploadedFile externe). On trash
+      // le Meeting via /api/youtube/meetings/<id> qui soft-delete côté
+      // device-token-authority. Le titre/confirm est le même que la
+      // suppression audio (UX uniformisée).
+      const yt = _youtubeImportsCache.find(
+        (y) => y.user_audio_file_id === fileId || ('yt:' + y.meeting_id) === fileId
+      );
       if (yt) {
-        const fn = _resolveLegacyFn('deleteFile');
-        if (fn) fn(fileId, yt.title || yt.canonical_url || 'Import YouTube');
+        _deleteYoutubeMeeting(yt.meeting_id, yt.title || 'Import YouTube');
         break;
       }
       break;
@@ -1201,7 +1204,15 @@ async function _confirmBulkDelete() {
   let okCount = 0, failed = 0;
   for (const id of ids) {
     try {
-      const resp = await fetch(`/api/file/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // Différencie YouTube vs audio : YouTube va sur /api/youtube/meetings/<meeting_id>
+      // (trash le Meeting), audio classique va sur /api/file/<uaf_id>.
+      const yt = _youtubeImportsCache.find(
+        (y) => y.user_audio_file_id === id || ('yt:' + y.meeting_id) === id
+      );
+      const url = yt
+        ? `/api/youtube/meetings/${encodeURIComponent(yt.meeting_id)}`
+        : `/api/file/${encodeURIComponent(id)}`;
+      const resp = await fetch(url, { method: 'DELETE' });
       if (resp.ok) okCount++;
       else failed++;
     } catch (e) {
@@ -1214,6 +1225,7 @@ async function _confirmBulkDelete() {
   }
   const fn = _resolveLegacyFn('loadSessions');
   if (fn) fn({ force: true });
+  _refreshYoutubeImportsCache({ force: true });
 }
 
 // ── Touche Alt → mode bulk visible ────────────────────────────────────
