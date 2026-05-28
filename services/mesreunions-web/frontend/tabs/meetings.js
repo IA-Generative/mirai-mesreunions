@@ -806,6 +806,16 @@ function _onClick(ev) {
       break;
     }
     case 'open-detail': {
+      // Si c'est un UAF YouTube (présent dans _youtubeImportsCache), on
+      // ne passe pas par showFileDetail legacy : il appelle loadSessions
+      // qui query /api/my-sessions (zone externe UploadSession), or les
+      // UAFs YouTube vivent uniquement en zone interne user_audio_files
+      // sans UploadSession parent → invisibles → fiche vide.
+      const yt = _youtubeImportsCache.find((y) => y.user_audio_file_id === fileId);
+      if (yt) {
+        _renderYoutubeRichDetail(yt);
+        break;
+      }
       const fn = _resolveLegacyFn('showFileDetail');
       if (fn) fn(fileId);
       break;
@@ -886,6 +896,12 @@ function _onClick(ev) {
       // Si oui → on ouvre la fiche standard. Sinon → message d'attente.
       const meetingId = el.getAttribute('data-yt-meeting-id') || '';
       _openYoutubeDetail(meetingId);
+      break;
+    }
+    case 'yt-detail-back': {
+      const pane = document.querySelector('.tab-pane[data-tab="transfers"]');
+      if (pane) pane.classList.remove('detail-active');
+      _refreshMeetingsListIfPossible();
       break;
     }
     case 'yt-delete-meeting': {
@@ -1630,6 +1646,98 @@ async function _openYoutubeDetail(meetingId) {
   // (typiquement 30-90s post-import) — l'user pourra alors cliquer le
   // titre. Pas de popup intrusive.
   _refreshMeetingsListIfPossible();
+}
+
+
+// ── Fiche détail YouTube inline (sans showFileDetail legacy) ─────────────
+// showFileDetail s'appuie sur /api/my-sessions (UploadSession zone externe).
+// Les UAFs YouTube vivent en zone interne sans UploadSession parent → la
+// fiche legacy reste vide. On rend ici une fiche minimaliste mais
+// fonctionnelle directement dans #sessions-list à partir des données du
+// cache + un fetch /api/file/transcript-status?summary=1 pour le CR complet.
+async function _renderYoutubeRichDetail(yt) {
+  const container = document.getElementById('sessions-list');
+  if (!container) return;
+  const pane = document.querySelector('.tab-pane[data-tab="transfers"]');
+  if (pane) pane.classList.add('detail-active');
+  const header = document.getElementById('sessions-table-header');
+  if (header) header.style.display = 'none';
+
+  const title = (yt.title || '(sans titre)');
+  const dur = _ytDurationLabel(yt.duration_sec);
+  const url = yt.canonical_url || '#';
+
+  // Skeleton pendant le fetch summary.
+  container.innerHTML = `
+    <div class="youtube-detail" style="padding:0.8rem 0.6rem;">
+      <div style="margin-bottom:0.8rem;">
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+                data-action="meetings-new:yt-detail-back">← Retour à la liste</button>
+      </div>
+      <h2 style="font-size:1.2rem; margin:0.4rem 0;">${_escapeHtmlInline(title)}</h2>
+      <div style="font-size:0.88rem; color:#555; margin-bottom:0.6rem;">
+        ${yt.channel ? _escapeHtmlInline(yt.channel) + ' · ' : ''}${dur} · ${(yt.transcript_chars || 0).toLocaleString('fr-FR')} car. ${_escapeHtmlInline(yt.transcript_language || '')}
+      </div>
+      <div style="margin-bottom:0.8rem;">
+        <a href="${_escapeHtmlInline(url)}" target="_blank" rel="noopener noreferrer"
+           class="fr-btn fr-btn--sm fr-btn--tertiary">↗ Voir sur YouTube</a>
+      </div>
+      <div id="yt-detail-content" style="margin-top:1rem;">
+        <div class="skeleton-line skeleton-line--title"></div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line skeleton-line--mid"></div>
+      </div>
+    </div>`;
+  requestAnimationFrame(() => window.scrollTo(0, 0));
+
+  // Fetch CR complet.
+  let analysis = null;
+  let keyPoints = yt.key_points_summary || '';
+  const uafId = yt.user_audio_file_id;
+  if (uafId) {
+    try {
+      const resp = await fetch(`/api/file/transcript-status/${encodeURIComponent(uafId)}?summary=1`, { credentials: 'same-origin' });
+      if (resp.ok) {
+        const body = await resp.json();
+        analysis = body && body.meeting_analysis_json;
+        if (body && body.key_points_summary) keyPoints = body.key_points_summary;
+      }
+    } catch (e) { /* best-effort */ }
+  }
+
+  const contentEl = document.getElementById('yt-detail-content');
+  if (!contentEl) return;
+  let html = '';
+  if (keyPoints) {
+    html += `<section style="margin-bottom:1.2rem;"><h3 style="font-size:1rem;">Points-clés</h3><div style="white-space:pre-wrap; font-size:0.92rem; line-height:1.45;">${_escapeHtmlInline(keyPoints)}</div></section>`;
+  }
+  if (analysis) {
+    const j = (typeof analysis === 'string') ? (function(){ try { return JSON.parse(analysis); } catch(e) { return null; } })() : analysis;
+    if (j && typeof j === 'object') {
+      const renderSection = (label, val) => {
+        if (!val) return '';
+        const text = (typeof val === 'string') ? val
+          : Array.isArray(val) ? val.map((x) => '• ' + (typeof x === 'string' ? x : JSON.stringify(x))).join('\n')
+          : JSON.stringify(val, null, 2);
+        return `<section style="margin-bottom:1rem;"><h3 style="font-size:1rem;">${_escapeHtmlInline(label)}</h3><div style="white-space:pre-wrap; font-size:0.92rem; line-height:1.45;">${_escapeHtmlInline(text)}</div></section>`;
+      };
+      html += renderSection('Résumé', j.summary || j.résumé);
+      html += renderSection('Décisions', j.decisions || j.décisions);
+      html += renderSection('Actions', j.actions || j.actions_a_suivre);
+      html += renderSection('Sujets', j.topics || j.sujets);
+    }
+  }
+  if (!html) {
+    html = `<p style="color:#666; font-style:italic;">Le compte-rendu n'est pas encore généré (statut : ${_escapeHtmlInline(yt.transcription_status || 'en cours')}). Reviens dans 1-2 min.</p>`;
+  }
+  contentEl.innerHTML = html;
+}
+
+function _escapeHtmlInline(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 
