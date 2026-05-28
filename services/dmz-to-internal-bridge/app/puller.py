@@ -2062,8 +2062,14 @@ def audio_lookup():
     user_sub = (data.get("user_sub") or "").strip()
     simple_code = (data.get("simple_code") or "").strip()
     filename = (data.get("stored_filename") or "").strip()
-    if not user_sub or not simple_code or not filename:
-        return jsonify({"error": "user_sub, simple_code, stored_filename required"}), 400
+    uaf_id = (data.get("uaf_id") or "").strip()
+    # Deux modes : lookup historique par triplet (zone externe,
+    # simple_code + filename) ou lookup direct par uaf_id (sources
+    # externes YouTube/MCR/DINUM qui n'ont pas de fichier S3).
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if not uaf_id and not (simple_code and filename):
+        return jsonify({"error": "uaf_id OR (simple_code + stored_filename) required"}), 400
     if SessionLocal is None:
         return jsonify({"error": "db_not_ready"}), 503
     db = SessionLocal()
@@ -2075,18 +2081,28 @@ def audio_lookup():
         # donc en suffixe pour rester compatible avec les deux formats
         # (lookup historique avec basename, et nouveaux uploads).
         from sqlalchemy import or_
-        row = (
-            db.query(UserAudioFile)
-            .filter(
-                UserAudioFile.user_sub == user_sub,
-                UserAudioFile.original_session_code == simple_code,
-                or_(
-                    UserAudioFile.stored_filename == filename,
-                    UserAudioFile.stored_filename.like(f"%/{filename}"),
-                ),
+        if uaf_id:
+            row = (
+                db.query(UserAudioFile)
+                .filter(
+                    UserAudioFile.id == uaf_id,
+                    UserAudioFile.user_sub == user_sub,
+                )
+                .first()
             )
-            .first()
-        )
+        else:
+            row = (
+                db.query(UserAudioFile)
+                .filter(
+                    UserAudioFile.user_sub == user_sub,
+                    UserAudioFile.original_session_code == simple_code,
+                    or_(
+                        UserAudioFile.stored_filename == filename,
+                        UserAudioFile.stored_filename.like(f"%/{filename}"),
+                    ),
+                )
+                .first()
+            )
         if row is None:
             return jsonify({"error": "not_found"}), 404
         # PR2d : résout meeting + preparation liés (via meetings.user_audio_file_id

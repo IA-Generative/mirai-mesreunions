@@ -83,9 +83,47 @@ def _request_internal_ingester_api(path, *, json_body=None, params=None,
 
 def _audio_or_404(db, user_sub, file_id):
     file_obj = svc.get_owned_file(db, user_sub, file_id)
-    if not file_obj:
+    if file_obj:
+        return file_obj, svc.lookup_audio_outputs(db, file_obj)
+    # Fallback source externe (YouTube/MCR/DINUM) : pas d'UploadedFile
+    # parent en zone externe, le file_id = user_audio_files.id direct.
+    # On interroge internal-ingester par uaf_id.
+    try:
+        audio = _request_internal_ingester_api(
+            "/api/v1/audio/lookup",
+            json_body={"user_sub": user_sub, "uaf_id": str(file_id)},
+        )
+    except Exception:
+        logger.exception("audio_lookup by uaf_id failed for file_id=%s", file_id)
+        audio = None
+    if not audio:
         abort(404, "File not found")
-    return file_obj, svc.lookup_audio_outputs(db, file_obj)
+    # Wrap dans un SimpleNamespace minimaliste compatible avec les usages
+    # downstream (original_filename, audio_duration_seconds, meeting_datetime,
+    # created_at, mime_type, id). Pour les sources externes, pas de S3 →
+    # les endpoints download_url/stream_url ne seront pas appelés.
+    from types import SimpleNamespace as _NS
+    from datetime import datetime as _dt
+    def _parse_dt(s):
+        if not s: return None
+        try: return _dt.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception: return None
+    synth = _NS(
+        id=audio.get("id") or file_id,
+        original_filename=audio.get("suggested_filename") or "Import externe",
+        stored_filename=None,
+        transcoded_filename=None,
+        transferred_at=None,
+        created_at=_parse_dt(audio.get("transcription_started_at")) or _dt.utcnow(),
+        meeting_datetime=_parse_dt(audio.get("meeting_datetime")),
+        audio_duration_seconds=audio.get("audio_duration_seconds"),
+        mime_type=None,
+        status=None,
+        status_message=None,
+        session_id=None,
+        is_external_source=True,
+    )
+    return synth, audio
 
 
 def _send_text_attachment(text, filename, mime="text/plain"):
