@@ -1854,6 +1854,15 @@ async function mountTranscriptCorrector(container) {
     container.dataset.correctorMounted = '1';
     const audioUrl = container.getAttribute('data-audio-url') || '';
     const audioPurged = container.getAttribute('data-audio-purged') === '1';
+    const sourceType = container.getAttribute('data-source-type') || 'upload';
+    const canonicalUrl = container.getAttribute('data-canonical-url') || '';
+    const isYoutube = sourceType.startsWith('youtube');
+    // Extrait l'ID YouTube depuis l'URL canonique pour l'embed.
+    function _extractYoutubeId(u) {
+        const m = String(u || '').match(/(?:v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/);
+        return m ? m[1] : '';
+    }
+    const ytId = isYoutube ? _extractYoutubeId(canonicalUrl) : '';
     container.innerHTML = `<p style="color:#94a3b8;font-size:0.85rem;">Chargement de la transcription…</p>`;
 
     let data;
@@ -2007,12 +2016,28 @@ async function mountTranscriptCorrector(container) {
     }
     // Player audio sticky en haut : visible dès qu'on déplie le <details>.
     // Source : transferred (interne, persistant) ou rien si purgé.
-    const playerHtml = audioPurged || !audioUrl
-        ? `<div class="tc-audio-purged" title="L'audio a été purgé du stockage interne (rétention dépassée).">
-             ⚠️ Audio purgé — ré-écoute indisponible. Les corrections par texte restent possibles.
+    // YouTube → embed IFrame (V1 minimal, sans sync segments — phase 2).
+    // L'embed est dans une vignette discrète en haut de la fiche, l'user
+    // peut la déplier en cliquant. Pas de sync audio↔segments pour
+    // l'instant (les sous-titres YouTube ne fournissent pas de word-timings).
+    const playerHtml = isYoutube && ytId
+        ? `<div class="tc-youtube-embed" style="margin:0.4rem 0 0.6rem;">
+             <iframe width="100%" height="220" style="max-width:480px;border:0;border-radius:6px;"
+                     src="https://www.youtube.com/embed/${ytId}"
+                     title="Vidéo YouTube source"
+                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                     allowfullscreen></iframe>
+             <div style="font-size:0.78rem;color:#666;margin-top:0.2rem;">
+               Lecture vidéo (sync segments → phase 2). Pour ré-écouter un mot exact,
+               cliquez sur la ligne du transcript ci-dessous.
+             </div>
            </div>`
-        : `<audio class="transcript-corrector-audio" controls preload="metadata"
-                  src="${escapeHtml(audioUrl)}"></audio>`;
+        : (audioPurged || !audioUrl
+            ? `<div class="tc-audio-purged" title="L'audio a été purgé du stockage interne (rétention dépassée).">
+                 ⚠️ Audio purgé — ré-écoute indisponible. Les corrections par texte restent possibles.
+               </div>`
+            : `<audio class="transcript-corrector-audio" controls preload="metadata"
+                      src="${escapeHtml(audioUrl)}"></audio>`);
     // Notice d'utilisation (visible quand le details est ouvert).
     const noticeHtml = `
       <div class="tc-notice">
@@ -4253,7 +4278,9 @@ async function loadSessions(opts) {
                          data-corrector-for="${f.id}"
                          data-audio-url="${escapeHtml(f.transferred_stream_url || f.transcoded_stream_url || f.source_stream_url || '')}"
                          data-audio-duration="${f.audio_duration_seconds || ''}"
-                         data-audio-purged="${(!f.transferred_available && !f.transcoded_available && !f.source_available) ? '1' : '0'}"></div>
+                         data-audio-purged="${(!f.transferred_available && !f.transcoded_available && !f.source_available) ? '1' : '0'}"
+                         data-source-type="${escapeHtml(f.source_type || 'upload')}"
+                         data-canonical-url="${escapeHtml(f.canonical_url || '')}"></div>
                     <!-- Bloc feedback (en bas de fiche, après la lecture du
                          contenu) : Régénérer + pouce ↑/↓ "utile?". Voir
                          services/mesreunions-web/app/modules/feedback/routes.py

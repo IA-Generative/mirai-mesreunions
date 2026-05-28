@@ -358,6 +358,74 @@ def api_my_sessions():
         if reconciled:
             db.commit()
             logger.info("Auto-reconciled %s transfer status entries for user %s", reconciled, user.get("sub"))
+
+        # ── Append sessions YouTube synthétiques ─────────────────────
+        # Les UAFs YouTube vivent en zone interne sans UploadSession
+        # parent. On les expose ici comme sessions synthétiques 1-upload
+        # pour que showFileDetail legacy puisse les rendre comme n'importe
+        # quelle réunion audio. Le frontend distingue via source_type sur
+        # l'upload et adapte les blocs spécifiques (audio player → embed
+        # YouTube, masque le bouton "Régénérer transcription", etc.).
+        try:
+            yt = _request_internal_ingester_api(
+                "/api/v1/audio/external-source-list",
+                method="GET", params={"user_sub": user["sub"]},
+            )
+            for it in (yt.get("items") if isinstance(yt, dict) else []) or []:
+                ext = (it.get("external") or {})
+                uaf_id = it.get("uaf_id")
+                if not uaf_id:
+                    continue
+                title = it.get("suggested_filename") or ext.get("title") or it.get("original_filename") or "Import YouTube"
+                created = it.get("created_at") or datetime.now(timezone.utc).isoformat()
+                duration = it.get("audio_duration_seconds") or ext.get("duration_sec") or 0
+                synth_upload = {
+                    "id": uaf_id,
+                    "original_filename": title,
+                    "status": "transferred",  # déclenche le rendu fiche standard
+                    "status_message": None,
+                    "audio_quality_score": None,
+                    "audio_duration_seconds": duration,
+                    "created_at": created,
+                    "updated_at": it.get("updated_at") or created,
+                    "meeting_datetime": it.get("meeting_datetime"),
+                    "meeting_datetime_overridden": bool(it.get("meeting_datetime")),
+                    # Aucun S3 audio pour YouTube : ces URLs ne seront
+                    # pas appelées (frontend gate sur source_type).
+                    "download_url": None, "stream_url": None,
+                    "source_available": False,
+                    "source_download_url": None, "source_stream_url": None,
+                    "transcoded_available": False,
+                    "transcoded_download_url": None, "transcoded_stream_url": None,
+                    "transferred_available": False,
+                    "transferred_download_url": None, "transferred_stream_url": None,
+                    "impact_url": None,
+                    # Spécifiques source externe (le frontend les utilise
+                    # pour adapter le rendu fiche).
+                    "source_type": it.get("source_type") or "youtube_subtitle",
+                    "source_provider": (ext.get("provider") or "youtube"),
+                    "canonical_url": ext.get("canonical_url"),
+                    "meeting_id": it.get("meeting_id"),
+                    "external_video_source_id": it.get("external_video_source_id"),
+                }
+                synth_session = {
+                    "id": f"yt-{it.get('meeting_id') or uaf_id}",
+                    "simple_code": it.get("original_session_code") or "YT",
+                    "qr_token": None,
+                    "status": "active",
+                    "upload_count": 1,
+                    "max_uploads": 1,
+                    "expires_at": created,
+                    "created_at": created,
+                    "lifecycle_state": "youtube",
+                    "is_local_upload": False,
+                    "device_label": "YouTube",
+                    "uploads": [synth_upload],
+                }
+                result.append(synth_session)
+        except Exception:
+            logger.debug("external-source-list enrichment failed (non-fatal)", exc_info=True)
+
         timings["t3_total"] = round((time.monotonic() - _t0) * 1000)
         timings["_session_count"] = len(sessions)
         # Log timing pour identifier les régressions de perf sur le hot

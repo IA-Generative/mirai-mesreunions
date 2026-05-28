@@ -1970,6 +1970,82 @@ def audio_meeting_datetimes():
         db.close()
 
 
+@app.route("/api/v1/audio/external-source-list", methods=["GET"])
+def audio_external_source_list():
+    """Liste les UAFs zone interne pour les sources externes (YouTube,
+    MCR, DINUM…) d'un user. Format compatible avec /api/my-sessions de
+    mesreunions-web : chaque UAF est exposé avec les champs utilisés
+    par showFileDetail (audio_duration_seconds, transcription_status,
+    suggested_filename, meeting_datetime, original_filename) + un bloc
+    `external` avec canonical_url / title / channel / duration_sec issu
+    de video_sources via LEFT JOIN. Auth = INTERNAL_API_TOKEN bearer.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_not_ready"}), 503
+    db = SessionLocal()
+    try:
+        # LEFT JOIN brut sur video_sources (table externe au modèle
+        # SQLAlchemy interne, on passe en SQL pour rester simple).
+        sql = """
+        SELECT u.id, u.source_type, u.external_video_source_id,
+               u.original_filename, u.original_session_code,
+               u.transcription_status, u.transcription_engine,
+               u.transcription_language,
+               u.suggested_filename, u.meeting_datetime,
+               u.audio_duration_seconds,
+               u.created_at, u.last_activity_at, u.last_activity_at,
+               u.meeting_id,
+               vs.canonical_url, vs.title, vs.channel, vs.duration_sec,
+               vs.provider, vs.provider_video_id
+          FROM user_audio_files u
+          LEFT JOIN video_sources vs
+            ON vs.id = u.external_video_source_id
+         WHERE u.user_sub = :user_sub
+           AND u.source_type IN ('youtube_subtitle', 'youtube_audio')
+         ORDER BY u.created_at DESC
+         LIMIT 200
+        """
+        rows = db.execute(text(sql), {"user_sub": user_sub}).fetchall()
+        items = []
+        for r in rows:
+            items.append({
+                "uaf_id": str(r[0]),
+                "source_type": r[1],
+                "external_video_source_id": r[2],
+                "original_filename": r[3] or (r[16] or "Import vidéo"),
+                "original_session_code": r[4],
+                "transcription_status": r[5],
+                "transcription_engine": r[6],
+                "transcription_language": r[7],
+                "suggested_filename": r[8],
+                "meeting_datetime": r[9].isoformat() if r[9] else None,
+                "audio_duration_seconds": r[10] or (float(r[18]) if r[18] else None),
+                "created_at": r[11].isoformat() if r[11] else None,
+                "updated_at": r[12].isoformat() if r[12] else None,
+                "last_activity_at": r[13].isoformat() if r[13] else None,
+                "meeting_id": str(r[14]) if r[14] else None,
+                "external": {
+                    "canonical_url": r[15],
+                    "title": r[16],
+                    "channel": r[17],
+                    "duration_sec": r[18],
+                    "provider": r[19],
+                    "provider_video_id": r[20],
+                },
+            })
+        return jsonify({"items": items})
+    except Exception:
+        logger.exception("audio_external_source_list failed")
+        return jsonify({"error": "internal_error"}), 500
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/audio/lookup", methods=["POST"])
 def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.

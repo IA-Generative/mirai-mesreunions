@@ -507,8 +507,13 @@ export function renderList(sessions) {
   if (!container) return;
 
   // Aplatit audio + injecte YouTube imports (cache) → trie unifié par date desc.
+  // Skip les sessions synthétiques YouTube (id préfixé "yt-") : elles sont
+  // injectées par /api/my-sessions UNIQUEMENT pour que showFileDetail
+  // legacy puisse rendre la fiche détail. La liste utilise toujours
+  // _youtubeImportsCache pour la row YT-spécifique.
   const entries = [];
   for (const s of (sessions || [])) {
+    if (typeof s.id === 'string' && s.id.startsWith('yt-')) continue;
     for (const f of (s.uploads || [])) {
       entries.push({ kind: 'audio', f, s, sortDate: f.meeting_datetime || f.created_at });
     }
@@ -806,16 +811,11 @@ function _onClick(ev) {
       break;
     }
     case 'open-detail': {
-      // Si c'est un UAF YouTube (présent dans _youtubeImportsCache), on
-      // ne passe pas par showFileDetail legacy : il appelle loadSessions
-      // qui query /api/my-sessions (zone externe UploadSession), or les
-      // UAFs YouTube vivent uniquement en zone interne user_audio_files
-      // sans UploadSession parent → invisibles → fiche vide.
-      const yt = _youtubeImportsCache.find((y) => y.user_audio_file_id === fileId);
-      if (yt) {
-        _renderYoutubeRichDetail(yt);
-        break;
-      }
+      // YouTube et audio passent par le même showFileDetail legacy.
+      // /api/my-sessions synthétise les sessions YouTube avec un UAF
+      // d'id réel → la fiche legacy fonctionne sans branchement. Le
+      // frontend adapte les blocs spécifiques (audio player, regenerate)
+      // en lisant `upload.source_type`.
       const fn = _resolveLegacyFn('showFileDetail');
       if (fn) fn(fileId);
       break;
