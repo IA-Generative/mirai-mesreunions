@@ -1300,6 +1300,12 @@ function mountFeedbackBlock(container) {
     const fileId = container.getAttribute('data-feedback-for') || '';
     if (!fileId) return;
     container.dataset.feedbackMounted = '1';
+    // Sources externes (YouTube/MCR/DINUM) : pas de Whisper à régénérer
+    // (transcript natif depuis les sous-titres). On masque le bouton
+    // "Transcription + diarisation" qui sinon marquerait l'UAF
+    // kevent_failed (s3_no_audio_path) immédiatement.
+    const _srcType = container.getAttribute('data-source-type') || 'upload';
+    const _hideFullRegen = _srcType !== 'upload';
     // Restaure l'état "corrections en attente" persisté côté localStorage
     // (le badge + le clignotement du bouton 🔄 sont rendus après).
     const pendingCount = getPendingCorrectionsCount(fileId);
@@ -1315,11 +1321,11 @@ function mountFeedbackBlock(container) {
                   title="Relance les étapes LLM (glossaire → compte-rendu) avec le glossaire actuel">
             🔄 Comptes-rendus (LLM)
           </button>
-          <button type="button" class="feedback-regen-btn feedback-regen-btn--full"
+          ${_hideFullRegen ? '' : `<button type="button" class="feedback-regen-btn feedback-regen-btn--full"
                   data-feedback-regen="full" data-feedback-file="${_escapeAttr(fileId)}"
                   title="Relance TOUT le pipeline depuis l'audio (Whisper + diarisation + LLM). Très coûteux en calcul — à demander uniquement si vraiment nécessaire.">
             🔁 Transcription + diarisation
-          </button>
+          </button>`}
         </div>
       </div>
       <div class="feedback-section feedback-section--useful" data-feedback-useful-for="${_escapeAttr(fileId)}">
@@ -4287,7 +4293,7 @@ async function loadSessions(opts) {
                          pour le backend. Le rendu interne du widget est
                          délégué à mountFeedbackBlock() côté JS (déclenché
                          par MutationObserver après insertion DOM). -->
-                    <div class="file-detail-feedback-block" data-feedback-for="${f.id}"></div>
+                    <div class="file-detail-feedback-block" data-feedback-for="${f.id}" data-source-type="${escapeHtml(f.source_type || 'upload')}"></div>
                 </div>`;
             }).join('');
 
