@@ -22,10 +22,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Pas de libs système particulières : pas de ffmpeg ici (la slice ASR
-# l'ajoutera quand le fallback Whisper sera implémenté).
+# ffmpeg requis par yt-dlp pour le postprocess FLAC en mode
+# force_audio (Kevent gateway refuse .webm + bug pyannote samples
+# mismatch sur AAC issue #41 → on remuxe systématiquement en flac).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libpq-dev \
+      libpq-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY services/video_ingest/requirements.txt /app/requirements.txt

@@ -40,10 +40,17 @@ class YouTubeProvider:
         """Fallback ASR via Kevent (cf. INTEGRATION_NOTES.md §2 chemin A).
 
         Télécharge l'audio dans un TemporaryDirectory (fichier supprimé
-        immédiatement après transcription — DoD §10).
+        immédiatement après transcription — DoD §10). Utilisé quand
+        l'orchestrator ne peut pas déporter (mode legacy).
         """
         from . import audio as _audio
         return _audio.fetch_audio_and_transcribe(video_id, language=language)
+
+    def fetch_audio_bytes(self, video_id: str) -> tuple[bytes, str]:
+        """Phase B — retourne (bytes flac, basename) pour upload vers
+        materialize-audio (pipeline standard avec diarisation)."""
+        from . import audio as _audio
+        return _audio.fetch_audio_bytes(video_id)
 
 
 __all__ = ["YouTubeProvider"]

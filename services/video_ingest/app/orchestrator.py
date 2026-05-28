@@ -18,6 +18,7 @@ honorée, cf. D15).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -114,14 +115,36 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
             transcript = None
 
     if transcript is None:
-        # Fallback ASR (chemin A : Kevent, cf. INTEGRATION_NOTES §2).
-        # Peut lever NotImplementedError si l'env Kevent n'est pas configuré
-        # ou si le provider n'a pas de fetch_audio — auquel cas on remonte
-        # `NeedsAudioFallback` pour un retry manuel.
+        # Phase B — Pas de sous-titres OU force_audio=true : on télécharge
+        # l'audio en FLAC puis on délègue à internal-ingester via
+        # /external-source/materialize-audio qui route dans le pipeline
+        # standard (Whisper + pyannote + LLM). L'utilisateur récupère
+        # transcript + diarisation comme pour un upload audio classique.
         try:
-            transcript = provider.fetch_audio(provider_video_id, language=languages[0])
+            audio_bytes, audio_basename = provider.fetch_audio_bytes(provider_video_id)
         except NotImplementedError as e:
             raise NeedsAudioFallback(str(e)) from e
+        ok = _notify_materialize_audio(
+            provider_name=provider.name,
+            provider_video_id=provider_video_id,
+            video_source_id=video_source_id,
+            job=job,
+            metadata=metadata,
+            audio_bytes=audio_bytes,
+            audio_basename=audio_basename,
+        )
+        if not ok:
+            raise NeedsAudioFallback(
+                "materialize-audio endpoint indisponible — refaire l'import plus tard"
+            )
+        # Bookmark + return : pas d'insert_transcript ni de hook materialize
+        # subtitle, le pipeline standard côté internal-ingester va produire
+        # le transcript dans user_audio_files directement.
+        repo.add_bookmark(
+            conn, user_sub=job.user_sub, video_source_id=video_source_id,
+            context=job.context, context_id=job.context_id,
+        )
+        return IngestResult(video_source_id=video_source_id, reused=False)
 
     # 6. Chunking → persistance.
     segments_json = chunk(transcript.segments)
@@ -155,6 +178,72 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
     )
 
     return IngestResult(video_source_id=video_source_id, reused=False)
+
+
+def _notify_materialize_audio(
+    *,
+    provider_name: str,
+    provider_video_id: str,
+    video_source_id: int,
+    job: Job,
+    metadata,
+    audio_bytes: bytes,
+    audio_basename: str,
+) -> bool:
+    """Phase B — POST multipart vers /api/v1/external-source/materialize-audio.
+
+    Le FLAC est uploadé, internal-ingester créera l'UAF avec stored_filename
+    pointant vers S3-internal puis lancera _transcribe_via_kevent (Whisper +
+    pyannote + LLM). Retourne True si l'appel a réussi.
+    """
+    import requests
+    base_url = os.environ.get("VIDEO_INGEST_MATERIALIZE_URL", "").strip()
+    if not base_url:
+        log.warning("materialize-audio skip: VIDEO_INGEST_MATERIALIZE_URL empty")
+        return False
+    # Dérive l'URL audio de l'URL transcript : .../materialize → .../materialize-audio
+    if base_url.endswith("/materialize"):
+        url = base_url + "-audio"
+    else:
+        url = base_url.rstrip("/") + "/materialize-audio"
+    token = os.environ.get("VIDEO_INGEST_INTERNAL_API_TOKEN", "").strip()
+    if not token:
+        log.warning("materialize-audio skip: VIDEO_INGEST_INTERNAL_API_TOKEN empty")
+        return False
+    # Timeout généreux : transfert ~250 MB intra-cluster < 30s typiquement.
+    timeout = int(os.environ.get("VIDEO_INGEST_MATERIALIZE_AUDIO_TIMEOUT", "120"))
+
+    meta = {
+        "provider": provider_name,
+        "source_resource_id": provider_video_id,
+        "source_canonical_url": metadata.canonical_url,
+        "user_sub": job.user_sub,
+        "meeting_id": job.context_id if job.context == "meeting" else None,
+        "title": metadata.title or "",
+        "channel": metadata.channel or "",
+        "duration_sec": metadata.duration_sec or 0,
+        "language": (job.language_pref or "fr"),
+        "external_video_source_id": video_source_id,
+        "video_ingest_job_id": job.id,
+    }
+    files = {"audio_file": (audio_basename, audio_bytes, "audio/flac")}
+    data = {"meta": json.dumps(meta)}
+    try:
+        resp = requests.post(
+            url, files=files, data=data,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+        if resp.status_code >= 400:
+            log.warning("materialize-audio failed: %s body=%s",
+                        resp.status_code, (resp.text or "")[:200])
+            return False
+        log.info("materialize-audio ok provider=%s vsid=%s bytes=%d",
+                 provider_name, video_source_id, len(audio_bytes))
+        return True
+    except Exception:
+        log.exception("materialize-audio request failed")
+        return False
 
 
 def _notify_materialize(

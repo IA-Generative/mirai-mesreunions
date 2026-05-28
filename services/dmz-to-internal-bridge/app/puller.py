@@ -4192,6 +4192,172 @@ def materialize_external_source():
     }), 200
 
 
+@app.route("/api/v1/external-source/materialize-audio", methods=["POST"])
+def materialize_external_source_audio():
+    """Variante audio-file de /external-source/materialize : video-ingest
+    transfère un FLAC complet (pas de transcript pré-calculé) et on
+    route l'UAF dans le pipeline standard (Whisper + diarisation + LLM).
+
+    Multipart form :
+      audio_file : binary FLAC
+      meta       : JSON string (mêmes champs que materialize, sauf
+                   transcript_text/segments/words_json/method qui ne sont
+                   pas pertinents — le transcript sera produit par Kevent)
+
+    Réponse 200 : {ok, audio_file_id, reused, transcription_status}.
+
+    Idempotence : 1 UAF par (user_sub, external_video_source_id).
+    """
+    import io
+    import uuid as _uuid
+    from app.external_source import synthetic_session_code
+
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    if SessionLocal is None:
+        return jsonify({"error": "DB not ready"}), 503
+
+    file_storage = request.files.get("audio_file")
+    if file_storage is None:
+        return jsonify({"error": "audio_file (multipart) required"}), 400
+    try:
+        meta = json.loads(request.form.get("meta") or "{}")
+    except json.JSONDecodeError:
+        return jsonify({"error": "meta must be valid JSON"}), 400
+
+    user_sub = (meta.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    provider = (meta.get("provider") or "youtube").strip()
+    source_resource_id = (meta.get("source_resource_id") or "").strip()
+    if not source_resource_id:
+        return jsonify({"error": "source_resource_id required"}), 400
+    title = (meta.get("title") or "Import YouTube").strip()
+    canonical_url = meta.get("source_canonical_url") or ""
+    duration_sec = float(meta.get("duration_sec") or 0)
+    external_vsid = meta.get("external_video_source_id")
+    meeting_id_arg = meta.get("meeting_id")
+
+    # Read audio bytes (single read — needed for both S3 upload + Kevent).
+    audio_bytes = file_storage.read()
+    if not audio_bytes:
+        return jsonify({"error": "audio_file is empty"}), 400
+
+    # Compose S3 key : <user_sub>/<synth_code>/<uaf_id>.flac
+    synth_code = synthetic_session_code(provider, source_resource_id)
+    new_uaf_id = _uuid.uuid4()
+    basename = f"{new_uaf_id}.flac"
+    s3_key = f"{user_sub}/{synth_code}/{basename}"
+
+    db = SessionLocal()
+    try:
+        # Idempotence : (user_sub, external_video_source_id) déjà en BDD ?
+        existing = None
+        if external_vsid is not None:
+            existing = (
+                db.query(UserAudioFile)
+                  .filter(UserAudioFile.user_sub == user_sub,
+                          UserAudioFile.external_video_source_id == int(external_vsid))
+                  .first()
+            )
+        if existing:
+            return jsonify({
+                "ok": True,
+                "audio_file_id": str(existing.id),
+                "reused": True,
+                "transcription_status": existing.transcription_status,
+            }), 200
+
+        # Upload S3-internal.
+        try:
+            upload_fileobj(s3_internal_cfg, s3_key, io.BytesIO(audio_bytes), "audio/flac")
+        except Exception:
+            logger.exception("materialize-audio: S3 upload failed for %s", s3_key)
+            return jsonify({"error": "s3_upload_failed"}), 503
+
+        now = datetime.now(timezone.utc)
+        uaf = UserAudioFile(
+            id=new_uaf_id,
+            user_sub=user_sub,
+            original_filename=title + ".flac",
+            stored_filename=s3_key,
+            original_session_code=synth_code,
+            source_type="youtube_audio",
+            external_video_source_id=int(external_vsid) if external_vsid is not None else None,
+            transcription_status="kevent_queued",
+            transcription_engine="kevent",
+            audio_duration_seconds=duration_sec or None,
+            transcription_started_at=now,
+            last_activity_at=now,
+        )
+        db.add(uaf)
+        db.flush()
+        audio_id_str = str(uaf.id)
+
+        if meeting_id_arg:
+            try:
+                m = db.query(Meeting).filter(Meeting.id == meeting_id_arg).first()
+                if m:
+                    if m.user_audio_file_id is None:
+                        m.user_audio_file_id = uaf.id
+                    if external_vsid is not None and m.video_source_id is None:
+                        m.video_source_id = int(external_vsid)
+                    vij = meta.get("video_ingest_job_id")
+                    if vij is not None and m.video_ingest_job_id is None:
+                        m.video_ingest_job_id = int(vij)
+            except Exception:
+                logger.exception("materialize-audio: failed to link meeting %s → uaf %s",
+                                 meeting_id_arg, audio_id_str)
+        db.commit()
+        logger.info(
+            "materialize-audio: created uaf=%s user=%s provider=%s vsid=%s "
+            "meeting=%s s3=%s audio_bytes=%d",
+            audio_id_str, user_sub[:12], provider, external_vsid,
+            meeting_id_arg, s3_key, len(audio_bytes),
+        )
+
+        user_sub_local = user_sub
+        title_local = title
+        audio_bytes_local = audio_bytes
+        basename_local = basename
+        audio_id_local = audio_id_str
+
+    except Exception:
+        db.rollback()
+        logger.exception("materialize-audio: db write failed")
+        return jsonify({"error": "db_write_failed"}), 500
+    finally:
+        db.close()
+
+    # Pipeline standard (Whisper + diarisation + LLM) en thread daemon.
+    def _run_pipeline():
+        try:
+            _transcribe_via_kevent(
+                audio_id_local, basename_local, io.BytesIO(audio_bytes_local),
+                {"user_sub": user_sub_local, "original_filename": title_local + ".flac"},
+            )
+        except Exception:
+            logger.exception("materialize-audio: pipeline crashed for %s", audio_id_local)
+            try:
+                _set_user_audio_status(audio_id_local, "kevent_failed",
+                                       transcription_engine="kevent",
+                                       last_error_kind="worker_crash",
+                                       last_error_message="Pipeline crashé après upload audio externe.")
+            except Exception:
+                logger.exception("materialize-audio: failed to set failed status")
+
+    threading.Thread(target=_run_pipeline,
+                     name=f"materialize-audio-{audio_id_local[:8]}",
+                     daemon=True).start()
+
+    return jsonify({
+        "ok": True,
+        "audio_file_id": audio_id_local,
+        "reused": False,
+        "transcription_status": "kevent_queued",
+    }), 200
+
+
 def create_app():
     global SessionLocal, _purge_thread_started, _pull_loop_thread_started, _orphan_resume_started, _orphan_watchdog_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
