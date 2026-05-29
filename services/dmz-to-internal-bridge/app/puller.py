@@ -4072,13 +4072,30 @@ def materialize_external_source():
             )
         if existing:
             audio_id_str = str(existing.id)
+            # Liaison bidirectionnelle : si un nouveau Meeting placeholder
+            # est fourni (cas typique : user a re-importé la même URL après
+            # avoir supprimé l'ancien Meeting), on relie ce Meeting à l'UAF
+            # existant. Sans ça le placeholder restait orphelin avec
+            # user_audio_file_id=NULL → fiche "matérialisation en retard"
+            # alors que l'UAF est déjà kevent_completed.
             if meeting_id_arg:
                 try:
+                    m = db.query(Meeting).filter(Meeting.id == meeting_id_arg).first()
+                    if m:
+                        if m.user_audio_file_id is None:
+                            m.user_audio_file_id = existing.id
+                        if external_vsid is not None and m.video_source_id is None:
+                            m.video_source_id = int(external_vsid)
+                        vij = data.get("video_ingest_job_id")
+                        if vij is not None and m.video_ingest_job_id is None:
+                            m.video_ingest_job_id = int(vij)
                     if existing.meeting_id is None:
                         existing.meeting_id = meeting_id_arg
-                        db.commit()
+                    db.commit()
                 except Exception:
                     db.rollback()
+                    logger.exception("materialize reused: failed to link meeting %s → uaf %s",
+                                     meeting_id_arg, audio_id_str)
             return jsonify({
                 "ok": True,
                 "audio_file_id": audio_id_str,
