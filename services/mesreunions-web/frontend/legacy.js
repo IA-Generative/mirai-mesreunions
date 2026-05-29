@@ -1929,11 +1929,15 @@ async function mountTranscriptCorrector(container) {
     // recompose comme un seul bloc pour avoir un highlight continu. Le
     // cap 60s plus bas re-découpera proprement si la fusion produit
     // un bloc trop long. Pattern inspiré de dictaphone `groupTranscriptSegments`.
+    // YouTube subtitle : tous les blocs ont le même speaker fictif
+    // (Intervenant_01) et un gap quasi nul → la fusion ci-dessous les
+    // collapserait en 1 seul bloc géant, ruinant la navigation
+    // phrase-par-phrase. On désactive la fusion pour les sources externes.
     const MERGE_GAP_SEC = 2.0;
     const blocks = [];
     for (const b of rawBlocks) {
         const prev = blocks[blocks.length - 1];
-        if (prev && prev.speaker === b.speaker &&
+        if (!isYoutube && prev && prev.speaker === b.speaker &&
             (b.start - prev.end) < MERGE_GAP_SEC) {
             prev.end = b.end;
             prev.text = (prev.text + ' ' + b.text).trim();
