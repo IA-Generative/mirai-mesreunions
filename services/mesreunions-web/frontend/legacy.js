@@ -2055,7 +2055,7 @@ async function mountTranscriptCorrector(container) {
         ? `<div class="tc-youtube-embed" style="margin:0.4rem 0 0.6rem;">
              <iframe id="yt-iframe-${ytId}" width="100%" height="220"
                      style="max-width:480px;border:0;border-radius:6px;"
-                     src="https://www.youtube.com/embed/${ytId}?enablejsapi=1&rel=0"
+                     src="https://www.youtube.com/embed/${ytId}?enablejsapi=1&rel=0&origin=${encodeURIComponent(window.location.origin)}"
                      title="Vidéo YouTube source"
                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                      allowfullscreen
@@ -2322,8 +2322,13 @@ async function mountTranscriptCorrector(container) {
     // mimique l'interface audio (.seek(time), .play(), .getTime()).
     // Pré-roll 1.5s appliqué côté seek : un clic phrase à t=12.30s →
     // player.seekTo(10.80s) pour ne pas couper le premier mot.
+    //
+    // Queue _ytPendingSeek : si l'utilisateur clique AVANT que onReady ait
+    // posé _ytCtrl (loading de l'API + iframe ~500ms-1s), on bufferise le
+    // dernier seek demandé et on le rejoue dès que _ytCtrl est prêt.
     const YT_PREROLL_SEC = 1.5;
     let _ytCtrl = null;
+    let _ytPendingSeek = null;
     const ytIframe = container.querySelector('iframe[data-yt-player-target]');
     if (ytIframe && !audio) {
         _ytLoadApi().then(() => {
@@ -2343,21 +2348,34 @@ async function mountTranscriptCorrector(container) {
                                 getTime() { try { return p.getCurrentTime(); } catch (e) { return 0; } },
                                 getState() { try { return p.getPlayerState(); } catch (e) { return -1; } },
                             };
+                            // Rejoue le seek bufferisé si l'utilisateur a cliqué
+                            // pendant le chargement de l'API/iframe.
+                            if (_ytPendingSeek) {
+                                _ytCtrl.seek(_ytPendingSeek.t, _ytPendingSeek.opts);
+                                _ytPendingSeek = null;
+                            }
                         },
+                        onError: (e) => { console.warn('YT player error', e && e.data); },
                     },
                 });
-            } catch (e) { /* IFrame API échoue silencieusement (réseau) */ }
+            } catch (e) {
+                console.warn('YT.Player init failed', e);
+            }
         });
     }
 
     // Helper : seek dans le média actuel (audio ou YT). Pre-roll appliqué
     // côté YT uniquement (audio garde le comportement legacy).
+    // Si YT pas encore prêt → bufferise (sera rejoué au onReady).
     const _doSeek = (t, opts) => {
         opts = opts || {};
         if (audio) {
             try { if (opts.play) audio.pause(); audio.currentTime = Math.max(0, t); if (opts.play) audio.play(); } catch (e) {}
         } else if (_ytCtrl) {
             _ytCtrl.seek(t, opts);
+        } else if (ytIframe) {
+            // Player pas encore initialisé — bufferise le seek
+            _ytPendingSeek = { t, opts };
         }
     };
 
@@ -2371,7 +2389,7 @@ async function mountTranscriptCorrector(container) {
         if (!ev.altKey) return;
         const wordEl = ev.target.closest && ev.target.closest('.tc-word');
         if (!wordEl) return;
-        if (!audio && !_ytCtrl) return;
+        if (!audio && !_ytCtrl && !ytIframe) return;
         ev.preventDefault();
         ev.stopPropagation();
         const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
@@ -2399,7 +2417,10 @@ async function mountTranscriptCorrector(container) {
         // seek (audio ou YouTube), sans play forcé. On détecte "click sans
         // sélection" via window.getSelection().isCollapsed après un petit délai.
         const textEl = ev.target.closest && ev.target.closest('.tc-text');
-        if (textEl && (audio || _ytCtrl)) {
+        // Guard étendu : YT player peut ne pas être prêt encore (1-2s
+        // d'init après mount). On accepte de bufferiser via _doSeek dans
+        // ce cas (le seek se rejouera onReady).
+        if (textEl && (audio || _ytCtrl || ytIframe)) {
             setTimeout(() => {
                 const sel = window.getSelection();
                 if (!sel || sel.isCollapsed) {
