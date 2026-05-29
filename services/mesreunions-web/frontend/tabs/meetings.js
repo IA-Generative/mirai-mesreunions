@@ -238,6 +238,11 @@ function renderHeader(fileCount, hasSelection) {
           <!-- Rempli dynamiquement par _renderBulkDownloadMenu lors de l'ouverture -->
         </div>
       </div>
+      <button type="button" class="meetings-tab-btn"
+              data-action="meetings-new:bulk-regenerate"
+              title="Relance la chaîne LLM (glossaire, nettoyage, CR) sur toutes les réunions sélectionnées. Marche pour audio uploadé + YouTube + MCR + DINUM. ~5-15 min par réunion en arrière-plan.">
+        🔄 Re-générer CR
+      </button>
       <button type="button" class="meetings-tab-btn meetings-tab-btn--danger"
               data-action="meetings-new:bulk-delete">
         Mettre à la corbeille
@@ -846,6 +851,10 @@ function _onClick(ev) {
       _confirmBulkDelete();
       break;
     }
+    case 'bulk-regenerate': {
+      _confirmBulkRegenerate();
+      break;
+    }
     case 'bulk-clear': {
       _selectedIds.clear();
       renderList(_lastSessions);
@@ -1219,6 +1228,65 @@ function _ensureRelaunchHighlightStyle() {
   `;
   document.head.appendChild(st);
 }
+
+async function _confirmBulkRegenerate() {
+  const ids = Array.from(_selectedIds);
+  if (ids.length === 0) return;
+  // Filtre : on ne peut régénérer que les UAFs réels (skipper les YT
+  // placeholders 'yt:<meeting_id>' sans UAF — pas de transcript à
+  // traiter encore). L'inventaire est rapide via _youtubeImportsCache
+  // + _findFile pour les audio classiques.
+  const uafIds = [];
+  const skippedNoUaf = [];
+  for (const id of ids) {
+    if (typeof id === 'string' && id.startsWith('yt:')) {
+      // Placeholder YouTube sans UAF (matérialisation en cours/échec)
+      const ytMeetingId = id.slice(3);
+      const yt = _youtubeImportsCache.find((y) => y.meeting_id === ytMeetingId);
+      if (yt && yt.user_audio_file_id) uafIds.push(yt.user_audio_file_id);
+      else skippedNoUaf.push(id);
+    } else {
+      uafIds.push(id);
+    }
+  }
+  if (uafIds.length === 0) {
+    window.alert(`Aucune réunion éligible (${skippedNoUaf.length} placeholder(s) sans transcription).`);
+    return;
+  }
+  const skipMsg = skippedNoUaf.length > 0
+    ? `\n\n${skippedNoUaf.length} réunion(s) ignorée(s) : pas encore de transcription.`
+    : '';
+  const ok = window.confirm(
+    `Re-générer le compte-rendu de ${uafIds.length} réunion(s) ?\n\n` +
+    `La chaîne LLM (glossaire, nettoyage, CR, résumé) tourne en arrière-plan ` +
+    `(~5-15 min par réunion). Les fiches sont consultables pendant le traitement.` +
+    skipMsg
+  );
+  if (!ok) return;
+  try {
+    const resp = await fetch('/api/files/bulk-regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_ids: uafIds, reason: 'bulk_ui' }),
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      window.alert(`Erreur lancement : ${body.error || resp.status}`);
+      return;
+    }
+    const lines = [`✅ ${body.queued} en cours de régénération`];
+    if (body.skipped > 0) lines.push(`⏭ ${body.skipped} ignoré(s) (pas de transcription)`);
+    if (body.failed > 0) lines.push(`✗ ${body.failed} échec(s)`);
+    window.alert(lines.join('\n') + '\n\nLes pastilles passeront à "Traitement IA en cours" puis vert quand chaque CR sera prêt.');
+  } catch (e) {
+    window.alert(`Erreur réseau : ${e.message}`);
+  }
+  _selectedIds.clear();
+  const fn = _resolveLegacyFn('loadSessions');
+  if (fn) fn({ force: true });
+  _refreshYoutubeImportsCache({ force: true });
+}
+
 
 async function _confirmBulkDelete() {
   const ids = Array.from(_selectedIds);

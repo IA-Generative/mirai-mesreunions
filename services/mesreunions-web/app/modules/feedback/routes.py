@@ -339,6 +339,91 @@ def regenerate_file(file_id: str):
     }), (200 if r.status_code < 400 else r.status_code)
 
 
+# ─── Bulk régénération CR (LLM-only, provider-agnostic) ─────────────
+
+
+@bp.route("/api/files/bulk-regenerate", methods=["POST"])
+@require_auth
+def bulk_regenerate_files():
+    """Body : ``{file_ids: [str], reason?: str}``.
+
+    Relance la chaîne LLM (glossary → cleaning → reformulation →
+    meeting_analysis → key_points → suggested_filename) pour chaque
+    UAF sélectionné. **Provider-agnostic** : marche pour upload audio,
+    YouTube subtitle, YouTube force_audio, MCR (V4+), DINUM (V5+) — le
+    seul prérequis est que ``transcription_text`` soit présent (= la
+    réunion a passé l'étape transcription).
+
+    Pour chaque file_id :
+      1. Tente de résoudre comme uploaded_files.id → user_audio_files.id
+         (cas audio classique via _resolve_internal_audio_id)
+      2. Si None : utilise file_id directement comme UAF id (cas
+         sources externes — YouTube/MCR/DINUM, pas d'UploadedFile parent)
+      3. POST /api/v1/audio/<uaf_id>/reprocess (async côté ingester :
+         spawn thread daemon, retour 202 immédiat)
+
+    Retour : ``{queued: int, failed: int, skipped: int,
+    items: [{file_id, status: 'queued'|'failed'|'skipped', uaf_id?, error?}]}``.
+
+    Pas de re-fetch transcription/diarisation : voir bulk-full-reprocess
+    (non livré V1 — refacto suit après V4 MCR).
+    """
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+    if not user_sub:
+        return jsonify({"error": "unauthenticated"}), 401
+    body = request.get_json(silent=True) or {}
+    file_ids = body.get("file_ids") or []
+    if not isinstance(file_ids, list) or not file_ids:
+        return jsonify({"error": "file_ids[] required"}), 400
+    if len(file_ids) > 50:
+        return jsonify({"error": "too_many_files (cap=50)"}), 413
+    reason = (body.get("reason") or "bulk_regenerate").strip()
+
+    items = []
+    queued = failed = skipped = 0
+    for fid in file_ids:
+        fid = str(fid).strip()
+        if not fid:
+            continue
+        # Résolution dual : external → internal (audio classique) OU
+        # direct UAF id (sources externes YT/MCR/DINUM).
+        uaf_id = _resolve_internal_audio_id(user_sub, fid) or fid
+        try:
+            r = _call_ingester(
+                "POST", f"/api/v1/audio/{uaf_id}/reprocess",
+                json_body={"user_sub": user_sub, "force": True},
+                timeout=30,
+            )
+        except req.RequestException:
+            failed += 1
+            items.append({"file_id": fid, "status": "failed",
+                          "error": "ingester_unreachable"})
+            continue
+        if r.status_code == 404:
+            skipped += 1
+            items.append({"file_id": fid, "status": "skipped",
+                          "error": "uaf_not_found"})
+        elif r.status_code == 410:
+            skipped += 1
+            items.append({"file_id": fid, "status": "skipped",
+                          "error": "no_transcription_yet"})
+        elif r.status_code >= 400:
+            failed += 1
+            items.append({"file_id": fid, "status": "failed",
+                          "error": f"http_{r.status_code}"})
+        else:
+            queued += 1
+            items.append({"file_id": fid, "status": "queued",
+                          "uaf_id": uaf_id})
+    logger.info(
+        "bulk-regenerate user=%s queued=%d failed=%d skipped=%d reason=%s",
+        user_sub[:12], queued, failed, skipped, reason,
+    )
+    return jsonify({"queued": queued, "failed": failed, "skipped": skipped,
+                    "items": items}), 200
+
+
 # ─── User glossary (édition manuelle) ─────────────────────────────
 
 
