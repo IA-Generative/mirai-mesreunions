@@ -1792,6 +1792,27 @@ function _renderBlockText(b) {
     }).join(' ');
 }
 
+// Charge l'API YouTube IFrame (singleton). Renvoie une Promise résolue
+// quand window.YT.Player est disponible. Réutilisable depuis n'importe
+// quel mountTranscriptCorrector pour des fiches YouTube.
+let _ytApiPromise = null;
+function _ytLoadApi() {
+    if (_ytApiPromise) return _ytApiPromise;
+    if (window.YT && window.YT.Player) return (_ytApiPromise = Promise.resolve());
+    _ytApiPromise = new Promise((resolve) => {
+        const prev = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = function () {
+            if (typeof prev === 'function') { try { prev(); } catch (e) {} }
+            resolve();
+        };
+        const s = document.createElement('script');
+        s.src = 'https://www.youtube.com/iframe_api';
+        s.async = true;
+        document.head.appendChild(s);
+    });
+    return _ytApiPromise;
+}
+
 function _parseSpeakerTagged(text) {
     if (!text || typeof text !== 'string') return [];
     const lines = text.split('\n');
@@ -2028,14 +2049,16 @@ async function mountTranscriptCorrector(container) {
     // l'instant (les sous-titres YouTube ne fournissent pas de word-timings).
     const playerHtml = isYoutube && ytId
         ? `<div class="tc-youtube-embed" style="margin:0.4rem 0 0.6rem;">
-             <iframe width="100%" height="220" style="max-width:480px;border:0;border-radius:6px;"
-                     src="https://www.youtube.com/embed/${ytId}"
+             <iframe id="yt-iframe-${ytId}" width="100%" height="220"
+                     style="max-width:480px;border:0;border-radius:6px;"
+                     src="https://www.youtube.com/embed/${ytId}?enablejsapi=1&rel=0"
                      title="Vidéo YouTube source"
                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                     allowfullscreen></iframe>
+                     allowfullscreen
+                     data-yt-player-target="1"></iframe>
              <div style="font-size:0.78rem;color:#666;margin-top:0.2rem;">
-               Lecture vidéo (sync segments → phase 2). Pour ré-écouter un mot exact,
-               cliquez sur la ligne du transcript ci-dessous.
+               Cliquez sur une phrase du transcript pour positionner la vidéo
+               (~1.5s avant le début pour ne pas couper le premier mot).
              </div>
            </div>`
         : (audioPurged || !audioUrl
@@ -2289,6 +2312,51 @@ async function mountTranscriptCorrector(container) {
     const audio = container.querySelector('.transcript-corrector-audio');
     const blocksEls = Array.from(container.querySelectorAll('.tc-block'));
 
+    // ─── YouTube IFrame API : controller pour seekTo + getCurrentTime ────
+    // Quand source_type='youtube_*', l'iframe a data-yt-player-target. On
+    // crée un YT.Player attaché et on expose un objet `_ytCtrl` qui
+    // mimique l'interface audio (.seek(time), .play(), .getTime()).
+    // Pré-roll 1.5s appliqué côté seek : un clic phrase à t=12.30s →
+    // player.seekTo(10.80s) pour ne pas couper le premier mot.
+    const YT_PREROLL_SEC = 1.5;
+    let _ytCtrl = null;
+    const ytIframe = container.querySelector('iframe[data-yt-player-target]');
+    if (ytIframe && !audio) {
+        _ytLoadApi().then(() => {
+            try {
+                const p = new window.YT.Player(ytIframe.id, {
+                    events: {
+                        onReady: () => {
+                            _ytCtrl = {
+                                seek(t, opts) {
+                                    const target = Math.max(0, t - YT_PREROLL_SEC);
+                                    try { p.seekTo(target, true); } catch (e) {}
+                                    if (opts && opts.play) {
+                                        try { p.playVideo(); } catch (e) {}
+                                    }
+                                },
+                                pause() { try { p.pauseVideo(); } catch (e) {} },
+                                getTime() { try { return p.getCurrentTime(); } catch (e) { return 0; } },
+                                getState() { try { return p.getPlayerState(); } catch (e) { return -1; } },
+                            };
+                        },
+                    },
+                });
+            } catch (e) { /* IFrame API échoue silencieusement (réseau) */ }
+        });
+    }
+
+    // Helper : seek dans le média actuel (audio ou YT). Pre-roll appliqué
+    // côté YT uniquement (audio garde le comportement legacy).
+    const _doSeek = (t, opts) => {
+        opts = opts || {};
+        if (audio) {
+            try { if (opts.play) audio.pause(); audio.currentTime = Math.max(0, t); if (opts.play) audio.play(); } catch (e) {}
+        } else if (_ytCtrl) {
+            _ytCtrl.seek(t, opts);
+        }
+    };
+
     // Alt+click (Option+click sur Mac) sur un mot précis → seek + play
     // avec petit contexte. On utilise Alt plutôt que dblclick parce que
     // le double-click sert déjà à sélectionner un mot pour la correction
@@ -2298,7 +2366,8 @@ async function mountTranscriptCorrector(container) {
     container.addEventListener('click', (ev) => {
         if (!ev.altKey) return;
         const wordEl = ev.target.closest && ev.target.closest('.tc-word');
-        if (!wordEl || !audio) return;
+        if (!wordEl) return;
+        if (!audio && !_ytCtrl) return;
         ev.preventDefault();
         ev.stopPropagation();
         const wStart = parseFloat(wordEl.getAttribute('data-tc-w-s')) || 0;
@@ -2309,7 +2378,7 @@ async function mountTranscriptCorrector(container) {
         const target = (blockDur < 5)
             ? bStart                              // bloc court : on rejoue tout
             : Math.max(bStart, wStart - 2);        // bloc long : 2s de contexte
-        try { audio.pause(); audio.currentTime = Math.max(0, target); audio.play(); } catch (e) {}
+        _doSeek(target, { play: true });
     }, true);  // capture phase pour court-circuiter avant le click handler générique
 
     // Click ▶ → seek + play. Click sur texte d'un bloc → seek (sans play
@@ -2319,25 +2388,20 @@ async function mountTranscriptCorrector(container) {
         if (playBtn && !playBtn.disabled) {
             ev.preventDefault();
             const t = parseFloat(playBtn.getAttribute('data-tc-play')) || 0;
-            if (audio) {
-                // pause() avant play() : sinon, si l'audio jouait déjà,
-                // chrome/firefox cumulent (rare mais reproduit par user)
-                // et on entend la bande son 2× désynchronisée.
-                try { audio.pause(); audio.currentTime = Math.max(0, t); audio.play(); } catch (e) { /* ignore */ }
-            }
+            _doSeek(t, { play: true });
             return;
         }
         // Click sur le texte d'un bloc (mais pas pendant une sélection !) :
-        // seek audio sans play. On détecte "click sans sélection" via
-        // window.getSelection().isCollapsed après un petit délai.
+        // seek (audio ou YouTube), sans play forcé. On détecte "click sans
+        // sélection" via window.getSelection().isCollapsed après un petit délai.
         const textEl = ev.target.closest && ev.target.closest('.tc-text');
-        if (textEl && audio) {
+        if (textEl && (audio || _ytCtrl)) {
             setTimeout(() => {
                 const sel = window.getSelection();
                 if (!sel || sel.isCollapsed) {
                     const blockEl = textEl.closest('.tc-block');
                     const start = blockEl ? parseFloat(blockEl.getAttribute('data-tc-start')) : 0;
-                    try { audio.currentTime = Math.max(0, start); } catch (e) { /* ignore */ }
+                    _doSeek(start, { play: false });
                 }
             }, 50);
         }
