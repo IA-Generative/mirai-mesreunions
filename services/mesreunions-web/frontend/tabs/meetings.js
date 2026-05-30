@@ -853,6 +853,32 @@ function updateRowStatus(fileId) {
 
 // ── Polling résumé enrichi (depuis /api/file/transcript-status) ───────
 
+// Retire la 1re ligne du résumé si elle reprend le titre de la réunion
+// (le titre est déjà affiché sur la ligne → évite la répétition visuelle).
+// Conservateur : ne strippe que si la 1re ligne ≈ le titre (égalité ou
+// préfixe), et seulement pour des titres assez longs (évite les faux
+// positifs sur des titres courts génériques).
+function _stripLeadingTitle(kp, title) {
+  if (!kp) return kp;
+  const norm = (s) => (s || '')
+    .toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+  const t = norm(title);
+  if (t.length < 6) return kp;
+  const lines = kp.split('\n');
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  if (i >= lines.length) return kp;
+  // nettoie le markdown éventuel en tête (#, **, -, >, etc.)
+  const firstRaw = lines[i].replace(/^[\s>#*_·•\-]+/, '').replace(/[\s*_]+$/, '');
+  const f = norm(firstRaw);
+  if (!f) return kp;
+  if (!(f === t || f.startsWith(t) || t.startsWith(f))) return kp;
+  const rest = lines.slice(i + 1);
+  while (rest.length && rest[0].trim() === '') rest.shift();
+  return rest.join('\n').trim();
+}
+
 async function _fetchAndRenderSummary(fileId) {
   const summaryEl = document.querySelector(`[data-summary-for="${cssEscape(fileId)}"]`);
   if (!summaryEl) return;
@@ -888,7 +914,10 @@ async function _fetchAndRenderSummary(fileId) {
     if (relaunch2 && newStatus2 && newStatus2 !== relaunch2.lastSeenStatus) {
       _recentlyRelaunched.delete(fileId);
     }
-    const kp = (data.key_points_summary || '').trim();
+    const file = _findFile(fileId);
+    const rowTitle = data.suggested_filename
+      || (file && (file.suggested_filename || file.original_filename)) || '';
+    const kp = _stripLeadingTitle((data.key_points_summary || '').trim(), rowTitle);
     summaryEl.innerHTML = kp
       ? `<pre class="meeting-row-summary-kp">${escapeHtml(kp)}</pre>`
       : `<em class="meeting-row-summary-empty">Pas de résumé clé disponible.</em>`;
@@ -2084,6 +2113,8 @@ function renderYoutubeRow(yt) {
     ? formatDate(yt.meeting_datetime, { withTime: true })
     : '—';
   const durLabel = _ytDurationLabel(yt.duration_sec);
+  // Résumé clé, titre de tête retiré (évite la répétition avec le titre).
+  const ytKp = _stripLeadingTitle((yt.key_points_summary || '').trim(), _cleanYoutubeTitle(yt.title));
   const url = escapeHtml(yt.canonical_url || '#');
   const ms = yt.materialization_status || 'pending';
   const uafId = yt.user_audio_file_id || '';
@@ -2200,8 +2231,8 @@ function renderYoutubeRow(yt) {
         <span class="meeting-row-created">Importée le ${escapeHtml(dateLabel)}</span>
       </div>
       <div class="meeting-row-summary">
-        ${(yt.key_points_summary && yt.key_points_summary.trim())
-          ? `<pre class="meeting-row-summary-kp">${escapeHtml(yt.key_points_summary.trim())}</pre>`
+        ${ytKp
+          ? `<pre class="meeting-row-summary-kp">${escapeHtml(ytKp)}</pre>`
           : `<em class="meeting-row-summary-empty">Résumé clé indisponible (génération en cours ou sous-titres trop courts).</em>`}
       </div>
       <div class="meeting-row-expanded-actions">
