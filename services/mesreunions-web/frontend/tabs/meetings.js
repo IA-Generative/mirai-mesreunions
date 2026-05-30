@@ -208,27 +208,27 @@ function renderHeader(fileCount, hasSelection) {
     <div class="meetings-tab-header-top">
       <h2 class="meetings-tab-title">Mes réunions <span class="meetings-tab-count">${fileCount}</span></h2>
       <div class="meetings-tab-actions">
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--primary"
+        <button type="button" class="fr-btn fr-btn--sm"
                 data-action="meetings-new:pick-files"
                 title="Importer un ou plusieurs fichiers audio">
           + Importer
         </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
                 data-action="meetings-new:pick-folder"
                 title="Importer un dossier entier (tous les audios à l'intérieur)">
           + Dossier
         </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
                 data-action="meetings-new:import-from-mcr"
                 title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
           📥 Depuis MCR
         </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
                 data-action="meetings-new:youtube-import"
                 title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
           🎬 YouTube
         </button>
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
                 data-action="meetings-new:resume-stuck"
                 title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
           🔄 Relancer les bloqués
@@ -241,7 +241,7 @@ function renderHeader(fileCount, hasSelection) {
     ${hasSelection ? `<div class="meetings-tab-bulkbar">
       <span class="meetings-tab-bulkbar-count"><strong>${_selectedIds.size}</strong> réunion(s) sélectionnée(s)</span>
       <div class="bulk-dl-wrap" data-bulk-dl-wrap style="position:relative;display:inline-block;">
-        <button type="button" class="meetings-tab-btn meetings-tab-btn--secondary"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
                 data-action="meetings-new:bulk-download-menu"
                 aria-haspopup="menu" aria-expanded="false"
                 style="display:inline-flex;align-items:center;gap:0.3rem;">
@@ -255,16 +255,16 @@ function renderHeader(fileCount, hasSelection) {
           <!-- Rempli dynamiquement par _renderBulkDownloadMenu lors de l'ouverture -->
         </div>
       </div>
-      <button type="button" class="meetings-tab-btn"
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
               data-action="meetings-new:bulk-regenerate"
               title="Relance la chaîne LLM (glossaire, nettoyage, CR) sur toutes les réunions sélectionnées. Marche pour audio uploadé + YouTube + MCR + DINUM. ~5-15 min par réunion en arrière-plan.">
         🔄 Re-générer CR
       </button>
-      <button type="button" class="meetings-tab-btn meetings-tab-btn--danger"
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
               data-action="meetings-new:bulk-delete">
         Mettre à la corbeille
       </button>
-      <button type="button" class="meetings-tab-btn meetings-tab-btn--ghost"
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
               data-action="meetings-new:bulk-clear">
         Annuler
       </button>
@@ -443,7 +443,8 @@ function renderRow(file, session) {
   const status = resolveStatus(file);
   const animated = status.kind === 'processing';
   const title = resolveTitle(file);
-  const importLabel = formatDate(file.created_at, { withTime: true });
+  // Tuile = uniquement la date de réunion (sur une ligne). La date d'import
+  // reste affichée dans le bloc déplié (« Importée le … »).
   const meetingLabel = file.meeting_datetime
     ? formatDate(file.meeting_datetime, { withTime: true })
     : '—';
@@ -484,10 +485,7 @@ function renderRow(file, session) {
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-dates">
-        <span class="mr-date-import" title="Date d'import du fichier">Import : ${escapeHtml(importLabel)}</span>
-        <span class="mr-date-meeting" title="Date réelle de la réunion">Réunion : ${escapeHtml(meetingLabel)}</span>
-      </span>
+      <span class="meeting-row-meetingdate" title="Date réelle de la réunion (modifiable dans la fiche)">Réunion : ${escapeHtml(meetingLabel)}</span>
       <span class="meeting-row-dur" title="Durée du fichier audio">${escapeHtml(durLabel || '—')}</span>
     </div>
     ${isExpanded ? `<div class="meeting-row-expanded" data-expanded-for="${escapeHtml(file.id)}">
@@ -505,12 +503,12 @@ function renderRow(file, session) {
       </div>
       <div class="meeting-row-prep" data-prep-for="${escapeHtml(file.id)}" hidden></div>
       <div class="meeting-row-expanded-actions">
-        <button type="button" class="meeting-row-action-btn"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
                 data-action="meetings-new:open-detail"
                 data-file-id="${escapeHtml(file.id)}">
           Ouvrir la fiche complète
         </button>
-        <button type="button" class="meeting-row-action-btn meeting-row-action-btn--danger"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
                 data-action="meetings-new:delete-one"
                 data-file-id="${escapeHtml(file.id)}">
           Mettre à la corbeille
@@ -573,17 +571,15 @@ function renderListToolbar(total) {
     .map(([k, lbl]) => `<option value="${k}"${_sortKey === k ? ' selected' : ''}>${lbl}</option>`)
     .join('');
   const dirLabel = _sortDir === 'asc' ? 'Ordre croissant' : 'Ordre décroissant';
-  const dirGlyph = _sortDir === 'asc' ? '↑' : '↓';
+  const dirIcon = _sortDir === 'asc' ? 'fr-icon-arrow-up-line' : 'fr-icon-arrow-down-line';
   return `<div class="meetings-tab-toolbar">
     <label class="meetings-tab-sort">
       <span class="meetings-tab-sort-label">Trier par</span>
       <select class="fr-select meetings-tab-sort-select" data-meetings-sort-key aria-label="Critère de tri">${opts}</select>
     </label>
-    <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm meetings-tab-sort-dir"
+    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary ${dirIcon} meetings-tab-sort-dir"
             data-action="meetings-new:toggle-sort-dir"
-            aria-label="${dirLabel} — cliquer pour inverser" title="${dirLabel} — cliquer pour inverser">
-      <span aria-hidden="true">${dirGlyph}</span>
-    </button>
+            aria-label="${dirLabel} — cliquer pour inverser" title="${dirLabel} — cliquer pour inverser"></button>
   </div>`;
 }
 
@@ -617,17 +613,15 @@ function _ensureListStyles() {
   const st = document.createElement('style');
   st.id = _LIST_STYLE_ID;
   st.textContent = `
-    .meetings-tab-toolbar{display:flex;align-items:flex-end;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .75rem;}
-    .meetings-tab-sort{display:flex;flex-direction:column;gap:.15rem;margin:0;}
-    .meetings-tab-sort-label{font-size:.75rem;color:#666;}
-    .meetings-tab-sort-select{min-width:11rem;margin:0;}
-    .meetings-tab-sort-dir{min-height:2.5rem;line-height:1;}
-    .meeting-row-dates{display:flex;flex-direction:column;gap:.1rem;min-width:12rem;text-align:right;}
-    .meeting-row-dates .mr-date-import{font-size:.8rem;color:#161616;white-space:nowrap;}
-    .meeting-row-dates .mr-date-meeting{font-size:.75rem;color:#666;white-space:nowrap;}
+    .meetings-tab-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .75rem;}
+    .meetings-tab-sort{display:flex;align-items:center;gap:.4rem;margin:0;}
+    .meetings-tab-sort-label{font-size:.8125rem;color:#666;white-space:nowrap;}
+    .meetings-tab-sort-select{min-width:10rem;margin:0;}
+    .meeting-row-meetingdate{font-size:.8125rem;color:#161616;white-space:nowrap;text-align:right;}
     .meetings-tab-pagination{margin-top:1rem;justify-content:center;}
     .meetings-tab-pagination-info{pointer-events:none;}
-    @media (max-width:600px){.meeting-row-dates{min-width:auto;text-align:left;}}
+    .meetings-danger-btn{color:#ce0500;box-shadow:inset 0 0 0 1px #ce0500;}
+    .meetings-danger-btn:hover{background-color:#fee9e9;}
   `;
   document.head.appendChild(st);
 }
@@ -1681,10 +1675,10 @@ function _openYoutubeImportModal() {
       <p class="yt-status" data-yt-status></p>
       <ul class="yt-status-list" data-yt-status-list hidden></ul>
       <div class="yt-actions">
-        <button type="button" data-yt-cancel class="meetings-tab-btn meetings-tab-btn--ghost">
+        <button type="button" data-yt-cancel class="fr-btn fr-btn--sm fr-btn--tertiary">
           Fermer
         </button>
-        <button type="button" data-yt-submit class="meetings-tab-btn meetings-tab-btn--primary">
+        <button type="button" data-yt-submit class="fr-btn fr-btn--sm">
           Importer
         </button>
       </div>
@@ -2194,10 +2188,7 @@ function renderYoutubeRow(yt) {
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-dates">
-        <span class="mr-date-import" title="Date d'import de la vidéo">Import : ${escapeHtml(dateLabel)}</span>
-        <span class="mr-date-meeting" title="Date réelle de la réunion">Réunion : ${escapeHtml(ytMeetingLabel)}</span>
-      </span>
+      <span class="meeting-row-meetingdate" title="Date réelle de la réunion">Réunion : ${escapeHtml(ytMeetingLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
     </div>
     ${isExpanded ? `<div class="meeting-row-expanded">
@@ -2208,18 +2199,23 @@ function renderYoutubeRow(yt) {
         </span>
         <span class="meeting-row-created">Importée le ${escapeHtml(dateLabel)}</span>
       </div>
+      <div class="meeting-row-summary">
+        ${(yt.key_points_summary && yt.key_points_summary.trim())
+          ? `<pre class="meeting-row-summary-kp">${escapeHtml(yt.key_points_summary.trim())}</pre>`
+          : `<em class="meeting-row-summary-empty">Résumé clé indisponible (génération en cours ou sous-titres trop courts).</em>`}
+      </div>
       <div class="meeting-row-expanded-actions">
-        ${canOpenDetail ? `<button type="button" class="meeting-row-action-btn"
+        ${canOpenDetail ? `<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
                 data-action="meetings-new:open-detail"
                 data-file-id="${escapeHtml(uafId)}">
           Ouvrir la fiche complète
         </button>` : ''}
-        <a class="meeting-row-action-btn" href="${url}" target="_blank" rel="noopener"
+        <a class="fr-btn fr-btn--sm fr-btn--tertiary" href="${url}" target="_blank" rel="noopener"
            data-action="meetings-new:yt-open-source" data-yt-url="${url}"
            style="text-decoration:none;">
           ↗ Voir sur YouTube
         </a>
-        <button type="button" class="meeting-row-action-btn meeting-row-action-btn--danger"
+        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
                 data-action="${deleteAction}"
                 ${deleteData}>
           Mettre à la corbeille
@@ -2496,14 +2492,14 @@ function _openMcrImportModal() {
         <span data-mcr-status style="font-size:0.85rem;color:#475569;"></span>
         <div style="display:flex;gap:0.5rem;">
           <button type="button" data-mcr-action="export"
-                  class="meetings-tab-btn meetings-tab-btn--ghost"
+                  class="fr-btn fr-btn--sm fr-btn--tertiary"
                   title="Télécharge un CSV de toutes tes réunions MCR (toutes pages)">
             📥 Exporter CSV
           </button>
           <button type="button" data-mcr-action="close"
-                  class="meetings-tab-btn meetings-tab-btn--ghost">Annuler</button>
+                  class="fr-btn fr-btn--sm fr-btn--tertiary">Annuler</button>
           <button type="button" data-mcr-action="submit"
-                  class="meetings-tab-btn meetings-tab-btn--primary"
+                  class="fr-btn fr-btn--sm"
                   disabled>Importer la sélection</button>
         </div>
       </div>
@@ -2627,8 +2623,8 @@ async function _loadMcrMeetings(page, search) {
                   margin-top:0.75rem;color:#64748b;font-size:0.85rem;">
         <span>${data.total_items || 0} réunion(s) — page ${data.page || page} / ${data.total_pages || 1}</span>
         <div style="display:flex;gap:0.3rem;">
-          ${page > 1 ? `<button type="button" data-mcr-page="${page-1}" class="meetings-tab-btn meetings-tab-btn--ghost">‹ Précédent</button>` : ''}
-          ${page < (data.total_pages || 1) ? `<button type="button" data-mcr-page="${page+1}" class="meetings-tab-btn meetings-tab-btn--ghost">Suivant ›</button>` : ''}
+          ${page > 1 ? `<button type="button" data-mcr-page="${page-1}" class="fr-btn fr-btn--sm fr-btn--tertiary">‹ Précédent</button>` : ''}
+          ${page < (data.total_pages || 1) ? `<button type="button" data-mcr-page="${page+1}" class="fr-btn fr-btn--sm fr-btn--tertiary">Suivant ›</button>` : ''}
         </div>
       </div>
     `;
