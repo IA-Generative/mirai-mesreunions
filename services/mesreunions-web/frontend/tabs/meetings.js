@@ -89,6 +89,23 @@ let _transcriptCache = new Map(); // fileId → { status, engine, kp, suggested,
 let _altPressed = false;
 let _lastSessions = [];
 let _delegationBound = false;
+
+// ── Tri + pagination de la liste (client-side, persistés localStorage) ──
+// Le backend renvoie toute la liste (cap 200) ; on trie et pagine ici pour
+// que le tri soit correct À TRAVERS les pages. Défaut = date d'import desc
+// (le dernier fichier uploadé remonte toujours en tête, quel que soit son
+// nom — cf bug « fichier récent classé à la date encodée dans son nom »).
+const _SORT_KEYS = new Set(['import', 'meeting', 'title', 'duration']);
+let _sortKey = (() => {
+  try { const k = localStorage.getItem('meetings.sort.key'); return _SORT_KEYS.has(k) ? k : 'import'; }
+  catch (_) { return 'import'; }
+})();
+let _sortDir = (() => {
+  try { return localStorage.getItem('meetings.sort.dir') === 'asc' ? 'asc' : 'desc'; }
+  catch (_) { return 'desc'; }
+})();
+let _page = 1;
+const _PAGE_SIZE = 25;
 // IDs des rows fraîchement relancées (par "Relancer les bloqués"). Affiche
 // un badge persistant "🔄 Relancé à HH:MM" sur chaque row tant que le
 // statut transcription n'a pas bougé (signal le watchdog a engagé).
@@ -426,7 +443,10 @@ function renderRow(file, session) {
   const status = resolveStatus(file);
   const animated = status.kind === 'processing';
   const title = resolveTitle(file);
-  const dateLabel = formatDate(file.meeting_datetime || file.created_at, { withTime: true });
+  const importLabel = formatDate(file.created_at, { withTime: true });
+  const meetingLabel = file.meeting_datetime
+    ? formatDate(file.meeting_datetime, { withTime: true })
+    : '—';
   const durLabel = formatDuration(file.audio_duration_seconds);
   const isExpanded = _expandedIds.has(file.id);
   const isSelected = _selectedIds.has(file.id);
@@ -464,7 +484,10 @@ function renderRow(file, session) {
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-date" title="Date de la réunion">${escapeHtml(dateLabel)}</span>
+      <span class="meeting-row-dates">
+        <span class="mr-date-import" title="Date d'import du fichier">Import : ${escapeHtml(importLabel)}</span>
+        <span class="mr-date-meeting" title="Date réelle de la réunion">Réunion : ${escapeHtml(meetingLabel)}</span>
+      </span>
       <span class="meeting-row-dur" title="Durée du fichier audio">${escapeHtml(durLabel || '—')}</span>
     </div>
     ${isExpanded ? `<div class="meeting-row-expanded" data-expanded-for="${escapeHtml(file.id)}">
@@ -504,6 +527,111 @@ function renderEmpty() {
   </div>`;
 }
 
+// ── Tri + pagination : helpers ────────────────────────────────────────
+
+// Valeur comparable d'une entrée (audio ou youtube) pour la clé de tri.
+function _entrySortValue(e, key) {
+  const isYt = e.kind === 'youtube';
+  const obj = isYt ? e.yt : e.f;
+  switch (key) {
+    case 'import':
+      return new Date(obj.created_at || 0).getTime();
+    case 'meeting':
+      // meeting_datetime si renseignée, sinon retombe sur la date d'import.
+      return new Date(obj.meeting_datetime || obj.created_at || 0).getTime();
+    case 'title':
+      return (isYt ? _cleanYoutubeTitle(obj.title) : resolveTitle(obj) || '').toLowerCase();
+    case 'duration':
+      return Number((isYt ? obj.duration_sec : obj.audio_duration_seconds) || 0);
+    default:
+      return 0;
+  }
+}
+
+function _compareEntries(a, b) {
+  const va = _entrySortValue(a, _sortKey);
+  const vb = _entrySortValue(b, _sortKey);
+  let cmp;
+  if (typeof va === 'string' || typeof vb === 'string') {
+    cmp = String(va).localeCompare(String(vb), 'fr', { sensitivity: 'base' });
+  } else {
+    cmp = va - vb;
+  }
+  return _sortDir === 'asc' ? cmp : -cmp;
+}
+
+// Barre de tri DSFR : fr-select (critère) + bouton de sens ↑/↓.
+function renderListToolbar(total) {
+  if (!total) return '';
+  const labels = [
+    ['import', "Date d'import"],
+    ['meeting', 'Date de réunion'],
+    ['title', 'Titre'],
+    ['duration', 'Durée'],
+  ];
+  const opts = labels
+    .map(([k, lbl]) => `<option value="${k}"${_sortKey === k ? ' selected' : ''}>${lbl}</option>`)
+    .join('');
+  const dirLabel = _sortDir === 'asc' ? 'Ordre croissant' : 'Ordre décroissant';
+  const dirGlyph = _sortDir === 'asc' ? '↑' : '↓';
+  return `<div class="meetings-tab-toolbar">
+    <label class="meetings-tab-sort">
+      <span class="meetings-tab-sort-label">Trier par</span>
+      <select class="fr-select meetings-tab-sort-select" data-meetings-sort-key aria-label="Critère de tri">${opts}</select>
+    </label>
+    <button type="button" class="fr-btn fr-btn--tertiary fr-btn--sm meetings-tab-sort-dir"
+            data-action="meetings-new:toggle-sort-dir"
+            aria-label="${dirLabel} — cliquer pour inverser" title="${dirLabel} — cliquer pour inverser">
+      <span aria-hidden="true">${dirGlyph}</span>
+    </button>
+  </div>`;
+}
+
+// Pagination DSFR (fr-pagination). Boutons pilotés par le dispatcher clic.
+function renderPagination(page, totalPages) {
+  if (totalPages <= 1) return '';
+  const prevDisabled = page <= 1;
+  const nextDisabled = page >= totalPages;
+  return `<nav role="navigation" class="fr-pagination meetings-tab-pagination" aria-label="Pagination des réunions">
+    <ul class="fr-pagination__list">
+      <li>
+        <button type="button" class="fr-pagination__link fr-pagination__link--prev fr-pagination__link--lg-label"
+                data-action="meetings-new:goto-page" data-page="${page - 1}"
+                ${prevDisabled ? 'disabled aria-disabled="true"' : ''}>Précédent</button>
+      </li>
+      <li><span class="fr-pagination__link meetings-tab-pagination-info" aria-current="page">Page ${page} / ${totalPages}</span></li>
+      <li>
+        <button type="button" class="fr-pagination__link fr-pagination__link--next fr-pagination__link--lg-label"
+                data-action="meetings-new:goto-page" data-page="${page + 1}"
+                ${nextDisabled ? 'disabled aria-disabled="true"' : ''}>Suivant</button>
+      </li>
+    </ul>
+  </nav>`;
+}
+
+// Styles propres au redesign liste, injectés une seule fois (évite de
+// toucher au CSS inline d'index.html).
+const _LIST_STYLE_ID = 'meetings-list-enhanced-style';
+function _ensureListStyles() {
+  if (document.getElementById(_LIST_STYLE_ID)) return;
+  const st = document.createElement('style');
+  st.id = _LIST_STYLE_ID;
+  st.textContent = `
+    .meetings-tab-toolbar{display:flex;align-items:flex-end;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .75rem;}
+    .meetings-tab-sort{display:flex;flex-direction:column;gap:.15rem;margin:0;}
+    .meetings-tab-sort-label{font-size:.75rem;color:#666;}
+    .meetings-tab-sort-select{min-width:11rem;margin:0;}
+    .meetings-tab-sort-dir{min-height:2.5rem;line-height:1;}
+    .meeting-row-dates{display:flex;flex-direction:column;gap:.1rem;min-width:12rem;text-align:right;}
+    .meeting-row-dates .mr-date-import{font-size:.8rem;color:#161616;white-space:nowrap;}
+    .meeting-row-dates .mr-date-meeting{font-size:.75rem;color:#666;white-space:nowrap;}
+    .meetings-tab-pagination{margin-top:1rem;justify-content:center;}
+    .meetings-tab-pagination-info{pointer-events:none;}
+    @media (max-width:600px){.meeting-row-dates{min-width:auto;text-align:left;}}
+  `;
+  document.head.appendChild(st);
+}
+
 // ── Render principal ──────────────────────────────────────────────────
 
 export function renderList(sessions) {
@@ -511,7 +639,8 @@ export function renderList(sessions) {
   const container = document.getElementById('sessions-list');
   if (!container) return;
 
-  // Aplatit audio + injecte YouTube imports (cache) → trie unifié par date desc.
+  // Aplatit audio + injecte YouTube imports (cache) → liste unifiée, triée
+  // selon _sortKey/_sortDir puis paginée (cf _compareEntries / renderPagination).
   // Skip les sessions synthétiques YouTube (id préfixé "yt-") : elles sont
   // injectées par /api/my-sessions UNIQUEMENT pour que showFileDetail
   // legacy puisse rendre la fiche détail. La liste utilise toujours
@@ -520,19 +649,32 @@ export function renderList(sessions) {
   for (const s of (sessions || [])) {
     if (typeof s.id === 'string' && s.id.startsWith('yt-')) continue;
     for (const f of (s.uploads || [])) {
-      entries.push({ kind: 'audio', f, s, sortDate: f.meeting_datetime || f.created_at });
+      entries.push({ kind: 'audio', f, s });
     }
   }
   for (const yt of _youtubeImportsCache) {
-    entries.push({ kind: 'youtube', yt, sortDate: yt.created_at });
+    entries.push({ kind: 'youtube', yt });
   }
-  entries.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
+  _ensureListStyles();
+  entries.sort(_compareEntries);
 
-  const headerHtml = renderHeader(entries.length, _selectedIds.size > 0);
-  const listHtml = entries.length
-    ? entries.map((e) => e.kind === 'youtube' ? renderYoutubeRow(e.yt) : renderRow(e.f, e.s)).join('')
+  // Pagination client-side : on tient le total complet, on n'affiche que la
+  // tranche courante. Le tri ci-dessus s'applique AVANT le découpage, donc
+  // il reste correct à travers les pages.
+  const total = entries.length;
+  const totalPages = Math.max(1, Math.ceil(total / _PAGE_SIZE));
+  if (_page > totalPages) _page = totalPages;
+  if (_page < 1) _page = 1;
+  const pageStart = (_page - 1) * _PAGE_SIZE;
+  const pageEntries = entries.slice(pageStart, pageStart + _PAGE_SIZE);
+
+  const headerHtml = renderHeader(total, _selectedIds.size > 0);
+  const toolbarHtml = renderListToolbar(total);
+  const listHtml = total
+    ? pageEntries.map((e) => e.kind === 'youtube' ? renderYoutubeRow(e.yt) : renderRow(e.f, e.s)).join('')
     : renderEmpty();
-  container.innerHTML = `${headerHtml}<div class="meetings-tab-list">${listHtml}</div>`;
+  const paginationHtml = renderPagination(_page, totalPages);
+  container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}`;
 
   // Refresh YouTube imports en async — re-render à la fin si la liste change.
   _refreshYoutubeImportsCache();
@@ -546,7 +688,9 @@ export function renderList(sessions) {
   // updateRowStatus() update juste la pastille + tooltip de la row
   // concernée, pas tout le DOM.
   // Skip entries YouTube (pas de file → pas de status à pré-fetch).
-  for (const e of entries) {
+  // On ne pré-fetch que la page visible (perf : évite N appels pour des
+  // rows hors écran).
+  for (const e of pageEntries) {
     if (e.kind !== 'audio') continue;
     const f = e.f;
     if (f.status === 'transferred' && !_transcriptCache.has(f.id)) {
@@ -790,6 +934,19 @@ function _resolveLegacyFn(name) {
   return typeof fn === 'function' ? fn : null;
 }
 
+// Changement du critère de tri (fr-select). Délégué sur le panel pour
+// survivre aux re-render innerHTML de renderList.
+function _onChange(ev) {
+  const sel = ev.target && ev.target.closest && ev.target.closest('[data-meetings-sort-key]');
+  if (!sel) return;
+  const k = sel.value;
+  if (!_SORT_KEYS.has(k)) return;
+  _sortKey = k;
+  try { localStorage.setItem('meetings.sort.key', k); } catch (_) { /* noop */ }
+  _page = 1;
+  renderList(_lastSessions);
+}
+
 function _onClick(ev) {
   // 1) Checkbox de sélection bulk
   const cb = ev.target.closest && ev.target.closest('[data-meeting-check]');
@@ -858,6 +1015,25 @@ function _onClick(ev) {
     case 'bulk-clear': {
       _selectedIds.clear();
       renderList(_lastSessions);
+      break;
+    }
+    case 'toggle-sort-dir': {
+      _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
+      try { localStorage.setItem('meetings.sort.dir', _sortDir); } catch (_) { /* noop */ }
+      _page = 1;
+      renderList(_lastSessions);
+      break;
+    }
+    case 'goto-page': {
+      const p = parseInt(el.getAttribute('data-page') || '1', 10);
+      if (!isNaN(p)) {
+        _page = p;
+        renderList(_lastSessions);
+        const c = document.getElementById('sessions-list');
+        if (c && typeof c.scrollIntoView === 'function') {
+          c.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+      }
       break;
     }
     case 'bulk-download-menu': {
@@ -1352,6 +1528,7 @@ export function mount(container /*, ctx */) {
   panel.classList.add('meetings-new-active');
   if (!_delegationBound) {
     panel.addEventListener('click', _onClick);
+    panel.addEventListener('change', _onChange);
     document.addEventListener('keydown', _onKeyDown);
     document.addEventListener('keyup', _onKeyUp);
     _delegationBound = true;
@@ -1909,6 +2086,9 @@ function renderYoutubeRow(yt) {
   const title = escapeHtml(_cleanYoutubeTitle(yt.title));
   const channel = escapeHtml(yt.channel || '');
   const dateLabel = formatDate(yt.created_at, { withTime: true });
+  const ytMeetingLabel = yt.meeting_datetime
+    ? formatDate(yt.meeting_datetime, { withTime: true })
+    : '—';
   const durLabel = _ytDurationLabel(yt.duration_sec);
   const url = escapeHtml(yt.canonical_url || '#');
   const ms = yt.materialization_status || 'pending';
@@ -2014,7 +2194,10 @@ function renderYoutubeRow(yt) {
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-date" title="Date d'import">${escapeHtml(dateLabel)}</span>
+      <span class="meeting-row-dates">
+        <span class="mr-date-import" title="Date d'import de la vidéo">Import : ${escapeHtml(dateLabel)}</span>
+        <span class="mr-date-meeting" title="Date réelle de la réunion">Réunion : ${escapeHtml(ytMeetingLabel)}</span>
+      </span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
     </div>
     ${isExpanded ? `<div class="meeting-row-expanded">

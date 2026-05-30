@@ -225,10 +225,15 @@ def api_my_sessions():
             # principale. SQLAlchemy n'est pas thread-safe sur une même
             # session : on garde donc la query dans le thread Flask et
             # on n'attend les futures qu'après.
+            # On renvoie l'ensemble des sessions actives (cap de sécurité à
+            # 200) : le tri ET la pagination sont désormais faits côté client
+            # sur la liste plate unifiée (audio + YouTube). L'ancien LIMIT 20
+            # masquait les uploads rattachés à des sessions plus anciennes
+            # (cause racine du « fichier récent introuvable »).
             sessions = db.query(UploadSession).filter(
                 UploadSession.user_sub == user["sub"],
                 UploadSession.trashed_at.is_(None),
-            ).order_by(UploadSession.created_at.desc()).limit(20).all()
+            ).order_by(UploadSession.created_at.desc()).limit(200).all()
             bulk = _bulk_future.result()
             devices = _devices_future.result()
         timings["t1_parallel_fetch"] = round((time.monotonic() - _t0) * 1000)
