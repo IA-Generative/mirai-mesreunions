@@ -494,14 +494,18 @@ function renderAudioExpanded(file, session) {
   </div>`;
 }
 
+// Icône MCR (compte-rendu.mirai) : carte/doc + personne + pastille rouge, en
+// SVG inline calé sur la hauteur de ligne (l'emoji était trop haut → wrap).
+const _MCR_ICON = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3.5" width="18" height="13" rx="2" stroke="#000091" stroke-width="1.6"/><path d="M6 7.6h6M6 10.1h4.4" stroke="#000091" stroke-width="1.5" stroke-linecap="round"/><circle cx="17.6" cy="7" r="1.5" fill="#e1000f"/><circle cx="12" cy="15.1" r="2.3" fill="#000091"/><path d="M7.8 21.6c0-2.4 1.9-4 4.2-4s4.2 1.6 4.2 4z" fill="#000091"/></svg>`;
+
 // Petite icône de source à mettre DEVANT le titre (pour repérer d'où vient la
 // réunion d'un coup d'œil). YouTube a son propre rendu (renderYoutubeRow).
 function _titleSourceIcon(file) {
   const st = ((file && file.source_type) || '').toLowerCase();
   const origin = ((file && file.origin) || '').toLowerCase();
-  if (origin === 'mcr_import') return { ic: '📄', label: 'Importé depuis compte-rendu.mirai (MCR)' };
-  if (st === 'lasuite_visio') return { ic: '📹', label: 'Visio · La Suite numérique' };
-  if (st === 'lasuite_transcript') return { ic: '📝', label: 'Transcript · La Suite numérique' };
+  if (origin === 'mcr_import') return { ic: _MCR_ICON, label: 'Importé depuis compte-rendu.mirai (MCR)' };
+  if (st === 'lasuite_visio') return { ic: _LASUITE_LOGO, label: 'Visio · La Suite numérique' };
+  if (st === 'lasuite_transcript') return { ic: _LASUITE_LOGO, label: 'Transcript · La Suite numérique' };
   return null;
 }
 
@@ -672,6 +676,12 @@ function _ensureListStyles() {
     /* Pt4 : badges source */
     .meeting-row-source{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap;}
     .src-logo{vertical-align:-2px;margin-right:.2rem;}
+    /* Icône de source devant le titre — calée sur la hauteur de ligne, jamais
+       de retour à la ligne (le titre s'ellipse à côté). */
+    .meeting-row-title-btn{display:flex;align-items:center;gap:.3rem;}
+    .meeting-row-title-btn .meeting-row-title-text{flex:1 1 auto;min-width:0;}
+    .meeting-row-src-ic{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:1.05em;height:1.05em;line-height:1;}
+    .meeting-row-src-ic svg{width:100%;height:100%;display:block;}
     /* Pagination + divers */
     .meetings-tab-pagination{margin:.4rem 0 0;justify-content:center;}
     .meetings-tab-pagination-info{pointer-events:none;}
