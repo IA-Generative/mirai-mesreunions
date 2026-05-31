@@ -494,6 +494,17 @@ function renderAudioExpanded(file, session) {
   </div>`;
 }
 
+// Petite icône de source à mettre DEVANT le titre (pour repérer d'où vient la
+// réunion d'un coup d'œil). YouTube a son propre rendu (renderYoutubeRow).
+function _titleSourceIcon(file) {
+  const st = ((file && file.source_type) || '').toLowerCase();
+  const origin = ((file && file.origin) || '').toLowerCase();
+  if (origin === 'mcr_import') return { ic: '📄', label: 'Importé depuis compte-rendu.mirai (MCR)' };
+  if (st === 'lasuite_visio') return { ic: '📹', label: 'Visio · La Suite numérique' };
+  if (st === 'lasuite_transcript') return { ic: '📝', label: 'Transcript · La Suite numérique' };
+  return null;
+}
+
 function renderRow(file, session) {
   const status = resolveStatus(file);
   const animated = status.kind === 'processing';
@@ -525,7 +536,7 @@ function renderRow(file, session) {
         <button type="button" class="meeting-row-title-btn"
                 data-action="meetings-new:open-detail" data-file-id="${escapeHtml(file.id)}"
                 title="${escapeHtml(hoverTip)}">
-          <span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
+          ${(() => { const si = _titleSourceIcon(file); return si ? `<span class="meeting-row-src-ic" title="${escapeHtml(si.label)}" aria-hidden="true">${si.ic}</span> ` : ''; })()}<span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
         </button>
         <button type="button" class="meeting-row-chevron"
                 data-action="meetings-new:toggle-expand" data-file-id="${escapeHtml(file.id)}"
@@ -1133,6 +1144,12 @@ function _onClick(ev) {
       // → endpoint /api/file/<id> via deleteFile legacy).
       const file = _findFile(fileId);
       if (file) {
+        // MCR : UAF interne (pas d'UploadedFile externe) → /api/file échoue.
+        // On trash le Meeting via le même chemin que YouTube (générique).
+        if ((file.origin === 'mcr_import' || file.source_provider === 'mcr') && file.meeting_id) {
+          _deleteYoutubeMeeting(file.meeting_id, resolveTitle(file));
+          break;
+        }
         const fn = _resolveLegacyFn('deleteFile');
         if (fn) fn(fileId, file.original_filename || '');
         break;
@@ -1638,14 +1655,18 @@ async function _confirmBulkDelete() {
   let okCount = 0, failed = 0;
   for (const id of ids) {
     try {
-      // Différencie YouTube vs audio : YouTube va sur /api/youtube/meetings/<meeting_id>
-      // (trash le Meeting), audio classique va sur /api/file/<uaf_id>.
+      // Différencie la cible : YouTube ET MCR sont des Meetings internes →
+      // /api/youtube/meetings/<meeting_id> (trash générique). Audio classique
+      // (UploadedFile externe) → /api/file/<uaf_id>.
       const yt = _youtubeImportsCache.find(
         (y) => y.user_audio_file_id === id || ('yt:' + y.meeting_id) === id
       );
-      const url = yt
-        ? `/api/youtube/meetings/${encodeURIComponent(yt.meeting_id)}`
-        : `/api/file/${encodeURIComponent(id)}`;
+      const file = _findFile(id);
+      const isMcr = !!(file && (file.origin === 'mcr_import' || file.source_provider === 'mcr') && file.meeting_id);
+      let url;
+      if (yt) url = `/api/youtube/meetings/${encodeURIComponent(yt.meeting_id)}`;
+      else if (isMcr) url = `/api/youtube/meetings/${encodeURIComponent(file.meeting_id)}`;
+      else url = `/api/file/${encodeURIComponent(id)}`;
       const resp = await fetch(url, { method: 'DELETE' });
       if (resp.ok) okCount++;
       else failed++;
