@@ -1649,8 +1649,27 @@ async function _confirmBulkRegenerate() {
       return;
     }
     const lines = [`✅ ${body.queued} en cours de régénération`];
-    if (body.skipped > 0) lines.push(`⏭ ${body.skipped} ignoré(s) (pas de transcription)`);
-    if (body.failed > 0) lines.push(`✗ ${body.failed} échec(s)`);
+    // Surface les VRAIES raisons (le backend renvoie items[].error) au lieu
+    // d'un « pas de transcription » générique et souvent faux.
+    const _reasonLabel = (err) => ({
+      uaf_not_found: 'réunion introuvable côté interne (souvent purgée — rétention dépassée)',
+      no_transcription_yet: 'pas encore de transcription (traitement en cours)',
+      ingester_unreachable: 'service indisponible (réessayez plus tard)',
+    })[err] || (String(err).startsWith('http_') ? `erreur technique (${String(err).replace('http_', 'HTTP ')})` : (err || 'raison inconnue'));
+    const _byReason = {};
+    for (const it of (Array.isArray(body.items) ? body.items : [])) {
+      if (it && (it.status === 'skipped' || it.status === 'failed')) {
+        const key = it.error || it.status;
+        _byReason[key] = (_byReason[key] || 0) + 1;
+      }
+    }
+    const _notDone = (body.skipped || 0) + (body.failed || 0);
+    if (_notDone > 0) {
+      lines.push(`⏭ ${_notDone} non régénéré(s) :`);
+      for (const [err, n] of Object.entries(_byReason)) {
+        lines.push(`   • ${n} — ${_reasonLabel(err)}`);
+      }
+    }
     window.alert(lines.join('\n') + '\n\nLes pastilles passeront à "Traitement IA en cours" puis vert quand chaque CR sera prêt.');
   } catch (e) {
     window.alert(`Erreur réseau : ${e.message}`);
