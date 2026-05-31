@@ -137,6 +137,14 @@ def list_mcr_meetings():
 def _fetch_meetings_resilient(access_token, *, page, page_size, search, user_sub):
     """Liste paginée MCR avec résilience par ligne.
 
+    NOTE (2026-05-31) : le bug racine côté MCR (validateur pydantic qui faisait
+    planter GET /api/meetings en 500 dès qu'une réunion VISIO avait un
+    meeting_platform_id) est corrigé en prod (MCR #735/#732). Le fallback
+    per-row ci-dessous ne se déclenche donc plus en pratique — on le CONSERVE
+    comme défense (dégradation gracieuse si MCR régresse ou qu'une autre row
+    pourrie réapparaît).
+
+
     Stratégie :
       1. Tente le fetch normal `page&page_size`.
       2. Si 500 avec le marker "not supported for platform" → on est dans
