@@ -2006,12 +2006,14 @@ def audio_external_source_list():
                u.created_at, u.last_activity_at, u.last_activity_at,
                u.meeting_id,
                vs.canonical_url, vs.title, vs.channel, vs.duration_sec,
-               vs.provider, vs.provider_video_id
+               vs.provider, vs.provider_video_id,
+               u.origin
           FROM user_audio_files u
           LEFT JOIN video_sources vs
             ON vs.id = u.external_video_source_id
          WHERE u.user_sub = :user_sub
-           AND u.source_type IN ('youtube_subtitle', 'youtube_audio')
+           AND (u.source_type IN ('youtube_subtitle', 'youtube_audio')
+                OR u.origin = 'mcr_import')
          ORDER BY u.created_at DESC
          LIMIT 200
         """
@@ -2034,6 +2036,7 @@ def audio_external_source_list():
                 "updated_at": r[12].isoformat() if r[12] else None,
                 "last_activity_at": r[13].isoformat() if r[13] else None,
                 "meeting_id": str(r[14]) if r[14] else None,
+                "origin": r[21],
                 "external": {
                     "canonical_url": r[15],
                     "title": r[16],

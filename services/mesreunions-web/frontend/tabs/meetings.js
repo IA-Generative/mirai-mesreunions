@@ -2557,9 +2557,13 @@ function _showMcrImportInProgressBanner(expectedCount) {
     clearInterval(_mcrImportBannerTimer);
     _mcrImportBannerTimer = null;
   }
+  // Snapshot des IDs présents au moment de l'import (sur s.uploads — l'ancien
+  // code lisait s.files qui n'existe pas → arrived restait toujours 0).
   const _startSnapshotIds = new Set(
-    (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean)
+    (_lastSessions || []).flatMap(s => (s.uploads || []).map(f => f.id)).filter(Boolean)
   );
+  let _lastSig = null;       // évite de reconstruire l'innerHTML à chaque tick (anti-clignotement)
+  let _allArrivedAt = 0;     // horodatage où tout est arrivé → auto-dismiss différé
   const render = (secs) => {
     const host = document.querySelector('.meetings-tab-header')
       || document.getElementById('sessions-list')
@@ -2575,30 +2579,40 @@ function _showMcrImportInProgressBanner(expectedCount) {
         'font-size:0.88rem;display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;'
       );
       host.parentNode ? host.parentNode.insertBefore(bn, host.nextSibling) : host.appendChild(bn);
+      _lastSig = null;
     }
-    // Compte les rows NOUVELLES apparues depuis le clic "Importer".
-    const currentIds = (_lastSessions || []).flatMap(s => (s.files || []).map(f => f.id || f.file_id)).filter(Boolean);
+    const currentIds = (_lastSessions || []).flatMap(s => (s.uploads || []).map(f => f.id)).filter(Boolean);
     const newIds = currentIds.filter(id => !_startSnapshotIds.has(id));
     const arrived = newIds.length;
     const k = _countTrackedStatuses(newIds);
+    const allArrived = _mcrImportBannerExpected > 0 && arrived >= _mcrImportBannerExpected;
+    if (allArrived && !_allArrivedAt) _allArrivedAt = secs;
     const chips = [];
     if (k.completed > 0) chips.push(`<span style="background:#bbf7d0;border-radius:9999px;padding:1px 8px;">✓ ${k.completed} prête${k.completed > 1 ? 's' : ''}</span>`);
     if (k.processing > 0) chips.push(`<span style="background:#dbeafe;border-radius:9999px;padding:1px 8px;">🔄 ${k.processing} en cours</span>`);
     if (k.queued > 0) chips.push(`<span style="background:#fef3c7;border-radius:9999px;padding:1px 8px;">⏳ ${k.queued} en file</span>`);
     if (k.failed > 0) chips.push(`<span style="background:#fee2e2;border-radius:9999px;padding:1px 8px;">⚠ ${k.failed} en échec</span>`);
     const remaining = Math.max(0, _mcrImportBannerExpected - arrived);
-    const headline = arrived >= _mcrImportBannerExpected && _mcrImportBannerExpected > 0
+    const headline = allArrived
       ? `<strong>Toutes les ${_mcrImportBannerExpected} réunions sont arrivées.</strong> Suivez le traitement ci-dessous.`
-      : `<strong>${arrived}/${_mcrImportBannerExpected} réunion(s) arrivée(s) depuis compte-rendu.mirai</strong> — ${remaining > 0 ? remaining + ' attendue(s) dans quelques secondes' : 'finalisation…'}. (${secs}s écoulées)`;
-    bn.innerHTML =
-      `<span style="font-size:1.1em;">📥</span>` +
-      `<span>${headline}</span>` +
-      (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
-      `<button type="button" id="mcr-import-banner-dismiss" ` +
-      `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
-    const dismiss = document.getElementById('mcr-import-banner-dismiss');
-    if (dismiss) {
-      dismiss.onclick = () => _clearMcrImportBanner();
+      : `<strong>${arrived}/${_mcrImportBannerExpected} réunion(s) arrivée(s) depuis compte-rendu.mirai</strong> — ${remaining > 0 ? "import en arrière-plan" : 'finalisation…'}. (<span data-mcr-secs>${secs}</span>s)`;
+    // Anti-clignotement : on ne reconstruit l'innerHTML que si le CONTENU
+    // significatif change (arrivées/statuts). Sinon on met juste à jour le
+    // compteur de secondes en place.
+    const sig = `${arrived}|${k.completed}|${k.processing}|${k.queued}|${k.failed}|${allArrived}`;
+    if (sig !== _lastSig) {
+      bn.innerHTML =
+        `<span style="font-size:1.1em;">📥</span>` +
+        `<span>${headline}</span>` +
+        (chips.length ? `<span style="display:inline-flex;gap:0.35rem;flex-wrap:wrap;">${chips.join('')}</span>` : '') +
+        `<button type="button" id="mcr-import-banner-dismiss" aria-label="Fermer" ` +
+        `style="margin-left:auto;background:none;border:0;color:#92400e;cursor:pointer;font-size:1.1em;">×</button>`;
+      const dismiss = bn.querySelector('#mcr-import-banner-dismiss');
+      if (dismiss) dismiss.onclick = () => _clearMcrImportBanner();
+      _lastSig = sig;
+    } else {
+      const sEl = bn.querySelector('[data-mcr-secs]');
+      if (sEl) sEl.textContent = String(secs);
     }
   };
   let secs = 0;
@@ -2606,7 +2620,11 @@ function _showMcrImportInProgressBanner(expectedCount) {
   _mcrImportBannerTimer = setInterval(() => {
     secs += 2;
     render(secs);
-    if (secs >= 300) _clearMcrImportBanner();  // 5 min — les CR peuvent prendre du temps
+    // Auto-dismiss : 4s après que tout soit arrivé, sinon plafond court à
+    // 45s (l'import continue en tâche de fond ; pas la peine de laisser un
+    // bandeau « clignoter » indéfiniment quand rien ne remonte côté UI).
+    if (_allArrivedAt && (secs - _allArrivedAt) >= 4) _clearMcrImportBanner();
+    else if (secs >= 45) _clearMcrImportBanner();
   }, 2000);
 }
 

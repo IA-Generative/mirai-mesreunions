@@ -440,7 +440,15 @@ def api_my_sessions():
                 uaf_id = it.get("uaf_id")
                 if not uaf_id:
                     continue
-                title = it.get("suggested_filename") or ext.get("title") or it.get("original_filename") or "Import YouTube"
+                # MCR vs YouTube : les deux remontent via external-source-list,
+                # mais les YouTube sont rendus côté frontend via le cache
+                # _youtubeImportsCache (session synth `yt-` SKIPée par renderList).
+                # Les MCR n'ont pas ce cache → on leur donne un id `mcr-` qui est
+                # rendu directement comme une réunion audio normale (badge 📄 MCR
+                # via origin=mcr_import).
+                is_mcr = (it.get("origin") == "mcr_import")
+                default_title = "Import MCR" if is_mcr else "Import YouTube"
+                title = it.get("suggested_filename") or ext.get("title") or it.get("original_filename") or default_title
                 created = it.get("created_at") or datetime.now(timezone.utc).isoformat()
                 duration = it.get("audio_duration_seconds") or ext.get("duration_sec") or 0
                 synth_upload = {
@@ -454,8 +462,8 @@ def api_my_sessions():
                     "updated_at": it.get("updated_at") or created,
                     "meeting_datetime": it.get("meeting_datetime"),
                     "meeting_datetime_overridden": bool(it.get("meeting_datetime")),
-                    # Aucun S3 audio pour YouTube : ces URLs ne seront
-                    # pas appelées (frontend gate sur source_type).
+                    # Pas de S3 audio pour ces sources externes : URLs non
+                    # appelées (frontend gate sur source_type / audio purgé).
                     "download_url": None, "stream_url": None,
                     "source_available": False,
                     "source_download_url": None, "source_stream_url": None,
@@ -464,26 +472,27 @@ def api_my_sessions():
                     "transferred_available": False,
                     "transferred_download_url": None, "transferred_stream_url": None,
                     "impact_url": None,
-                    # Spécifiques source externe (le frontend les utilise
-                    # pour adapter le rendu fiche).
-                    "source_type": it.get("source_type") or "youtube_subtitle",
-                    "source_provider": (ext.get("provider") or "youtube"),
+                    # Source (le frontend adapte le rendu + le badge).
+                    "source_type": it.get("source_type") or ("upload" if is_mcr else "youtube_subtitle"),
+                    "source_provider": ("mcr" if is_mcr else (ext.get("provider") or "youtube")),
+                    "origin": it.get("origin"),
                     "canonical_url": ext.get("canonical_url"),
                     "meeting_id": it.get("meeting_id"),
                     "external_video_source_id": it.get("external_video_source_id"),
                 }
                 synth_session = {
-                    "id": f"yt-{it.get('meeting_id') or uaf_id}",
-                    "simple_code": it.get("original_session_code") or "YT",
+                    "id": (f"mcr-{it.get('meeting_id') or uaf_id}" if is_mcr
+                           else f"yt-{it.get('meeting_id') or uaf_id}"),
+                    "simple_code": it.get("original_session_code") or ("MCR" if is_mcr else "YT"),
                     "qr_token": None,
                     "status": "active",
                     "upload_count": 1,
                     "max_uploads": 1,
                     "expires_at": created,
                     "created_at": created,
-                    "lifecycle_state": "youtube",
+                    "lifecycle_state": ("mcr" if is_mcr else "youtube"),
                     "is_local_upload": False,
-                    "device_label": "YouTube",
+                    "device_label": ("MCR" if is_mcr else "YouTube"),
                     "uploads": [synth_upload],
                 }
                 result.append(synth_session)
