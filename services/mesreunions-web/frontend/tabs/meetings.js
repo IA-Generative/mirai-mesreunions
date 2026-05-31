@@ -457,7 +457,7 @@ function _sourceBadges(file, session) {
   } else if (st === 'lasuite_transcript') {
     out.push(`<span class="fr-badge fr-badge--sm fr-badge--blue-cumulus">${_LASUITE_LOGO}Transcript · La Suite</span>`);
   } else if (origin === 'mcr_import') {
-    out.push(`<span class="fr-badge fr-badge--sm fr-badge--purple-glycine">📄 MCR</span>`);
+    out.push(`<span class="fr-badge fr-badge--sm">${_MCR_ICON} MCR</span>`);
   } else if (session && session.is_local_upload) {
     out.push(`<span class="fr-badge fr-badge--sm fr-badge--green-emeraude">💻 Upload local</span>`);
   } else {
@@ -496,16 +496,21 @@ function renderAudioExpanded(file, session) {
 
 // Icône MCR (compte-rendu.mirai) : carte/doc + personne + pastille rouge, en
 // SVG inline calé sur la hauteur de ligne (l'emoji était trop haut → wrap).
-const _MCR_ICON = `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3.5" width="18" height="13" rx="2" stroke="#000091" stroke-width="1.6"/><path d="M6 7.6h6M6 10.1h4.4" stroke="#000091" stroke-width="1.5" stroke-linecap="round"/><circle cx="17.6" cy="7" r="1.5" fill="#e1000f"/><circle cx="12" cy="15.1" r="2.3" fill="#000091"/><path d="M7.8 21.6c0-2.4 1.9-4 4.2-4s4.2 1.6 4.2 4z" fill="#000091"/></svg>`;
+const _MCR_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" style="vertical-align:-2px"><rect x="3" y="3.5" width="18" height="13" rx="2" stroke="#000091" stroke-width="1.6"/><path d="M6 7.6h6M6 10.1h4.4" stroke="#000091" stroke-width="1.5" stroke-linecap="round"/><circle cx="17.6" cy="7" r="1.5" fill="#e1000f"/><circle cx="12" cy="15.1" r="2.3" fill="#000091"/><path d="M7.8 21.6c0-2.4 1.9-4 4.2-4s4.2 1.6 4.2 4z" fill="#000091"/></svg>`;
+
+// Icône « import téléphone » (appareil mobile enrôlé) — bleu, calée sur la ligne.
+const _PHONE_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" style="vertical-align:-2px"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4" stroke="#000091" stroke-width="1.6"/><line x1="10.3" y1="19" x2="13.7" y2="19" stroke="#000091" stroke-width="1.6" stroke-linecap="round"/></svg>`;
 
 // Petite icône de source à mettre DEVANT le titre (pour repérer d'où vient la
 // réunion d'un coup d'œil). YouTube a son propre rendu (renderYoutubeRow).
-function _titleSourceIcon(file) {
+function _titleSourceIcon(file, session) {
   const st = ((file && file.source_type) || '').toLowerCase();
   const origin = ((file && file.origin) || '').toLowerCase();
   if (origin === 'mcr_import') return { ic: _MCR_ICON, label: 'Importé depuis compte-rendu.mirai (MCR)' };
   if (st === 'lasuite_visio') return { ic: _LASUITE_LOGO, label: 'Visio · La Suite numérique' };
   if (st === 'lasuite_transcript') return { ic: _LASUITE_LOGO, label: 'Transcript · La Suite numérique' };
+  // Import depuis un téléphone (appareil mobile enrôlé) : is_local_upload=false.
+  if (session && session.is_local_upload === false) return { ic: _PHONE_ICON, label: 'Importé depuis un téléphone' };
   return null;
 }
 
@@ -540,7 +545,7 @@ function renderRow(file, session) {
         <button type="button" class="meeting-row-title-btn"
                 data-action="meetings-new:open-detail" data-file-id="${escapeHtml(file.id)}"
                 title="${escapeHtml(hoverTip)}">
-          ${(() => { const si = _titleSourceIcon(file); return si ? `<span class="meeting-row-src-ic" title="${escapeHtml(si.label)}" aria-hidden="true">${si.ic}</span> ` : ''; })()}<span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
+          ${(() => { const si = _titleSourceIcon(file, session); return si ? `<span class="meeting-row-src-ic" title="${escapeHtml(si.label)}" aria-hidden="true">${si.ic}</span> ` : ''; })()}<span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
         </button>
         <button type="button" class="meeting-row-chevron"
                 data-action="meetings-new:toggle-expand" data-file-id="${escapeHtml(file.id)}"
@@ -2414,7 +2419,7 @@ function renderYoutubeExpanded(yt) {
   const deleteData = uafId
     ? `data-file-id="${escapeHtml(uafId)}"`
     : `data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}" data-yt-title="${escapeHtml(title)}"`;
-  const ytIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/></svg>`;
+  const ytIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="#000091" aria-hidden="true" style="vertical-align:-2px"><path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/></svg>`;
   return `<div class="meeting-row-expanded">
     <div class="meeting-row-expanded-row">
       <span class="meeting-row-source"><span class="fr-badge fr-badge--sm">${ytIcon} ${channel ? 'YouTube — ' + channel : 'YouTube'}</span></span>
