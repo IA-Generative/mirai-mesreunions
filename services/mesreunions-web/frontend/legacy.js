@@ -2979,9 +2979,11 @@ function _formatMeetingAnalysisAsMarkdown(jsonText) {
     };
     const fmtGap = (g) => {
         if (typeof g === 'string') return `- ${g}`;
-        const text = pick(g, ['question', 'gap', 'text', 'title', 'issue']);
+        // 'item'/'point' : certains CR mettent le contenu du point en suspens
+        // sous une clé `item` → sans ça il retombait en extra « (item: …) ».
+        const text = pick(g, ['question', 'gap', 'text', 'title', 'issue', 'item', 'point', 'content']);
         const raised = pick(g, ['raised_by', 'asked_by', 'speaker']);
-        const consumed = ['question','gap','text','title','issue','raised_by','asked_by','speaker'];
+        const consumed = ['question','gap','text','title','issue','item','point','content','raised_by','asked_by','speaker'];
         const main = raised ? `${text} _(soulevé par ${raised})_` : text;
         return `- ${main}${fmtExtras(g, consumed)}`;
     };
@@ -3398,6 +3400,14 @@ function _markCorrectedTermsInBody(body, correctedTerms) {
         const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
         const nodes = [];
         let n; while ((n = walker.nextNode())) nodes.push(n);
+        const ql = newTerm.toLowerCase();
+        // Match sur MOT ENTIER : sinon « IA » surlignerait dans « milliards »
+        // ou « fiable ». On borne par des caractères non alphanumériques
+        // (unicode : lettres/chiffres accentués inclus). Si le terme lui-même
+        // commence/finit par un non-mot, on n'exige pas la frontière de ce côté.
+        const isWordChar = (ch) => !!ch && /[\p{L}\p{N}]/u.test(ch);
+        const needLeft = isWordChar(ql[0]);
+        const needRight = isWordChar(ql[ql.length - 1]);
         nodes.forEach((tn) => {
             // Skip si déjà dans un span.cr-corrected-term ou .tc-find-hit.
             if (tn.parentElement && (
@@ -3406,23 +3416,33 @@ function _markCorrectedTermsInBody(body, correctedTerms) {
             )) return;
             const txt = tn.nodeValue || '';
             const lower = txt.toLowerCase();
-            const ql = newTerm.toLowerCase();
-            const j = lower.indexOf(ql);
-            if (j < 0) return;
-            const before = txt.slice(0, j);
-            const hit = txt.slice(j, j + newTerm.length);
-            const after = txt.slice(j + newTerm.length);
+            // Collecte toutes les occurrences bornées (mot entier).
+            const ranges = [];
+            let from = 0, j;
+            while ((j = lower.indexOf(ql, from)) >= 0) {
+                const beforeCh = j > 0 ? txt[j - 1] : '';
+                const afterCh = (j + ql.length < txt.length) ? txt[j + ql.length] : '';
+                const okLeft = !needLeft || !isWordChar(beforeCh);
+                const okRight = !needRight || !isWordChar(afterCh);
+                if (okLeft && okRight) ranges.push([j, j + ql.length]);
+                from = j + ql.length;
+            }
+            if (!ranges.length) return;
             const frag = document.createDocumentFragment();
-            if (before) frag.appendChild(document.createTextNode(before));
-            const sp = document.createElement('span');
-            sp.className = 'cr-corrected-term';
-            sp.setAttribute('data-cr-term', newTerm);
-            sp.setAttribute('title', c.fromGlossary
-                ? `Terme du glossaire personnel — cliquez pour voir les sources brutes`
-                : `Terme corrigé — cliquez pour voir les sources brutes`);
-            sp.textContent = hit;
-            frag.appendChild(sp);
-            if (after) frag.appendChild(document.createTextNode(after));
+            let cursor = 0;
+            for (const [a, b] of ranges) {
+                if (a > cursor) frag.appendChild(document.createTextNode(txt.slice(cursor, a)));
+                const sp = document.createElement('span');
+                sp.className = 'cr-corrected-term';
+                sp.setAttribute('data-cr-term', newTerm);
+                sp.setAttribute('title', c.fromGlossary
+                    ? `Terme du glossaire personnel — cliquez pour voir les sources brutes`
+                    : `Terme corrigé — cliquez pour voir les sources brutes`);
+                sp.textContent = txt.slice(a, b);
+                frag.appendChild(sp);
+                cursor = b;
+            }
+            if (cursor < txt.length) frag.appendChild(document.createTextNode(txt.slice(cursor)));
             tn.parentNode.replaceChild(frag, tn);
         });
     });
@@ -3651,7 +3671,8 @@ function _showCorrectionFooter(container, fileId, selectedText, blockIdx, audio,
           ${block ? `<button type="button" class="tc-correct-listen" data-tc-play="${playStart}"
                               title="Réécouter ce passage">🔊 ${_fmtTimecode(playStart)}</button>` : ''}
           <button type="button" class="tc-correct-close"
-                  onclick="document.querySelector('[data-tc-corrector-footer=\\'${fileId}\\']').hidden=true; document.querySelector('[data-tc-corrector-footer=\\'${fileId}\\']').innerHTML='';">×</button>
+                  data-tc-correct-close="${escapeHtml(fileId)}"
+                  title="Fermer le mode correction">×</button>
         </div>
         <div class="tc-correct-row">
           <input type="text" class="tc-correct-new"
@@ -3679,6 +3700,18 @@ function _showCorrectionFooter(container, fileId, selectedText, blockIdx, audio,
     const inp = footer.querySelector('.tc-correct-new');
     if (inp) inp.focus();
 }
+
+// Fermeture du footer de correction (× ) — délégué au document. L'ancien
+// inline onclick était inopérant (sélecteur fragile + inline handler peu
+// fiable) : la croix ne fermait pas le mode correction. On retrouve le footer
+// par .closest() (pas de sélecteur à échapper).
+document.addEventListener('click', (ev) => {
+    const closeBtn = ev.target.closest && ev.target.closest('[data-tc-correct-close]');
+    if (!closeBtn) return;
+    ev.preventDefault();
+    const footer = closeBtn.closest('.transcript-corrector-footer');
+    if (footer) { footer.hidden = true; footer.innerHTML = ''; }
+});
 
 // Délégation click APPLIQUE/Listen au niveau document (le footer est rendu
 // dans des containers existants, on évite de rebrancher à chaque rendu).
