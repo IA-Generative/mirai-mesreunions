@@ -30,7 +30,9 @@ def _partition_for(user_sub: str) -> str:
 
 
 def _ingester_base() -> str:
-    return (os.getenv("FILE_PULLER_INTERNAL_BASE_URL") or "").rstrip("/")
+    # Même défaut que feedback._call_ingester (service interne in-cluster).
+    return (os.getenv("FILE_PULLER_INTERNAL_BASE_URL")
+            or "http://internal-ingester:8090").rstrip("/")
 
 
 # ── Query ─────────────────────────────────────────────────────────────
