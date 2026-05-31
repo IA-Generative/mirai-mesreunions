@@ -229,6 +229,11 @@ function renderHeader() {
               title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
         🎬 YouTube
       </button>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+              data-action="meetings-new:lasuite-import"
+              title="Importer une visio ou un transcript depuis La Suite numérique (bientôt disponible)">
+        ${_LASUITE_LOGO}La Suite
+      </button>
       <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
               data-action="meetings-new:resume-stuck"
               title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
@@ -1221,6 +1226,14 @@ function _onClick(ev) {
     }
     case 'youtube-import': {
       _openYoutubeImportModal();
+      break;
+    }
+    case 'lasuite-import': {
+      // Placeholder : l'import La Suite numérique (visio / transcript) n'est
+      // pas encore branché. On informe sans bloquer.
+      if (window.showToast) {
+        window.showToast('Import depuis La Suite numérique — bientôt disponible.', 'info');
+      }
       break;
     }
     case 'yt-open-source': {
