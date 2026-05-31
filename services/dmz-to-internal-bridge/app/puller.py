@@ -1925,12 +1925,14 @@ def queue_status():
 
 @app.route("/api/v1/audio/meeting-datetimes", methods=["GET"])
 def audio_meeting_datetimes():
-    """Bulk map (simple_code, original_filename) → meeting_datetime override.
+    """Bulk map (simple_code, original_filename) → meta de la réunion interne.
 
-    Renvoie uniquement les rows ayant un override non-NULL — sert au
-    mesreunions-web pour enrichir la liste mydevices d'un seul aller-retour
-    (au lieu de N appels lookup individuels). Format compact :
-    ``{"items": [{"simple_code","original_filename","meeting_datetime"}]}``.
+    Sert au mesreunions-web pour enrichir la liste mydevices d'un seul
+    aller-retour (au lieu de N lookups). Renvoie TOUTES les rows de l'user
+    (pas seulement celles ayant un override de date) afin de fournir aussi la
+    SOURCE (origin / source_type / reprocess_version) pour les badges UI.
+    Format compact : ``{"items": [{"simple_code","original_filename",
+    "meeting_datetime","origin","source_type","reprocess_version"}]}``.
     Auth = INTERNAL_API_TOKEN bearer.
     """
     if not verify_token():
@@ -1947,11 +1949,11 @@ def audio_meeting_datetimes():
                 UserAudioFile.original_session_code,
                 UserAudioFile.original_filename,
                 UserAudioFile.meeting_datetime,
+                UserAudioFile.origin,
+                UserAudioFile.source_type,
+                UserAudioFile.reprocess_version,
             )
-            .filter(
-                UserAudioFile.user_sub == user_sub,
-                UserAudioFile.meeting_datetime.isnot(None),
-            )
+            .filter(UserAudioFile.user_sub == user_sub)
             .all()
         )
         items = [
@@ -1959,8 +1961,11 @@ def audio_meeting_datetimes():
                 "simple_code": code,
                 "original_filename": name,
                 "meeting_datetime": dt.isoformat() if dt else None,
+                "origin": origin,
+                "source_type": source_type,
+                "reprocess_version": reprocess_version or 0,
             }
-            for (code, name, dt) in rows
+            for (code, name, dt, origin, source_type, reprocess_version) in rows
         ]
         return jsonify({"items": items})
     except Exception:

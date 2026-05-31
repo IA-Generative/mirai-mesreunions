@@ -239,6 +239,9 @@ def api_my_sessions():
         timings["t1_parallel_fetch"] = round((time.monotonic() - _t0) * 1000)
 
         meeting_dt_overrides = {}
+        # Pt4 : méta de source (origin / source_type / reprocess_version) par
+        # (simple_code, original_filename), pour les badges UI.
+        source_meta = {}
         if isinstance(bulk, dict):
             for it in (bulk.get("items") or []):
                 code = (it.get("simple_code") or "").strip()
@@ -246,12 +249,25 @@ def api_my_sessions():
                 dt = it.get("meeting_datetime")
                 if code and name and dt:
                     meeting_dt_overrides[(code, name)] = dt
+                if code and name:
+                    source_meta[(code, name)] = {
+                        "origin": it.get("origin"),
+                        "source_type": it.get("source_type"),
+                        "reprocess_version": it.get("reprocess_version") or 0,
+                    }
 
         active_qr_tokens = set()
+        # Pt4 : nom convivial de l'appareil enrôlé par qr_token (tous statuts,
+        # pour pouvoir libeller même un device révoqué depuis).
+        device_name_by_qr = {}
         now = datetime.now(timezone.utc)
         for d in (devices if isinstance(devices, list) else []):
             if not isinstance(d, dict):
                 continue
+            _qr_any = (d.get("qr_token") or "").strip()
+            _dev_name = (d.get("device_name") or "").strip()
+            if _qr_any and _dev_name:
+                device_name_by_qr[_qr_any] = _dev_name
             if (d.get("status") or "").lower() != "active":
                 continue
             retention_raw = d.get("retention_expires_at")
@@ -357,6 +373,7 @@ def api_my_sessions():
                     transferred_available = bool(probe_results.get(("transferred", f.id)))
 
                 override_dt = meeting_dt_overrides.get((s.simple_code, f.original_filename))
+                _smeta = source_meta.get((s.simple_code, f.original_filename)) or {}
                 uploads.append({
                     "id": str(f.id),
                     "original_filename": f.original_filename,
@@ -368,6 +385,9 @@ def api_my_sessions():
                     "updated_at": f.updated_at.isoformat() if f.updated_at else None,
                     "meeting_datetime": override_dt,
                     "meeting_datetime_overridden": override_dt is not None,
+                    "origin": _smeta.get("origin"),
+                    "source_type": _smeta.get("source_type"),
+                    "reprocess_version": _smeta.get("reprocess_version") or 0,
                     "download_url": f"/api/file/download/{f.id}",
                     "stream_url": f"/api/file/stream/{f.id}",
                     "source_available": source_available,
@@ -396,6 +416,7 @@ def api_my_sessions():
                 ),
                 "is_local_upload": is_local,
                 "device_label": svc.LOCAL_UPLOAD_DEVICE_LABEL if is_local else None,
+                "device_name": device_name_by_qr.get((s.qr_token or "").strip()),
                 "uploads": uploads,
             })
         if reconciled:

@@ -203,73 +203,70 @@ function resolveTitle(file) {
 
 // ── Rendu HTML ────────────────────────────────────────────────────────
 
-function renderHeader(fileCount, hasSelection) {
+function renderHeader() {
+  // Pt0 : haut compact — pas de titre « Mes réunions » (redondant avec
+  // l'onglet), le compteur part dans la toolbar. Le rappel Alt est relocalisé
+  // à droite des boutons d'import.
   return `<div class="meetings-tab-header">
-    <div class="meetings-tab-header-top">
-      <h2 class="meetings-tab-title">Mes réunions <span class="meetings-tab-count">${fileCount}</span></h2>
-      <div class="meetings-tab-actions">
-        <button type="button" class="fr-btn fr-btn--sm"
-                data-action="meetings-new:pick-files"
-                title="Importer un ou plusieurs fichiers audio">
-          + Importer
-        </button>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                data-action="meetings-new:pick-folder"
-                title="Importer un dossier entier (tous les audios à l'intérieur)">
-          + Dossier
-        </button>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                data-action="meetings-new:import-from-mcr"
-                title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
-          📥 Depuis MCR
-        </button>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                data-action="meetings-new:youtube-import"
-                title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
-          🎬 YouTube
-        </button>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
-                data-action="meetings-new:resume-stuck"
-                title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
-          🔄 Relancer les bloqués
-        </button>
-      </div>
-    </div>
-    <div class="meetings-tab-header-hint">
-      Maintenez la touche <kbd>Alt</kbd> pour activer la sélection multiple et supprimer en lot.
-    </div>
-    ${hasSelection ? `<div class="meetings-tab-bulkbar">
-      <span class="meetings-tab-bulkbar-count"><strong>${_selectedIds.size}</strong> réunion(s) sélectionnée(s)</span>
-      <div class="bulk-dl-wrap" data-bulk-dl-wrap style="position:relative;display:inline-block;">
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                data-action="meetings-new:bulk-download-menu"
-                aria-haspopup="menu" aria-expanded="false"
-                style="display:inline-flex;align-items:center;gap:0.3rem;">
-          ⬇ Télécharger <span aria-hidden="true">▾</span>
-        </button>
-        <div class="bulk-dl-menu" data-bulk-dl-menu hidden role="menu"
-             style="position:absolute;top:100%;left:0;margin-top:0.25rem;
-                    min-width:300px;background:#fff;border:1px solid #cbd5e1;
-                    border-radius:0.3rem;box-shadow:0 10px 30px rgba(0,0,0,0.15);
-                    z-index:50;padding:0.3rem 0;font-size:0.85rem;">
-          <!-- Rempli dynamiquement par _renderBulkDownloadMenu lors de l'ouverture -->
-        </div>
-      </div>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-              data-action="meetings-new:bulk-regenerate"
-              title="Relance la chaîne LLM (glossaire, nettoyage, CR) sur toutes les réunions sélectionnées. Marche pour audio uploadé + YouTube + MCR + DINUM. ~5-15 min par réunion en arrière-plan.">
-        🔄 Re-générer CR
+    <div class="meetings-tab-actions">
+      <button type="button" class="fr-btn fr-btn--sm"
+              data-action="meetings-new:pick-files"
+              title="Importer un ou plusieurs fichiers audio">
+        + Importer
       </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
-              data-action="meetings-new:bulk-delete">
-        Mettre à la corbeille
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+              data-action="meetings-new:pick-folder"
+              title="Importer un dossier entier (tous les audios à l'intérieur)">
+        + Dossier
+      </button>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+              data-action="meetings-new:import-from-mcr"
+              title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
+        📥 Depuis MCR
+      </button>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+              data-action="meetings-new:youtube-import"
+              title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
+        🎬 YouTube
       </button>
       <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
-              data-action="meetings-new:bulk-clear">
-        Annuler
+              data-action="meetings-new:resume-stuck"
+              title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
+        🔄 Relancer
       </button>
-    </div>` : ''}
+      <span class="meetings-tab-althint">Maintenez <kbd>Alt</kbd> pour sélectionner plusieurs réunions</span>
+    </div>
   </div>`;
+}
+
+// Boutons d'action en lot (réutilisés dans la toolbar quand ≥1 sélection).
+function _bulkActionsHtml() {
+  return `<div class="bulk-dl-wrap" data-bulk-dl-wrap style="position:relative;display:inline-block;">
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+              data-action="meetings-new:bulk-download-menu"
+              aria-haspopup="menu" aria-expanded="false"
+              style="display:inline-flex;align-items:center;gap:0.3rem;">
+        ⬇ Télécharger <span aria-hidden="true">▾</span>
+      </button>
+      <div class="bulk-dl-menu" data-bulk-dl-menu hidden role="menu"
+           style="position:absolute;top:100%;right:0;margin-top:0.25rem;
+                  min-width:300px;background:#fff;border:1px solid #cbd5e1;
+                  border-radius:0.3rem;box-shadow:0 10px 30px rgba(0,0,0,0.15);
+                  z-index:50;padding:0.3rem 0;font-size:0.85rem;"></div>
+    </div>
+    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+            data-action="meetings-new:bulk-regenerate"
+            title="Relance la chaîne LLM (glossaire, nettoyage, CR) sur toutes les réunions sélectionnées. ~5-15 min par réunion en arrière-plan.">
+      🔄 Re-générer CR
+    </button>
+    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
+            data-action="meetings-new:bulk-delete">
+      Corbeille
+    </button>
+    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
+            data-action="meetings-new:bulk-clear">
+      Annuler
+    </button>`;
 }
 
 // Format "HH:MM" → "il y a X min" lisible.
@@ -439,22 +436,73 @@ async function _fetchPipelineStats() {
   }
 }
 
+// Petit logo « La Suite numérique » (placeholder design-ready).
+const _LASUITE_LOGO = `<svg class="src-logo" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#000091"/><circle cx="9" cy="9.5" r="3" fill="#fff"/><circle cx="15.5" cy="15" r="3" fill="#e1000f"/></svg>`;
+
+// Pt4 : badge(s) de source d'une réunion. Consomme les champs exposés par le
+// backend (origin / source_type / reprocess_version) + la session.
+function _sourceBadges(file, session) {
+  const st = ((file && file.source_type) || '').toLowerCase();
+  const origin = ((file && file.origin) || '').toLowerCase();
+  const out = [];
+  if (st.startsWith('youtube')) {
+    out.push(`<span class="fr-badge fr-badge--sm">▶ YouTube</span>`);
+  } else if (st === 'lasuite_visio') {
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--blue-cumulus">${_LASUITE_LOGO}Visio · La Suite</span>`);
+  } else if (st === 'lasuite_transcript') {
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--blue-cumulus">${_LASUITE_LOGO}Transcript · La Suite</span>`);
+  } else if (origin === 'mcr_import') {
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--purple-glycine">📄 MCR</span>`);
+  } else if (session && session.is_local_upload) {
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--green-emeraude">💻 Upload local</span>`);
+  } else {
+    const dev = (session && (session.device_name || session.device_label)) || 'Appareil enrôlé';
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--blue-ecume">📱 ${escapeHtml(dev)}</span>`);
+  }
+  if (file && file.reprocess_version && file.reprocess_version > 0) {
+    out.push(`<span class="fr-badge fr-badge--sm fr-badge--yellow-tournesol">🔄 Re-transcrit</span>`);
+  }
+  return out.join(' ');
+}
+
+// Bloc déplié d'une réunion audio — extrait pour pouvoir l'insérer LOCALEMENT
+// (dépliage sans re-render global, cf _toggleRowExpandLocal).
+function renderAudioExpanded(file, session) {
+  return `<div class="meeting-row-expanded" data-expanded-for="${escapeHtml(file.id)}">
+    <div class="meeting-row-expanded-row">
+      <span class="meeting-row-source">${_sourceBadges(file, session)}</span>
+      <span class="meeting-row-created">Importée le ${escapeHtml(formatDate(file.created_at, { withTime: true }))}</span>
+    </div>
+    <div class="meeting-row-summary" data-summary-for="${escapeHtml(file.id)}">
+      <em class="meeting-row-summary-loading">Chargement du résumé…</em>
+    </div>
+    <div class="meeting-row-expanded-actions">
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
+              data-action="meetings-new:open-detail" data-file-id="${escapeHtml(file.id)}">
+        Ouvrir la fiche complète
+      </button>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
+              data-action="meetings-new:delete-one" data-file-id="${escapeHtml(file.id)}">
+        Mettre à la corbeille
+      </button>
+    </div>
+  </div>`;
+}
+
 function renderRow(file, session) {
   const status = resolveStatus(file);
   const animated = status.kind === 'processing';
   const title = resolveTitle(file);
-  // Tuile = uniquement la date de réunion (sur une ligne). La date d'import
-  // reste affichée dans le bloc déplié (« Importée le … »).
-  const meetingLabel = file.meeting_datetime
-    ? formatDate(file.meeting_datetime, { withTime: true })
-    : '—';
+  // Pt3 : pas de date de réunion → on retombe sur la date d'import (grisé).
+  const meetingFallback = !file.meeting_datetime;
+  const meetingLabel = formatDate(file.meeting_datetime || file.created_at, { withTime: true });
   const durLabel = formatDuration(file.audio_duration_seconds);
   const isExpanded = _expandedIds.has(file.id);
   const isSelected = _selectedIds.has(file.id);
-  const isLocal = !!session.is_local_upload;
   const statusTooltip = _buildStatusTooltip(file, status);
-  const sourceLabel = session.device_label || (isLocal ? 'Upload local' : 'Appareil enrôlé');
-  const sourceTooltip = `${sourceLabel}${session.simple_code ? ' — code ' + session.simple_code : ''}`;
+  // Tooltip pastille + titre : état du pipeline + invite au clic (pt « survol »).
+  const hoverTip = `${statusTooltip} — cliquer pour ouvrir la fiche détaillée`;
+  const dateTip = meetingFallback ? "Date d'import (réunion non datée)" : 'Date réelle de la réunion (modifiable dans la fiche)';
 
   return `<div class="meeting-row${isExpanded ? ' is-expanded' : ''}${isSelected ? ' is-selected' : ''}" data-file-id="${escapeHtml(file.id)}">
     <div class="meeting-row-main">
@@ -462,59 +510,30 @@ function renderRow(file, session) {
         <input type="checkbox" data-meeting-check="${escapeHtml(file.id)}" ${isSelected ? 'checked' : ''} />
       </label>
       <button type="button" class="meeting-row-status"
-              data-action="meetings-new:open-detail"
-              data-file-id="${escapeHtml(file.id)}"
+              data-action="meetings-new:open-detail" data-file-id="${escapeHtml(file.id)}"
               data-status-host="${escapeHtml(file.id)}"
-              aria-label="Statut : ${escapeHtml(status.label)} — clic pour ouvrir la fiche"
-              title="${escapeHtml(statusTooltip)}">
+              aria-label="Statut : ${escapeHtml(status.label)} — cliquer pour ouvrir la fiche détaillée"
+              title="${escapeHtml(hoverTip)}">
         ${statusIcon(status.kind, status.pct, animated)}
       </button>
       <div class="meeting-row-title-wrap">
         <button type="button" class="meeting-row-title-btn"
-                data-action="meetings-new:open-detail"
-                data-file-id="${escapeHtml(file.id)}"
-                title="${escapeHtml(title)} — clic pour ouvrir la fiche complète">
+                data-action="meetings-new:open-detail" data-file-id="${escapeHtml(file.id)}"
+                title="${escapeHtml(hoverTip)}">
           <span class="meeting-row-title-text" data-title-for="${escapeHtml(file.id)}">${escapeHtml(title)}</span>
         </button>
         <button type="button" class="meeting-row-chevron"
-                data-action="meetings-new:toggle-expand"
-                data-file-id="${escapeHtml(file.id)}"
+                data-action="meetings-new:toggle-expand" data-file-id="${escapeHtml(file.id)}"
                 aria-expanded="${isExpanded}"
                 aria-label="${isExpanded ? 'Masquer le résumé inline' : 'Afficher le résumé inline'}"
                 title="${isExpanded ? 'Masquer le résumé' : 'Afficher le résumé inline'}">
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-meetingdate" title="Date réelle de la réunion (modifiable dans la fiche)">Réunion : ${escapeHtml(meetingLabel)}</span>
+      <span class="meeting-row-meetingdate${meetingFallback ? ' is-fallback' : ''}" title="${escapeHtml(dateTip)}">Réunion : ${escapeHtml(meetingLabel)}</span>
       <span class="meeting-row-dur" title="Durée du fichier audio">${escapeHtml(durLabel || '—')}</span>
     </div>
-    ${isExpanded ? `<div class="meeting-row-expanded" data-expanded-for="${escapeHtml(file.id)}">
-      <div class="meeting-row-expanded-row">
-        <span class="meeting-row-source" title="${escapeHtml(sourceTooltip)}">
-          ${sourceIcon(isLocal)}
-          <span class="meeting-row-source-label">${escapeHtml(sourceLabel)}</span>
-        </span>
-        <span class="meeting-row-created">
-          Importée le ${escapeHtml(formatDate(file.created_at, { withTime: true }))}
-        </span>
-      </div>
-      <div class="meeting-row-summary" data-summary-for="${escapeHtml(file.id)}">
-        <em class="meeting-row-summary-loading">Chargement du résumé…</em>
-      </div>
-      <div class="meeting-row-prep" data-prep-for="${escapeHtml(file.id)}" hidden></div>
-      <div class="meeting-row-expanded-actions">
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
-                data-action="meetings-new:open-detail"
-                data-file-id="${escapeHtml(file.id)}">
-          Ouvrir la fiche complète
-        </button>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
-                data-action="meetings-new:delete-one"
-                data-file-id="${escapeHtml(file.id)}">
-          Mettre à la corbeille
-        </button>
-      </div>
-    </div>` : ''}
+    ${isExpanded ? renderAudioExpanded(file, session) : ''}
   </div>`;
 }
 
@@ -558,28 +577,28 @@ function _compareEntries(a, b) {
   return _sortDir === 'asc' ? cmp : -cmp;
 }
 
-// Barre de tri DSFR : fr-select (critère) + bouton de sens ↑/↓.
+// Toolbar unifiée (pt1) : compteur (ou « N sélectionnées ») + tri en liens
+// texte + actions bulk dans la MÊME barre. Le tri reste cliquable même en
+// cours de sélection ; l'ordre des lignes ne change pas avec la sélection.
 function renderListToolbar(total) {
   if (!total) return '';
-  const labels = [
-    ['import', "Date d'import"],
-    ['meeting', 'Date de réunion'],
-    ['title', 'Titre'],
-    ['duration', 'Durée'],
-  ];
-  const opts = labels
-    .map(([k, lbl]) => `<option value="${k}"${_sortKey === k ? ' selected' : ''}>${lbl}</option>`)
-    .join('');
-  const dirLabel = _sortDir === 'asc' ? 'Ordre croissant' : 'Ordre décroissant';
-  const dirIcon = _sortDir === 'asc' ? 'fr-icon-arrow-up-line' : 'fr-icon-arrow-down-line';
+  const sel = _selectedIds.size;
+  const count = sel > 0
+    ? `<span class="mt-selcount"><strong>${sel}</strong> sélectionnée${sel > 1 ? 's' : ''}</span>`
+    : `<span class="mt-count">${total} réunion${total > 1 ? 's' : ''}</span>`;
+  const SORTS = [['import', 'Import'], ['meeting', 'Réunion'], ['title', 'Titre'], ['duration', 'Durée']];
+  const links = SORTS.map(([k, lbl]) => {
+    const on = _sortKey === k;
+    const arrow = on ? (_sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+    return `<a class="mt-sortlink${on ? ' active' : ''}" role="button" tabindex="0"
+       data-action="meetings-new:set-sort" data-sort-key="${k}"
+       title="Trier par ${lbl.toLowerCase()}${on ? ' — re-cliquer pour inverser le sens' : ''}">${lbl}${arrow}</a>`;
+  }).join('<span class="mt-sep">·</span>');
+  const bulk = sel > 0 ? `<span class="mt-bulk-actions">${_bulkActionsHtml()}</span>` : '';
   return `<div class="meetings-tab-toolbar">
-    <label class="meetings-tab-sort">
-      <span class="meetings-tab-sort-label">Trier par</span>
-      <select class="fr-select meetings-tab-sort-select" data-meetings-sort-key aria-label="Critère de tri">${opts}</select>
-    </label>
-    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary ${dirIcon} meetings-tab-sort-dir"
-            data-action="meetings-new:toggle-sort-dir"
-            aria-label="${dirLabel} — cliquer pour inverser" title="${dirLabel} — cliquer pour inverser"></button>
+    ${count}
+    <span class="mt-sortwrap"><span class="mt-sortlabel">Trier :</span> ${links}</span>
+    ${bulk}
   </div>`;
 }
 
@@ -613,15 +632,41 @@ function _ensureListStyles() {
   const st = document.createElement('style');
   st.id = _LIST_STYLE_ID;
   st.textContent = `
-    .meetings-tab-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.25rem 0 .75rem;}
-    .meetings-tab-sort{display:flex;align-items:center;gap:.4rem;margin:0;}
-    .meetings-tab-sort-label{font-size:.8125rem;color:#666;white-space:nowrap;}
-    .meetings-tab-sort-select{min-width:10rem;margin:0;}
+    /* Pt0 : header compact */
+    .meetings-tab-header{padding:.4rem 0 .25rem !important;border-bottom:none !important;position:static !important;}
+    .meetings-tab-actions{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;}
+    .meetings-tab-althint{font-size:.72rem;color:#8a8a8a;margin-left:auto;white-space:nowrap;}
+    .meetings-tab-althint kbd{background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 .25rem;}
+    /* Pt1 : toolbar unifiée (compteur/sélection + tri liens + bulk) */
+    .meetings-tab-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.1rem 0 .5rem;font-size:.8125rem;}
+    .mt-count{color:#666;white-space:nowrap;}
+    .mt-selcount{color:#0063cb;white-space:nowrap;}
+    .mt-sortwrap{display:flex;align-items:center;gap:.1rem;flex-wrap:wrap;}
+    .mt-sortlabel{color:#666;margin-right:.15rem;}
+    .mt-sortlink{color:#000091;text-decoration:none;cursor:pointer;padding:0 .12rem;white-space:nowrap;}
+    .mt-sortlink.active{font-weight:700;}
+    .mt-sortlink:hover{text-decoration:underline;}
+    .mt-sep{color:#ccc;}
+    .mt-bulk-actions{display:flex;align-items:center;gap:.35rem;margin-left:auto;flex-wrap:wrap;}
+    /* Pt3 : date de réunion (fallback import = grisé italique) */
     .meeting-row-meetingdate{font-size:.8125rem;color:#161616;white-space:nowrap;text-align:right;}
-    .meetings-tab-pagination{margin-top:1rem;justify-content:center;}
+    .meeting-row-meetingdate.is-fallback{color:#777;font-style:italic;}
+    /* Pt2 : interligne du résumé resserré */
+    .meeting-row-summary-kp{line-height:1.25 !important;}
+    /* Pt4 : badges source */
+    .meeting-row-source{display:flex;align-items:center;gap:.35rem;flex-wrap:wrap;}
+    .src-logo{vertical-align:-2px;margin-right:.2rem;}
+    /* Pagination + divers */
+    .meetings-tab-pagination{margin:.4rem 0 0;justify-content:center;}
     .meetings-tab-pagination-info{pointer-events:none;}
     .meetings-danger-btn{color:#ce0500;box-shadow:inset 0 0 0 1px #ce0500;}
     .meetings-danger-btn:hover{background-color:#fee9e9;}
+    /* Pt5 : scroll interne — seules les lignes défilent */
+    #sessions-list{display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-right:0;}
+    #sessions-list .meetings-tab-header,
+    #sessions-list .meetings-tab-toolbar,
+    #sessions-list .meetings-tab-pagination{flex:0 0 auto;}
+    #sessions-list .meetings-tab-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:.25rem;}
   `;
   document.head.appendChild(st);
 }
@@ -662,13 +707,19 @@ export function renderList(sessions) {
   const pageStart = (_page - 1) * _PAGE_SIZE;
   const pageEntries = entries.slice(pageStart, pageStart + _PAGE_SIZE);
 
-  const headerHtml = renderHeader(total, _selectedIds.size > 0);
+  const headerHtml = renderHeader();
   const toolbarHtml = renderListToolbar(total);
   const listHtml = total
     ? pageEntries.map((e) => e.kind === 'youtube' ? renderYoutubeRow(e.yt) : renderRow(e.f, e.s)).join('')
     : renderEmpty();
   const paginationHtml = renderPagination(_page, totalPages);
+  // Pt5 : on préserve la position de scroll INTERNE de la liste (sinon le
+  // poll 15s ou un re-render renvoie l'utilisateur en haut).
+  const _prevList = container.querySelector('.meetings-tab-list');
+  const _prevScroll = _prevList ? _prevList.scrollTop : 0;
   container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}`;
+  const _newList = container.querySelector('.meetings-tab-list');
+  if (_newList && _prevScroll) _newList.scrollTop = _prevScroll;
 
   // Refresh YouTube imports en async — re-render à la fin si la liste change.
   _refreshYoutubeImportsCache();
@@ -957,17 +1008,52 @@ function _resolveLegacyFn(name) {
   return typeof fn === 'function' ? fn : null;
 }
 
-// Changement du critère de tri (fr-select). Délégué sur le panel pour
-// survivre aux re-render innerHTML de renderList.
-function _onChange(ev) {
-  const sel = ev.target && ev.target.closest && ev.target.closest('[data-meetings-sort-key]');
-  if (!sel) return;
-  const k = sel.value;
-  if (!_SORT_KEYS.has(k)) return;
-  _sortKey = k;
-  try { localStorage.setItem('meetings.sort.key', k); } catch (_) { /* noop */ }
-  _page = 1;
-  renderList(_lastSessions);
+// Retrouve (file, session) pour un fileId dans le dernier payload.
+function _findFileAndSession(fileId) {
+  for (const s of _lastSessions) {
+    for (const f of (s.uploads || [])) {
+      if (f.id === fileId) return { file: f, session: s };
+    }
+  }
+  return { file: null, session: null };
+}
+
+// Pt5 : dépliage LOCAL d'une row (insertion/retrait ciblé du bloc déplié,
+// sans renderList global → scroll et reste de la liste intacts).
+function _toggleRowExpandLocal(fileId) {
+  const row = document.querySelector(`.meeting-row[data-file-id="${cssEscape(fileId)}"]`);
+  if (!row) {
+    // Row absente du DOM (autre page) : bascule juste l'état mémoire.
+    if (_expandedIds.has(fileId)) _expandedIds.delete(fileId);
+    else _expandedIds.add(fileId);
+    return;
+  }
+  const open = !_expandedIds.has(fileId);
+  if (open) _expandedIds.add(fileId); else _expandedIds.delete(fileId);
+  row.classList.toggle('is-expanded', open);
+  const chevron = row.querySelector('.meeting-row-chevron');
+  if (chevron) {
+    chevron.setAttribute('aria-expanded', String(open));
+    chevron.setAttribute('aria-label', open ? 'Masquer le résumé inline' : 'Afficher le résumé inline');
+    chevron.setAttribute('title', open ? 'Masquer le résumé' : 'Afficher le résumé inline');
+  }
+  const existing = row.querySelector('.meeting-row-expanded');
+  if (!open) { if (existing) existing.remove(); return; }
+  if (existing) return;
+  const { file, session } = _findFileAndSession(fileId);
+  let html = '';
+  if (file) {
+    html = renderAudioExpanded(file, session);
+  } else {
+    const yt = _youtubeImportsCache.find(
+      (y) => y.user_audio_file_id === fileId || ('yt:' + y.meeting_id) === fileId
+    );
+    if (yt) html = renderYoutubeExpanded(yt);
+  }
+  if (html) {
+    row.insertAdjacentHTML('beforeend', html);
+    if (file) _fetchAndRenderSummary(fileId);
+  }
 }
 
 function _onClick(ev) {
@@ -990,9 +1076,9 @@ function _onClick(ev) {
 
   switch (verb) {
     case 'toggle-expand': {
-      if (_expandedIds.has(fileId)) _expandedIds.delete(fileId);
-      else _expandedIds.add(fileId);
-      renderList(_lastSessions);
+      // Pt5 : dépliage LOCAL — on n'efface plus toute la liste, on insère/
+      // retire juste le bloc déplié de la row ciblée (scroll préservé).
+      _toggleRowExpandLocal(fileId);
       break;
     }
     case 'open-detail': {
@@ -1040,9 +1126,21 @@ function _onClick(ev) {
       renderList(_lastSessions);
       break;
     }
-    case 'toggle-sort-dir': {
-      _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
-      try { localStorage.setItem('meetings.sort.dir', _sortDir); } catch (_) { /* noop */ }
+    case 'set-sort': {
+      // Pt1 : liens de tri. Clic sur le critère actif → inverse le sens ;
+      // clic sur un autre → ce critère, sens décroissant par défaut.
+      const k = el.getAttribute('data-sort-key') || 'import';
+      if (!_SORT_KEYS.has(k)) break;
+      if (_sortKey === k) {
+        _sortDir = (_sortDir === 'desc') ? 'asc' : 'desc';
+      } else {
+        _sortKey = k;
+        _sortDir = 'desc';
+      }
+      try {
+        localStorage.setItem('meetings.sort.key', _sortKey);
+        localStorage.setItem('meetings.sort.dir', _sortDir);
+      } catch (_) { /* noop */ }
       _page = 1;
       renderList(_lastSessions);
       break;
@@ -1551,7 +1649,6 @@ export function mount(container /*, ctx */) {
   panel.classList.add('meetings-new-active');
   if (!_delegationBound) {
     panel.addEventListener('click', _onClick);
-    panel.addEventListener('change', _onChange);
     document.addEventListener('keydown', _onKeyDown);
     document.addEventListener('keyup', _onKeyUp);
     _delegationBound = true;
@@ -2109,9 +2206,9 @@ function renderYoutubeRow(yt) {
   const title = escapeHtml(_cleanYoutubeTitle(yt.title));
   const channel = escapeHtml(yt.channel || '');
   const dateLabel = formatDate(yt.created_at, { withTime: true });
-  const ytMeetingLabel = yt.meeting_datetime
-    ? formatDate(yt.meeting_datetime, { withTime: true })
-    : '—';
+  // Pt3 : pas de date de réunion → fallback date d'import (grisé).
+  const ytMeetingFallback = !yt.meeting_datetime;
+  const ytMeetingLabel = formatDate(yt.meeting_datetime || yt.created_at, { withTime: true });
   const durLabel = _ytDurationLabel(yt.duration_sec);
   // Résumé clé, titre de tête retiré (évite la répétition avec le titre).
   const ytKp = _stripLeadingTitle((yt.key_points_summary || '').trim(), _cleanYoutubeTitle(yt.title));
@@ -2219,40 +2316,43 @@ function renderYoutubeRow(yt) {
           ${chevronIcon()}
         </button>
       </div>
-      <span class="meeting-row-meetingdate" title="Date réelle de la réunion">Réunion : ${escapeHtml(ytMeetingLabel)}</span>
+      <span class="meeting-row-meetingdate${ytMeetingFallback ? ' is-fallback' : ''}" title="${ytMeetingFallback ? "Date d'import (réunion non datée)" : 'Date réelle de la réunion'}">Réunion : ${escapeHtml(ytMeetingLabel)}</span>
       <span class="meeting-row-dur" title="Durée de la vidéo">${escapeHtml(durLabel)}</span>
     </div>
-    ${isExpanded ? `<div class="meeting-row-expanded">
-      <div class="meeting-row-expanded-row">
-        <span class="meeting-row-source" title="Source vidéo web — YouTube">
-          ${youtubeSourceIcon}
-          <span class="meeting-row-source-label">${channel ? 'YouTube — ' + channel : 'YouTube'}</span>
-        </span>
-        <span class="meeting-row-created">Importée le ${escapeHtml(dateLabel)}</span>
-      </div>
-      <div class="meeting-row-summary">
-        ${ytKp
-          ? `<pre class="meeting-row-summary-kp">${escapeHtml(ytKp)}</pre>`
-          : `<em class="meeting-row-summary-empty">Résumé clé indisponible (génération en cours ou sous-titres trop courts).</em>`}
-      </div>
-      <div class="meeting-row-expanded-actions">
-        ${canOpenDetail ? `<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
-                data-action="meetings-new:open-detail"
-                data-file-id="${escapeHtml(uafId)}">
-          Ouvrir la fiche complète
-        </button>` : ''}
-        <a class="fr-btn fr-btn--sm fr-btn--tertiary" href="${url}" target="_blank" rel="noopener"
-           data-action="meetings-new:yt-open-source" data-yt-url="${url}"
-           style="text-decoration:none;">
-          ↗ Voir sur YouTube
-        </a>
-        <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn"
-                data-action="${deleteAction}"
-                ${deleteData}>
-          Mettre à la corbeille
-        </button>
-      </div>
-    </div>` : ''}
+    ${isExpanded ? renderYoutubeExpanded(yt) : ''}
+  </div>`;
+}
+
+// Bloc déplié d'une réunion YouTube — extrait (recalcule depuis yt) pour
+// permettre le dépliage LOCAL (cf _toggleRowExpandLocal).
+function renderYoutubeExpanded(yt) {
+  const title = escapeHtml(_cleanYoutubeTitle(yt.title));
+  const channel = escapeHtml(yt.channel || '');
+  const dateLabel = formatDate(yt.created_at, { withTime: true });
+  const ytKp = _stripLeadingTitle((yt.key_points_summary || '').trim(), _cleanYoutubeTitle(yt.title));
+  const url = escapeHtml(yt.canonical_url || '#');
+  const uafId = yt.user_audio_file_id || '';
+  const canOpenDetail = !!uafId;
+  const deleteAction = uafId ? 'meetings-new:delete-one' : 'meetings-new:yt-delete-meeting';
+  const deleteData = uafId
+    ? `data-file-id="${escapeHtml(uafId)}"`
+    : `data-yt-meeting-id="${escapeHtml(yt.meeting_id || '')}" data-yt-title="${escapeHtml(title)}"`;
+  const ytIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/></svg>`;
+  return `<div class="meeting-row-expanded">
+    <div class="meeting-row-expanded-row">
+      <span class="meeting-row-source"><span class="fr-badge fr-badge--sm">${ytIcon} ${channel ? 'YouTube — ' + channel : 'YouTube'}</span></span>
+      <span class="meeting-row-created">Importée le ${escapeHtml(dateLabel)}</span>
+    </div>
+    <div class="meeting-row-summary">
+      ${ytKp
+        ? `<pre class="meeting-row-summary-kp">${escapeHtml(ytKp)}</pre>`
+        : `<em class="meeting-row-summary-empty">Résumé clé indisponible (génération en cours ou sous-titres trop courts).</em>`}
+    </div>
+    <div class="meeting-row-expanded-actions">
+      ${canOpenDetail ? `<button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary" data-action="meetings-new:open-detail" data-file-id="${escapeHtml(uafId)}">Ouvrir la fiche complète</button>` : ''}
+      <a class="fr-btn fr-btn--sm fr-btn--tertiary" href="${url}" target="_blank" rel="noopener" data-action="meetings-new:yt-open-source" data-yt-url="${url}" style="text-decoration:none;">↗ Voir sur YouTube</a>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary meetings-danger-btn" data-action="${deleteAction}" ${deleteData}>Mettre à la corbeille</button>
+    </div>
   </div>`;
 }
 
