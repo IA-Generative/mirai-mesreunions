@@ -2186,8 +2186,8 @@ async function mountTranscriptCorrector(container) {
           ${blocks.map((b, i) => `
             <div class="tc-block${crossedSet.has(i) ? ' is-crossed' : ''}" data-tc-idx="${i}" data-tc-start="${b.start}" data-tc-end="${b.end}">
               <button type="button" class="tc-play" data-tc-play="${b.start}"
-                      title="${audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')'}"
-                      ${audioPurged ? 'disabled' : ''}>▶</button>
+                      title="${isYoutube ? 'Positionner la vidéo (' + _fmtTimecode(b.start) + ')' : (audioPurged ? 'Audio purgé' : 'Écouter ce passage (' + _fmtTimecode(b.start) + ')')}"
+                      ${(audioPurged && !isYoutube) ? 'disabled' : ''}>▶</button>
               <span class="tc-speaker" data-tc-speaker-idx="${i}">${escapeHtml(_displaySpeaker(b.speaker))}</span>
               <button type="button" class="tc-speaker-rename"
                       data-tc-speaker-rename="${escapeHtml(b.speaker)}"
