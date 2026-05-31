@@ -33,6 +33,7 @@ import './tabs/wizard.js';  // modale fullscreen "Nouvelle préparation"
 import './tabs/useful-data.js';
 import * as adminTab from './tabs/admin.js';
 import { initTabManager } from './lib/tab-manager.js';
+import { initChatWidget } from './lib/chat-widget.js';
 
 // Affichage conditionnel de l'onglet Admin dans la nav (selon claim OIDC).
 try { adminTab.revealNavIfAdmin && adminTab.revealNavIfAdmin(); } catch (e) {}
@@ -63,6 +64,11 @@ document.addEventListener('click', (ev) => {
     try { meetingsTab.unmount && meetingsTab.unmount(); } catch (e) {}
   }
 }, true);
+
+// Widget « Interroger mes réunions » (agent conversationnel RAG, OpenRAG).
+// Persistant, indépendant des onglets. Ne se révèle que si le RAG est
+// configuré côté serveur (sinon inerte → aucun impact).
+try { initChatWidget(); } catch (e) { /* widget non bloquant */ }
 
 // Sentinelle utile au test e2e (vérifier que le bundle a bien initialisé).
 window.__MESREUNIONS_SHELL_READY__ = true;
