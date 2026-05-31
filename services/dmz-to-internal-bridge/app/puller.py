@@ -2054,6 +2054,58 @@ def audio_external_source_list():
         db.close()
 
 
+@app.route("/api/v1/audio/rag-export", methods=["GET"])
+def audio_rag_export():
+    """Liste les réunions (UAF) d'un user avec leur texte, pour l'ingestion RAG.
+
+    Pour chaque UAF ayant du contenu exploitable : id, titre, dates, source,
+    points clés et le meilleur texte de transcription (cleaned > speaker_tagged
+    > brut, tronqué). Auth = INTERNAL_API_TOKEN. Lecture seule.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    user_sub = (request.args.get("user_sub") or "").strip()
+    if not user_sub:
+        return jsonify({"error": "user_sub required"}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "db_not_ready"}), 503
+    max_chars = int(os.getenv("RAG_EXPORT_MAX_CHARS", "80000"))
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserAudioFile)
+            .filter(UserAudioFile.user_sub == user_sub)
+            .order_by(UserAudioFile.created_at.desc())
+            .limit(300)
+            .all()
+        )
+        items = []
+        for r in rows:
+            text = (r.cleaned_text or r.speaker_tagged_text or r.transcription_text or "").strip()
+            kp = (r.key_points_summary or "").strip()
+            if not text and not kp:
+                continue
+            if len(text) > max_chars:
+                text = text[:max_chars]
+            items.append({
+                "uaf_id": str(r.id),
+                "title": (r.suggested_filename or r.original_filename or "Réunion"),
+                "meeting_datetime": r.meeting_datetime.isoformat() if r.meeting_datetime else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "source_type": r.source_type,
+                "origin": r.origin,
+                "meeting_id": str(r.meeting_id) if getattr(r, "meeting_id", None) else None,
+                "key_points_summary": kp or None,
+                "text": text or None,
+            })
+        return jsonify({"items": items})
+    except Exception:
+        logger.exception("audio_rag_export failed")
+        return jsonify({"error": "internal_error"}), 500
+    finally:
+        db.close()
+
+
 @app.route("/api/v1/audio/lookup", methods=["POST"])
 def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.

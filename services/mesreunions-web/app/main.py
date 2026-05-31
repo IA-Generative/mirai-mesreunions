@@ -208,6 +208,7 @@ def _register_modular_blueprints(flask_app):
     from app.modules.feedback import feedback_bp
     from app.modules.mcr_import import mcr_import_bp
     from app.modules.youtube_import import youtube_import_bp
+    from app.modules.rag import rag_bp
 
     registered = {b.name for b in flask_app.blueprints.values()}
     for name, bp in (
@@ -219,6 +220,7 @@ def _register_modular_blueprints(flask_app):
         ("feedback", feedback_bp),
         ("mcr_import", mcr_import_bp),
         ("youtube_import", youtube_import_bp),
+        ("rag", rag_bp),
     ):
         if name not in registered:
             flask_app.register_blueprint(bp)
