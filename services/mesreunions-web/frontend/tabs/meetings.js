@@ -661,14 +661,43 @@ function _ensureListStyles() {
     .meetings-tab-pagination-info{pointer-events:none;}
     .meetings-danger-btn{color:#ce0500;box-shadow:inset 0 0 0 1px #ce0500;}
     .meetings-danger-btn:hover{background-color:#fee9e9;}
-    /* Pt5 : scroll interne — seules les lignes défilent */
-    #sessions-list{display:flex;flex-direction:column;min-height:0;overflow:hidden;padding-right:0;}
-    #sessions-list .meetings-tab-header,
-    #sessions-list .meetings-tab-toolbar,
-    #sessions-list .meetings-tab-pagination{flex:0 0 auto;}
-    #sessions-list .meetings-tab-list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:.25rem;}
+    /* Pt5 (itér.3) : la hauteur du scroller .meetings-tab-list est posée en
+       JS (_sizeScroller) — indépendant de la chaîne flex DSFR (cassée par
+       .fr-tabs__panel--selected{display:block}). On retire donc le
+       flex/overflow:hidden et le min-height forcé qui créait le vide. */
+    #sessions-list{display:block;overflow:visible;padding-right:0;}
+    #sessions-list .meetings-tab-list{overflow-y:auto;padding-right:.25rem;}
+    .tab-pane[data-tab="transfers"]:not(.detail-active){min-height:0 !important;}
+    #panel-transfers:not(.detail-active){padding-top:.6rem !important;}
   `;
   document.head.appendChild(st);
+}
+
+// Pt5 (itér.3) : borne la hauteur du scroller au viewport, de façon robuste
+// (la chaîne flex DSFR ne se borne pas). maxHeight = espace restant sous le
+// haut de la liste, moins la pagination. En maxHeight (pas height) : une liste
+// courte garde sa hauteur naturelle, une longue est plafonnée et scrolle.
+function _sizeScroller() {
+  const list = document.querySelector('#sessions-list .meetings-tab-list');
+  if (!list) return;
+  // Vue détail : pas de scroll interne (le scroll vit au niveau page).
+  if (list.closest('.detail-active')) { list.style.maxHeight = ''; return; }
+  // Panneau masqué (autre onglet) : rect.top non fiable → on laisse au prochain
+  // render visible le soin de dimensionner.
+  if (list.offsetParent === null) return;
+  const rect = list.getBoundingClientRect();
+  if (rect.top <= 0) return;
+  const pager = document.querySelector('#sessions-list .meetings-tab-pagination');
+  const pagerH = pager ? pager.getBoundingClientRect().height : 0;
+  const gap = 16;
+  const avail = window.innerHeight - rect.top - pagerH - gap;
+  list.style.maxHeight = Math.max(200, avail) + 'px';
+}
+
+let _resizeRaf = 0;
+function _onResize() {
+  if (_resizeRaf) return;
+  _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; _sizeScroller(); });
 }
 
 // ── Render principal ──────────────────────────────────────────────────
@@ -720,6 +749,8 @@ export function renderList(sessions) {
   container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}`;
   const _newList = container.querySelector('.meetings-tab-list');
   if (_newList && _prevScroll) _newList.scrollTop = _prevScroll;
+  // Borne la hauteur du scroller au viewport (cf _sizeScroller).
+  _sizeScroller();
 
   // Refresh YouTube imports en async — re-render à la fin si la liste change.
   _refreshYoutubeImportsCache();
@@ -1054,6 +1085,7 @@ function _toggleRowExpandLocal(fileId) {
     row.insertAdjacentHTML('beforeend', html);
     if (file) _fetchAndRenderSummary(fileId);
   }
+  _sizeScroller();
 }
 
 function _onClick(ev) {
@@ -1651,6 +1683,7 @@ export function mount(container /*, ctx */) {
     panel.addEventListener('click', _onClick);
     document.addEventListener('keydown', _onKeyDown);
     document.addEventListener('keyup', _onKeyUp);
+    window.addEventListener('resize', _onResize);
     _delegationBound = true;
   }
   if (_firstLoadDone) {
