@@ -113,12 +113,18 @@ def index_text(partition: str, file_id: str, title: str, text: str,
     meta = {"title": title}
     if metadata:
         meta.update(metadata)
-    files = {"file": (f"{file_id}.md", text.encode("utf-8"), "text/markdown")}
-    data = {"metadata": json.dumps(meta, ensure_ascii=False)}
-    r = req.post(
-        f"{_base()}/indexer/partition/{partition}/file/{file_id}",
-        headers=_headers(), files=files, data=data, timeout=120,
-    )
+    url = f"{_base()}/indexer/partition/{partition}/file/{file_id}"
+
+    def _mk():  # requests consomme le file-handle → en reconstruire un par appel
+        return ({"file": (f"{file_id}.md", text.encode("utf-8"), "text/markdown")},
+                {"metadata": json.dumps(meta, ensure_ascii=False)})
+
+    files, data = _mk()
+    r = req.post(url, headers=_headers(), files=files, data=data, timeout=120)
+    # Déjà indexé → on REMPLACE (PUT) pour mettre à jour le contenu (enrichi).
+    if r.status_code == 409:
+        files2, data2 = _mk()
+        r = req.put(url, headers=_headers(), files=files2, data=data2, timeout=120)
     if r.status_code == 409:
         return {"status": "exists"}
     if r.status_code in (200, 201, 202):

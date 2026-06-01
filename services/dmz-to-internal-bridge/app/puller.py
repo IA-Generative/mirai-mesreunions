@@ -2072,31 +2072,89 @@ def audio_rag_export():
     max_chars = int(os.getenv("RAG_EXPORT_MAX_CHARS", "80000"))
     db = SessionLocal()
     try:
-        rows = (
-            db.query(UserAudioFile)
-            .filter(UserAudioFile.user_sub == user_sub)
-            .order_by(UserAudioFile.created_at.desc())
-            .limit(300)
-            .all()
-        )
+        # LEFT JOIN video_sources pour récupérer le TITRE D'ORIGINE (ex. titre
+        # YouTube « Arthur Mensch (MistralAI) devant… ») + chaîne/URL : sans ça
+        # le doc indexé n'a que le titre LLM (sujet, pas le nom) → les requêtes
+        # par nom de personne échouent.
+        sql = """
+        SELECT u.id, u.suggested_filename, u.original_filename, u.meeting_datetime,
+               u.created_at, u.source_type, u.origin, u.meeting_id,
+               u.key_points_summary, u.meeting_analysis_json,
+               u.cleaned_text, u.speaker_tagged_text, u.transcription_text,
+               vs.title, vs.channel, vs.canonical_url
+          FROM user_audio_files u
+          LEFT JOIN video_sources vs ON vs.id = u.external_video_source_id
+         WHERE u.user_sub = :user_sub
+         ORDER BY u.created_at DESC
+         LIMIT 300
+        """
+        rows = db.execute(text(sql), {"user_sub": user_sub}).fetchall()
+
+        def _fmt_analysis(raw):
+            """meeting_analysis_json → bloc lisible (acteurs/thèmes/décisions…).
+            Tolérant : si parsing impossible, renvoie le JSON brut (les noms y
+            sont quand même, donc indexables)."""
+            if not raw:
+                return None
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                return str(raw)[:8000]
+            if not isinstance(obj, dict):
+                return str(raw)[:8000]
+            out = []
+            labels = [("actors", "Acteurs / intervenants"), ("themes", "Thèmes"),
+                      ("decisions", "Décisions"), ("gaps", "Points en suspens"),
+                      ("recommendations", "Recommandations")]
+            for key, lbl in labels:
+                vals = obj.get(key)
+                if not vals:
+                    continue
+                out.append(f"### {lbl}")
+                if isinstance(vals, list):
+                    for v in vals[:40]:
+                        if isinstance(v, dict):
+                            parts = [str(v.get(k)) for k in
+                                     ("name", "speaker", "title", "label", "theme",
+                                      "role", "decision", "text", "question", "item",
+                                      "recommendation", "summary", "why")
+                                     if v.get(k)]
+                            line = " — ".join(dict.fromkeys(parts))  # dédup en gardant l'ordre
+                            if line:
+                                out.append(f"- {line}")
+                        elif v:
+                            out.append(f"- {v}")
+                elif vals:
+                    out.append(f"- {vals}")
+            return "\n".join(out) if out else str(raw)[:8000]
+
         items = []
         for r in rows:
-            text = (r.cleaned_text or r.speaker_tagged_text or r.transcription_text or "").strip()
-            kp = (r.key_points_summary or "").strip()
-            if not text and not kp:
+            (uid, suggested, original, mdt, cat, stype, origin, mid,
+             kp, manalysis_raw, cleaned, spk, raw_txt,
+             vs_title, vs_channel, vs_url) = r
+            # Texte : speaker_tagged (avec noms d'intervenants) > cleaned > brut.
+            body = (spk or cleaned or raw_txt or "").strip()
+            kp = (kp or "").strip()
+            analysis = _fmt_analysis(manalysis_raw)
+            if not body and not kp and not analysis:
                 continue
-            if len(text) > max_chars:
-                text = text[:max_chars]
+            if len(body) > max_chars:
+                body = body[:max_chars]
             items.append({
-                "uaf_id": str(r.id),
-                "title": (r.suggested_filename or r.original_filename or "Réunion"),
-                "meeting_datetime": r.meeting_datetime.isoformat() if r.meeting_datetime else None,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "source_type": r.source_type,
-                "origin": r.origin,
-                "meeting_id": str(r.meeting_id) if getattr(r, "meeting_id", None) else None,
+                "uaf_id": str(uid),
+                "title": (suggested or vs_title or original or "Réunion"),
+                "original_title": vs_title or original or None,
+                "channel": vs_channel,
+                "canonical_url": vs_url,
+                "meeting_datetime": mdt.isoformat() if mdt else None,
+                "created_at": cat.isoformat() if cat else None,
+                "source_type": stype,
+                "origin": origin,
+                "meeting_id": str(mid) if mid else None,
                 "key_points_summary": kp or None,
-                "text": text or None,
+                "meeting_analysis": analysis,
+                "text": body or None,
             })
         return jsonify({"items": items})
     except Exception:

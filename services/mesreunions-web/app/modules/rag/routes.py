@@ -99,14 +99,31 @@ def _fetch_rag_export(user_sub: str) -> list:
 
 def _compose_doc(it: dict) -> str:
     parts = [f"# {it.get('title') or 'Réunion'}"]
+    # Titre d'origine (ex. titre YouTube qui contient souvent le nom de la
+    # personne / de l'intervenant) — clé pour les requêtes par nom.
+    orig = it.get("original_title")
+    if orig and orig != it.get("title"):
+        parts.append(f"**Titre d'origine :** {orig}")
+    # Source explicite (aide le LLM à contextualiser).
+    st = (it.get("source_type") or "").lower()
+    origin = (it.get("origin") or "").lower()
+    if st.startswith("youtube"):
+        src = "Source : vidéo YouTube"
+        if it.get("channel"):
+            src += f" — chaîne {it['channel']}"
+        if it.get("canonical_url"):
+            src += f" ({it['canonical_url']})"
+        parts.append(src)
+    elif origin == "mcr_import":
+        parts.append("Source : compte-rendu.mirai (MCR)")
     if it.get("meeting_datetime"):
-        parts.append(f"_Date de réunion : {it['meeting_datetime']}_")
+        parts.append(f"Date de réunion : {it['meeting_datetime']}")
     elif it.get("created_at"):
-        parts.append(f"_Importée le : {it['created_at']}_")
+        parts.append(f"Importée le : {it['created_at']}")
+    if it.get("meeting_analysis"):
+        parts.append("## Acteurs, thèmes et analyse\n\n" + str(it["meeting_analysis"]))
     if it.get("key_points_summary"):
         parts.append("## Points clés\n\n" + str(it["key_points_summary"]))
-    if it.get("meeting_analysis"):
-        parts.append("## Analyse de la réunion\n\n" + str(it["meeting_analysis"]))
     if it.get("text"):
         parts.append("## Transcription\n\n" + str(it["text"]))
     return "\n\n".join(p for p in parts if p and p.strip()).strip()
