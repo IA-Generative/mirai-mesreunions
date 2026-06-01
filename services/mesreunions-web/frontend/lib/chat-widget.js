@@ -25,6 +25,32 @@ function renderMarkdown(text) {
   return `<p>${esc(text).replace(/\n/g, '<br>')}</p>`;
 }
 
+// Icônes de source (cohérentes avec la liste « Mes réunions »).
+const _IC = {
+  youtube: '<svg width="13" height="13" viewBox="0 0 24 24" fill="#000091" aria-hidden="true" style="vertical-align:-2px"><path d="M23 7.5c-.3-1.5-1.4-2.6-2.9-2.9C17.3 4 12 4 12 4s-5.3 0-8.1.6C2.4 4.9 1.3 6 1 7.5.4 10.3.4 13.7 1 16.5c.3 1.5 1.4 2.6 2.9 2.9C6.7 20 12 20 12 20s5.3 0 8.1-.6c1.5-.3 2.6-1.4 2.9-2.9.6-2.8.6-6.2 0-9zM10 16V8l5.5 4L10 16z"/></svg>',
+  mcr: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="vertical-align:-2px"><rect x="3" y="3.5" width="18" height="13" rx="2" stroke="#000091" stroke-width="1.6"/><path d="M6 7.6h6M6 10.1h4.4" stroke="#000091" stroke-width="1.5" stroke-linecap="round"/><circle cx="17.6" cy="7" r="1.5" fill="#e1000f"/><circle cx="12" cy="15.1" r="2.3" fill="#000091"/><path d="M7.8 21.6c0-2.4 1.9-4 4.2-4s4.2 1.6 4.2 4z" fill="#000091"/></svg>',
+  lasuite: '<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true" style="vertical-align:-2px"><rect width="24" height="24" rx="6" fill="#000091"/><circle cx="9" cy="9.5" r="3" fill="#fff"/><circle cx="15.5" cy="15" r="3" fill="#e1000f"/></svg>',
+  meeting: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#000091" stroke-width="1.7" stroke-linecap="round" aria-hidden="true" style="vertical-align:-2px"><circle cx="9" cy="8" r="2.4"/><path d="M3.5 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5"/><circle cx="17" cy="9" r="1.8"/><path d="M15 19c0-2.4 1.6-4.2 4-4.2"/></svg>',
+};
+function _srcIcon(meta) {
+  const st = ((meta && meta.source_type) || '').toLowerCase();
+  const origin = ((meta && meta.origin) || '').toLowerCase();
+  if (st.indexOf('youtube') >= 0) return _IC.youtube;
+  if (origin === 'mcr_import') return _IC.mcr;
+  if (st === 'lasuite_visio' || st === 'lasuite_transcript') return _IC.lasuite;
+  return _IC.meeting;
+}
+function _stripSources(t) {
+  // OpenRAG ajoute un bloc « **Sources :** [titre](url) » avec des liens
+  // externes (statique OpenRAG) inopérants dans l'app → on le retire et on
+  // affiche nos propres puces cliquables vers la fiche.
+  if (!t) return t;
+  return String(t)
+    .replace(/\n?-{2,}\s*\n+\*\*\s*sources?\s*:?\s*\*\*[\s\S]*$/i, '')
+    .replace(/\n+\*\*\s*sources?\s*:?\s*\*\*[\s\S]*$/i, '')
+    .trim();
+}
+
 function _ensureStyles() {
   if (document.getElementById('rag-widget-style')) return;
   const st = document.createElement('style');
@@ -77,13 +103,24 @@ function _addMsg(role, html, sources) {
   wrap.className = 'rag-msg ' + (role === 'user' ? 'user' : 'bot');
   let inner = `<div class="rag-bubble">${html}`;
   if (sources && sources.length) {
-    const chips = sources.slice(0, 6).map((s) => {
+    const seen = new Set();
+    const chips = [];
+    for (const s of sources) {
       const meta = (s && s.metadata) || {};
-      const title = esc(meta.title || s.title || 'source');
-      const fid = meta.file_id || meta.uaf_id || '';
-      return `<span class="rag-src" data-rag-open="${esc(fid)}" title="${title}">📄 ${title.slice(0, 32)}</span>`;
-    }).join('');
-    if (chips) inner += `<div class="rag-sources">${chips}</div>`;
+      let fid = meta.uaf_id || meta.file_id || '';
+      const url = s.file_url || s.chunk_url || meta.link || '';
+      if (!fid && url) {
+        const m = String(url).match(/\/file\/([^/?#]+)/);
+        if (m) fid = m[1].replace(/_/g, '-');
+      }
+      const key = fid || (meta.meeting_title || '') + url;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const title = esc(meta.meeting_title || meta.original_title || meta.title || 'réunion');
+      chips.push(`<span class="rag-src" data-rag-open="${esc(fid)}" title="Ouvrir : ${title}">${_srcIcon(meta)} ${title.slice(0, 34)}</span>`);
+      if (chips.length >= 6) break;
+    }
+    if (chips.length) inner += `<div class="rag-sources">${chips.join('')}</div>`;
   }
   inner += '</div>';
   wrap.innerHTML = inner;
@@ -128,7 +165,7 @@ async function _send() {
       _addMsg('bot', `<em>${esc(msg)}</em>`);
     } else {
       const answer = d.answer || '(réponse vide)';
-      _addMsg('bot', renderMarkdown(answer), d.sources);
+      _addMsg('bot', renderMarkdown(_stripSources(answer)), d.sources);
       _history.push({ role: 'assistant', content: answer });
     }
   } catch (e) {

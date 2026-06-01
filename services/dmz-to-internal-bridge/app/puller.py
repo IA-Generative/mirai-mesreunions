@@ -2137,6 +2137,21 @@ def audio_rag_export():
             body = (spk or cleaned or raw_txt or "").strip()
             kp = (kp or "").strip()
             analysis = _fmt_analysis(manalysis_raw)
+            # Personnes citées (acteurs de l'analyse) — pour métadonnées /
+            # filtrage RAG côté OpenRAG.
+            persons = None
+            try:
+                if manalysis_raw:
+                    o = json.loads(manalysis_raw)
+                    names = []
+                    for a in (o.get("actors") or []) if isinstance(o, dict) else []:
+                        nm = (a.get("name") or a.get("speaker") or a.get("label")) if isinstance(a, dict) else (a if isinstance(a, str) else None)
+                        if nm:
+                            names.append(str(nm).strip())
+                    if names:
+                        persons = ", ".join(dict.fromkeys(names))[:500]
+            except Exception:
+                persons = None
             if not body and not kp and not analysis:
                 continue
             if len(body) > max_chars:
@@ -2152,6 +2167,7 @@ def audio_rag_export():
                 "source_type": stype,
                 "origin": origin,
                 "meeting_id": str(mid) if mid else None,
+                "persons": persons,
                 "key_points_summary": kp or None,
                 "meeting_analysis": analysis,
                 "text": body or None,

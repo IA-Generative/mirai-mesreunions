@@ -162,10 +162,20 @@ def rag_ingest():
             r = _openrag.index_text(
                 partition, uaf_id, it.get("title") or "Réunion", doc,
                 metadata={
+                    # Métadonnées par document (chunk) — exploitées pour les
+                    # citations du widget + le filtrage RAG (source/date/personnes).
+                    "uaf_id": uaf_id,
+                    "meeting_title": it.get("title"),
+                    "original_title": it.get("original_title"),
+                    "source_type": it.get("source_type"),
+                    "origin": it.get("origin"),
                     "source": it.get("source_type") or it.get("origin") or "meeting",
+                    "channel": it.get("channel"),
+                    "canonical_url": it.get("canonical_url"),
                     "meeting_id": it.get("meeting_id"),
                     "meeting_datetime": it.get("meeting_datetime"),
                     "created_at": it.get("created_at"),
+                    "persons": it.get("persons"),
                 },
             )
             st = r.get("status")

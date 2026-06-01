@@ -66,10 +66,29 @@ def partition_files(partition: str, limit: int = 1000) -> list:
     return body.get("files", []) if isinstance(body, dict) else []
 
 
+# Prompt système : les transcriptions sont automatiques (ASR) et comportent des
+# fautes sur les noms propres (« Mench » pour « Mensch »…). Le titre d'origine
+# du document donne l'orthographe correcte. Sans ce cadrage, le LLM refuse de
+# répondre dès que l'orthographe exacte du nom n'est pas dans la transcription.
+_SYSTEM_PROMPT = (
+    "Tu es l'assistant des comptes-rendus de réunions de l'utilisateur. Chaque "
+    "document fourni commence par un titre (qui mentionne souvent l'intervenant "
+    "ou le sujet) et son titre d'origine, puis une analyse (acteurs, thèmes, "
+    "décisions) et la transcription. Les transcriptions sont AUTOMATIQUES "
+    "(reconnaissance vocale) et comportent souvent des fautes sur les noms "
+    "propres (ex. « Mench » pour « Mensch », « Welsch » pour « Welsh ») : le "
+    "titre d'origine donne l'orthographe correcte. Considère qu'un nom proche "
+    "phonétiquement désigne la même personne et réponds à partir du contexte, "
+    "sans exiger une orthographe exacte. Dès qu'un document pertinent est "
+    "présent, réponds utilement et cite la ou les réunion(s) concernée(s). "
+    "Réponds en français."
+)
+
+
 def chat(partition: str, question: str, *, history: list | None = None,
          max_tokens: int = 700) -> dict:
     """Interroge la partition (RAG) via /v1/chat/completions. → {answer, sources}."""
-    messages: list = []
+    messages: list = [{"role": "system", "content": _SYSTEM_PROMPT}]
     if history:
         # On ne garde que les tours role/content valides (défense).
         for m in history[-8:]:
