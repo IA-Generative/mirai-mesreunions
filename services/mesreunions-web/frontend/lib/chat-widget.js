@@ -116,7 +116,7 @@ function _addMsg(role, html, sources) {
       const key = fid || (meta.meeting_title || '') + url;
       if (seen.has(key)) continue;
       seen.add(key);
-      const title = esc(meta.meeting_title || meta.original_title || meta.title || 'réunion');
+      const title = esc(meta.meeting_title || s.title || meta.original_title || 'réunion');
       chips.push(`<span class="rag-src" data-rag-open="${esc(fid)}" title="Ouvrir : ${title}">${_srcIcon(meta)} ${title.slice(0, 34)}</span>`);
       if (chips.length >= 6) break;
     }

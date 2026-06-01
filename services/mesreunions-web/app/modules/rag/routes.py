@@ -35,6 +35,42 @@ def _ingester_base() -> str:
             or "http://internal-ingester:8090").rstrip("/")
 
 
+# Métadonnées de chunk remontées au widget (citations : icône + lien fiche).
+_SRC_META_KEYS = (
+    "uaf_id", "meeting_title", "original_title", "source_type", "origin",
+    "channel", "canonical_url", "meeting_id", "meeting_datetime", "persons",
+)
+
+
+def _enrich_sources(partition: str, sources: list) -> list:
+    """Réinjecte nos métadonnées dans les sources du chat.
+
+    OpenRAG aplatit les sources de ``/v1/chat/completions`` et n'y renvoie PAS
+    le ``metadata`` custom (seulement ``file_id``/``title``). On le récupère
+    depuis ``GET /partition`` (qui, lui, expose nos champs) et on le joint par
+    ``file_id`` → le widget retrouve la nature de la source + l'uaf_id cliquable.
+    """
+    if not sources:
+        return sources
+    try:
+        files = _openrag.partition_files(partition)
+    except Exception:
+        logger.debug("enrich_sources: partition_files failed", exc_info=True)
+        return sources
+    by_id = {}
+    for f in files:
+        fid = f.get("uaf_id") or f.get("file_id")
+        if fid:
+            by_id[str(fid)] = f
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+        meta = by_id.get(str(s.get("file_id") or s.get("uaf_id") or ""))
+        if meta:
+            s["metadata"] = {k: meta.get(k) for k in _SRC_META_KEYS}
+    return sources
+
+
 # ── Query ─────────────────────────────────────────────────────────────
 @bp.route("/api/rag/query", methods=["POST"])
 @require_auth
@@ -54,6 +90,7 @@ def rag_query():
     try:
         _openrag.ensure_partition(partition)
         res = _openrag.chat(partition, question, history=history)
+        res["sources"] = _enrich_sources(partition, res.get("sources"))
         return jsonify(res), 200
     except req.HTTPError as e:
         code = e.response.status_code if e.response is not None else 502
