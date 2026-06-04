@@ -36,7 +36,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 
-_INTERNAL_TOKEN = "***REMOVED-FIXTURE-TOKEN***"  # 35 chars, no banned prefix
+# Valeur factice explicite : satisfait is_strong_shared_secret (>=32 chars, aucun
+# marqueur faible) sans committer une chaîne « token-like » que les scanners de
+# secrets remontent en faux positif. Ce n'est PAS le INTERNAL_API_TOKEN de prod.
+_INTERNAL_TOKEN = "not-a-real-credential-synthetic-fixture-value"
 
 
 def _purge_libs_shared_stubs():

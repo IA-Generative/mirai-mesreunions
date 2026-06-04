@@ -78,7 +78,7 @@ MOCK_SESSIONS = [
     {
         "id": SESSION_ID,
         "simple_code": "9NXBMN",
-        "qr_token": "***REMOVED-QR-TOKEN***",
+        "qr_token": "MOCK-QR-TOKEN-synthetic-preview-0000000000",
         "status": "active",
         "upload_count": 2,
         "max_uploads": 50,
@@ -125,7 +125,7 @@ MOCK_DEVICES = [
         "device_id": "dev-9nxbmn",
         "device_name": "Mobile (test)",
         "name": "Mobile (test)",
-        "qr_token": "***REMOVED-QR-TOKEN***",
+        "qr_token": "MOCK-QR-TOKEN-synthetic-preview-0000000000",
         "status": "active",
         "created_at": "2026-05-11T21:13:25.030605+00:00",
         "last_seen_at": "2026-05-11T21:44:37.360360+00:00",

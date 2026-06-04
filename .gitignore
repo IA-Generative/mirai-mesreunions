@@ -65,3 +65,6 @@ deploy/kubernetes/environments/**/*.local.sh
 # Audio source & rapports locaux — non versionnés (gros binaires + scratch).
 /datasets/
 /reports/
+
+# Incident sécurité — local uniquement (contient infra sensible)
+INCIDENT_FUITE_*.md
