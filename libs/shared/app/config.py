@@ -24,6 +24,18 @@ def _list(key: str, default: str = "") -> List[str]:
     return [x.strip() for x in os.getenv(key, default).split(",") if x.strip()]
 
 
+def _json_obj(key: str, default: dict | None = None) -> dict:
+    raw = os.getenv(key, "").strip()
+    if not raw:
+        return dict(default or {})
+    import json
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else dict(default or {})
+    except (ValueError, TypeError):
+        return dict(default or {})
+
+
 @dataclass
 class OIDCConfig:
     issuer: str = field(default_factory=lambda: _str("OIDC_ISSUER"))
@@ -201,6 +213,13 @@ OIDC_REFRESH_TOKEN_FERNET_KEY = _str("OIDC_REFRESH_TOKEN_FERNET_KEY", "")
 # preparation documents from the user's Drive. Auth reuses the OIDC refresh
 # token already captured at login (same Keycloak realm).
 DRIVE_BASE_URL = _str("DRIVE_BASE_URL", "")
+
+# Routage Drive multi-instances (optionnel) : map hostname -> base URL pour
+# router certains Drives connus (ex. pod intra-cluster qui bypass un LB public).
+# Fourni par le déploiement (overlay privé) en JSON, ex :
+#   DRIVE_HOST_ROUTES='{"drive-interne.example": "https://drive-interne.example"}'
+# Vide par défaut : tout host inconnu retombe sur DRIVE_BASE_URL.
+DRIVE_HOST_ROUTES = _json_obj("DRIVE_HOST_ROUTES", {})
 
 # Kevent backend (when TRANSCRIPTION_BACKEND=kevent). The Mirai inference
 # gateway exposes Whisper (transcription) and pyannote (diarization) over

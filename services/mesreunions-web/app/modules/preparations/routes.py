@@ -65,24 +65,11 @@ def _drive_sync_module():
         return None
 
 
-# Routage Drive multi-instances : on supporte plusieurs Drives Mirai
-# (mesfichiers interne au cluster, fichiers.fake-domain.name externe).
-# Key = hostname, value = base URL à utiliser pour les appels API.
-#   - mesfichiers.fake-domain.name : pod intra-cluster
-#     (bypass du LB public qui resettait les sockets idle, cf
-#     docs/debug-brief-drive-connection-reset.md)
-#   - fichiers.fake-domain.name : LB public Mirai
-# NB : on n'utilise PAS de route intra-cluster vers drive-backend pour
-# mesfichiers — testé 2026-05-24 et le drive-backend Django refuse les
-# requêtes HTTP avec Host=drive-backend... (ALLOWED_HOSTS) et redirige
-# vers HTTPS canonical (boucle). On garde donc le hairpin LB public et
-# on tolère les RST via retries + Session fraîche dans DriveClient.
-_DRIVE_HOST_ROUTES = {
-    "mesfichiers.fake-domain.name": "https://mesfichiers.fake-domain.name",
-    "fichiers.fake-domain.name": "https://fichiers.fake-domain.name",
-}
-
-
+# Routage Drive multi-instances : on supporte plusieurs Drives (ex. un pod
+# intra-cluster qui bypass un LB public resettant les sockets idle, et un LB
+# public). La table hostname -> base URL est fournie par le déploiement via
+# la config DRIVE_HOST_ROUTES (JSON) ; vide par défaut. Tout host inconnu (ou
+# ID nu) retombe sur DRIVE_BASE_URL.
 def _resolve_drive_base_url(folder_host):
     """Retourne le base URL Drive à utiliser pour ce job.
 
@@ -91,11 +78,11 @@ def _resolve_drive_base_url(folder_host):
     host inconnu) on retombe sur DRIVE_BASE_URL env qui pointe sur le
     Drive par défaut.
     """
+    from libs.shared.app.config import DRIVE_BASE_URL, DRIVE_HOST_ROUTES
     if folder_host:
         lc = folder_host.strip().lower()
-        if lc in _DRIVE_HOST_ROUTES:
-            return _DRIVE_HOST_ROUTES[lc]
-    from libs.shared.app.config import DRIVE_BASE_URL
+        if lc in DRIVE_HOST_ROUTES:
+            return DRIVE_HOST_ROUTES[lc]
     return DRIVE_BASE_URL
 
 
