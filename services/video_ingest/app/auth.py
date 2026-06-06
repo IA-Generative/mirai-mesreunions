@@ -79,15 +79,22 @@ def verify_bearer(token: str) -> dict:
             raise AuthError(f"JWT invalide : {e}") from e
 
     # Validation des claims standards (exp, iat, nbf auto par authlib).
+    # Audience OBLIGATOIRE (fail-closed) : sans elle, un token frappé pour
+    # un autre client du realm passerait la validation (confusion d'audience).
     audience = os.environ.get("VIDEO_INGEST_OIDC_AUDIENCE")
     issuer = os.environ.get("VIDEO_INGEST_OIDC_ISSUER")
-    if audience:
-        claims.options.setdefault("aud", {"essential": True, "value": audience})
+    if not audience:
+        raise AuthError(
+            "VIDEO_INGEST_OIDC_AUDIENCE non configuré — vérification refusée "
+            "(fail-closed contre la confusion d'audience)",
+            status=500,
+        )
+    claims.options["aud"] = {"essential": True, "value": audience}
     if issuer:
         # Défense en profondeur : si on a configuré l'issuer attendu, on
         # refuse les tokens d'un autre realm (même si signés par la même
         # clé pour une raison X).
-        claims.options.setdefault("iss", {"essential": True, "value": issuer})
+        claims.options["iss"] = {"essential": True, "value": issuer}
     try:
         claims.validate()
     except JoseError as e:
@@ -143,6 +150,39 @@ def require_admin(fn):
             return jsonify({"error": "Rôle admin requis"}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+
+_PROD_MARKERS = {"production", "prod", "prod-beta", "prodbeta", "preprod", "staging"}
+
+
+def _is_production() -> bool:
+    marker = (os.environ.get("ENVIRONMENT") or os.environ.get("APP_ENV") or "").strip().lower()
+    return marker in _PROD_MARKERS
+
+
+def assert_startup_auth_config() -> None:
+    """Garde de démarrage fail-closed (cf. brique partagée `oidc_auth`).
+
+    - Refuse le boot si l'auth est désactivée en **production**
+      (`VIDEO_INGEST_AUTH_DISABLED=1`) — un drapeau de dev laissé actif en
+      prod ouvre le service sans authentification.
+    - Exige une audience attendue (`VIDEO_INGEST_OIDC_AUDIENCE`) dès lors que
+      l'auth est active, pour interdire la confusion d'audience.
+    """
+    auth_disabled = os.environ.get("VIDEO_INGEST_AUTH_DISABLED") == "1"
+    if auth_disabled:
+        if _is_production():
+            raise RuntimeError(
+                "VIDEO_INGEST_AUTH_DISABLED=1 en production : désactivation "
+                "d'authentification interdite hors dev/test."
+            )
+        # Dev/test : bypass autorisé, pas d'autre exigence.
+        return
+    if not os.environ.get("VIDEO_INGEST_OIDC_AUDIENCE"):
+        raise RuntimeError(
+            "VIDEO_INGEST_OIDC_AUDIENCE est obligatoire (audience attendue du "
+            "JWT) : refus de démarrer pour éviter la confusion d'audience."
+        )
 
 
 def reset_cache_for_tests() -> None:

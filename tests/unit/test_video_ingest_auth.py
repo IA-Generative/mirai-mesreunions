@@ -73,3 +73,33 @@ def test_verify_bearer_requires_jwks_url(monkeypatch):
     with pytest.raises(auth.AuthError) as exc:
         auth.verify_bearer("anything.anything.anything")
     assert exc.value.status == 500
+
+
+# ─── PA-05 : audience obligatoire (fail-closed) ───────────────────────────
+
+def test_startup_refuses_missing_audience(monkeypatch):
+    monkeypatch.delenv("VIDEO_INGEST_AUTH_DISABLED", raising=False)
+    monkeypatch.delenv("VIDEO_INGEST_OIDC_AUDIENCE", raising=False)
+    with pytest.raises(RuntimeError):
+        auth.assert_startup_auth_config()
+
+
+def test_startup_ok_with_audience(monkeypatch):
+    monkeypatch.delenv("VIDEO_INGEST_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("VIDEO_INGEST_OIDC_AUDIENCE", "mes-reunions")
+    auth.assert_startup_auth_config()  # ne lève pas
+
+
+# ─── PA-03 : garde de production sur le bypass d'auth ──────────────────────
+
+def test_startup_refuses_auth_disabled_in_prod(monkeypatch):
+    monkeypatch.setenv("VIDEO_INGEST_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    with pytest.raises(RuntimeError):
+        auth.assert_startup_auth_config()
+
+
+def test_startup_allows_auth_disabled_in_dev(monkeypatch):
+    monkeypatch.setenv("VIDEO_INGEST_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    auth.assert_startup_auth_config()  # bypass dev autorisé

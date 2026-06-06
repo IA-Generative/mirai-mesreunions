@@ -380,6 +380,10 @@ def create_app() -> Flask:
                 f"manquante(s) : {', '.join(missing)}. Refuse de booter "
                 "pour éviter les imports silencieusement non matérialisés."
             )
+    # Garde de démarrage fail-closed : audience obligatoire + refus de
+    # désactivation d'auth en production.
+    from .auth import assert_startup_auth_config
+    assert_startup_auth_config()
     app = Flask("video_ingest")
     app.register_blueprint(bp)
     return app
