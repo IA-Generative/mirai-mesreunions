@@ -33,6 +33,7 @@ from libs.shared.app.database import create_session_factory, init_tables
 from libs.shared.app.s3_helper import ensure_bucket, delete_object
 from libs.shared.app.upload_helpers import (
     is_allowed_audio_filename, build_stored_filename, store_audio_to_s3, publish_av_scan_message,
+    looks_like_audio, sniff_audio_magic, magic_bytes_enforced,
 )
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import verify_device_token, utc_now_ts
@@ -820,6 +821,18 @@ def api_upload(qr_token):
 
     if file_size == 0:
         return jsonify({"error": "Fichier vide."}), 400
+
+    # Validation par magic bytes : un contenu non-audio sous extension audio
+    # est rejeté à la porte (l'extension seule ne fait pas foi).
+    if not looks_like_audio(file_data):
+        if magic_bytes_enforced():
+            return jsonify({
+                "error": "Contenu de fichier non reconnu comme audio."
+            }), 400
+        logger.warning(
+            "Upload magic-bytes mismatch (mode log) file=%s sniff=%s",
+            file.filename, sniff_audio_magic(file_data),
+        )
 
     # Build stored filename: {simple_code}_{uuid}_{original_name}
     stored_name = build_stored_filename(session_obj.simple_code, file.filename)

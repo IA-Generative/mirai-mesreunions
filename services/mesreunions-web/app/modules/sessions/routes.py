@@ -38,6 +38,7 @@ from libs.shared.app.security import verify_bearer_token  # noqa: E402
 from libs.shared.app.database import with_db_retry  # noqa: E402
 from libs.shared.app.upload_helpers import (  # noqa: E402
     build_stored_filename, is_allowed_audio_filename, publish_av_scan_message,
+    looks_like_audio, sniff_audio_magic, magic_bytes_enforced,
     store_audio_to_s3,
 )
 
@@ -1449,6 +1450,15 @@ def api_my_upload():
     file_size = len(file_data)
     if file_size == 0:
         return jsonify({"error": "Fichier vide."}), 400
+
+    # Validation par magic bytes (l'extension seule ne fait pas foi).
+    if not looks_like_audio(file_data):
+        if magic_bytes_enforced():
+            return jsonify({"error": "Contenu de fichier non reconnu comme audio."}), 400
+        logger.warning(
+            "Local upload magic-bytes mismatch (mode log) file=%s sniff=%s",
+            file.filename, sniff_audio_magic(file_data),
+        )
 
     s3_upload_cfg = get_s3_upload_cfg()
     db = session_scope()
