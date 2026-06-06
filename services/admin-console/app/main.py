@@ -43,7 +43,7 @@ from libs.shared.app.oidc_refresh_store import store_refresh_token
 from libs.shared.app.oidc_auth import (
     verify_id_token,
     is_user_admin,
-    assert_admin_allowlist_configured,
+    assert_admin_access_configured,
     assert_auth_startup_config,
     OidcAuthError,
 )
@@ -99,9 +99,10 @@ def create_app() -> Flask:
     allowed_users = _parse_allowed_users()
 
     # Garde de démarrage fail-closed : refus de bypass d'auth en prod, et
-    # liste d'accès admin vide interdite (sinon élévation de privilège).
+    # exigence d'un mécanisme d'admin (groupe Keycloak /g/admins
+    # par défaut, ou liste d'accès de secours).
     assert_auth_startup_config(service_name="admin-console")
-    assert_admin_allowlist_configured(allowed_users)
+    assert_admin_access_configured(allowed_users)
 
     ext_db_cfg = load_ext_db()
     int_db_cfg = load_int_db()
@@ -637,6 +638,9 @@ def create_app() -> Flask:
             "email": userinfo.get("email", ""),
             "name": userinfo.get("name", userinfo.get("preferred_username", "")),
             "preferred_username": userinfo.get("preferred_username", ""),
+            # Appartenance aux groupes Keycloak : source des droits admin
+            # (/g/admins).
+            "groups": userinfo.get("groups", []),
         }
         session["id_token"] = token.get("id_token", "")
         session.pop("oidc_state", None)

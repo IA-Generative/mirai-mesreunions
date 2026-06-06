@@ -245,12 +245,50 @@ def assert_auth_startup_config(
 
 # ─── Autorisation admin (fail-closed) ───────────────────────────────────────
 
-def is_user_admin(user: dict, allowed_users: Optional[Iterable[str]]) -> bool:
-    """True si ``user`` figure dans la liste d'accès. Liste vide ⇒ False.
+# Groupe Keycloak portant les droits d'administration. L'appartenance est la
+# source de vérité des droits admin (claim `groups` de l'OIDC). Surchargable
+# par env ``ADMIN_GROUP``.
+DEFAULT_ADMIN_GROUP = "/g/admins"
 
-    Fail-closed : une liste d'accès vide ou absente interdit l'accès, jamais
-    l'inverse (contrairement au pattern fail-open historique).
+
+def _admin_group(admin_group: Optional[str]) -> str:
+    import os
+    if admin_group is not None:
+        return admin_group
+    return os.getenv("ADMIN_GROUP", DEFAULT_ADMIN_GROUP)
+
+
+def _normalize_group(value: str) -> str:
+    """Normalise un chemin de groupe pour comparaison robuste (casse + slashes)."""
+    return "/" + str(value or "").strip().strip("/").lower()
+
+
+def user_groups(user: dict) -> list:
+    """Liste des groupes portés par le claim ``groups`` (str ou liste)."""
+    raw = (user or {}).get("groups")
+    if isinstance(raw, str):
+        raw = [raw]
+    return [g for g in (raw or []) if g]
+
+
+def is_user_admin(
+    user: dict,
+    allowed_users: Optional[Iterable[str]] = None,
+    *,
+    admin_group: Optional[str] = None,
+) -> bool:
+    """True si ``user`` a les droits d'administration. Fail-closed.
+
+    Source de vérité : **appartenance au groupe** ``admin_group`` (claim
+    ``groups`` OIDC), défaut ``/g/admins``. Une liste d'accès
+    ``allowed_users`` optionnelle sert de secours (break-glass) ; vide/absente
+    elle n'accorde rien. Aucun membre du groupe + hors allowlist ⇒ refus.
     """
+    group = _admin_group(admin_group)
+    if group:
+        target = _normalize_group(group)
+        if any(_normalize_group(g) == target for g in user_groups(user)):
+            return True
     allowed = {str(x).strip().lower() for x in (allowed_users or []) if str(x).strip()}
     if not allowed:
         return False
@@ -263,8 +301,27 @@ def is_user_admin(user: dict, allowed_users: Optional[Iterable[str]]) -> bool:
     return any(c and c in allowed for c in candidates)
 
 
+def assert_admin_access_configured(
+    allowed_users: Optional[Iterable[str]] = None,
+    *,
+    admin_group: Optional[str] = None,
+) -> None:
+    """Refuse le démarrage si **aucun** mécanisme d'admin n'est configuré
+    (ni groupe, ni liste d'accès) — fail-closed."""
+    group = _admin_group(admin_group)
+    allowed = {str(x).strip().lower() for x in (allowed_users or []) if str(x).strip()}
+    if not group and not allowed:
+        raise AuthStartupError(
+            "Aucun mécanisme d'autorisation admin configuré (ni ADMIN_GROUP ni "
+            "ADMIN_ALLOWED_USERS) : refus de démarrer (fail-closed)."
+        )
+
+
 def assert_admin_allowlist_configured(allowed_users: Optional[Iterable[str]]) -> None:
-    """Refuse le démarrage si la liste d'accès admin est vide (fail-closed)."""
+    """Refuse le démarrage si la liste d'accès admin est vide (fail-closed).
+
+    Conservé pour compatibilité ; préférer ``assert_admin_access_configured``
+    (qui accepte une admin par groupe Keycloak)."""
     allowed = {str(x).strip().lower() for x in (allowed_users or []) if str(x).strip()}
     if not allowed:
         raise AuthStartupError(

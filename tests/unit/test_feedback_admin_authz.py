@@ -40,25 +40,28 @@ def feedback_mod(monkeypatch):
     return mod
 
 
-def test_is_admin_fail_closed_without_roles(feedback_mod):
+def test_is_admin_fail_closed_without_group(feedback_mod, monkeypatch):
+    monkeypatch.delenv("ADMIN_ALLOWED_USERS", raising=False)
     assert feedback_mod._is_admin(None) is False
     assert feedback_mod._is_admin({}) is False
-    assert feedback_mod._is_admin({"sub": "u", "roles": []}) is False
-    assert feedback_mod._is_admin({"roles": "admin"}) is False  # type invalide
+    assert feedback_mod._is_admin({"sub": "u", "groups": []}) is False
+    assert feedback_mod._is_admin({"groups": ["/g/users"]}) is False
 
 
-def test_is_admin_true_only_with_admin_role(feedback_mod):
-    assert feedback_mod._is_admin({"roles": ["user", "admin"]}) is True
-    assert feedback_mod._is_admin({"roles": ["ADMIN"]}) is True
-    assert feedback_mod._is_admin({"roles": ["editor"]}) is False
+def test_is_admin_true_with_admin_group(feedback_mod, monkeypatch):
+    monkeypatch.delenv("ADMIN_ALLOWED_USERS", raising=False)
+    assert feedback_mod._is_admin({"groups": ["/g/users", "/g/admins"]}) is True
+    # Tolérant casse/slash.
+    assert feedback_mod._is_admin({"groups": ["g/Admins"]}) is True
 
 
-def test_ensure_admin_or_403_blocks_non_admin(feedback_mod):
+def test_ensure_admin_or_403_blocks_non_member(feedback_mod, monkeypatch):
     import flask
 
+    monkeypatch.delenv("ADMIN_ALLOWED_USERS", raising=False)
     app = flask.Flask(__name__)
     with app.test_request_context():
-        resp = feedback_mod._ensure_admin_or_403({"roles": []})
+        resp = feedback_mod._ensure_admin_or_403({"groups": ["/g/users"]})
         assert resp is not None
         body, status = resp
         assert status == 403

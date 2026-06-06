@@ -159,6 +159,9 @@ def auth_callback():
         "sub": userinfo.get("sub", ""),
         "email": userinfo.get("email", ""),
         "name": userinfo.get("name", userinfo.get("preferred_username", "")),
+        # Groupes Keycloak (claim `groups`) : source des droits admin
+        # (/g/admins). Cf. modules/feedback/routes.py:_is_admin.
+        "groups": userinfo.get("groups", []),
     }
     session["id_token"] = token.get("id_token", "")
     # Access token stocké pour les proxys serveur→serveur (ex. video-ingest).

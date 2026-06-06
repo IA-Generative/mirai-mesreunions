@@ -44,13 +44,20 @@ BASE_ENV = {
 }
 
 
-def test_empty_allowlist_refuses_boot(monkeypatch):
-    """ADMIN_ALLOWED_USERS vide ⇒ refus de démarrage (fail-closed)."""
+def test_no_admin_mechanism_refuses_boot(monkeypatch):
+    """Ni groupe ni liste d'accès ⇒ refus de démarrage (fail-closed)."""
     from libs.shared.app.oidc_auth import AuthStartupError
 
-    env = {**BASE_ENV, "ADMIN_ALLOWED_USERS": ""}
+    env = {**BASE_ENV, "ADMIN_ALLOWED_USERS": "", "ADMIN_GROUP": ""}
     with pytest.raises(AuthStartupError):
-        _load(monkeypatch, env, "admin_main_empty_allowlist")
+        _load(monkeypatch, env, "admin_main_no_mechanism")
+
+
+def test_empty_allowlist_with_group_boots(monkeypatch):
+    """Liste vide mais admin par groupe (défaut /g/admins) ⇒ boot OK."""
+    env = {**BASE_ENV, "ADMIN_ALLOWED_USERS": ""}
+    mod = _load(monkeypatch, env, "admin_main_group_boot")
+    assert mod.application is not None
 
 
 def test_default_allowlist_boots(monkeypatch):

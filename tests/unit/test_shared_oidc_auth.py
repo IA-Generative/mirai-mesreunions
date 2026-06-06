@@ -273,3 +273,49 @@ def test_assert_admin_allowlist_configured_refuses_empty():
         oidc_auth.assert_admin_allowlist_configured(set())
     # Une liste non vide passe.
     oidc_auth.assert_admin_allowlist_configured({"admin"})
+
+
+# ─── Admin par groupe Keycloak (/g/admins) ─────────────────────
+
+def test_admin_via_group_membership():
+    user = {"sub": "s", "groups": ["/g/users", "/g/admins"]}
+    assert oidc_auth.is_user_admin(user) is True
+
+
+def test_non_member_of_admin_group_denied():
+    user = {"sub": "s", "groups": ["/g/users"]}
+    # Pas dans le groupe admin et pas d'allowlist ⇒ refus.
+    assert oidc_auth.is_user_admin(user) is False
+    assert oidc_auth.is_user_admin(user, set()) is False
+
+
+def test_admin_group_match_is_case_and_slash_tolerant():
+    user = {"sub": "s", "groups": ["g/Admins"]}  # sans slash, casse
+    assert oidc_auth.is_user_admin(user) is True
+
+
+def test_admin_group_overridable_by_env(monkeypatch):
+    monkeypatch.setenv("ADMIN_GROUP", "/g/autre-groupe")
+    member = {"sub": "s", "groups": ["/g/autre-groupe"]}
+    notmember = {"sub": "s", "groups": ["/g/admins"]}
+    assert oidc_auth.is_user_admin(member) is True
+    assert oidc_auth.is_user_admin(notmember) is False
+
+
+def test_admin_group_explicit_param():
+    user = {"sub": "s", "groups": ["/g/x"]}
+    assert oidc_auth.is_user_admin(user, admin_group="/g/x") is True
+    assert oidc_auth.is_user_admin(user, admin_group="/g/y") is False
+
+
+def test_allowlist_still_works_as_breakglass():
+    user = {"preferred_username": "alice", "groups": []}
+    assert oidc_auth.is_user_admin(user, {"alice"}) is True
+
+
+def test_assert_admin_access_configured_accepts_group():
+    # Liste vide mais groupe configuré (défaut) ⇒ OK.
+    oidc_auth.assert_admin_access_configured(set())
+    # Ni groupe ni allowlist ⇒ refus.
+    with pytest.raises(oidc_auth.AuthStartupError):
+        oidc_auth.assert_admin_access_configured(set(), admin_group="")
