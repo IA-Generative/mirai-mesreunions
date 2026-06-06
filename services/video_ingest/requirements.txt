@@ -4,9 +4,14 @@
 #
 # Versions épinglées prudemment : yt-dlp casse régulièrement quand YouTube
 # change son API, prévoir un bump régulier (cf. point de vigilance §8).
-
-yt-dlp>=2025.1.0
-youtube-transcript-api>=1.0.0
+#
+# Borne de version : la surface d'import distant est fermée par construction
+# (URL canonique reconstruite côté serveur), mais yt-dlp reste la dépendance
+# par laquelle une faille d'extracteur réintroduirait le risque. On épingle
+# donc une version exacte, auditable, à bumper de façon délibérée (pas de
+# `>=` flottant qui tirerait silencieusement une version non revue).
+yt-dlp==2026.3.17
+youtube-transcript-api>=1.0.0,<2.0.0
 
 # BDD : psycopg2 direct, sans SQLAlchemy ORM (cf. README D14 — raw SQL
 # pour minimiser les deps lors de l'extraction du composant).
