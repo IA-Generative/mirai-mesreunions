@@ -89,7 +89,6 @@ def verify_bearer(token: str) -> dict:
             "(fail-closed contre la confusion d'audience)",
             status=500,
         )
-    claims.options["aud"] = {"essential": True, "value": audience}
     if issuer:
         # Défense en profondeur : si on a configuré l'issuer attendu, on
         # refuse les tokens d'un autre realm (même si signés par la même
@@ -99,6 +98,17 @@ def verify_bearer(token: str) -> dict:
         claims.validate()
     except JoseError as e:
         raise AuthError(f"JWT claims invalides : {e}") from e
+
+    # Audience fail-closed, anti-confusion : valeur attendue dans `aud` OU
+    # égale à `azp` (client émetteur). Keycloak met le client appelant dans
+    # `azp` et `aud` cible les resource servers aval ; un token d'un autre
+    # client (azp différent, absent de aud) est rejeté.
+    token_aud = claims.get("aud")
+    if isinstance(token_aud, str):
+        token_aud = [token_aud]
+    token_aud = token_aud or []
+    if audience not in token_aud and audience != claims.get("azp"):
+        raise AuthError("Audience du JWT non reconnue (aud/azp)")
 
     sub = claims.get("sub")
     if not sub:

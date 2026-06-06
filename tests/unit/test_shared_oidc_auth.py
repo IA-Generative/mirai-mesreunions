@@ -129,6 +129,25 @@ def test_audience_confusion_rejected(keypair):
         )
 
 
+def test_audience_accepted_via_azp(keypair):
+    """Token réel Keycloak : `aud` cible les resource servers aval, le client
+    appelant est dans `azp`. L'audience attendue == azp ⇒ accepté."""
+    token = _sign(keypair, _base_claims(aud=["drive", "mcr", "account"], azp=AUD))
+    claims = oidc_auth.verify_oidc_token(
+        token, audience=AUD, issuer=ISSUER, jwks_url=JWKS_URL
+    )
+    assert claims["sub"] == "user-123"
+
+
+def test_audience_rejected_when_neither_aud_nor_azp(keypair):
+    """Token d'un autre client : azp différent et pas dans aud ⇒ rejeté."""
+    token = _sign(keypair, _base_claims(aud=["drive", "account"], azp="autre-client"))
+    with pytest.raises(oidc_auth.OidcAuthError):
+        oidc_auth.verify_oidc_token(
+            token, audience=AUD, issuer=ISSUER, jwks_url=JWKS_URL
+        )
+
+
 def test_expired_token_rejected(keypair):
     token = _sign(keypair, _base_claims(exp=int(time.time()) - 10))
     with pytest.raises(oidc_auth.OidcAuthError):

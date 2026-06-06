@@ -140,11 +140,24 @@ def verify_oidc_token(
         )
 
     claims = _decode_with_rotation(token, jwks_url)
-    claims.options["aud"] = {"essential": True, "value": audience}
+    # exp/iat/nbf via authlib ; l'audience est contrôlée manuellement
+    # ci-dessous (aud OU azp), donc on ne pose pas d'option `aud` essentielle.
     try:
         claims.validate()
     except JoseError as exc:
         raise OidcAuthError(f"JWT claims invalides : {exc}") from exc
+
+    # Contrôle d'audience fail-closed, anti-confusion : la valeur attendue
+    # doit figurer dans ``aud`` **ou** correspondre à ``azp`` (authorized
+    # party = client émetteur). Keycloak place le client appelant dans
+    # ``azp`` et réserve ``aud`` aux resource servers en aval ; un token
+    # frappé pour un autre client (azp différent, absent de aud) est rejeté.
+    token_aud = claims.get("aud")
+    if isinstance(token_aud, str):
+        token_aud = [token_aud]
+    token_aud = token_aud or []
+    if audience not in token_aud and audience != claims.get("azp"):
+        raise OidcAuthError("Audience du JWT non reconnue (aud/azp)")
 
     # Validation de l'issuer : accepte une valeur unique ou un ensemble
     # (utile quand Keycloak frappe ``iss`` différemment selon l'horizon
