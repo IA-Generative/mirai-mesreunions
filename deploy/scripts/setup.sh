@@ -8,6 +8,44 @@ echo "============================================"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# ---- Audio de test : hébergé dans des repos dédiés (hors historique git) ------
+# Fixtures publiques (poèmes domaine public, eicar, snippets) + datasets réels
+# privés. Override possible via env FIXTURES_REPO / DATASETS_REPO. Datasets en
+# opt-in : `setup.sh --with-datasets`.
+FIXTURES_REPO="${FIXTURES_REPO:-https://github.com/IA-Generative/mirai-mesreunions-fixtures.git}"
+DATASETS_REPO="${DATASETS_REPO:-https://github.com/IA-Generative/mirai-mesreunions-datasets.git}"
+WITH_DATASETS=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-datasets) WITH_DATASETS=1 ;;
+    esac
+done
+
+_fetch_into() {  # <repo-url> <dest-dir> <label> <soft-fail-msg>
+    local repo="$1" dest="$2" label="$3" softmsg="$4" tmp
+    if [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+        echo "[OK] $label déjà présent(es) ($dest)."; return 0
+    fi
+    echo "[..] Récupération $label..."
+    tmp="$(mktemp -d)"
+    if git clone --depth 1 -q "$repo" "$tmp" 2>/dev/null; then
+        mkdir -p "$dest"; cp -R "$tmp/audio/." "$dest/"
+        echo "[OK] $label -> $dest"
+    else
+        echo "[!!] $softmsg"
+    fi
+    rm -rf "$tmp"
+}
+
+fetch_audio_data() {
+    _fetch_into "$FIXTURES_REPO" "tests/fixtures/audio" "fixtures audio" \
+        "fixtures indisponibles (réseau). On continue sans."
+    [ "$WITH_DATASETS" = "1" ] && _fetch_into "$DATASETS_REPO" "datasets" \
+        "datasets privés" "datasets indisponibles (accès privé requis)."
+    return 0
+}
+fetch_audio_data
+
 detect_public_host_ip() {
     # 1) Respect explicit override
     if [ -n "${PUBLIC_HOST:-}" ]; then

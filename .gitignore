@@ -24,47 +24,29 @@ env/
 .idea/
 .vscode/
 
-# Claude Code internal scratch (worktrees / agent state — never commit)
+# Scratch local d'outils de dev (worktrees / état d'agent — never commit)
 .claude/
 
-# Manifests de base zone interne/externe — retirés du repo public.
-# Les overlays sous deploy/kubernetes/environments/ référencent ces
-# dossiers via des chemins relatifs ; ils doivent être présents localement
-# (et synchronisés sur la VM de build hors-git) pour que `kustomize build`
-# fonctionne. Voir docs internes pour récupération.
-deploy/kubernetes/internal-zone/
-deploy/kubernetes/external-zone/
-
-# Environment files
+# Variables d'environnement
 .env
 .env.*
 !.env.example
 
-# Local Kubernetes secrets (never commit)
-deploy/kubernetes/shared/secrets.local.yaml
-deploy/kubernetes/shared/secrets.*.local.yaml
+# Overrides et secrets locaux — jamais committés (convention *.local.*)
+*.local.yaml
+*.local.yml
+*.local.env
+*.local.sh
+*.local.md
 
-# Local helper scripts/env (never commit)
-deploy/kubernetes/scripts/*.local.sh
-deploy/kubernetes/scripts/*.local.env
-
-# Kubernetes kubeconfigs (NEVER commit — contain cluster CA + user tokens)
-deploy/kubernetes/kubeconfigs/*
-!deploy/kubernetes/kubeconfigs/.gitkeep
-!deploy/kubernetes/kubeconfigs/README.md
+# Kubeconfigs — jamais committés (CA + tokens cluster)
 *.kubeconfig
 .kube/
 
-# Environment-specific local overrides (manifests, env files, sensitive notes)
-deploy/kubernetes/environments/**/*.local.yaml
-deploy/kubernetes/environments/**/*.local.env
-deploy/kubernetes/environments/**/*.local.md
-deploy/kubernetes/environments/**/*.local.sh
-**/*.local.md
-
-# Audio source & rapports locaux — non versionnés (gros binaires + scratch).
+# Données locales récupérées hors dépôt par setup.sh, non versionnées
 /datasets/
-/reports/
+tests/fixtures/audio/
 
-# Incident sécurité — local uniquement (contient infra sensible)
-INCIDENT_FUITE_*.md
+# Fichiers et configuration locaux, non publiés (convention private/ et *.private/)
+private/
+*.private/

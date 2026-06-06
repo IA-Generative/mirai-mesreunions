@@ -26,19 +26,14 @@ regexes = [
   '''testpassword''',
   '''adminpassword''',
   '''testkey-deadbeef''',                   # fixture de test
-  # NB : on n'allowliste AUCUN littéral de secret réel ici (sinon la réécriture
-  # d'historique caviarde le .gitleaks.toml lui-même et casse le regex). Les
-  # anciens tokens dev/prod sont supprimés par la purge d'historique, pas masqués.
+  # On n'allowliste aucun littéral de secret réel ici : un vrai secret n'a pas
+  # sa place dans le dépôt, même en allowlist.
   '''\$\{[A-Z_]+(:-[^}]*)?\}''',            # références env ${VAR} / ${VAR:-default}
   '''fake-domain\.name''',                  # hostnames d'intégration volontaires
   # Faux positifs non-secrets confirmés à l'audit :
   '''diarization-api:[A-Za-z0-9._-]+''',    # tag d'image Docker dans un doc benchmark
-  '''00000000-0000-0000-0000-000000000000''', # user_sub Keycloak (identifiant, pas un credential)
+  '''00000000-0000-0000-0000-000000000000''', # UUID d'exemple (placeholder)
 ]
-
-# NB : le qr_token prod « ***... » n'est volontairement PAS allowlisté.
-# C'est une vraie fuite ; le scan doit rester ROUGE tant que l'historique
-# n'est pas réécrit. Une fois purgé, le scan repasse au vert.
 
 # Fichiers connus pour ne contenir que des templates/exemples.
 paths = [
