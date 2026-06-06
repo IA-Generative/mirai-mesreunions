@@ -195,13 +195,17 @@ def test_get_job_nominal(client):
 
 
 # ─── GET /video/sources/<id>/transcript ───────────────────────────────
+# Le catalogue est un cache partagé : la lecture est scopée par propriété
+# (signet ou job de l'utilisateur). On patch `user_owns_source` pour
+# distinguer le propriétaire (True) de l'énumérateur tiers (False).
+
 
 def test_get_transcript_format_text(client):
-    cur = MagicMock()
+    conn, cur, cm = _conn()
     cur.fetchone.return_value = (1, "fr", "subtitle_manual", "hello world",
                                   [{"start_seconds": 0, "end_seconds": 5, "text": "hello world"}])
-    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
-    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=True):
         resp = client.get("/video/sources/1/transcript")
     body = resp.get_json()
     assert resp.status_code == 200
@@ -211,23 +215,23 @@ def test_get_transcript_format_text(client):
 
 
 def test_get_transcript_format_segments(client):
-    cur = MagicMock()
+    conn, cur, cm = _conn()
     cur.fetchone.return_value = (1, "fr", "subtitle_manual", "x",
                                   [{"start_seconds": 0, "end_seconds": 5, "text": "x"}])
-    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
-    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=True):
         resp = client.get("/video/sources/1/transcript?format=segments")
     body = resp.get_json()
     assert body["segments"] == [{"start_seconds": 0, "end_seconds": 5, "text": "x"}]
 
 
 def test_get_transcript_format_markdown_has_timestamps(client):
-    cur = MagicMock()
+    conn, cur, cm = _conn()
     cur.fetchone.return_value = (1, "fr", "subtitle_manual", "x",
                                   [{"start_seconds": 12, "end_seconds": 20, "text": "bonjour"},
                                    {"start_seconds": 20, "end_seconds": 30, "text": "monde"}])
-    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
-    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=True):
         resp = client.get("/video/sources/1/transcript?format=markdown")
     body = resp.get_json()
     assert "**[12s]**" in body["markdown"]
@@ -235,12 +239,52 @@ def test_get_transcript_format_markdown_has_timestamps(client):
 
 
 def test_get_transcript_not_found(client):
-    cur = MagicMock()
+    conn, cur, cm = _conn()
     cur.fetchone.return_value = None
-    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
-    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=True):
         resp = client.get("/video/sources/999/transcript")
     assert resp.status_code == 404
+
+
+def test_get_transcript_not_owned_returns_404(client):
+    """BOLA : un utilisateur sans lien vers la source ne lit pas son transcript."""
+    conn, cur, cm = _conn()
+    cur.fetchone.return_value = (1, "fr", "subtitle_manual", "secret", [])
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=False):
+        resp = client.get("/video/sources/1/transcript")
+    assert resp.status_code == 404
+    # La requête transcript ne doit même pas être exécutée.
+    assert cur.execute.call_count == 0
+
+
+def test_get_source_owner_ok(client):
+    conn, cur, cm = _conn()
+    from datetime import datetime
+    cur.fetchone.return_value = (
+        1, "youtube", "dQw4w9WgXcQ", "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "Title", "Channel", 213, datetime(2026, 1, 1), {}, datetime(2026, 1, 2),
+    )
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=True):
+        resp = client.get("/video/sources/1")
+    assert resp.status_code == 200
+    assert resp.get_json()["title"] == "Title"
+
+
+def test_get_source_not_owned_returns_404(client):
+    """BOLA : énumération du catalogue partagé fermée pour un tiers."""
+    conn, cur, cm = _conn()
+    cur.fetchone.return_value = (
+        1, "youtube", "x", "u", "Secret Title", "Secret Channel",
+        1, None, {}, None,
+    )
+    with patch("services.video_ingest.app.api.db.connection", return_value=cm), \
+         patch("services.video_ingest.app.api.user_owns_source", return_value=False):
+        resp = client.get("/video/sources/1")
+    assert resp.status_code == 404
+    assert cur.execute.call_count == 0
 
 
 # ─── GET /video/search ────────────────────────────────────────────────
