@@ -44,7 +44,25 @@ app = Flask(__name__, template_folder=os.path.join(os.path.dirname(__file__), "t
 app.secret_key = SECRET_KEY
 app.config["MAX_CONTENT_LENGTH"] = UPLOAD_MAX_FILE_SIZE_MB * 1024 * 1024
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+def _ws_allowed_origins():
+    """Origines autorisées pour le canal WebSocket de statut.
+
+    Liste blanche via ``WS_ALLOWED_ORIGINS`` (séparée par virgules). Si non
+    configurée, on retombe sur la même origine uniquement (python-socketio
+    compare l'en-tête Origin à l'hôte) plutôt que sur ``"*"`` qui laissait
+    toute origine s'abonner aux statuts d'upload.
+    """
+    raw = (os.getenv("WS_ALLOWED_ORIGINS", "") or "").strip()
+    if raw:
+        return [o.strip() for o in raw.split(",") if o.strip()]
+    return None  # python-socketio : défaut = même origine
+
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=_ws_allowed_origins(),
+    async_mode="threading",
+)
 
 db_cfg = load_ext_db()
 s3_cfg = load_s3_upload()
@@ -950,11 +968,23 @@ def api_status(qr_token):
 
 @socketio.on("join")
 def on_join(data):
-    """Join a room based on qr_token for real-time updates."""
-    room = data.get("qr_token")
-    if room:
-        join_room(room)
-        emit("joined", {"room": room})
+    """Join a room based on qr_token for real-time updates.
+
+    La room est le ``qr_token`` (secret de forte entropie). On valide tout de
+    même son existence/validité côté serveur avant d'abonner le client :
+    un join non authentifié ne doit pas pouvoir s'abonner à un statut
+    arbitraire (durcissement WebSocket).
+    """
+    room = (data or {}).get("qr_token")
+    if not room:
+        emit("join_error", {"error": "qr_token requis"})
+        return
+    session_obj = get_session_by_token(room)
+    if not session_obj or not can_view_status(session_obj):
+        emit("join_error", {"error": "Session introuvable ou expirée."})
+        return
+    join_room(room)
+    emit("joined", {"room": room})
 
 
 # ─── Notification endpoint (called by workers) ─────────────
@@ -1040,6 +1070,9 @@ def notify_status():
 def create_app():
     global SessionLocal, _purge_thread_started
     require_strong_shared_secret("INTERNAL_API_TOKEN")
+    # Garde de démarrage fail-closed (cohérente avec les autres services).
+    from libs.shared.app.oidc_auth import assert_auth_startup_config
+    assert_auth_startup_config(service_name="mobile-upload-pwa")
     init_tables(db_cfg, ExternalBase)
     SessionLocal = create_session_factory(db_cfg)
     ensure_bucket(s3_cfg)
