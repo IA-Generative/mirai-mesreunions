@@ -561,7 +561,4 @@ connexions, doublant la fenêtre d'indispo.
 
 ## Captures Associees
 
-- QR generator: `docs/screenshots/qr-code-gen.png`
-- Suivi activite: `docs/screenshots/activity-follow.png`
-- Upload mobile: `docs/screenshots/upload-mobile.png`
-- Admin: `docs/screenshots/admin-panel.png`
+Voir la section « Captures d'écran » du `README.md`.

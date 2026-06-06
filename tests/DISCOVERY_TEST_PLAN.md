@@ -35,39 +35,6 @@ Il couvre aussi la compréhension du **renouvellement token (+7 jours + quota)**
 - Upload Portal: URL issue du QR
 - Admin Portal: `https://qrcode-import.fake-domain.name/admin/`
 
-## Repères visuels (captures)
-
-1. Génération QR et options token (étape 1)
-
-![QR Generator](../docs/screenshots/qr-code-gen.png)
-
-2. Suivi d'activité (étape 3)
-
-![Suivi activité](../docs/screenshots/activity-follow.png)
-
-3. Saisie code court mobile (étapes 2-3)
-
->Cette étape n'est pas nécessaire si le QRCode est flashé, passe directement à l'étape suivante Upload.
-
-![Code court mobile](../docs/screenshots/enter-small-code.png)
-
-4. Upload mobile / statut (étape 3)
-
-![Upload mobile](../docs/screenshots/upload-mobile.png)
-
-5. Vue application mobile (étapes 2-4)
-
->Le sytème propose d'installer une pseudo application mobile ( mettre sur l'écran d'accueil )
-
-![Application mobile](../docs/screenshots/mobile-application.jpeg)
-![Android - installation PWA](../docs/screenshots/install-android.png)
-![Android - bouton installation](../docs/screenshots/install-android-button.png)
-![Android - application](../docs/screenshots/mobile-app-android.png)
-
-6. Portail admin / compte-rendu (étape 6)
-
-![Admin panel](../docs/screenshots/admin-panel.png)
-
 ## Scénario guidé (pas à pas)
 
 ### 1. Génération et compréhension initiale (5 min)

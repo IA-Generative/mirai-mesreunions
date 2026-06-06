@@ -395,20 +395,27 @@ kubectl -n audio-internal rollout restart deploy/internal-ingester
 
 ## 9. Captures d'écran
 
-QR Generator
-![QR Generator](docs/screenshots/qr-code-gen.png)
-![Activité](docs/screenshots/activity-follow.png)
+### Mes réunions (IA)
 
-Upload mobile
-![Code court mobile](docs/screenshots/enter-small-code.png)
-![Upload mobile](docs/screenshots/upload-mobile.png)
-![Application mobile](docs/screenshots/mobile-application.jpeg)
-![Android — installation PWA](docs/screenshots/install-android.png)
-![Android — bouton installation](docs/screenshots/install-android-button.png)
-![Android — application](docs/screenshots/mobile-app-android.png)
+Liste des réunions importées (audio, YouTube, Drive…) :
 
-Admin
-![Admin panel](docs/screenshots/admin-panel.png)
+![Liste des réunions](docs/screenshots/mesreunions-liste.png)
+
+Détail d'une réunion — résumé, compte-rendu structuré et transcription synchronisée à la vidéo :
+
+![Détail d'une réunion](docs/screenshots/mesreunions-detail.png)
+
+### Préparation de réunion
+
+Briefs préparés en amont, rattachés automatiquement à l'enregistrement correspondant :
+
+![Préparation de réunion](docs/screenshots/mesreunions-preparation.png)
+
+### Mes appareils
+
+Enrôlement et gestion des appareils autorisés à uploader :
+
+![Mes appareils](docs/screenshots/mesreunions-appareils.png)
 
 ---
 
