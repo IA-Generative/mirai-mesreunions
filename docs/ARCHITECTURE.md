@@ -179,7 +179,7 @@ sequenceDiagram
     FP->>MQ: publish transcription (audio_file_id, stored_filename)
     MQ-->>STT: deliver transcription
     STT->>S3I: GET audio (stored_filename)
-    Note over STT: backend `stub` par défaut (délai simulé) ;<br/>backends `mcr` et `kevent` court-circuitent la queue<br/>(cf docs/integrate-with-{mcr,kevent}.md)
+    Note over STT: backend stub par défaut (délai simulé) ;<br/>backends mcr et kevent court-circuitent la queue<br/>(cf docs/integrate-with-mcr.md et integrate-with-kevent.md)
     STT->>PGI: UPDATE user_audio_files<br/>transcription_status=processing → completed
     STT->>PGI: stocke transcription_text
     STT->>PGI: INSERT transcription_events (audit)
@@ -388,7 +388,6 @@ flowchart LR
   pas se connecter — TCP RST). Doc complète : [docs/BUG_SCW_LB_INTER_CLUSTER.md](BUG_SCW_LB_INTER_CLUSTER.md).
   Filet applicatif `with_db_retry` toujours en place dans
   `libs/shared/app/database.py` (safety net défensif).
-
 
 ### Pattern CNAME delegation cert-manager
 
