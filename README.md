@@ -409,6 +409,16 @@ Détail d'une réunion — résumé, compte-rendu structuré et transcription sy
 
 ![Détail d'une réunion](docs/screenshots/mesreunions-detail.png)
 
+### Interroger mes réunions (RAG)
+
+Posez une question en langage naturel : la réponse est synthétisée à partir de vos réunions indexées.
+
+![Interroger mes réunions](docs/screenshots/mesreunions-rag.png)
+
+Recommandations structurées, avec les sources citées et cliquables (la réunion d'origine) :
+
+![Recommandations et sources](docs/screenshots/mesreunions-rag-sources.png)
+
 ### Préparation de réunion
 
 Briefs préparés en amont, rattachés automatiquement à l'enregistrement correspondant :
