@@ -37,6 +37,7 @@ from libs.shared.app.upload_helpers import (
 )
 from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
 from libs.shared.app.device_token import verify_device_token, utc_now_ts
+from libs.shared.app.rate_limit import client_ip, SlidingWindowLimiter
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -82,6 +83,27 @@ DEVICE_REVALIDATE_INTERVAL_SECONDS = max(60, int(os.getenv("DEVICE_REVALIDATE_IN
 DEVICE_REVALIDATE_MAX_FAILURE_SECONDS = max(300, int(os.getenv("DEVICE_REVALIDATE_MAX_FAILURE_SECONDS", "14400")))
 _device_validation_state = {}
 _device_validation_lock = threading.Lock()
+
+# Durcissement de la vérification libre du code (QR).
+# IP réelle derrière l'ingress (XFF posé par le dernier hop de confiance).
+TRUSTED_PROXY_HOPS = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
+# Rate-limit généreux par IP sur la résolution de code (anti-bruteforce de
+# l'espace des codes), volontairement large pour ne pas pénaliser une
+# organisation derrière une IP NAT — le verrou par-code en base fait le fin.
+_code_lookup_limiter = SlidingWindowLimiter(
+    max_events=int(os.getenv("CODE_LOOKUP_RATE_MAX", "30")),
+    window_seconds=int(os.getenv("CODE_LOOKUP_RATE_WINDOW_SECONDS", "60")),
+)
+# Verrou par-code : gel de la session au-delà de N tentatives échouées.
+QR_CODE_MAX_FAILED_ATTEMPTS = max(1, int(os.getenv("QR_CODE_MAX_FAILED_ATTEMPTS", "20")))
+
+
+def _request_client_ip() -> str:
+    return client_ip(
+        remote_addr=request.remote_addr,
+        forwarded_for=request.headers.get("X-Forwarded-For"),
+        trusted_proxy_hops=TRUSTED_PROXY_HOPS,
+    )
 
 
 # ─── Health ─────────────────────────────────────────────────
@@ -556,10 +578,21 @@ def service_worker():
 
 @app.route("/code", methods=["POST"])
 def code_lookup():
-    """Redirect to upload page from simple code."""
+    """Redirect to upload page from simple code.
+
+    Durci contre le bruteforce de l'espace des codes : rate-limit par IP
+    réelle (proxy-aware). Réponse uniforme pour code absent ou session gelée
+    (pas d'oracle invalide/expiré/épuisé).
+    """
+    if not _code_lookup_limiter.allow(_request_client_ip(), now=utc_now_ts()):
+        return render_template(
+            "upload_landing.html",
+            error="Trop de tentatives. Réessayez dans quelques instants.",
+        ), 429
     code = request.form.get("code", "").strip().upper()
     session_obj = get_session_by_code(code)
-    if not session_obj:
+    # Code absent OU session gelée par le verrou par-code ⇒ même réponse.
+    if not session_obj or session_obj.locked_at is not None:
         return render_template("upload_landing.html", error="Code invalide.")
     return redirect(f"/upload/{session_obj.qr_token}")
 
@@ -768,11 +801,78 @@ def api_device_enroll(qr_token):
         return jsonify({"error": "enrollment_unavailable"}), 503
 
 
+def _register_qr_failed_attempt(session_id) -> None:
+    """Incrémente le compteur d'échecs de la session et la gèle au-delà du
+    seuil (verrou par-code en base, autoritaire multi-réplicas)."""
+    db = SessionLocal()
+    try:
+        sess = db.query(UploadSession).filter(UploadSession.id == session_id).first()
+        if not sess:
+            return
+        sess.failed_attempts = (sess.failed_attempts or 0) + 1
+        if sess.failed_attempts >= QR_CODE_MAX_FAILED_ATTEMPTS and sess.locked_at is None:
+            sess.locked_at = datetime.now(timezone.utc)
+            logger.warning("QR session gelée après %s tentatives échouées",
+                           sess.failed_attempts)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("register QR failed attempt failed")
+    finally:
+        db.close()
+
+
+def _claim_device_for_session(session_id, device_id) -> tuple[bool, str]:
+    """Lie la session au premier appareil qui réussit (liaison mono-device).
+
+    Claim atomique (``UPDATE ... WHERE claimed_by_device_id IS NULL``) pour
+    gérer la concurrence multi-réplicas. Un second appareil différent est
+    refusé. Le device_id (pas l'IP) est la clé → proxy-safe. Sur erreur DB
+    transitoire, on n'empêche pas l'upload (l'autorité interne porte déjà la
+    règle 1-QR-1-device) mais on trace.
+    """
+    if not device_id:
+        return True, "no_device_id"
+    db = SessionLocal()
+    try:
+        sess = db.query(UploadSession).filter(UploadSession.id == session_id).first()
+        if not sess:
+            return False, "not_found"
+        if sess.claimed_by_device_id and sess.claimed_by_device_id != device_id:
+            return False, "claimed_by_other_device"
+        if not sess.claimed_by_device_id:
+            updated = db.query(UploadSession).filter(
+                UploadSession.id == session_id,
+                UploadSession.claimed_by_device_id.is_(None),
+            ).update(
+                {"claimed_by_device_id": device_id,
+                 "claimed_at": datetime.now(timezone.utc)},
+                synchronize_session=False,
+            )
+            db.commit()
+            if updated == 0:
+                fresh = db.query(UploadSession).filter(UploadSession.id == session_id).first()
+                if fresh and fresh.claimed_by_device_id and fresh.claimed_by_device_id != device_id:
+                    return False, "claimed_by_other_device"
+        # Succès : on remet le compteur d'échecs à zéro.
+        db.query(UploadSession).filter(UploadSession.id == session_id).update(
+            {"failed_attempts": 0}, synchronize_session=False)
+        db.commit()
+        return True, "ok"
+    except Exception:
+        db.rollback()
+        logger.exception("device claim failed (non-bloquant)")
+        return True, "claim_error_ignored"
+    finally:
+        db.close()
+
+
 @app.route("/api/upload/<qr_token>", methods=["POST"])
 def api_upload(qr_token):
     """Handle file upload via API."""
     session_obj = get_session_by_token(qr_token)
-    if not session_obj:
+    # Session absente OU gelée par le verrou par-code ⇒ réponse uniforme.
+    if not session_obj or session_obj.locked_at is not None:
         return jsonify({"error": "Code invalide ou introuvable."}), 400
 
     # On valide d'abord le device : c'est la source de vérité pour
@@ -784,12 +884,23 @@ def api_upload(qr_token):
     # device avait encore 14 jours de validité.
     ok, details = _validate_device_fast_path(qr_token, _extract_device_token())
     if not ok:
+        # Verrou par-code : compte la tentative échouée (gel au-delà du seuil).
+        _register_qr_failed_attempt(session_obj.id)
         return jsonify(
             {
                 "error": details.get("message", "Device non enrole ou invalide."),
                 "device_reason": details.get("reason"),
             }
         ), 401
+
+    # Liaison mono-device : lie le code au 1er appareil, refuse un 2e.
+    claimed_ok, claim_reason = _claim_device_for_session(
+        session_obj.id, str(details.get("device_id") or ""))
+    if not claimed_ok:
+        return jsonify({
+            "error": "Ce code est déjà associé à un autre appareil.",
+            "device_reason": claim_reason,
+        }), 409
 
     # Device valide : on contrôle uniquement les limites de la session
     # qui ont du sens long-terme (quota max_uploads, status révoqué).
