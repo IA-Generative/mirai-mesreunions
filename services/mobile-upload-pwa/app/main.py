@@ -1086,6 +1086,8 @@ def create_app():
     # Garde de démarrage fail-closed (cohérente avec les autres services).
     from libs.shared.app.oidc_auth import assert_auth_startup_config
     assert_auth_startup_config(service_name="mobile-upload-pwa")
+    from libs.shared.app.web_hardening import apply_security_headers
+    apply_security_headers(app)
     init_tables(db_cfg, ExternalBase)
     SessionLocal = create_session_factory(db_cfg)
     ensure_bucket(s3_cfg)

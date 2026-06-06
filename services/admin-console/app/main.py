@@ -52,6 +52,7 @@ from libs.shared.app.models import (
     UploadSession, UploadedFile, UserAudioFile, TranscriptionEvent, UploadStatus, DeviceEnrollment,
 )
 from libs.shared.app.s3_helper import delete_object, download_fileobj, get_s3_client
+from libs.shared.app.web_hardening import apply_security_headers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -984,6 +985,7 @@ def create_app() -> Flask:
         finally:
             db.close()
 
+    apply_security_headers(app)
     return app
 
 

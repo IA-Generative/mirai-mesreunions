@@ -32,6 +32,7 @@ from ...shared import (
     trigger_audio_reprocess,
 )
 from libs.shared.app.config import INTERNAL_API_TOKEN  # noqa: E402
+from libs.shared.app.security import verify_bearer_token  # noqa: E402
 from . import service as meeting_service
 
 logger = logging.getLogger("mesreunions_web.meetings.routes")
@@ -293,11 +294,9 @@ def _verify_internal_bearer() -> bool:
     Utilisé par les endpoints "system-to-system" (hook puller post-
     transcription) qui n'ont pas de session OIDC.
     """
-    auth = (request.headers.get("Authorization") or "").strip()
-    if not auth.lower().startswith("bearer "):
-        return False
-    token = auth.split(" ", 1)[1].strip()
-    return bool(INTERNAL_API_TOKEN) and token == INTERNAL_API_TOKEN
+    # Comparaison à temps constant via le helper partagé (évite l'oracle de
+    # timing d'un `==` sur secret).
+    return verify_bearer_token(request.headers.get("Authorization", ""), INTERNAL_API_TOKEN)
 
 
 @bp.route("/<meeting_id>/send-cr", methods=["POST"])

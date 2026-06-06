@@ -197,6 +197,8 @@ def create_app():
     )
 
     _register_modular_blueprints(app)
+    from libs.shared.app.web_hardening import apply_security_headers
+    apply_security_headers(app)
     return app
 
 
