@@ -1,0 +1,8 @@
+# Hooks pre-commit. Installer une fois : pre-commit install
+# Bloque tout commit contenant un secret AVANT qu'il parte (gitleaks protect).
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks (scan secrets sur le staged)

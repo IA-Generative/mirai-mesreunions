@@ -1,0 +1,50 @@
+# Configuration gitleaks pour mirai-mesreunions (repo public).
+# Étend les règles par défaut et déclare une allowlist pour les fixtures
+# de dev / placeholders intentionnels — afin de garder un signal sans bruit.
+#
+# Usage local :   gitleaks detect --source . --log-opts="--all" -v
+# Usage staged :  gitleaks protect --staged -v   (via le hook pre-commit)
+
+title = "mirai-mesreunions gitleaks config"
+
+# On part des règles intégrées (AWS, GCP, Scaleway, OpenAI, JWT, PEM, etc.)
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders et fixtures de dev volontairement présents dans le repo public"
+
+# Valeurs littérales sûres (dev/local uniquement, jamais de prod).
+regexes = [
+  '''CHANGE_ME''',                          # placeholders secrets.yaml
+  '''CHANGE-ME-IN-PROD''',                  # placeholder docker-compose
+  '''dev-only-internal-token-CHANGE-ME-IN-PROD''',
+  '''dev-secret-key-change-in-prod''',
+  '''dev-client-secret''',
+  '''changeme-(ext|int)''',                 # mots de passe postgres dev
+  '''minioadmin''',                         # MinIO dev par défaut
+  '''testpassword''',
+  '''adminpassword''',
+  '''testkey-deadbeef''',                   # fixture de test
+  # NB : on n'allowliste AUCUN littéral de secret réel ici (sinon la réécriture
+  # d'historique caviarde le .gitleaks.toml lui-même et casse le regex). Les
+  # anciens tokens dev/prod sont supprimés par la purge d'historique, pas masqués.
+  '''\$\{[A-Z_]+(:-[^}]*)?\}''',            # références env ${VAR} / ${VAR:-default}
+  '''fake-domain\.name''',                  # hostnames d'intégration volontaires
+  # Faux positifs non-secrets confirmés à l'audit :
+  '''diarization-api:[A-Za-z0-9._-]+''',    # tag d'image Docker dans un doc benchmark
+  '''00000000-0000-0000-0000-000000000000''', # user_sub Keycloak (identifiant, pas un credential)
+]
+
+# NB : le qr_token prod « ***... » n'est volontairement PAS allowlisté.
+# C'est une vraie fuite ; le scan doit rester ROUGE tant que l'historique
+# n'est pas réécrit. Une fois purgé, le scan repasse au vert.
+
+# Fichiers connus pour ne contenir que des templates/exemples.
+paths = [
+  '''\.env\.example$''',
+  '''deploy/kubernetes/shared/secrets\.yaml$''',   # template 100% CHANGE_ME
+  '''deploy/keycloak/client-.*\.json$''',          # CHANGE_ME_CLIENT_SECRET
+  '''(^|/)tests?/''',                              # fixtures de test
+  '''docs/benchmarks/''',                          # docs de bench (tags d'images, pas de secrets)
+]
