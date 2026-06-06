@@ -13,8 +13,6 @@ par ``app.runtime``.
 
 from __future__ import annotations
 
-import base64
-import json
 import logging
 import os
 import secrets
@@ -28,6 +26,7 @@ from flask import Blueprint, redirect, request, session, url_for
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
 from libs.shared.app.config import OIDC_OFFLINE_ACCESS  # noqa: E402
 from libs.shared.app.oidc_refresh_store import store_refresh_token  # noqa: E402
+from libs.shared.app.oidc_auth import verify_id_token, OidcAuthError  # noqa: E402
 
 from app.runtime import (
     get_oidc_cfg, get_oidc_internal_issuer, get_oidc_scope,
@@ -36,20 +35,6 @@ from app.runtime import (
 logger = logging.getLogger("mesreunions_web.auth.routes")
 
 bp = Blueprint("auth", __name__)
-
-
-def _decode_jwt_payload_unverified(token_value: str) -> dict:
-    try:
-        parts = token_value.split(".")
-        if len(parts) < 2:
-            return {}
-        payload = parts[1]
-        pad = "=" * (-len(payload) % 4)
-        raw = base64.urlsafe_b64decode(payload + pad)
-        data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
 
 
 def _oidc_request_with_retry(method, url, *, max_attempts=3, retry_delay=0.7, **kwargs):
@@ -135,6 +120,27 @@ def auth_callback():
         logger.warning("OIDC token response is not JSON: %s", (token_resp.text or "")[:300])
         return "Réponse OIDC invalide (token).", 502
 
+    # Vérification cryptographique de l'id_token (signature JWKS + nonce) :
+    # source d'identité autoritaire et fail-closed. Remplace l'ancien repli
+    # sur un décodage non vérifié.
+    expected_nonce = session.get("oidc_nonce", "")
+    jwks_url = f"{oidc_internal_issuer}/protocol/openid-connect/certs"
+    try:
+        userinfo = verify_id_token(
+            token.get("id_token", ""),
+            audience=oidc_cfg.client_id,
+            issuer={oidc_cfg.issuer.rstrip("/"), oidc_internal_issuer},
+            jwks_url=jwks_url,
+            nonce=expected_nonce,
+        )
+    except OidcAuthError:
+        logger.warning("OIDC id_token verification failed", exc_info=True)
+        session.pop("oidc_state", None)
+        session.pop("oidc_nonce", None)
+        return "Echec de vérification de l'identité OIDC.", 400
+
+    # Enrichissement best-effort via userinfo (email/name). Non requis pour
+    # la sécurité : l'id_token vérifié fait foi.
     try:
         userinfo_resp = _oidc_request_with_retry(
             "GET",
@@ -142,22 +148,12 @@ def auth_callback():
             headers={"Authorization": f"Bearer {token.get('access_token', '')}"},
             timeout=10,
         )
-        if userinfo_resp.status_code >= 400:
-            logger.warning("OIDC userinfo failed: status=%s body=%s",
-                           userinfo_resp.status_code,
-                           (userinfo_resp.text or "")[:500])
-            userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
-            if not userinfo:
-                return "Echec de récupération du profil OIDC.", 400
-            logger.info("OIDC userinfo fallback to id_token claims")
-        else:
-            userinfo = userinfo_resp.json()
+        if userinfo_resp.status_code < 400:
+            enriched = userinfo_resp.json() or {}
+            if isinstance(enriched, dict):
+                userinfo = {**userinfo, **enriched}
     except Exception:
-        logger.exception("Failed to fetch userinfo from Keycloak")
-        userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
-        if not userinfo:
-            return "Erreur OIDC (userinfo). Réessaie.", 502
-        logger.info("OIDC userinfo exception fallback to id_token claims")
+        logger.info("OIDC userinfo enrichment unavailable (verified id_token claims used)")
 
     session["user"] = {
         "sub": userinfo.get("sub", ""),

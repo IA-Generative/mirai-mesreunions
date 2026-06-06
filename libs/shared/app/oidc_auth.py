@@ -141,12 +141,18 @@ def verify_oidc_token(
 
     claims = _decode_with_rotation(token, jwks_url)
     claims.options["aud"] = {"essential": True, "value": audience}
-    if issuer:
-        claims.options["iss"] = {"essential": True, "value": issuer}
     try:
         claims.validate()
     except JoseError as exc:
         raise OidcAuthError(f"JWT claims invalides : {exc}") from exc
+
+    # Validation de l'issuer : accepte une valeur unique ou un ensemble
+    # (utile quand Keycloak frappe ``iss`` différemment selon l'horizon
+    # public/interne du déploiement).
+    if issuer:
+        expected = {issuer} if isinstance(issuer, str) else {str(i) for i in issuer}
+        if claims.get("iss") not in expected:
+            raise OidcAuthError("Issuer du JWT non reconnu")
 
     sub = claims.get("sub")
     if not sub:
