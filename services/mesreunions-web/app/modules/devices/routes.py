@@ -26,7 +26,7 @@ from libs.shared.app.config import (  # noqa: E402
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
 from libs.shared.app.models import SessionStatus, UploadSession, UploadTokenOption  # noqa: E402
-from libs.shared.app.security import verify_bearer_token  # noqa: E402
+from libs.shared.app.security import verify_bearer_token, resolve_auto_transcribe  # noqa: E402
 
 from app.runtime import (
     allow_short_qr_ttl, get_public_host, session_scope,
@@ -127,7 +127,10 @@ def api_generate_code():
     # fichiers même si le client demandait 299 — cf bug PU7S39 2026-05-21.
     max_uploads = min(max(int(data.get("max_uploads", MAX_UPLOADS_PER_SESSION)), 1),
                       MAX_UPLOADS_PER_SESSION)
-    auto_transcribe = bool(data.get("auto_transcribe", True))
+    # Politique serveur (défaut OFF) : la valeur demandée par l'utilisateur
+    # n'est honorée que si AUTO_TRANSCRIBE_POLICY l'autorise. Cohérent avec
+    # le garde-fou de l'autorité interne (device-token-authority).
+    auto_transcribe = resolve_auto_transcribe(data.get("auto_transcribe", False))
 
     try:
         token_data = _request_token_from_internal(

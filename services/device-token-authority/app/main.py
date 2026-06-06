@@ -39,7 +39,11 @@ from libs.shared.app.models import (
     Preparation, Meeting, UserGlossaryTerm,
 )
 from libs.shared.app.database import create_session_factory, init_tables
-from libs.shared.app.security import require_strong_shared_secret, verify_bearer_token
+from libs.shared.app.security import (
+    require_strong_shared_secret,
+    verify_bearer_token,
+    resolve_auto_transcribe,
+)
 from libs.shared.app.device_token import create_device_token, verify_device_token, utc_now_ts
 from libs.shared.app.device_fingerprint import compute_fp_hash
 
@@ -121,7 +125,10 @@ def issue_token():
     user_sub = data.get("user_sub")
     if not user_sub:
         return jsonify({"error": "Missing user_sub"}), 400
-    auto_transcribe = bool(data.get("auto_transcribe", True))
+    # Politique serveur (défaut OFF) : l'autorité interne est le garde-fou
+    # autoritaire. La valeur du payload n'est honorée que si la politique
+    # l'autorise — un utilisateur ne déclenche pas Whisper+LLM à volonté.
+    auto_transcribe = resolve_auto_transcribe(data.get("auto_transcribe", False))
 
     now = datetime.now(timezone.utc)
 

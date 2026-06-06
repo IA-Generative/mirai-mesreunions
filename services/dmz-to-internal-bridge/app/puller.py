@@ -1495,7 +1495,9 @@ def _perform_pull(payload: dict) -> dict:
     user_sub = payload["user_sub"]
     transcoded_filename = payload["transcoded_filename"]
     simple_code = payload["simple_code"]
-    auto_transcribe = bool(payload.get("auto_transcribe", True))
+    # Flag absent ⇒ OFF (fail-safe) : la décision d'activer le traitement
+    # coûteux est prise en amont par la politique serveur (cf. PA-01).
+    auto_transcribe = bool(payload.get("auto_transcribe", False))
     internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
 
     logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
