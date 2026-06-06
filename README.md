@@ -401,6 +401,10 @@ Liste des réunions importées (audio, YouTube, Drive…) :
 
 ![Liste des réunions](docs/screenshots/mesreunions-liste.png)
 
+Import multi-source, dont YouTube (récupération des sous-titres, transcription Whisper en option) :
+
+![Import YouTube](docs/screenshots/mesreunions-import-youtube.png)
+
 Détail d'une réunion — résumé, compte-rendu structuré et transcription synchronisée à la vidéo :
 
 ![Détail d'une réunion](docs/screenshots/mesreunions-detail.png)
