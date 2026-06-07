@@ -153,6 +153,8 @@ info "clé SCW transmise via stdin (jamais en argv ni en log)"
 REMOTE_SCRIPT='set -e
 cd "'"$REMOTE_REPO"'"
 export PLATFORMS='"'$BUILD_PLATFORMS'"'
+export REGISTRY_NAMESPACE='"'${REGISTRY_NAMESPACE:-}'"'
+export REGISTRY_HOST='"'${REGISTRY_HOST:-}'"'
 
 echo "  ▸ fetch origin '"$BRANCH"' (avec mise à jour explicite du tracking ref)"
 git fetch --quiet origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
