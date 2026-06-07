@@ -157,7 +157,9 @@ export REGISTRY_NAMESPACE='"'${REGISTRY_NAMESPACE:-}'"'
 export REGISTRY_HOST='"'${REGISTRY_HOST:-}'"'
 
 echo "  ▸ fetch origin '"$BRANCH"' (avec mise à jour explicite du tracking ref)"
-git fetch --quiet origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
+# --force : survit à une réécriture d'\''historique (force-push) côté origin,
+# sinon le fetch non-fast-forward échoue et le build s'\''arrête.
+git fetch --quiet --force origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
 
 if git show-ref --verify --quiet "refs/heads/'"$BRANCH"'"; then
   git checkout --quiet "'"$BRANCH"'"
