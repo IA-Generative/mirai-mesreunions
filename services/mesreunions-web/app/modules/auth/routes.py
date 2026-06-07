@@ -26,7 +26,7 @@ from flask import Blueprint, redirect, request, session, url_for
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
 from libs.shared.app.config import OIDC_OFFLINE_ACCESS  # noqa: E402
 from libs.shared.app.oidc_refresh_store import store_refresh_token  # noqa: E402
-from libs.shared.app.oidc_auth import verify_id_token, OidcAuthError  # noqa: E402
+from libs.shared.app.oidc_auth import verify_id_token, OidcAuthError, is_user_admin  # noqa: E402
 
 from app.runtime import (
     get_oidc_cfg, get_oidc_internal_issuer, get_oidc_scope,
@@ -155,13 +155,27 @@ def auth_callback():
     except Exception:
         logger.info("OIDC userinfo enrichment unavailable (verified id_token claims used)")
 
+    # Droits admin = appartenance au groupe Keycloak (claim `groups`), calculée
+    # UNE FOIS au login et stockée comme booléen compact. On NE stocke PAS la
+    # liste `groups` en session : ces realms renvoient des dizaines de groupes
+    # (+ id/access/refresh tokens déjà en session) → le cookie dépasserait la
+    # limite ~4 Ko et l'ingress renverrait 502 (header trop gros).
+    _admin_allowed = {x.strip() for x in os.getenv("ADMIN_ALLOWED_USERS", "").split(",") if x.strip()}
+    _is_admin = is_user_admin(
+        {
+            "preferred_username": userinfo.get("preferred_username", ""),
+            "email": userinfo.get("email", ""),
+            "name": userinfo.get("name", ""),
+            "sub": userinfo.get("sub", ""),
+            "groups": userinfo.get("groups", []),
+        },
+        _admin_allowed,
+    )
     session["user"] = {
         "sub": userinfo.get("sub", ""),
         "email": userinfo.get("email", ""),
         "name": userinfo.get("name", userinfo.get("preferred_username", "")),
-        # Groupes Keycloak (claim `groups`) : source des droits admin
-        # (/g/admins). Cf. modules/feedback/routes.py:_is_admin.
-        "groups": userinfo.get("groups", []),
+        "is_admin": _is_admin,
     }
     session["id_token"] = token.get("id_token", "")
     # Access token stocké pour les proxys serveur→serveur (ex. video-ingest).

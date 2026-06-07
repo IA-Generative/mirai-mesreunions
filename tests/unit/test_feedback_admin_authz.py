@@ -48,6 +48,14 @@ def test_is_admin_fail_closed_without_group(feedback_mod, monkeypatch):
     assert feedback_mod._is_admin({"groups": ["/g/users"]}) is False
 
 
+def test_is_admin_honors_session_boolean(feedback_mod, monkeypatch):
+    """La session stocke un booléen compact is_admin (pas la liste groups)."""
+    monkeypatch.delenv("ADMIN_ALLOWED_USERS", raising=False)
+    assert feedback_mod._is_admin({"sub": "u", "is_admin": True}) is True
+    assert feedback_mod._is_admin({"sub": "u", "is_admin": False}) is False
+    assert feedback_mod._is_admin({"sub": "u"}) is False  # ni bool ni groups
+
+
 def test_is_admin_true_with_admin_group(feedback_mod, monkeypatch):
     monkeypatch.delenv("ADMIN_ALLOWED_USERS", raising=False)
     assert feedback_mod._is_admin({"groups": ["/g/users", "/g/admins"]}) is True

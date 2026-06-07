@@ -137,7 +137,11 @@ def create_app() -> Flask:
         return session.get("user")
 
     def is_admin(user: dict) -> bool:
-        # Fail-closed : liste d'accès vide ⇒ refus (cf. brique partagée).
+        # Fail-closed. Booléen `is_admin` calculé au login honoré en priorité
+        # (la liste `groups` n'est pas stockée en session) ; repli sur le
+        # calcul groupe/allowlist (brique partagée).
+        if bool((user or {}).get("is_admin")):
+            return True
         return is_user_admin(user, allowed_users)
 
     def require_auth(view):
@@ -633,14 +637,25 @@ def create_app() -> Flask:
                     userinfo = {**userinfo, **enriched}
         except Exception:
             logger.info("OIDC userinfo enrichment unavailable (verified id_token claims used)")
+        # Droits admin calculés au login (booléen compact). On NE stocke PAS la
+        # liste `groups` en session : ces realms renvoient des dizaines de
+        # groupes → cookie > ~4 Ko → 502 ingress (header trop gros).
+        _admin_flag = is_user_admin(
+            {
+                "preferred_username": userinfo.get("preferred_username", ""),
+                "email": userinfo.get("email", ""),
+                "name": userinfo.get("name", ""),
+                "sub": userinfo.get("sub", ""),
+                "groups": userinfo.get("groups", []),
+            },
+            allowed_users,
+        )
         session["user"] = {
             "sub": userinfo.get("sub", ""),
             "email": userinfo.get("email", ""),
             "name": userinfo.get("name", userinfo.get("preferred_username", "")),
             "preferred_username": userinfo.get("preferred_username", ""),
-            # Appartenance aux groupes Keycloak : source des droits admin
-            # (/g/admins).
-            "groups": userinfo.get("groups", []),
+            "is_admin": _admin_flag,
         }
         session["id_token"] = token.get("id_token", "")
         session.pop("oidc_state", None)

@@ -117,3 +117,47 @@ def test_callback_accepts_verified_identity(auth_mod, monkeypatch):
     assert resp.status_code in (301, 302)
     with client.session_transaction() as sess:
         assert sess["user"]["sub"] == "user-9"
+        # Anti-régression cookie : on stocke un booléen compact, PAS la liste
+        # des groupes (sinon cookie > ~4 Ko → 502 ingress).
+        assert "groups" not in sess["user"]
+        assert "is_admin" in sess["user"]
+
+
+def test_callback_session_stays_compact_with_many_groups(auth_mod, monkeypatch):
+    """Un realm renvoyant des dizaines de groupes ne doit pas gonfler la session :
+    seul un booléen is_admin est stocké, et il est True si le groupe admin y est."""
+    class _TokResp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"id_token": "h.p.s", "access_token": "at"}
+
+    class _ErrResp:
+        status_code = 500
+
+        @staticmethod
+        def json():
+            return {}
+
+    def _req(method, url, **k):
+        return _ErrResp() if "userinfo" in url else _TokResp()
+
+    big_groups = [f"/g/groupe-metier-{i}" for i in range(40)] + ["/g/admins"]
+    monkeypatch.setattr(auth_mod, "_oidc_request_with_retry", _req)
+    monkeypatch.setattr(
+        auth_mod, "verify_id_token",
+        lambda *a, **k: {"sub": "u", "email": "u@x.test", "name": "U",
+                         "preferred_username": "u", "groups": big_groups},
+    )
+    monkeypatch.setattr(auth_mod, "OIDC_OFFLINE_ACCESS", False, raising=False)
+
+    app = _make_app(auth_mod)
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["oidc_state"] = "st"; sess["oidc_nonce"] = "no"
+    resp = client.get("/auth/callback?code=abc&state=st", follow_redirects=False)
+    assert resp.status_code in (301, 302)
+    with client.session_transaction() as sess:
+        assert sess["user"].get("is_admin") is True   # membre de /g/admins
+        assert "groups" not in sess["user"]            # pas la liste → cookie compact
