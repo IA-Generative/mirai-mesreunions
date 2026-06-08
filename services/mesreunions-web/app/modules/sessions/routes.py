@@ -255,6 +255,7 @@ def api_my_sessions():
                         "origin": it.get("origin"),
                         "source_type": it.get("source_type"),
                         "reprocess_version": it.get("reprocess_version") or 0,
+                        "uaf_id": it.get("uaf_id"),
                     }
 
         active_qr_tokens = set()
@@ -377,6 +378,11 @@ def api_my_sessions():
                 _smeta = source_meta.get((s.simple_code, f.original_filename)) or {}
                 uploads.append({
                     "id": str(f.id),
+                    # id interne (user_audio_files.id) si la transcription a
+                    # démarré — sert au deep-link depuis les citations RAG, qui
+                    # indexent par uaf_id (≠ id externe). None tant que pas
+                    # d'audio interne associé.
+                    "uaf_id": _smeta.get("uaf_id"),
                     "original_filename": f.original_filename,
                     "status": f.status.value,
                     "status_message": f.status_message,

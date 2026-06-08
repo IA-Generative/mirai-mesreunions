@@ -107,12 +107,17 @@ function _addMsg(role, html, sources) {
     const chips = [];
     for (const s of sources) {
       const meta = (s && s.metadata) || {};
-      let fid = meta.uaf_id || meta.file_id || '';
+      // L'uaf_id (= user_audio_files.id, UUID à tirets) est l'id passé à
+      // showFileDetail. On le cherche dans le metadata enrichi, puis sur la
+      // source elle-même (file_id = id d'indexation), puis dans l'URL. On
+      // normalise les underscores → tirets (sanitization OpenRAG du path).
+      let fid = meta.uaf_id || meta.file_id || s.file_id || s.uaf_id || '';
       const url = s.file_url || s.chunk_url || meta.link || '';
       if (!fid && url) {
         const m = String(url).match(/\/file\/([^/?#]+)/);
-        if (m) fid = m[1].replace(/_/g, '-');
+        if (m) fid = m[1];
       }
+      fid = fid ? String(fid).replace(/_/g, '-') : '';
       const key = fid || (meta.meeting_title || '') + url;
       if (seen.has(key)) continue;
       seen.add(key);

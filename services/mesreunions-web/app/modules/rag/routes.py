@@ -42,6 +42,24 @@ _SRC_META_KEYS = (
 )
 
 
+def _norm_uaf(x) -> str:
+    """Normalise un id de fichier en uaf_id ``user_audio_files.id`` (UUID dashes).
+
+    OpenRAG peut renvoyer l'id de fichier avec des underscores à la place des
+    tirets (sanitization du path ``/file/{id}``) ; un UUID n'a jamais
+    d'underscore légitime, donc on les retourne tous en tirets.
+    """
+    return str(x).replace("_", "-") if x not in (None, "") else ""
+
+
+def _file_uaf(f: dict) -> str:
+    """Extrait l'uaf_id d'un fichier de partition, qu'il soit au top-level OU
+    imbriqué sous ``metadata`` (selon la version/format OpenRAG), avec fallback
+    sur le ``file_id`` (= ce avec quoi on a indexé, cf. index_text)."""
+    m = f.get("metadata") if isinstance(f.get("metadata"), dict) else {}
+    return f.get("uaf_id") or m.get("uaf_id") or f.get("file_id") or ""
+
+
 def _enrich_sources(partition: str, sources: list) -> list:
     """Réinjecte nos métadonnées dans les sources du chat.
 
@@ -49,6 +67,12 @@ def _enrich_sources(partition: str, sources: list) -> list:
     le ``metadata`` custom (seulement ``file_id``/``title``). On le récupère
     depuis ``GET /partition`` (qui, lui, expose nos champs) et on le joint par
     ``file_id`` → le widget retrouve la nature de la source + l'uaf_id cliquable.
+
+    GARANTIE : ``s["metadata"]["uaf_id"]`` est toujours renseigné (en UUID
+    dashes) — c'est l'identifiant que le widget passe à showFileDetail. À
+    défaut d'enrichissement (jointure ratée, champ imbriqué…) on retombe sur le
+    ``file_id`` de la source, qui EST l'uaf_id utilisé à l'indexation. Sans ce
+    garde-fou, le clic sur une citation partait avec un id vide → empty-state.
     """
     if not sources:
         return sources
@@ -56,18 +80,36 @@ def _enrich_sources(partition: str, sources: list) -> list:
         files = _openrag.partition_files(partition)
     except Exception:
         logger.debug("enrich_sources: partition_files failed", exc_info=True)
-        return sources
+        files = []
     by_id = {}
     for f in files:
-        fid = f.get("uaf_id") or f.get("file_id")
-        if fid:
-            by_id[str(fid)] = f
+        if not isinstance(f, dict):
+            continue
+        # Range chaque fichier sous toutes ses clés plausibles (brutes +
+        # normalisées) pour absorber un éventuel mismatch underscore/dash.
+        for k in {str(f.get("file_id") or ""), _norm_uaf(f.get("file_id")),
+                  str(_file_uaf(f)), _norm_uaf(_file_uaf(f))}:
+            if k:
+                by_id.setdefault(k, f)
     for s in sources:
         if not isinstance(s, dict):
             continue
-        meta = by_id.get(str(s.get("file_id") or s.get("uaf_id") or ""))
+        sid = s.get("file_id") or s.get("uaf_id") or ""
+        meta = by_id.get(str(sid)) or by_id.get(_norm_uaf(sid))
+        enriched = {}
         if meta:
-            s["metadata"] = {k: meta.get(k) for k in _SRC_META_KEYS}
+            mm = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+            for k in _SRC_META_KEYS:
+                v = meta.get(k)
+                if v in (None, ""):
+                    v = mm.get(k)
+                if v not in (None, ""):
+                    enriched[k] = v
+        # uaf_id cliquable garanti : enrich > file_id de la source, en dashes.
+        enriched["uaf_id"] = _norm_uaf(enriched.get("uaf_id") or _file_uaf(meta or {}) or sid)
+        # Fusion non destructive avec un éventuel metadata déjà présent.
+        base = s.get("metadata") if isinstance(s.get("metadata"), dict) else {}
+        s["metadata"] = {**base, **enriched}
     return sources
 
 
