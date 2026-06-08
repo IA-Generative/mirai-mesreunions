@@ -166,6 +166,42 @@ def add_bookmark(
         return cur.fetchone()[0]
 
 
+def user_owns_source(conn, *, user_sub: str, video_source_id: int) -> bool:
+    """True si l'utilisateur a un lien légitime vers cette source vidéo.
+
+    Le catalogue ``video_sources`` est un cache de déduplication partagé
+    (contenu YouTube public). On ne révèle une entrée à un utilisateur que
+    s'il a posé un signet (``user_video_bookmarks``) ou lancé un job
+    (``video_ingest_jobs``) sur cette source — sinon l'énumération des
+    identifiants entiers divulguerait le catalogue d'imports de tout le
+    système. Fail-closed : sujet absent ⇒ False.
+    """
+    if not user_sub:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+              FROM user_video_bookmarks
+             WHERE user_sub = %s AND video_source_id = %s
+             LIMIT 1
+            """,
+            (user_sub, video_source_id),
+        )
+        if cur.fetchone() is not None:
+            return True
+        cur.execute(
+            """
+            SELECT 1
+              FROM video_ingest_jobs
+             WHERE user_sub = %s AND video_source_id = %s
+             LIMIT 1
+            """,
+            (user_sub, video_source_id),
+        )
+        return cur.fetchone() is not None
+
+
 def has_transcript(
     conn, *, video_source_id: int, language: str | None = None
 ) -> bool:

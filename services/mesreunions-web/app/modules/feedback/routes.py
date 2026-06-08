@@ -55,16 +55,22 @@ def _call_ingester(method: str, path: str, *, json_body=None, params=None, timeo
 
 
 def _is_admin(user) -> bool:
-    """Check claim admin sur l'utilisateur courant.
+    """Droits admin = appartenance au groupe Keycloak (claim ``groups``),
+    via la brique partagée. Fail-closed.
 
-    Aligné avec frontend/lib/auth.js isAdmin() : roles[].lowercase() === 'admin'.
+    En session, l'app stocke un booléen compact ``is_admin`` (calculé au login,
+    pour ne pas gonfler le cookie avec la liste des groupes) : on l'honore en
+    priorité, et on retombe sur le calcul à partir de ``groups`` (cas des tests
+    / appels internes) + liste d'accès de secours ``ADMIN_ALLOWED_USERS``.
     """
     if not user:
         return False
-    roles = user.get("roles") or []
-    if not isinstance(roles, list):
-        return False
-    return any(str(r).lower() == "admin" for r in roles)
+    if user.get("is_admin") is True:
+        return True
+    from libs.shared.app.oidc_auth import is_user_admin
+
+    allowed = {x.strip() for x in os.getenv("ADMIN_ALLOWED_USERS", "").split(",") if x.strip()}
+    return is_user_admin(user, allowed)
 
 
 def _ensure_admin_or_403(user):

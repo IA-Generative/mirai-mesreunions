@@ -28,6 +28,57 @@ def is_allowed_audio_filename(filename: str) -> bool:
     return ext in ALLOWED_AUDIO_EXTENSIONS
 
 
+def sniff_audio_magic(data: bytes) -> str | None:
+    """Détecte le conteneur audio par ses octets de tête (magic bytes).
+
+    Renvoie un label de famille (``mp3``, ``wav``, ``ogg``, ``flac``,
+    ``mp4`` (m4a/aac), ``asf`` (wma), ``ebml`` (webm), ``aac``, ``amr``) ou
+    ``None`` si rien de reconnu. Complète la validation par extension : un
+    contenu non-audio sous une extension audio est ainsi rejeté à la porte.
+    """
+    if not data or len(data) < 4:
+        return None
+    head = data[:16]
+
+    if head[:3] == b"ID3":
+        return "mp3"
+    # MP3 / AAC-ADTS : frame sync 0xFFE.. / 0xFFF..
+    if head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "aac" if (head[1] & 0xF6) in (0xF0, 0xF1, 0xF8, 0xF9) else "mp3"
+    if head[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "wav"
+    if head[:4] == b"OggS":
+        return "ogg"  # ogg vorbis / opus
+    if head[:4] == b"fLaC":
+        return "flac"
+    if head[4:8] == b"ftyp":
+        return "mp4"  # m4a / aac dans conteneur mp4
+    if head[:4] == b"\x1aE\xdf\xa3":
+        return "ebml"  # webm / matroska
+    if head[:4] == b"\x30\x26\xb2\x75":
+        return "asf"  # wma (ASF GUID)
+    if head[:5] == b"#!AMR":
+        return "amr"
+    if head[:4] == b"FORM" and data[8:12] in (b"AIFF", b"AIFC"):
+        return "aiff"
+    return None
+
+
+def looks_like_audio(data: bytes) -> bool:
+    """True si les octets de tête correspondent à un conteneur audio connu."""
+    return sniff_audio_magic(data) is not None
+
+
+def magic_bytes_enforced() -> bool:
+    """Mode d'application du contrôle magic bytes.
+
+    ``UPLOAD_MAGIC_BYTES_MODE`` = ``enforce`` (défaut) rejette les contenus
+    non reconnus ; ``log`` se contente de tracer (déploiement progressif).
+    """
+    import os
+    return (os.getenv("UPLOAD_MAGIC_BYTES_MODE", "enforce") or "enforce").strip().lower() != "log"
+
+
 def build_stored_filename(simple_code: str, original_filename: str) -> str:
     """Construit le nom S3 : ``{simple_code}_{uuid8}_{sanitized}``.
 

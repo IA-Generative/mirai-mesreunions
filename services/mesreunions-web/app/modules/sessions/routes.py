@@ -38,6 +38,7 @@ from libs.shared.app.security import verify_bearer_token  # noqa: E402
 from libs.shared.app.database import with_db_retry  # noqa: E402
 from libs.shared.app.upload_helpers import (  # noqa: E402
     build_stored_filename, is_allowed_audio_filename, publish_av_scan_message,
+    looks_like_audio, sniff_audio_magic, magic_bytes_enforced,
     store_audio_to_s3,
 )
 
@@ -254,6 +255,7 @@ def api_my_sessions():
                         "origin": it.get("origin"),
                         "source_type": it.get("source_type"),
                         "reprocess_version": it.get("reprocess_version") or 0,
+                        "uaf_id": it.get("uaf_id"),
                     }
 
         active_qr_tokens = set()
@@ -376,6 +378,11 @@ def api_my_sessions():
                 _smeta = source_meta.get((s.simple_code, f.original_filename)) or {}
                 uploads.append({
                     "id": str(f.id),
+                    # id interne (user_audio_files.id) si la transcription a
+                    # démarré — sert au deep-link depuis les citations RAG, qui
+                    # indexent par uaf_id (≠ id externe). None tant que pas
+                    # d'audio interne associé.
+                    "uaf_id": _smeta.get("uaf_id"),
                     "original_filename": f.original_filename,
                     "status": f.status.value,
                     "status_message": f.status_message,
@@ -1449,6 +1456,15 @@ def api_my_upload():
     file_size = len(file_data)
     if file_size == 0:
         return jsonify({"error": "Fichier vide."}), 400
+
+    # Validation par magic bytes (l'extension seule ne fait pas foi).
+    if not looks_like_audio(file_data):
+        if magic_bytes_enforced():
+            return jsonify({"error": "Contenu de fichier non reconnu comme audio."}), 400
+        logger.warning(
+            "Local upload magic-bytes mismatch (mode log) file=%s sniff=%s",
+            file.filename, sniff_audio_magic(file_data),
+        )
 
     s3_upload_cfg = get_s3_upload_cfg()
     db = session_scope()

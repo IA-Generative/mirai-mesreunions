@@ -267,8 +267,15 @@ def transcode_audio(input_path: str, output_path: str, file_duration_s: float = 
     Returns (success, was_normalized) — was_normalized is False when the audio
     was loud enough and we skipped the 2-pass loudnorm.
     """
-    def run_ffmpeg(cmd, timeout=300):
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # Borne de coût/temps du transcodage : un média malformé ne doit pas
+    # consommer FFmpeg sans limite. Timeout configurable via env, défaut 300s.
+    _ffmpeg_timeout_default = max(10, int(os.getenv("FFMPEG_TRANSCODE_TIMEOUT_SECONDS", "300")))
+
+    def run_ffmpeg(cmd, timeout=None):
+        return subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout if timeout is not None else _ffmpeg_timeout_default,
+        )
 
     def ffmpeg_base_input():
         # More tolerant decoding to avoid bursts/artefacts on partially corrupt streams.

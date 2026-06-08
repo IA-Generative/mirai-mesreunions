@@ -98,7 +98,9 @@ def _build_pull_payload(message: dict) -> dict:
         "transcoded_filename": message["transcoded_filename"],
         "quality_score": message.get("quality_score"),
         "duration_seconds": message.get("duration_seconds"),
-        "auto_transcribe": bool(message.get("auto_transcribe", True)),
+        # Flag absent ⇒ OFF (fail-safe). L'activation est décidée en amont
+        # par la politique serveur à l'émission du jeton (cf. PA-01).
+        "auto_transcribe": bool(message.get("auto_transcribe", False)),
     }
 
 
@@ -178,7 +180,8 @@ def process_file_ready(message: dict) -> bool:
 
         # Notify internal zone via AMQP (and optionally HTTP trigger).
         msg = dict(message)
-        msg["auto_transcribe"] = bool(token_opt.auto_transcribe) if token_opt is not None else True
+        # token_opt absent ⇒ OFF (fail-safe), cohérent avec la politique PA-01.
+        msg["auto_transcribe"] = bool(token_opt.auto_transcribe) if token_opt is not None else False
         published = publish_internal_pull(msg)
 
         if published:

@@ -167,6 +167,7 @@ services:
       SECRET_KEY: dev-secret-key-change-in-prod
       VITE_DEV: ${VITE_DEV:-}
       VITE_DEV_URL: ${VITE_DEV_URL:-http://localhost:5173}
+      ADMIN_GROUP: ${ADMIN_GROUP:-/g/admins}
       OIDC_ISSUER: http://${PUBLIC_HOST:-localhost}:8180/realms/openwebui
       OIDC_INTERNAL_ISSUER: http://keycloak:8080/realms/openwebui
       OIDC_CLIENT_ID: mes-reunions
@@ -224,6 +225,7 @@ services:
       OIDC_CLIENT_SECRET: dev-client-secret
       OIDC_REDIRECT_URI: http://${PUBLIC_HOST:-localhost}:8082/auth/callback
       ADMIN_PORTAL_PORT: "8082"
+      ADMIN_GROUP: ${ADMIN_GROUP:-/g/admins}
       ADMIN_ALLOWED_USERS: admin
       EXT_DB_HOST: postgres-external
       EXT_DB_PORT: "5432"

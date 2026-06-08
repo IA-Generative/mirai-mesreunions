@@ -29,7 +29,7 @@ from . import repo
 from .auth import require_admin, require_auth
 from .providers.youtube import url as yt_url
 from .providers.youtube import YouTubeProvider
-from .repo import add_bookmark, find_source_by_provider_id, has_transcript
+from .repo import add_bookmark, find_source_by_provider_id, has_transcript, user_owns_source
 
 log = logging.getLogger(__name__)
 
@@ -236,16 +236,22 @@ def get_job(job_id: int):
 @bp.get("/video/sources/<int:source_id>")
 @require_auth
 def get_source(source_id: int):
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, provider, provider_video_id, canonical_url, title,
-                   channel, duration_sec, published_at, metadata_json, fetched_at
-              FROM video_sources WHERE id = %s
-            """,
-            (source_id,),
-        )
-        row = cur.fetchone()
+    with db.connection() as conn:
+        # Contrôle de propriété : le catalogue est un cache partagé, on ne
+        # révèle une source qu'aux utilisateurs qui y ont un lien légitime
+        # (signet ou job). Sinon 404 — pas d'énumération du catalogue global.
+        if not user_owns_source(conn, user_sub=g.user_sub, video_source_id=source_id):
+            return jsonify({"error": "source introuvable"}), 404
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, provider, provider_video_id, canonical_url, title,
+                       channel, duration_sec, published_at, metadata_json, fetched_at
+                  FROM video_sources WHERE id = %s
+                """,
+                (source_id,),
+            )
+            row = cur.fetchone()
     if not row:
         return jsonify({"error": "source introuvable"}), 404
     return jsonify({
@@ -263,26 +269,32 @@ def get_source(source_id: int):
 def get_transcript(source_id: int):
     language = request.args.get("language")
     format_ = request.args.get("format", "text")  # text | segments | markdown
-    with db.cursor() as cur:
-        if language:
-            cur.execute(
-                """SELECT id, language, method, content_text, segments_json
-                     FROM video_transcripts
-                    WHERE video_source_id = %s AND language = %s
-                    ORDER BY (method = 'subtitle_manual') DESC, created_at DESC
-                    LIMIT 1""",
-                (source_id, language),
-            )
-        else:
-            cur.execute(
-                """SELECT id, language, method, content_text, segments_json
-                     FROM video_transcripts
-                    WHERE video_source_id = %s
-                    ORDER BY (method = 'subtitle_manual') DESC, created_at DESC
-                    LIMIT 1""",
-                (source_id,),
-            )
-        row = cur.fetchone()
+    with db.connection() as conn:
+        # Même contrôle de propriété que get_source : le transcript d'une
+        # source du catalogue partagé n'est lisible que par un utilisateur
+        # qui y a un lien légitime (signet ou job).
+        if not user_owns_source(conn, user_sub=g.user_sub, video_source_id=source_id):
+            return jsonify({"error": "transcript introuvable"}), 404
+        with conn.cursor() as cur:
+            if language:
+                cur.execute(
+                    """SELECT id, language, method, content_text, segments_json
+                         FROM video_transcripts
+                        WHERE video_source_id = %s AND language = %s
+                        ORDER BY (method = 'subtitle_manual') DESC, created_at DESC
+                        LIMIT 1""",
+                    (source_id, language),
+                )
+            else:
+                cur.execute(
+                    """SELECT id, language, method, content_text, segments_json
+                         FROM video_transcripts
+                        WHERE video_source_id = %s
+                        ORDER BY (method = 'subtitle_manual') DESC, created_at DESC
+                        LIMIT 1""",
+                    (source_id,),
+                )
+            row = cur.fetchone()
     if not row:
         return jsonify({"error": "transcript introuvable"}), 404
     base = {"id": row[0], "language": row[1], "method": row[2]}
@@ -380,6 +392,10 @@ def create_app() -> Flask:
                 f"manquante(s) : {', '.join(missing)}. Refuse de booter "
                 "pour éviter les imports silencieusement non matérialisés."
             )
+    # Garde de démarrage fail-closed : audience obligatoire + refus de
+    # désactivation d'auth en production.
+    from .auth import assert_startup_auth_config
+    assert_startup_auth_config()
     app = Flask("video_ingest")
     app.register_blueprint(bp)
     return app

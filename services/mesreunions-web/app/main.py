@@ -174,6 +174,11 @@ from app import meeting_prep as _meeting_prep  # noqa: E402,F401
 
 def create_app():
     require_strong_shared_secret("INTERNAL_API_TOKEN")
+    # Garde de démarrage fail-closed : refuse un drapeau de dev (VITE_DEV,
+    # qui charge le front depuis un serveur externe) en production, et
+    # contrôle AUTH_MODE.
+    from libs.shared.app.oidc_auth import assert_auth_startup_config
+    assert_auth_startup_config(service_name="mesreunions-web", auth_disable_flags=("VITE_DEV",))
     init_tables(db_cfg, ExternalBase)
     session_factory = create_session_factory(db_cfg)
 
@@ -192,6 +197,8 @@ def create_app():
     )
 
     _register_modular_blueprints(app)
+    from libs.shared.app.web_hardening import apply_security_headers
+    apply_security_headers(app)
     return app
 
 

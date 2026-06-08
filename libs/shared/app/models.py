@@ -85,6 +85,15 @@ class UploadSession(ExternalBase):
     # par le balayage opportuniste de mesreunions-web (api_my_sessions).
     trashed_at = Column(DateTime(timezone=True), nullable=True, index=True)
 
+    # Durcissement de la vérification libre du code (anti-bruteforce /
+    # anti-partage). Verrou par-code : compteur de tentatives échouées et
+    # gel au-delà d'un seuil. Liaison mono-device : le code est lié au
+    # premier appareil qui l'utilise avec succès (un 2e appareil est refusé).
+    failed_attempts = Column(Integer, default=0, nullable=False)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    claimed_by_device_id = Column(String(255), nullable=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+
     uploads = relationship("UploadedFile", back_populates="session", cascade="all, delete-orphan")
 
     __table_args__ = (

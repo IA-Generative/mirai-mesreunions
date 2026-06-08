@@ -1495,7 +1495,9 @@ def _perform_pull(payload: dict) -> dict:
     user_sub = payload["user_sub"]
     transcoded_filename = payload["transcoded_filename"]
     simple_code = payload["simple_code"]
-    auto_transcribe = bool(payload.get("auto_transcribe", True))
+    # Flag absent ⇒ OFF (fail-safe) : la décision d'activer le traitement
+    # coûteux est prise en amont par la politique serveur (cf. PA-01).
+    auto_transcribe = bool(payload.get("auto_transcribe", False))
     internal_key = f"{user_sub}/{simple_code}/{transcoded_filename}"
 
     logger.info("Pull request: file_id=%s, user=%s, file=%s", file_id, user_sub, transcoded_filename)
@@ -1952,6 +1954,7 @@ def audio_meeting_datetimes():
                 UserAudioFile.origin,
                 UserAudioFile.source_type,
                 UserAudioFile.reprocess_version,
+                UserAudioFile.id,
             )
             .filter(UserAudioFile.user_sub == user_sub)
             .all()
@@ -1964,8 +1967,12 @@ def audio_meeting_datetimes():
                 "origin": origin,
                 "source_type": source_type,
                 "reprocess_version": reprocess_version or 0,
+                # id interne (user_audio_files.id) — permet à mesreunions-web
+                # d'exposer un uaf_id cliquable depuis les citations RAG, qui
+                # indexe par cet id (≠ uploaded_files.id externe de la liste).
+                "uaf_id": str(uaf_id),
             }
-            for (code, name, dt, origin, source_type, reprocess_version) in rows
+            for (code, name, dt, origin, source_type, reprocess_version, uaf_id) in rows
         ]
         return jsonify({"items": items})
     except Exception:

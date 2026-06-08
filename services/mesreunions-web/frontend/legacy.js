@@ -4045,8 +4045,12 @@ async function loadSessions(opts) {
         // En mode vue détail, on garde uniquement la session qui contient
         // le fichier ciblé, et on filtre tout le reste (autres sessions,
         // wrappers buckets) pour vraiment afficher une page focus fichier.
+        // Le ciblage matche l'id externe (uploaded_files.id, liste normale)
+        // OU l'uaf_id interne (user_audio_files.id) : les citations du chat
+        // RAG ne connaissent que ce dernier, distinct de l'id externe.
+        const _matchesDetail = (u) => u && (u.id === _detailFileId || u.uaf_id === _detailFileId);
         const sessionsToRender = _detailFileId
-            ? sessions.filter(s => (s.uploads || []).some(u => u.id === _detailFileId))
+            ? sessions.filter(s => (s.uploads || []).some(_matchesDetail))
             : sessions;
 
         // Aplatir tous les fichiers de toutes les sessions, puis trier par
@@ -4056,7 +4060,7 @@ async function loadSessions(opts) {
         const allFileEntries = [];
         for (const s of sessionsToRender) {
             for (const f of (s.uploads || [])) {
-                if (_detailFileId && _detailFileId !== f.id) continue;
+                if (_detailFileId && !_matchesDetail(f)) continue;
                 allFileEntries.push({ f, s });
             }
         }
@@ -4083,8 +4087,9 @@ async function loadSessions(opts) {
         const rowsHtml = allFileEntries.map(({ f, s }) => {
                 // Si une vue détail est active et ce fichier n'est pas le
                 // détail demandé, on le saute (un seul fichier visible).
-                if (_detailFileId && _detailFileId !== f.id) return '';
-                const isDetailView = (_detailFileId === f.id);
+                // Cible par id externe OU uaf_id interne (cf. _matchesDetail).
+                if (_detailFileId && !_matchesDetail(f)) return '';
+                const isDetailView = _matchesDetail(f);
                 const quality = (f.audio_quality_score !== null && f.audio_quality_score !== undefined)
                     ? ` <span class="quality-help" title="Indice de qualité audio (1 à 5). Calculé automatiquement par le worker de transcodage selon le niveau RMS, la proportion de silence, la durée et la fréquence d'échantillonnage.">i</span> ${f.audio_quality_score.toFixed(1)}/5`
                     : '';

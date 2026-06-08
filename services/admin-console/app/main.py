@@ -40,11 +40,19 @@ from libs.shared.app.config import (
     OIDC_OFFLINE_ACCESS,
 )
 from libs.shared.app.oidc_refresh_store import store_refresh_token
+from libs.shared.app.oidc_auth import (
+    verify_id_token,
+    is_user_admin,
+    assert_admin_access_configured,
+    assert_auth_startup_config,
+    OidcAuthError,
+)
 from libs.shared.app.database import create_session_factory
 from libs.shared.app.models import (
     UploadSession, UploadedFile, UserAudioFile, TranscriptionEvent, UploadStatus, DeviceEnrollment,
 )
 from libs.shared.app.s3_helper import delete_object, download_fileobj, get_s3_client
+from libs.shared.app.web_hardening import apply_security_headers
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -79,21 +87,6 @@ def _format_size(size_bytes: int) -> str:
         size /= 1024
 
 
-def _decode_jwt_payload_unverified(token_value: str) -> dict:
-    """Best-effort JWT payload decode (no signature verification)."""
-    try:
-        parts = token_value.split(".")
-        if len(parts) < 2:
-            return {}
-        payload = parts[1]
-        pad = "=" * (-len(payload) % 4)
-        raw = base64.urlsafe_b64decode(payload + pad)
-        data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def create_app() -> Flask:
     app = Flask(__name__)
     app.secret_key = SECRET_KEY
@@ -104,6 +97,12 @@ def create_app() -> Flask:
 
     oidc_cfg = OIDCConfig()
     allowed_users = _parse_allowed_users()
+
+    # Garde de démarrage fail-closed : refus de bypass d'auth en prod, et
+    # exigence d'un mécanisme d'admin (groupe Keycloak /g/admins
+    # par défaut, ou liste d'accès de secours).
+    assert_auth_startup_config(service_name="admin-console")
+    assert_admin_access_configured(allowed_users)
 
     ext_db_cfg = load_ext_db()
     int_db_cfg = load_int_db()
@@ -138,15 +137,12 @@ def create_app() -> Flask:
         return session.get("user")
 
     def is_admin(user: dict) -> bool:
-        if not allowed_users:
+        # Fail-closed. Booléen `is_admin` calculé au login honoré en priorité
+        # (la liste `groups` n'est pas stockée en session) ; repli sur le
+        # calcul groupe/allowlist (brique partagée).
+        if bool((user or {}).get("is_admin")):
             return True
-        candidates = {
-            str(user.get("preferred_username", "")).lower(),
-            str(user.get("email", "")).lower(),
-            str(user.get("name", "")).lower(),
-            str(user.get("sub", "")).lower(),
-        }
-        return any(c in allowed_users for c in candidates)
+        return is_user_admin(user, allowed_users)
 
     def require_auth(view):
         @wraps(view)
@@ -608,35 +604,58 @@ def create_app() -> Flask:
         except Exception:
             logger.warning("OIDC token response is not JSON: %s", (token_resp.text or "")[:300])
             return "Réponse OIDC invalide (token).", 502
+        # Vérification cryptographique de l'id_token (signature JWKS + nonce) :
+        # source d'identité autoritaire et fail-closed. Remplace l'ancien
+        # repli sur un décodage non vérifié.
+        expected_nonce = session.get("oidc_nonce", "")
+        jwks_url = f"{oidc_internal_issuer}/protocol/openid-connect/certs"
+        try:
+            userinfo = verify_id_token(
+                token.get("id_token", ""),
+                audience=oidc_cfg.client_id,
+                issuer={oidc_public_issuer, oidc_internal_issuer},
+                jwks_url=jwks_url,
+                nonce=expected_nonce,
+            )
+        except OidcAuthError:
+            logger.warning("OIDC id_token verification failed", exc_info=True)
+            session.pop("oidc_state", None)
+            session.pop("oidc_nonce", None)
+            return "Echec de vérification de l'identité OIDC.", 400
+
+        # Enrichissement best-effort via userinfo (email/name). Non requis
+        # pour la sécurité : l'id_token vérifié fait foi.
         try:
             userinfo_resp = req.get(
                 f"{oidc_internal_issuer}/protocol/openid-connect/userinfo",
                 headers={"Authorization": f"Bearer {token.get('access_token', '')}"},
                 timeout=10,
             )
-            if userinfo_resp.status_code >= 400:
-                logger.warning(
-                    "OIDC userinfo failed: status=%s body=%s",
-                    userinfo_resp.status_code,
-                    (userinfo_resp.text or "")[:500],
-                )
-                userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
-                if not userinfo:
-                    return "Echec de récupération du profil OIDC.", 400
-                logger.info("OIDC userinfo fallback to id_token claims")
-            else:
-                userinfo = userinfo_resp.json()
+            if userinfo_resp.status_code < 400:
+                enriched = userinfo_resp.json() or {}
+                if isinstance(enriched, dict):
+                    userinfo = {**userinfo, **enriched}
         except Exception:
-            logger.exception("Failed to fetch userinfo from Keycloak")
-            userinfo = _decode_jwt_payload_unverified(token.get("id_token", ""))
-            if not userinfo:
-                return "Erreur OIDC (userinfo). Réessaie.", 502
-            logger.info("OIDC userinfo exception fallback to id_token claims")
+            logger.info("OIDC userinfo enrichment unavailable (verified id_token claims used)")
+        # Droits admin calculés au login (booléen compact). On NE stocke PAS la
+        # liste `groups` en session : ces realms renvoient des dizaines de
+        # groupes → cookie > ~4 Ko → 502 ingress (header trop gros).
+        _admin_flag = is_user_admin(
+            {
+                "preferred_username": userinfo.get("preferred_username", ""),
+                "email": userinfo.get("email", ""),
+                "name": userinfo.get("name", ""),
+                "sub": userinfo.get("sub", ""),
+                "groups": userinfo.get("groups", []),
+            },
+            allowed_users,
+        )
         session["user"] = {
             "sub": userinfo.get("sub", ""),
             "email": userinfo.get("email", ""),
             "name": userinfo.get("name", userinfo.get("preferred_username", "")),
             "preferred_username": userinfo.get("preferred_username", ""),
+            "is_admin": _admin_flag,
         }
         session["id_token"] = token.get("id_token", "")
         session.pop("oidc_state", None)
@@ -985,6 +1004,7 @@ def create_app() -> Flask:
         finally:
             db.close()
 
+    apply_security_headers(app)
     return app
 
 
