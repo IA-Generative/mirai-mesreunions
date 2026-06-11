@@ -2528,12 +2528,12 @@ async function mountTranscriptCorrector(container) {
     // Sync audio → text : pendant la lecture, highlight le bloc courant
     // + scroll dans le viewport du container blocks si hors-vue.
     // Si word-level timestamps dispo, highlight aussi le mot prononcé.
-    if (audio) {
-        audio.addEventListener('timeupdate', () => {
-            // ``t`` = position perçue par l'oreille (décalée pour
-            // compenser le buffer de sortie audio). Utilisée pour les
-            // 2 niveaux de highlight (bloc + mot).
-            const t = Math.max(0, (audio.currentTime || 0) - KARAOKE_LAG_SEC);
+    // Karaoké : logique de highlight extraite pour être pilotée par DEUX
+    // sources de temps — la balise <audio> (S3) ET le lecteur YouTube
+    // (iframe). ``t`` = position perçue par l'oreille (décalée pour
+    // compenser le buffer de sortie audio).
+    const applyKaraoke = (t) => {
+            t = Math.max(0, t);
             let activeIdx = -1;
             for (let i = 0; i < blocks.length; i++) {
                 if (blocks[i].start <= t && t < blocks[i].end) {
@@ -2601,7 +2601,33 @@ async function mountTranscriptCorrector(container) {
                     }
                 }
             }
-        });
+    };
+
+    // Audio S3 : event natif ``timeupdate``.
+    if (audio) {
+        audio.addEventListener('timeupdate',
+            () => applyKaraoke((audio.currentTime || 0) - KARAOKE_LAG_SEC));
+    }
+
+    // YouTube : l'API IFrame ne déclenche PAS ``timeupdate`` → on poll
+    // getCurrentTime() en requestAnimationFrame tant que le player joue
+    // (state PLAYING=1). Sans ça, aucun surlignage karaoké sur YouTube
+    // (la sync segments YouTube était restée "phase 2"). La boucle s'arrête
+    // d'elle-même quand la fiche quitte le DOM (navigation) → pas de fuite.
+    if (isYoutube) {
+        let _ytKaraokeRaf = null;
+        const _ytKaraokeTick = () => {
+            if (!document.contains(container)) {
+                if (_ytKaraokeRaf) cancelAnimationFrame(_ytKaraokeRaf);
+                return;
+            }
+            if (_ytCtrl && typeof _ytCtrl.getState === 'function'
+                && _ytCtrl.getState() === 1) {
+                applyKaraoke((_ytCtrl.getTime() || 0) - KARAOKE_LAG_SEC);
+            }
+            _ytKaraokeRaf = requestAnimationFrame(_ytKaraokeTick);
+        };
+        _ytKaraokeRaf = requestAnimationFrame(_ytKaraokeTick);
     }
 
     // Sélection texte → afficher le footer correction.
