@@ -41,7 +41,7 @@ from libs.shared.app.queue_helper import (
     QUEUE_FILE_READY,
     QUEUE_INTERNAL_PULL,
 )
-from libs.shared.app.security import require_strong_shared_secret
+from libs.shared.app.security import require_strong_shared_secret, resolve_auto_transcribe
 from libs.shared.app.trigger_url import resolved_trigger_url
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -180,8 +180,18 @@ def process_file_ready(message: dict) -> bool:
 
         # Notify internal zone via AMQP (and optionally HTTP trigger).
         msg = dict(message)
-        # token_opt absent ⇒ OFF (fail-safe), cohérent avec la politique PA-01.
-        msg["auto_transcribe"] = bool(token_opt.auto_transcribe) if token_opt is not None else False
+        # auto_transcribe :
+        #   • jeton présent (QR/PWA) ⇒ on respecte la valeur déjà résolue à
+        #     l'émission du jeton (device-token-authority a appliqué la policy).
+        #   • jeton absent (upload local web : aucune UploadTokenOption) ⇒ on
+        #     applique la policy serveur ICI via resolve_auto_transcribe. Le
+        #     fail-safe PA-01 est préservé (policy off/absente → False) ; avec
+        #     policy "on" les uploads locaux sont enfin transcrits au lieu de
+        #     finir "disabled" à vie (incident 2026-06-11).
+        if token_opt is not None:
+            msg["auto_transcribe"] = bool(token_opt.auto_transcribe)
+        else:
+            msg["auto_transcribe"] = resolve_auto_transcribe(False)
         published = publish_internal_pull(msg)
 
         if published:
