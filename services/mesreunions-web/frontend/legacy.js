@@ -2326,7 +2326,14 @@ async function mountTranscriptCorrector(container) {
     // Queue _ytPendingSeek : si l'utilisateur clique AVANT que onReady ait
     // posé _ytCtrl (loading de l'API + iframe ~500ms-1s), on bufferise le
     // dernier seek demandé et on le rejoue dès que _ytCtrl est prêt.
-    const YT_PREROLL_SEC = 1.5;
+    // Pré-roll appliqué au seek YouTube : léger rewind pour absorber le
+    // snap-keyframe de seekTo (qui peut sinon couper le 1er mot). 1.5s était
+    // trop — on atterrissait dans la phrase PRÉCÉDENTE. 0.3s = on tombe au
+    // tout début du segment cliqué. Tunable via localStorage.tc_yt_preroll.
+    const YT_PREROLL_SEC = (() => {
+        const v = parseFloat(localStorage.getItem('tc_yt_preroll') || '0.3');
+        return Number.isFinite(v) && v >= 0 ? v : 0.3;
+    })();
     let _ytCtrl = null;
     let _ytPendingSeek = null;
     const ytIframe = container.querySelector('iframe[data-yt-player-target]');
