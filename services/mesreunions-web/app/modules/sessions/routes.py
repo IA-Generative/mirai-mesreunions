@@ -140,6 +140,55 @@ def _send_text_attachment(text, filename, mime="text/plain"):
 # ─── /api/my-sessions ────────────────────────────────────────────────────
 
 
+# Cap de sécurité sur le nombre de sessions listées : chaque session
+# entraîne des probes S3 + un rendu, donc on borne le hot path.
+_MY_SESSIONS_CAP = int(os.getenv("MY_SESSIONS_CAP", "200"))
+
+
+def _select_listed_sessions(db, user_sub: str):
+    """Sessions à retourner par ``/api/my-sessions``.
+
+    Le cap (_MY_SESSIONS_CAP) s'applique sur l'ACTIVITÉ récente
+    (``updated_at``) et non sur ``created_at``. Raison : une session
+    « Upload local » (préfixe ``L-``) est créée une seule fois puis
+    réutilisée/ré-incrémentée à chaque upload (cf
+    ``_get_or_create_local_upload_session``) — son ``created_at`` reste
+    figé alors que ses fichiers sont récents. Trier par ``created_at`` la
+    faisait couler sous le cap (rang 336/337 observé le 2026-06-11) ⇒ des
+    fichiers pourtant bien uploadés (status TRANSFERRED) devenaient
+    invisibles dans la liste. ``upload_count += 1`` bumpe ``updated_at``
+    via ``onupdate`` à chaque upload, donc trier par activité fait
+    remonter la session.
+
+    Filet de sécurité complémentaire : les sessions locales sont
+    permanentes (rétention ~50 ans) et constituent l'historique « mes
+    uploads » de l'utilisateur — on garantit qu'elles ne sont JAMAIS
+    tronquées par le cap, quel que soit le volume de sessions QR.
+    """
+    recent = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.user_sub == user_sub,
+            UploadSession.trashed_at.is_(None),
+        )
+        .order_by(UploadSession.updated_at.desc())
+        .limit(_MY_SESSIONS_CAP)
+        .all()
+    )
+    seen = {s.id for s in recent}
+    local_sessions = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.user_sub == user_sub,
+            UploadSession.trashed_at.is_(None),
+            UploadSession.simple_code.like(f"{svc.LOCAL_UPLOAD_SIMPLE_CODE_PREFIX}%"),
+        )
+        .order_by(UploadSession.updated_at.desc())
+        .all()
+    )
+    return recent + [s for s in local_sessions if s.id not in seen]
+
+
 _PURGE_TRASH_PROBABILITY = float(os.getenv("MY_SESSIONS_PURGE_PROBABILITY", "0.1"))
 _purge_inflight_users = set()
 _purge_inflight_lock = threading.Lock()
@@ -226,15 +275,11 @@ def api_my_sessions():
             # principale. SQLAlchemy n'est pas thread-safe sur une même
             # session : on garde donc la query dans le thread Flask et
             # on n'attend les futures qu'après.
-            # On renvoie l'ensemble des sessions actives (cap de sécurité à
-            # 200) : le tri ET la pagination sont désormais faits côté client
-            # sur la liste plate unifiée (audio + YouTube). L'ancien LIMIT 20
-            # masquait les uploads rattachés à des sessions plus anciennes
-            # (cause racine du « fichier récent introuvable »).
-            sessions = db.query(UploadSession).filter(
-                UploadSession.user_sub == user["sub"],
-                UploadSession.trashed_at.is_(None),
-            ).order_by(UploadSession.created_at.desc()).limit(200).all()
+            # Sélection cappée par activité récente + sessions locales
+            # toujours incluses (cf _select_listed_sessions). Le tri ET la
+            # pagination finaux sont faits côté client sur la liste plate
+            # unifiée (audio + YouTube).
+            sessions = _select_listed_sessions(db, user["sub"])
             bulk = _bulk_future.result()
             devices = _devices_future.result()
         timings["t1_parallel_fetch"] = round((time.monotonic() - _t0) * 1000)
