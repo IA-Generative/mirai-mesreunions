@@ -81,7 +81,8 @@ flowchart LR
     PWA["mobile-upload-pwa<br/>(captation mobile)"]
     CV["clamav-scanner"]
     AN["audio-normalizer<br/>(FFmpeg voix)"]
-    BR["dmz-to-internal-bridge<br/>(notif AMQP)"]
+    BR["dmz-to-internal-bridge<br/>(publie notif AMQP)"]
+    GUI[("bucket audio-processed<br/>guichet DMZ")]
   end
 
   subgraph INT["ZONE INTERNE"]
@@ -100,17 +101,23 @@ flowchart LR
 
   MW -->|Bearer| DTA
   PWA -->|upload| CV --> AN --> BR
-  BR -.->|AMQP internal_pull| ING
+  AN -->|dépose| GUI
+
+  %% PULL strict : l'INTERNE initie tout — aucune flèche n'entre dans la zone interne
+  ING -.->|① consomme la notif<br/>socket AMQP sortante| BR
+  ING ==>|② tire le fichier<br/>PULL depuis le guichet S3| GUI
   ING --> REL
   ING -->|Whisper + LLM| KEV
   ING -->|diarize| VM
-  ING -->|push| MCR
+  ING -->|push résultat| MCR
+
+  linkStyle 5,6 stroke:#2e7d32,stroke-width:3px,color:#2e7d32
 ```
 
 **Lecture rapide** :
-- L'externe accueille les uploads, scanne et normalise.
-- L'interne reçoit par PULL (queue AMQP + trigger HTTP optionnel) et orchestre transcription/diarisation/LLM.
-- Les appels lourds (Whisper, pyannote, LLM) sortent vers des services externes mais sont initiés *depuis l'interne*.
+- L'externe accueille les uploads, scanne et normalise, puis **dépose** le fichier dans le guichet DMZ et publie une notification.
+- **Sens des flèches = sens d'initiation.** Aucune flèche n'entre dans la zone interne : c'est l'**interne qui tire** (flèches vertes ① notif puis ② fichier), en ouvrant des sockets *sortantes*. C'est la mesure de protection « **rien ne rentre** » (PULL strict ; le seul flux entrant possible est un trigger HTTP optionnel filtré par bearer + ACL).
+- Les appels lourds (Whisper, pyannote, LLM) sortent eux aussi vers des services externes, *initiés depuis l'interne*.
 
 ### 3.3 Cycle complet d'un fichier
 
