@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
 # Commit + push la branche courante vers GitHub, puis build container
-# sur la VM cloud (bandwidth interne SCW).
+# IN-CLUSTER (Job BuildKit rootless sur le cluster Scaleway).
 #
 # Usage :
 #   deploy/scripts/commit-push-build.sh [--multi-arch] ["message de commit"]
 #
-# Par défaut : build linux/amd64 uniquement (~2x plus rapide, c'est ce qui
-# tourne sur les nœuds Kapsule SCW). L'arm64 sert surtout pour Docker
-# Desktop local sur Mac M1/M2/M3.
+# Depuis ADR-0004, le build ne passe plus par la VM cloud : il tourne dans un
+# Job Kubernetes et le push part du cluster. Plus de SSH, plus de démon Docker
+# à maintenir, et SCW_SECRET_KEY ne transite plus par un poste à chaque build
+# (elle vit dans le secret de push du namespace). Le moteur est inchangé —
+# BuildKit est déjà celui de `docker buildx`, donc les images ne divergent pas.
 #
-#   --multi-arch / --arm   ajoute linux/arm64 en plus (build complet)
+# Par défaut : build linux/amd64 uniquement, la seule architecture des nœuds
+# Kapsule SCW. L'arm64 (Docker Desktop sur Mac M1/M2/M3) exige QEMU/binfmt sur
+# les nœuds — non installé : utiliser un build local pour ce cas.
+#
+#   --multi-arch / --arm   ajoute linux/arm64 (nécessite binfmt sur les nœuds)
 #
 # Si des modifs sont uncommitées et qu'aucun message n'est passé en argv,
 # le script demande le message en interactif.
 #
-# Variables d'env optionnelles :
-#   REMOTE_HOST   cible SSH de la VM cloud (obligatoire — exporter dans
-#                 ~/.envrc ou shell, ex: REMOTE_HOST=root@<vm-build-host>)
-#   REMOTE_REPO   chemin du clone sur la VM (par défaut: /root/mirai-mesreunions)
-#   PLATFORMS     override complet de la liste de plateformes buildx
-#                 (ex: PLATFORMS=linux/arm64 pour ne builder QUE arm64)
-#   SCW_SECRET_KEY  obligatoire en local, transmise au build via stdin (jamais argv)
+# Variables d'env :
+#   REGISTRY_NAMESPACE  obligatoire — namespace du registre SCW
+#   BUILD_KUBE_CONTEXT  contexte kubectl du cluster de build (défaut: courant)
+#   BUILD_NAMESPACE     namespace du Job de build (défaut: audio-internal)
+#   BUILD_PUSH_SECRET   secret dockerconfigjson de push (défaut: scw-registry-push)
+#   PLATFORMS           override de la liste de plateformes
+#   REMOTE_HOST         OPTIONNEL — si défini, les zones gitignored sont encore
+#                       rsyncées vers cette VM (utile si vous appliquez les
+#                       overlays kustomize depuis elle). Sinon l'étape est sautée.
 #
 # Le script partage son avancement étape par étape sur stdout/stderr.
 
 set -euo pipefail
 
+# La VM n'est plus requise : elle ne sert qu'au sync optionnel des zones
+# gitignored, pour qui applique les overlays kustomize depuis elle.
 REMOTE_HOST="${REMOTE_HOST:-}"
-if [ -z "$REMOTE_HOST" ]; then
-  echo "ERREUR : variable REMOTE_HOST non définie." >&2
-  echo "  Exporter dans ~/.envrc ou shell, ex: REMOTE_HOST=root@<vm-build-host>" >&2
-  exit 1
-fi
 REMOTE_REPO="${REMOTE_REPO:-/root/mirai-mesreunions}"
 
 # Plateformes par défaut : amd64 seulement.
@@ -90,8 +95,10 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 ok "branche courante = ${C_BOLD}$BRANCH${C_RST}"
 ok "plateformes build = ${C_BOLD}$BUILD_PLATFORMS${C_RST}"
 
-[ -n "${SCW_SECRET_KEY:-}" ] || fail "SCW_SECRET_KEY non défini en local (export ou source la config)"
-ok "SCW_SECRET_KEY présent en environnement local"
+[ -n "${REGISTRY_NAMESPACE:-}" ] || fail "REGISTRY_NAMESPACE non défini (namespace du registre SCW)"
+ok "REGISTRY_NAMESPACE présent"
+command -v kubectl >/dev/null 2>&1 || fail "kubectl introuvable — requis pour le build in-cluster"
+ok "kubectl disponible"
 
 git ls-remote --exit-code origin >/dev/null 2>&1 || fail "origin injoignable"
 ok "remote origin atteignable"
@@ -128,65 +135,36 @@ ok "push terminé — HEAD = $(git rev-parse --short HEAD)"
 # 3-bis. Sync des bases gitignored (deploy/kubernetes/internal-zone et
 # external-zone). Ces dossiers ne sont plus dans le repo public (cf
 # commit ca0e41f) mais restent référencés par les overlays kustomize.
-# La VM doit donc les recevoir hors-git pour que `kustomize build`
-# fonctionne lors d'un éventuel apply depuis la VM.
-step "Sync zones gitignored vers $REMOTE_HOST"
-ZONE_PATHS=(
-  "deploy/kubernetes/internal-zone"
-  "deploy/kubernetes/external-zone"
-)
-for p in "${ZONE_PATHS[@]}"; do
-  if [ -d "$p" ]; then
-    info "  rsync $p → $REMOTE_HOST:$REMOTE_REPO/$p"
-    rsync -a --delete "$p/" "$REMOTE_HOST:$REMOTE_REPO/$p/"
-  else
-    info "  $p absent en local — skip"
-  fi
-done
-ok "sync zones terminé"
-
-# 4. Build container sur la VM cloud
-step "Build container sur $REMOTE_HOST"
-info "synchro repo + buildx ($BUILD_PLATFORMS) + push registry (bandwidth interne SCW)"
-info "clé SCW transmise via stdin (jamais en argv ni en log)"
-
-REMOTE_SCRIPT='set -e
-cd "'"$REMOTE_REPO"'"
-export PLATFORMS='"'$BUILD_PLATFORMS'"'
-export REGISTRY_NAMESPACE='"'${REGISTRY_NAMESPACE:-}'"'
-export REGISTRY_HOST='"'${REGISTRY_HOST:-}'"'
-
-echo "  ▸ fetch origin '"$BRANCH"' (avec mise à jour explicite du tracking ref)"
-# --force : survit à une réécriture d'\''historique (force-push) côté origin,
-# sinon le fetch non-fast-forward échoue et le build s'\''arrête.
-git fetch --quiet --force origin "'"$BRANCH"':refs/remotes/origin/'"$BRANCH"'"
-
-if git show-ref --verify --quiet "refs/heads/'"$BRANCH"'"; then
-  git checkout --quiet "'"$BRANCH"'"
+# Le build n'en a PAS besoin (le Dockerfile ne copie que du suivi-git) : cette
+# étape ne sert qu'à qui applique les overlays depuis la VM. D'où le skip
+# propre quand REMOTE_HOST n'est pas défini.
+if [ -n "$REMOTE_HOST" ]; then
+  step "Sync zones gitignored vers $REMOTE_HOST"
+  ZONE_PATHS=(
+    "deploy/kubernetes/internal-zone"
+    "deploy/kubernetes/external-zone"
+  )
+  for p in "${ZONE_PATHS[@]}"; do
+    if [ -d "$p" ]; then
+      info "  rsync $p → $REMOTE_HOST:$REMOTE_REPO/$p"
+      rsync -a --delete "$p/" "$REMOTE_HOST:$REMOTE_REPO/$p/"
+    else
+      info "  $p absent en local — skip"
+    fi
+  done
+  ok "sync zones terminé"
 else
-  git checkout --quiet -b "'"$BRANCH"'" "origin/'"$BRANCH"'"
+  step "Sync zones gitignored"
+  info "REMOTE_HOST non défini — skip (le build in-cluster n'en a pas besoin)"
 fi
-git reset --hard --quiet "origin/'"$BRANCH"'"
-echo "  ▸ HEAD = $(git log --oneline -1)"
 
-echo "  ▸ lecture SCW_SECRET_KEY depuis stdin"
-IFS= read -r SCW_SECRET_KEY
-export SCW_SECRET_KEY
+# 4. Build container in-cluster (Job BuildKit rootless)
+step "Build container in-cluster"
+info "Job BuildKit sur le cluster ($BUILD_PLATFORMS) — le push part du cluster"
+info "source du build = origin/$BRANCH, pas la copie de travail"
 
-echo "  ▸ prépare buildx (driver docker-container)"
-# Le format réel de `buildx ls` met un astérisque sur le builder actif :
-# "scw-multi*  docker-container ...". On match donc le nom seul.
-if ! docker buildx inspect scw-multi >/dev/null 2>&1; then
-  docker buildx create --name scw-multi --driver docker-container --bootstrap >/dev/null
-fi
-docker buildx use scw-multi
-
-echo "  ▸ lance deploy/scripts/build-push-scw.sh"
-bash deploy/scripts/build-push-scw.sh
-'
-
-printf '%s\n' "$SCW_SECRET_KEY" | ssh "$REMOTE_HOST" "$REMOTE_SCRIPT"
-ok "image construite et poussée sur rg.fr-par.scw.cloud"
+PLATFORMS="$BUILD_PLATFORMS" bash "$(dirname "$0")/build-incluster.sh" --ref "$BRANCH"
+ok "image construite et poussée sur ${REGISTRY_HOST:-rg.fr-par.scw.cloud}"
 
 # 5. Pointeurs rollout
 step "Terminé"

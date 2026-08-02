@@ -1,0 +1,99 @@
+# Job de build in-cluster (BuildKit rootless) — construit l'image monorepo
+# `secure-audio-upload` depuis le dépôt git, sans démon Docker ni VM de build.
+#
+# Ce fichier est un GABARIT : les jetons __XXX__ sont substitués par
+# deploy/scripts/build-incluster.sh. Pour un apply manuel, remplacez-les.
+#
+# Pourquoi BuildKit : c'est le moteur de `docker buildx`, donc celui qu'utilisait
+# déjà le build sur VM (deploy/scripts/build-push-scw.sh). Une seule
+# implémentation de build, des images équivalentes par construction. Kaniko a
+# été écarté : le projet est archivé depuis 2025 (cf. ADR-0004).
+#
+# Prérequis dans le namespace cible :
+#   - un secret kubernetes.io/dockerconfigjson ayant les droits de PUSH sur
+#     rg.fr-par.scw.cloud (créé par deploy/scripts/create-registry-push-secret.sh).
+#
+# Le mode rootless tourne en uid 1000 sans privilège, mais réclame de délier
+# seccomp et AppArmor : BuildKit crée des espaces de noms utilisateur imbriqués
+# que les profils par défaut interdisent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __JOB_NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: mirai-mesreunions
+    app.kubernetes.io/component: image-build
+spec:
+  backoffLimit: 0            # pas de reconstruction silencieuse : un échec reste un échec
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mirai-mesreunions
+        app.kubernetes.io/component: image-build
+    spec:
+      restartPolicy: Never
+      # Le pod porte un secret de PUSH : il n'a aucune raison de porter en plus
+      # un jeton d'API Kubernetes. BuildKit n'appelle pas l'API du cluster.
+      automountServiceAccountToken: false
+      containers:
+        - name: buildkit
+          image: __BUILDKIT_IMAGE__
+          command: ["buildctl-daemonless.sh"]
+          args:
+            - "build"
+            - "--frontend=dockerfile.v0"
+            - "--opt=context=__GIT_CONTEXT__"
+            - "--opt=filename=__DOCKERFILE__"
+            - "--opt=platform=__PLATFORMS__"
+            - "--opt=label:org.opencontainers.image.revision=__GIT_SHA__"
+            - "--opt=label:org.opencontainers.image.version=__TAG__"
+            - "--output=type=image,name=__DESTINATIONS__,push=true"
+            - "__EXTRA_ARGS__"
+            - "--progress=plain"
+          env:
+            # buildctl lit les credentials de registre dans $DOCKER_CONFIG/config.json.
+            - name: DOCKER_CONFIG
+              value: /home/user/.docker
+            - name: BUILDKITD_FLAGS
+              value: --oci-worker-no-process-sandbox
+          securityContext:
+            # Configuration rootless documentée en amont (examples/kubernetes/
+            # pod.rootless.yaml). Pas de privilège, pas de root.
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: Unconfined
+            appArmorProfile:
+              type: Unconfined
+          resources:
+            # Nœuds internal-gw : 7800m CPU / 30 Gi / 68 Gi éphémère. L'image est
+            # lourde (torch, ffmpeg, node build DSFR) — on demande large sans
+            # menacer les pods applicatifs, qui tiennent dans le reste du nœud.
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              # Déclaré pour que l'ORDONNANCEUR réserve la place du build (cache
+              # de couches + contexte). Sans cette demande, le kubelet ne voit la
+              # consommation qu'après coup et évince des pods voisins.
+              ephemeral-storage: "12Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+              ephemeral-storage: "30Gi"
+          volumeMounts:
+            - name: docker-config
+              mountPath: /home/user/.docker
+              readOnly: true
+            - name: buildkit-state
+              mountPath: /home/user/.local/share/buildkit
+      volumes:
+        - name: docker-config
+          secret:
+            secretName: __PUSH_SECRET__
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        - name: buildkit-state
+          emptyDir: {}

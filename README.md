@@ -355,12 +355,20 @@ cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
 
 ### 7.1 Pipeline de build prod-bêta
 
+Le build tourne **dans le cluster** (Job BuildKit rootless), plus sur une VM — cf. [ADR-0004](docs/adr/0004-build-in-cluster-buildkit.md). BuildKit étant le moteur de `docker buildx`, la bascule n'a pas changé les images produites, seulement l'endroit où elles le sont.
+
 Le script `deploy/scripts/commit-push-build.sh` :
-1. `git push`
-2. `ssh root@<vm-diarization-host>` (cloud build VM)
-3. `docker buildx build --platform linux/amd64`
-4. `docker push` vers le registry de l'infrastructure cible
+1. `git push` de la branche courante
+2. `deploy/scripts/build-incluster.sh` → applique un Job BuildKit sur le cluster
+3. Le Job clone `origin/<branche>` et construit `deploy/docker/Dockerfile`
+4. `push` vers le registry depuis le cluster (bande passante interne SCW)
 5. `kubectl set image` (rollout strategy `surge=100%` pour fast rollouts)
+
+> Le build part de **git**, pas de la copie de travail : une garde refuse de lancer si le HEAD local n'est pas sur `origin`. Ce qui est construit est ce qui est poussé.
+
+Prérequis une seule fois : un secret de push dans le namespace de build, posé par `deploy/scripts/create-registry-push-secret.sh`.
+
+`deploy/scripts/build-push-scw.sh` (buildx local) reste la voie de secours si le cluster est indisponible, et la seule voie multi-arch tant que QEMU/binfmt n'est pas sur les nœuds.
 
 ### 7.2 Cert-manager + DNS-01 (CNAME delegation)
 
