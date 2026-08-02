@@ -61,6 +61,10 @@ def claim_next(conn, *, claimed_by: str, lease_seconds: int = 90) -> Job | None:
     Transactionnel : si le worker meurt entre claim et heartbeat, le job
     reste verrouillé jusqu'à `lease_until` puis sera repris par le
     watchdog.
+
+    Un job replacé en `pending` par `retry()` porte un `next_attempt_at`
+    dans le futur : il est ignoré jusqu'à échéance (backoff), sans bloquer
+    les autres jobs de la file (l'ORDER BY reste sur `created_at`).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -68,7 +72,10 @@ def claim_next(conn, *, claimed_by: str, lease_seconds: int = 90) -> Job | None:
             WITH next_job AS (
                 SELECT id
                   FROM video_ingest_jobs
-                 WHERE status = 'pending'
+                 WHERE (
+                         status = 'pending'
+                         AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
+                       )
                     OR (status = 'running' AND lease_until < NOW())
                  ORDER BY created_at
                  FOR UPDATE SKIP LOCKED
@@ -150,6 +157,33 @@ def fail(conn, job_id: int, *, error: str) -> None:
              WHERE id = %s
             """,
             (error[:2000] if error else None, job_id),
+        )
+
+
+def retry(conn, job_id: int, *, error: str, delay_seconds: int) -> None:
+    """Replace un job en `pending`, réarmé dans `delay_seconds`.
+
+    Transition NON terminale, réservée aux `TransientProviderError`
+    (anti-bot YouTube, 429, 5xx). `error_message` est conservé pour que
+    l'utilisateur et les logs voient *pourquoi* ça retente, mais
+    `completed_at` reste NULL — le job n'est pas fini.
+
+    `attempts` n'est pas touché ici : il est incrémenté par `claim_next`
+    au prochain tour, ce qui garde une seule source d'incrément.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE video_ingest_jobs
+               SET status          = 'pending',
+                   claimed_by      = NULL,
+                   lease_until     = NULL,
+                   next_attempt_at = NOW() + (%s || ' seconds')::INTERVAL,
+                   error_message   = %s,
+                   updated_at      = NOW()
+             WHERE id = %s
+            """,
+            (str(delay_seconds), error[:2000] if error else None, job_id),
         )
 
 

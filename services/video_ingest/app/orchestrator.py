@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import requests
 
@@ -32,6 +32,7 @@ from .jobs import Job
 from .providers.base import (
     ProviderError,
     SubtitlesUnavailable,
+    TransientProviderError,
     VideoProvider,
     VideoUnavailable,
 )
@@ -40,6 +41,22 @@ log = logging.getLogger(__name__)
 
 
 _DEFAULT_LANGUAGES = ["fr", "en"]
+
+# Backoff des échecs transitoires (anti-bot YouTube, 429). Calibré sur
+# l'incident 2026-08-02 : ~4 min séparaient l'échec de la reprise
+# spontanée. Séquence 20s → 60s → 180s, soit ~4min20 cumulées sur
+# 4 tentatives — ça rentre dans la fenêtre de polling du front (10 min),
+# donc l'utilisateur voit l'import aboutir sans rouvrir la modale.
+MAX_ATTEMPTS = int(os.environ.get("VIDEO_INGEST_MAX_ATTEMPTS", "4"))
+RETRY_BASE_DELAY = int(os.environ.get("VIDEO_INGEST_RETRY_BASE_DELAY", "20"))
+
+
+def retry_delay_seconds(attempts: int) -> int:
+    """Backoff exponentiel base 3 : 20s, 60s, 180s, …
+
+    `attempts` = valeur post-claim (1 au premier passage).
+    """
+    return RETRY_BASE_DELAY * (3 ** max(0, attempts - 1))
 
 
 class NeedsAudioFallback(ProviderError):
@@ -145,6 +162,19 @@ def run_job(conn, providers: list[VideoProvider], job: Job) -> IngestResult:
             context=job.context, context_id=job.context_id,
         )
         return IngestResult(video_source_id=video_source_id, reused=False)
+
+    # 6bis. Métadonnées dégradées (fallback oEmbed) : oEmbed n'expose pas
+    # la durée. Le dernier segment de sous-titres en donne une très bonne
+    # approximation — sans ça la fiche afficherait « 0 s » et le CR
+    # perdrait un repère utile.
+    if metadata.duration_sec is None and transcript.segments:
+        last = transcript.segments[-1]
+        derived = int(round(last.start_seconds + last.duration_seconds))
+        if derived > 0:
+            repo.update_source_duration(conn, video_source_id, derived)
+            metadata = replace(metadata, duration_sec=derived)
+            log.info("durée dérivée des sous-titres pour vsid=%s : %ds",
+                     video_source_id, derived)
 
     # 6. Chunking → persistance.
     segments_json = chunk(transcript.segments)
@@ -430,11 +460,17 @@ def _select_provider(providers: list[VideoProvider], url: str) -> VideoProvider:
 def run_and_record(conn, providers: list[VideoProvider], job: Job) -> None:
     """Variante intégrée file de jobs : exécute + écrit le résultat.
 
-    Convention V1 :
+    Convention :
       - succès → `complete(reused=…)`
-      - `VideoUnavailable` ou `ProviderError` → `fail` (pas de retry auto)
+      - `TransientProviderError` → `retry` avec backoff tant qu'il reste des
+        tentatives, `fail` au-delà. C'est le seul cas rejoué automatiquement.
+      - `VideoUnavailable` ou `ProviderError` → `fail` (rejouer ne sert à rien)
       - `NeedsAudioFallback` → `fail` avec message explicite (sera intercepté
         en slice ASR pour requeue avec force_audio=True)
+
+    L'ordre des `except` compte : `TransientProviderError` et
+    `VideoUnavailable` dérivent tous deux de `ProviderError`, donc le cas
+    général doit rester en dernier.
 
     Le worker appelle cette fonction, l'orchestrateur reste réutilisable
     sans la file (utile pour tests d'intégration et pour un mode CLI admin).
@@ -443,6 +479,24 @@ def run_and_record(conn, providers: list[VideoProvider], job: Job) -> None:
         result = run_job(conn, providers, job)
     except VideoUnavailable as e:
         jobs_mod.fail(conn, job.id, error=f"video_unavailable: {e}")
+    except TransientProviderError as e:
+        if job.attempts >= MAX_ATTEMPTS:
+            log.warning("job %s : échec transitoire définitif après %d tentatives",
+                        job.id, job.attempts)
+            jobs_mod.fail(
+                conn, job.id,
+                error=f"provider_error (abandon après {job.attempts} tentatives): {e}",
+            )
+        else:
+            delay = retry_delay_seconds(job.attempts)
+            log.warning("job %s : échec transitoire (tentative %d/%d), retry dans %ds — %s",
+                        job.id, job.attempts, MAX_ATTEMPTS, delay, str(e)[:160])
+            jobs_mod.retry(
+                conn, job.id,
+                error=f"transient (tentative {job.attempts}/{MAX_ATTEMPTS}, "
+                      f"retry dans {delay}s): {e}",
+                delay_seconds=delay,
+            )
     except NeedsAudioFallback as e:
         jobs_mod.fail(conn, job.id, error=f"needs_audio: {e}")
     except ProviderError as e:

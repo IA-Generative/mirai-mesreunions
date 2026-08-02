@@ -56,6 +56,25 @@ def upsert_source(conn, meta: VideoMetadata) -> int:
         return cur.fetchone()[0]
 
 
+def update_source_duration(conn, video_source_id: int, duration_sec: int) -> None:
+    """Renseigne la durée d'une source qui n'en avait pas.
+
+    Utilisé quand les métadonnées viennent du fallback oEmbed (qui
+    n'expose pas la durée) : l'orchestrateur la dérive du dernier segment
+    de sous-titres. `IS NULL` dans le WHERE : on ne réécrit jamais une
+    durée exacte fournie par yt-dlp avec une estimation.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE video_sources
+               SET duration_sec = %s
+             WHERE id = %s AND duration_sec IS NULL
+            """,
+            (duration_sec, video_source_id),
+        )
+
+
 def insert_transcript(
     conn,
     *,

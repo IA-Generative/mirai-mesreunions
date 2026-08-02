@@ -19,7 +19,8 @@ from youtube_transcript_api._errors import (
 )
 
 from ...types import FetchedTranscript, TranscriptSegment
-from ..base import ProviderError, SubtitlesUnavailable, VideoUnavailable
+from ..base import SubtitlesUnavailable, VideoUnavailable
+from . import _errors
 
 
 def fetch(video_id: str, languages: Iterable[str]) -> FetchedTranscript:
@@ -46,7 +47,12 @@ def fetch(video_id: str, languages: Iterable[str]) -> FetchedTranscript:
     except TranscriptsDisabled as e:
         raise SubtitlesUnavailable(f"Sous-titres désactivés sur la vidéo {video_id}") from e
     except Exception as e:  # noqa: BLE001 — la lib lève des erreurs hétérogènes
-        raise ProviderError(f"Échec listing transcripts {video_id} : {e}") from e
+        # `IpBlocked` / `RequestBlocked` : l'IP d'egress est rate-limitée,
+        # exactement le même phénomène que l'anti-bot yt-dlp. On classe
+        # via le point unique pour que l'orchestrateur retente.
+        raise _errors.classify(
+            f"{type(e).__name__}: {e}", prefix=f"Échec listing transcripts {video_id}",
+        ) from e
 
     # 1. Manuels d'abord.
     try:

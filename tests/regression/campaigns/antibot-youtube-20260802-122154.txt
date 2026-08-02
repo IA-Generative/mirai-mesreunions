@@ -1,0 +1,18 @@
+=== Campagne de non-régression — Sun Aug  2 12:21:54 CEST 2026 ===
+Tag : antibot-youtube
+
+── Run 1 : tests/unit/test_video_ingest_*.py ──
+FAILED tests/unit/test_video_ingest_orchestrator.py::test_force_audio_skips_subtitles_and_goes_to_audioFAILED tests/unit/test_video_ingest_orchestrator.py::test_fetch_audio_not_implemented_raises_needs_audio_fallback======================== 3 failed, 173 passed in 0.58s =========================
+
+── Run 2 : tests/unit/ (hors video_ingest) ──
+ERROR tests/unit/test_upload_magic_bytes.py!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!=============================== 1 error in 0.68s ===============================
+
+── Compteurs ──
+video_ingest : 173 passed / 3 failed
+historique   : 0 passed / 0 failed
+total passed : 173
+
+❌ ÉCHEC : 3 tests video_ingest cassés. Bloquant pour la slice.
+
+❌ ÉCHEC : compteur historique passe de 518 → 0. Régression.
+

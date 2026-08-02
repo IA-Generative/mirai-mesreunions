@@ -103,6 +103,44 @@ def test_fail_handles_none_error_gracefully():
     assert args[1][0] is None
 
 
+def test_retry_reprogramme_sans_etat_terminal():
+    """Incident anti-bot 2026-08-02 : le job repart en `pending` avec un
+    réarmement futur, et surtout PAS en `failed`."""
+    conn, cur = _conn_with_cursor()
+    jobs.retry(conn, 31, error="transient: anti-bot", delay_seconds=20)
+    sql, params = cur.execute.call_args.args
+    assert "status          = 'pending'" in sql
+    assert "next_attempt_at = NOW() + (%s || ' seconds')::INTERVAL" in sql
+    assert "'failed'" not in sql
+    assert "completed_at" not in sql        # le job n'est pas fini
+    assert params == ("20", "transient: anti-bot", 31)
+
+
+def test_retry_libere_le_lease_et_le_claim():
+    """Sans ça, le job resterait attribué au pod qui vient d'échouer."""
+    conn, cur = _conn_with_cursor()
+    jobs.retry(conn, 31, error="x", delay_seconds=60)
+    sql = cur.execute.call_args.args[0]
+    assert "claimed_by      = NULL" in sql
+    assert "lease_until     = NULL" in sql
+
+
+def test_retry_tronque_le_message():
+    conn, cur = _conn_with_cursor()
+    jobs.retry(conn, 31, error="x" * 5000, delay_seconds=20)
+    assert len(cur.execute.call_args.args[1][1]) == 2000
+
+
+def test_claim_next_ignore_les_jobs_en_backoff():
+    """Un job réarmé dans le futur ne doit pas être repris tout de suite —
+    sinon le backoff dégénère en boucle serrée contre YouTube."""
+    conn, cur = _conn_with_cursor()
+    cur.fetchone.return_value = None
+    jobs.claim_next(conn, claimed_by="pod-1")
+    sql = cur.execute.call_args.args[0]
+    assert "next_attempt_at IS NULL OR next_attempt_at <= NOW()" in sql
+
+
 def test_reset_orphans_returns_rowcount():
     conn, cur = _conn_with_cursor()
     cur.rowcount = 3

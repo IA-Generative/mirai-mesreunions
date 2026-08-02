@@ -2063,6 +2063,20 @@ async function _pollJobUntilTerminal(jobId, setStatus) {
         setStatus(`échec : ${body.error_message || 'inconnu'}`, '#b00020');
         return 'failed';
       }
+      if (body.retrying) {
+        // YouTube nous a jetés temporairement (anti-bot / 429). Le worker
+        // réarme tout seul : on l'annonce plutôt que d'afficher un « en
+        // cours » figé qui donne l'impression que ça a planté.
+        const waitS = body.next_attempt_at
+          ? Math.max(0, Math.round((new Date(body.next_attempt_at) - Date.now()) / 1000))
+          : null;
+        setStatus(
+          `YouTube nous limite — nouvelle tentative${waitS !== null ? ` dans ${waitS}s` : ''}`
+          + ` (${body.attempts || 1}/4)`,
+          '#b35000',
+        );
+        continue;
+      }
       setStatus(`en cours (tentative ${body.attempts || 1})…`);
     } catch (err) {
       setStatus(`polling… (${err.message})`);

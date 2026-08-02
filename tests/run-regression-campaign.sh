@@ -54,6 +54,7 @@ VI_FAILED=$(echo "$VI_OUT" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9
 # ── Run 2 : reste de tests/unit/ (dette préexistante = ~20 fails) ────────────
 log "── Run 2 : tests/unit/ (hors video_ingest) ──"
 HIST_OUT=$(python -m pytest tests/unit/ \
+  --ignore=tests/unit/test_video_ingest_youtube_antibot.py \
   --ignore=tests/unit/test_video_ingest_youtube_audio.py \
   --ignore=tests/unit/test_video_ingest_youtube_metadata.py \
   --ignore=tests/unit/test_video_ingest_youtube_provider.py \

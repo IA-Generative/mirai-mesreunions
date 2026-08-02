@@ -214,7 +214,8 @@ def get_job(job_id: int):
         cur.execute(
             """
             SELECT id, status, video_source_id, reused, error_message,
-                   attempts, created_at, completed_at, user_sub
+                   attempts, created_at, completed_at, user_sub,
+                   next_attempt_at
               FROM video_ingest_jobs WHERE id = %s
             """,
             (job_id,),
@@ -230,6 +231,11 @@ def get_job(job_id: int):
         "reused": row[3], "error_message": row[4], "attempts": row[5],
         "created_at": row[6].isoformat() if row[6] else None,
         "completed_at": row[7].isoformat() if row[7] else None,
+        # Renseigné quand le job est en backoff après un échec transitoire
+        # (anti-bot YouTube) : permet au front d'afficher « nouvelle
+        # tentative… » plutôt qu'un « en cours » qui semble figé.
+        "next_attempt_at": row[9].isoformat() if row[9] else None,
+        "retrying": bool(row[9]) and row[1] == "pending",
     })
 
 

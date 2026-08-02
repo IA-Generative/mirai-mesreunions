@@ -184,6 +184,7 @@ def test_get_job_nominal(client):
     cur.fetchone.return_value = (
         1, "done", 99, False, None, 1,
         datetime(2026, 5, 25), datetime(2026, 5, 25), "dev-anon",
+        None,  # next_attempt_at — NULL sur un job terminé
     )
     cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
     with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
@@ -192,6 +193,26 @@ def test_get_job_nominal(client):
     body = resp.get_json()
     assert body["status"] == "done"
     assert body["video_source_id"] == 99
+    assert body["retrying"] is False
+
+
+def test_get_job_en_backoff_expose_retrying(client):
+    """Job replacé en pending après un anti-bot YouTube : le front doit
+    pouvoir distinguer « ça retente » de « ça tourne »."""
+    from datetime import datetime
+    cur = MagicMock()
+    cur.fetchone.return_value = (
+        31, "pending", None, None, "transient (tentative 1/4, retry dans 20s)", 1,
+        datetime(2026, 8, 2), None, "dev-anon",
+        datetime(2026, 8, 2, 10, 0, 20),
+    )
+    cm = MagicMock(); cm.__enter__.return_value = cur; cm.__exit__.return_value = False
+    with patch("services.video_ingest.app.api.db.cursor", return_value=cm):
+        resp = client.get("/video/jobs/31")
+    body = resp.get_json()
+    assert resp.status_code == 200
+    assert body["retrying"] is True
+    assert body["next_attempt_at"] == "2026-08-02T10:00:20"
 
 
 # ─── GET /video/sources/<id>/transcript ───────────────────────────────

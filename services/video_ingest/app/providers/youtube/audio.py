@@ -17,8 +17,8 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from ...types import FetchedTranscript, TranscriptSegment
-from ..base import ProviderError, VideoUnavailable
-from . import _kevent
+from ..base import ProviderError
+from . import _errors, _kevent
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ _YDL_AUDIO_OPTS: dict = {
     # accepté par tous les backends (Whisper, pyannote, vm-direct).
     "format": "bestaudio/best",
     "noplaylist": True,
+    # Cf. metadata.py : absorbe le 429 isolé sans repasser par la file.
+    "retries": 3,
+    "extractor_retries": 3,
     "postprocessors": [{
         "key": "FFmpegExtractAudio",
         "preferredcodec": "flac",
@@ -55,10 +58,7 @@ def fetch_audio_bytes(video_id: str) -> tuple[bytes, str]:
             with YoutubeDL(opts) as ydl:
                 ydl.download([url])
         except DownloadError as e:
-            msg = str(e).lower()
-            if any(k in msg for k in ("private", "removed", "unavailable", "blocked")):
-                raise VideoUnavailable(str(e)) from e
-            raise ProviderError(f"yt-dlp download failed: {e}") from e
+            raise _errors.classify(str(e), prefix="yt-dlp download failed") from e
         # FFmpegExtractAudio postprocess écrit le .flac et garde aussi
         # le fichier source — on prend le .flac.
         flacs = list(Path(tmp).glob("*.flac"))
@@ -81,10 +81,7 @@ def fetch_audio_and_transcribe(video_id: str, language: str = "fr") -> FetchedTr
             with YoutubeDL(opts) as ydl:
                 ydl.download([url])
         except DownloadError as e:
-            msg = str(e).lower()
-            if any(k in msg for k in ("private", "removed", "unavailable", "blocked")):
-                raise VideoUnavailable(str(e)) from e
-            raise ProviderError(f"yt-dlp download failed: {e}") from e
+            raise _errors.classify(str(e), prefix="yt-dlp download failed") from e
 
         files = list(Path(tmp).iterdir())
         if len(files) != 1:

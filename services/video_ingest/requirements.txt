@@ -10,7 +10,7 @@
 # par laquelle une faille d'extracteur réintroduirait le risque. On épingle
 # donc une version exacte, auditable, à bumper de façon délibérée (pas de
 # `>=` flottant qui tirerait silencieusement une version non revue).
-yt-dlp==2026.3.17
+yt-dlp==2026.7.4
 youtube-transcript-api>=1.0.0,<2.0.0
 
 # BDD : psycopg2 direct, sans SQLAlchemy ORM (cf. README D14 — raw SQL

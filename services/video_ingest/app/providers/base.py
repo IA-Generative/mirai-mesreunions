@@ -23,6 +23,18 @@ class VideoUnavailable(ProviderError):
     """Vidéo retirée, privée, géo-bloquée — pas de retry utile."""
 
 
+class TransientProviderError(ProviderError):
+    """Échec temporaire côté plateforme — un retry plus tard a des chances
+    d'aboutir.
+
+    Cas typique : YouTube sert « Sign in to confirm you're not a bot » ou
+    un HTTP 429 à l'IP d'egress du cluster (NAT SCW mutualisée). Observé
+    en prod le 2026-08-02 : la MÊME vidéo échoue à 09:59 et passe à 10:03
+    sans changement de code. Traiter ça comme terminal (comportement V1)
+    perdait définitivement l'import.
+    """
+
+
 class SubtitlesUnavailable(ProviderError):
     """Aucun sous-titre disponible dans les langues demandées. Le worker
     devra basculer sur le fallback ASR si `force_audio` ou si retry."""
