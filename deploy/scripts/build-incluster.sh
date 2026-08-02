@@ -171,8 +171,12 @@ fi
 KCTL=(kubectl)
 [ -n "$KUBE_CONTEXT" ] && KCTL+=(--context "$KUBE_CONTEXT")
 
+# `kubectl --context X config current-context` IGNORE --context : il lit le
+# champ current-context du kubeconfig. Afficher ça donnait un cluster faux
+# quand -c était passé — un opérateur pouvait croire que le build partait
+# ailleurs. On affiche donc l'override quand il existe.
 echo "== Build in-cluster (BuildKit rootless) =="
-echo "   cluster     : $("${KCTL[@]}" config current-context)"
+echo "   cluster     : ${KUBE_CONTEXT:-$(kubectl config current-context)}"
 echo "   namespace   : $NAMESPACE"
 echo "   source      : $GIT_CONTEXT @ ${BUILD_SHA:0:7}"
 echo "   image       : $DESTINATIONS"
