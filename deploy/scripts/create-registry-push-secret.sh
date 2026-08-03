@@ -56,7 +56,10 @@ fi
 
 # Vérifie la clé AVANT de la sceller dans un secret : une clé périmée créerait
 # un secret d'apparence saine qui ne casserait qu'au push, en fin de build.
-echo "Vérification de la clé auprès de $REGISTRY_HOST…" >&2
+# Accolades obligatoires : un caractère non-ASCII collé au nom de variable
+# (ici l'ellipse) voit son premier octet UTF-8 absorbé dans l'identifiant
+# selon la locale → « unbound variable » sous `set -u`.
+echo "Vérification de la clé auprès de ${REGISTRY_HOST}..." >&2
 HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
   -u "$REGISTRY_USERNAME:$SCW_SECRET_KEY" "https://$REGISTRY_HOST/v2/" || echo 000)"
 if [ "$HTTP_CODE" != "200" ]; then
