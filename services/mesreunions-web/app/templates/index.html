@@ -1,5 +1,8 @@
 <!DOCTYPE html>
-<html lang="fr" data-fr-theme>
+{# `light` EXPLICITE, et c'est un correctif : l'application n'a aucun thème sombre (toute
+   la CSS maison est en couleurs claires figées). L'attribut VIDE laissait le menu commun
+   de la bêta se croire en sombre sur un OS sombre — menu sombre sur page claire. #}
+<html lang="fr" data-fr-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -2438,10 +2441,11 @@
             <p class="fr-header__service-tagline">Concentrez-vous sur la réunion.</p>
           </div>
         </div>
+        {# Le nom de l'utilisateur et « Déconnexion » sont désormais portés par le menu
+           commun de la bêta (bulle en haut à droite — /_beta/menu.js, table APPS du dépôt
+           mirai-apps-menu : sortie « /logout »). Une seule commande de compte à l'écran. #}
         <div class="header-user">
-          <span class="header-user-name">{{ user.name or user.email }}</span>
           <div style="display:flex;gap:0.6rem;justify-content:flex-end;align-items:center;">
-            <a class="fr-link" href="/logout">Déconnexion</a>
             <button type="button" id="advanced-toggle" class="advanced-toggle"
                     onclick="toggleAdvancedDl(this)"
                     title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
@@ -3609,6 +3613,7 @@
   "user": {
     "email": "{{ (user.email or '')|e }}",
     "name": "{{ (user.name or '')|e }}",
+    "sub": "{{ (user.sub or '')|e }}",
     "roles": {{ (user.roles or [])|tojson }}
   }
 }
@@ -3619,5 +3624,18 @@
    attachent aux éléments `data-fr-*` injectés par notre rendu. #}
 <script type="module" src="/static/dsfr/dsfr/dsfr.module.min.js"></script>
 <script nomodule src="/static/dsfr/dsfr/dsfr.nomodule.min.js"></script>
+{# Menu commun de la bêta MirAI — servi en même origine par l'Ingress /_beta (dépôt
+   mirai-apps-menu). L'identité alimente la bulle du compte ; le `sub` sert au condensé
+   des avis (jamais écrit en clair). `onerror` vide : un menu absent ne doit jamais
+   empêcher le service de servir. #}
+<script>
+  (function () {
+    try {
+      var u = (JSON.parse(document.getElementById('bootstrap-data').textContent) || {}).user || {};
+      window.MIRAI_MENU = {nom: u.name || '', mail: u.email || '', sub: u.sub || ''};
+    } catch (e) { /* le menu affichera « ? » */ }
+  })();
+</script>
+<script src="/_beta/menu.js" onerror="void 0"></script>
 </body>
 </html>
