@@ -49,7 +49,10 @@ spec:
             - "--opt=platform=__PLATFORMS__"
             - "--opt=label:org.opencontainers.image.revision=__GIT_SHA__"
             - "--opt=label:org.opencontainers.image.version=__TAG__"
-            - "--output=type=image,name=__DESTINATIONS__,push=true"
+            # `name=` est protégé par des guillemets CSV : avec DEUX destinations
+            # (tag horodaté + latest), la virgule ferait lire la seconde comme une clé
+            # d'option — « error: invalid value …:latest », mesuré le 2026-08-25.
+            - "--output=type=image,\"name=__DESTINATIONS__\",push=true"
             - "__EXTRA_ARGS__"
             - "--progress=plain"
           env:
