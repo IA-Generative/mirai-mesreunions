@@ -391,6 +391,19 @@ def test_meeting_prep_v2_selectors_present(rendered_html):
         "brief-detail-themes",
         "brief-detail-themes-save-btn",
         "wizard-themes-container",
+        # Chantier « sources du brief » — étape 3 du wizard. Les quatre
+        # cartes sont câblées par délégation sur `data-source-picker`
+        # (jamais `onclick=`, jamais `data-action=` qui appartient déjà à
+        # preparations.js::_onPanelClick).
+        "wizard-source-cards",
+        'data-source-picker="drive"',
+        'data-source-picker="preparations"',
+        'data-source-picker="mail"',
+        'data-source-picker="link"',
+        "wizard-sources-basket",
+        # Le champ Drive historique survit en hidden : NATIVE_IDS (brouillons),
+        # _collectValues().drive et body.drive_folder en dépendent.
+        'type="hidden" id="wizard-drive-folder"',
     ]
     missing = [s for s in must_have if s not in rendered_html]
     assert not missing, (
@@ -412,6 +425,10 @@ def test_meeting_prep_v2_lib_modules_exist():
         "themes-chips.js",         # Lot 9
         "participants.js",         # Lot 5
         "prep-modal.js",           # Lot 3 (modales link-audio + glossaire)
+        # Chantier « sources du brief » — étape 3 du wizard.
+        "stacked-modal.js",        # modale au-dessus du wizard (z-index 10200+)
+        "source-basket.js",        # état + fonctions pures du panier
+        "source-pickers.js",       # les 4 sélecteurs de sources
     ]
     missing = [
         f for f in expected

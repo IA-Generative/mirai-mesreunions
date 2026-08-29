@@ -7,7 +7,7 @@
 // l'ancien _wizard_template.py mais distribués en 5 steps :
 //   1. Identité  : type + sujet (+ durée prévue, déplacée ici pour cohérence)
 //   2. Contexte  : rôle dans la réunion + attendu du brief
-//   3. Documents : dossier Drive optionnel
+//   3. Sources   : dossiers/fichiers Drive, réunions passées, textes collés
 //   4. Focus     : checkboxes "Sur quoi concentrer l'analyse ?"
 //   5. Récap     : récapitulatif + bouton Générer
 //
@@ -30,10 +30,28 @@ import {
   serializeThemesChips,
   loadThemesSuggestions,
 } from '../lib/themes-chips.js';
+import {
+  mountSourceBasket,
+  getSourceBasketEntries,
+  setSourceBasketEntries,
+  addSourceBasketEntries,
+  toApiSources,
+  snapshotEntries,
+} from '../lib/source-basket.js';
+import { openSourcePicker } from '../lib/source-pickers.js';
+import { isStackedModalOpen } from '../lib/stacked-modal.js';
+import { showToast } from '../lib/toast.js';
 
+// Le wizard reste à CINQ étapes. En ajouter une aurait deux conséquences
+// qu'aucun gain d'ergonomie ne compense : `_COACH_BY_STEP` est indexé par
+// numéro d'étape (les suggestions atterriraient sur le mauvais écran), et
+// surtout `_applySnapshot` restaure `snap.step` comme un entier brut, sans
+// champ de version — tous les brouillons déjà en localStorage rouvriraient
+// donc sur un écran décalé. L'étape 3 change seulement de nature : de
+// « Documents » (un champ Drive) à « Sources » (quatre pickers + panier).
 const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
 const STEP_LABELS = [
-  'Identité', 'Contexte', 'Documents', 'Focus', 'Récap',
+  'Identité', 'Contexte', 'Sources', 'Focus', 'Récap',
 ];
 
 let _currentStep = 0;
@@ -41,6 +59,11 @@ let _wizardOpenedOnce = false;
 // Identifiant opaque fourni par l'application tierce qui a ouvert le lien.
 // Transmis au brief pour que l'appelant puisse retrouver ce qu'il a déclenché.
 let _externalRef = '';
+
+// Vrai dès qu'on a déjà prévenu l'utilisateur pour l'ouverture en cours —
+// le save est débouncé à 400 ms, sans ce drapeau le toast se répéterait à
+// chaque frappe.
+let _draftQuotaWarned = false;
 
 function _qs(sel, root) { return (root || document).querySelector(sel); }
 function _qsa(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
@@ -51,6 +74,43 @@ function _esc(s) {
 }
 
 function _statusBox() { return _qs('#wizard-status'); }
+
+// ── Panier de sources (étape 3) ─────────────────────────────────────────
+function _basketEl() { return _qs('#wizard-sources-basket'); }
+
+/**
+ * Recopie dans le champ historique `#wizard-drive-folder` (devenu un hidden)
+ * le premier dossier sans instance explicite, et lui seul.
+ *
+ * Pourquoi « sans instance » : le serveur replace `drive_folder` en tête de
+ * `sources[]` puis déduplique sur le triplet (drive, host, id). Le champ
+ * historique ne porte pas d'instance ; une entrée qui en porte une ne se
+ * dédupliquerait donc pas contre lui, et le dossier serait ingéré deux fois.
+ * Le picker Drive ne stampille une instance que lorsqu'il y a un choix à
+ * faire — dans le cas courant (un seul Drive), un dossier choisi en naviguant
+ * alimente donc bien ce champ, exactement comme un dossier collé.
+ */
+function _syncDriveHiddenInput(entries) {
+  const el = _qs('#wizard-drive-folder');
+  if (!el) return;
+  const legacy = (entries || []).find(
+    (e) => e && e.type === 'drive_folder' && !e.drive && !e.host,
+  );
+  el.value = legacy ? legacy.id : '';
+}
+
+function _onBasketChange(entries) {
+  _syncDriveHiddenInput(entries);
+  // Les pickers vivent dans `document.body`, donc hors du nœud sur lequel
+  // `_bindAutosave` délègue (`#wizard-modal-backdrop`) : sans ce rappel
+  // explicite, rien de ce que l'utilisateur choisit ne survivrait à une
+  // fermeture du wizard.
+  _scheduleSave();
+}
+
+function _sourceEntries() {
+  return getSourceBasketEntries(_basketEl());
+}
 
 function _setStatus(msg, kind) {
   const el = _statusBox();
@@ -267,8 +327,12 @@ function _collectValues() {
   const expectedOutcomes = _qsa('#wizard-outcome-chips .wizard-chip.is-on')
     .map((c) => c.dataset.outcome).filter(Boolean);
   const successCriteria = ((_qs('#wizard-success-criteria') || {}).value || '').trim();
+  // Étape 3 — panier de sources. `drive` reste renseigné en parallèle pour
+  // le chemin historique (cf. _syncDriveHiddenInput).
+  const sources = _sourceEntries();
   return {
     meetingType, subject, role, expectation, drive, duration, focus, participants,
+    sources,
     isRecurring: isRecurring && !!recurrenceRule,
     recurrenceRule: isRecurring ? recurrenceRule : null,
     themes,
@@ -304,6 +368,16 @@ function _renderRecap() {
               v.successCriteria,
             ].filter(Boolean).join(' ; '))
           : '<em>(non précisé)</em>'
+      }</dd>
+      <dt>Sources :</dt><dd>${
+        v.sources.length
+          ? '<ul style="margin:0;padding-left:1.1rem;">'
+            + v.sources.map((s) => (
+              `<li>${_esc(s.label)} <span style="color:#94a3b8;font-size:0.8em;">`
+              + `${_esc(s.meta || '')}</span></li>`
+            )).join('')
+            + '</ul>'
+          : '<em>(aucune)</em>'
       }</dd>
       <dt>Dossier Drive :</dt><dd>${_esc(v.drive) || '<em>(aucun)</em>'}</dd>
       <dt>Focus :</dt><dd>${v.focus.length ? v.focus.map(_esc).join(', ') : '<em>(aucun)</em>'}</dd>
@@ -525,14 +599,26 @@ async function _submit(ev) {
   if (v.expectedOutcomes.length) body.expected_outcomes = v.expectedOutcomes;
   if (v.successCriteria) body.success_criteria = v.successCriteria;
   if (_externalRef) body.external_ref = _externalRef;
+  // Étape 3 — sources combinées. `toApiSources` regroupe les fichiers Drive
+  // d'une même instance et retire toutes les clés d'affichage : le serveur ne
+  // reçoit que le contrat de `modules/preparations/sources.py`.
+  const apiSources = toApiSources(v.sources);
+  if (apiSources.length) body.sources = apiSources;
+
+  // Le stepper de génération masque les phases Drive quand aucune source ne
+  // les déclenche — un « Connexion au Drive » qui ne viendra jamais fait
+  // croire à un blocage.
+  const hasDrive = !!v.drive || apiSources.some(
+    (s) => s.type === 'drive_folder' || s.type === 'drive_files',
+  );
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
-  _setStatus(v.drive
+  _setStatus(hasDrive
     ? 'Lecture du Drive et génération du brief en cours…'
     : 'Génération du brief en cours…', 'info');
   // Affiche tout de suite le stepper en état initial pour feedback immédiat.
-  _renderGenerationStepper({ phase: 'init' }, { hasDrive: !!v.drive });
+  _renderGenerationStepper({ phase: 'init' }, { hasDrive });
 
   try {
     const r = await fetch('/api/preparations', {
@@ -550,7 +636,7 @@ async function _submit(ev) {
     // Mode async (Lot 2) : back renvoie {job_id} en 202.
     if (d.job_id) {
       _pollStartedAt = Date.now();
-      _pollJob(d.job_id, { hasDrive: !!v.drive });
+      _pollJob(d.job_id, { hasDrive });
       return;
     }
     // Fallback : ancienne réponse sync (compat).
@@ -571,48 +657,12 @@ async function _submit(ev) {
   }
 }
 
-// ── Test d'accès Drive (Lot 1) ───────────────────────────────────────────
-async function _testDriveAccess() {
-  const input = _qs('#wizard-drive-folder');
-  const result = _qs('#wizard-drive-test-result');
-  const spinner = _qs('#wizard-drive-test-spinner');
-  const btn = _qs('#wizard-drive-test-btn');
-  if (!input || !result) return;
-  const raw = (input.value || '').trim();
-  if (!raw) {
-    result.innerHTML = '<div class="fr-alert fr-alert--info fr-alert--sm"><p>Aucun dossier renseigné — le test est inutile.</p></div>';
-    return;
-  }
-  result.innerHTML = '';
-  if (spinner) spinner.style.display = '';
-  if (btn) btn.disabled = true;
-  try {
-    const url = '/api/preparations/test-drive?folder_id=' + encodeURIComponent(raw);
-    const r = await fetch(url);
-    const d = await r.json().catch(() => ({}));
-    if (d && d.ok) {
-      const n = d.docs_count || 0;
-      const docs = (d.docs || []).filter(x => !x.is_folder).slice(0, 10);
-      let list = '';
-      if (docs.length) {
-        list = '<ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85rem;">'
-          + docs.map(x => `<li>${_esc(x.name)}</li>`).join('')
-          + (n > docs.length ? `<li><em>…et ${n - docs.length} autre(s)</em></li>` : '')
-          + '</ul>';
-      }
-      result.innerHTML = `<div class="fr-alert fr-alert--success fr-alert--sm">
-        <p><strong>${n} document(s) trouvé(s)</strong> dans ce dossier.</p>${list}</div>`;
-    } else {
-      const msg = (d && d.error) ? d.error : 'Accès au Drive impossible.';
-      result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>${_esc(msg)}</p></div>`;
-    }
-  } catch (err) {
-    result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>Erreur réseau : ${_esc(err && err.message ? err.message : err)}</p></div>`;
-  } finally {
-    if (spinner) spinner.style.display = 'none';
-    if (btn) btn.disabled = false;
-  }
-}
+// Le test d'accès Drive (ancien `_testDriveAccess`) a déménagé dans
+// `lib/source-pickers.js` avec le markup qu'il pilotait : le champ d'URL
+// vit désormais dans la modale « Coller un lien ». Il y est paramétré par
+// ses éléments (`testDriveAccess({input, result, spinner, btn})`) — le
+// wizard ne peut pas l'importer depuis les pickers ET l'inverse sans
+// créer un cycle d'import.
 
 // Validation step idx (sans afficher / déplacer l'utilisateur).
 function _validateStepIdx(idx) {
@@ -684,6 +734,15 @@ export function openWizard(opts) {
       }
     }).catch(() => {});
   }
+  // Étape 3 — panier de sources. Monté AVANT `_applySnapshot` : la
+  // restauration d'un brouillon repose sur `_sourceBasketSet`, posé par le
+  // montage. Monté après, elle échouerait en silence et le panier serait vide.
+  const basket = _basketEl();
+  if (basket) {
+    mountSourceBasket(basket, { onChange: _onBasketChange });
+    _syncDriveHiddenInput([]);
+  }
+  _draftQuotaWarned = false;
   // Lot 8 — reset toggle CR.
   const sendCr = _qs('#wizard-send-cr-email');
   if (sendCr) sendCr.checked = false;
@@ -744,8 +803,14 @@ export function closeWizard() {
     try { _saveDraft(_currentDraftId, _collectSnapshot()); } catch (e) {}
   }
   _currentDraftId = null;
-  const driveTestResult = _qs('#wizard-drive-test-result');
-  if (driveTestResult) driveTestResult.innerHTML = '';
+  // Le panier est vidé APRÈS la sauvegarde ci-dessus, sinon on persisterait
+  // un brouillon amputé de ses sources.
+  const basket = _basketEl();
+  if (basket && basket._sourceBasketState) {
+    basket._sourceBasketState.entries = [];
+    if (basket._sourceBasketRender) basket._sourceBasketRender();
+  }
+  _syncDriveHiddenInput([]);
   // Nettoie ?action=new de l'URL pour éviter de réouvrir si reload.
   try {
     const url = new URL(window.location.href);
@@ -772,8 +837,23 @@ function _bindEvents() {
   if (nextBtn) nextBtn.addEventListener('click', _next);
   if (form) form.addEventListener('submit', _submit);
   if (submitBtn) submitBtn.addEventListener('click', _submit);
-  const driveTestBtn = _qs('#wizard-drive-test-btn');
-  if (driveTestBtn) driveTestBtn.addEventListener('click', _testDriveAccess);
+  // Étape 3 — ouverture des pickers par délégation sur `data-source-picker`.
+  // Ni `onclick=` (une fonction d'un module ES n'existe pas dans le scope
+  // global, le clic échouerait en ReferenceError), ni `data-action` (déjà
+  // possédé par `preparations.js::_onPanelClick`).
+  const sourceCards = _qs('#wizard-source-cards');
+  if (sourceCards) {
+    sourceCards.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest
+        ? ev.target.closest('[data-source-picker]') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      openSourcePicker(btn.getAttribute('data-source-picker'), {
+        trigger: btn,
+        addEntries: (entries) => addSourceBasketEntries(_basketEl(), entries),
+      });
+    });
+  }
   // Coaching — chips d'intention + rafraîchissement des suggestions quand
   // les entrées qui les conditionnent changent (durée, participants, texte).
   _bindOutcomeChips();
@@ -812,6 +892,10 @@ function _bindEvents() {
   document.addEventListener('keydown', (ev) => {
     if (!_wizardOpenedOnce) return;
     if (!backdrop.classList.contains('is-open')) return;
+    // Une modale empilée (picker de sources) est au-dessus : ESC lui
+    // appartient. Sans cette garde, échapper d'un picker fermerait le wizard
+    // entier — et le travail en cours partirait avec lui.
+    if (isStackedModalOpen()) return;
     if (ev.key === 'Escape') { ev.preventDefault(); closeWizard(); }
   });
   _bindChips(backdrop);
@@ -901,7 +985,25 @@ function _readAllDrafts() {
 }
 
 function _writeAllDrafts(obj) {
-  try { localStorage.setItem(_DRAFTS_KEY, JSON.stringify(obj)); } catch (e) {}
+  // Cette fonction avalait toute erreur en silence. Or le quota localStorage
+  // (~5 Mo, partagé par TOUS les brouillons) est réellement atteignable
+  // depuis que les sources `inline` portent jusqu'à 20 000 caractères : le
+  // brouillon entier était alors perdu sans le moindre signal.
+  try {
+    localStorage.setItem(_DRAFTS_KEY, JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    const isQuota = e && (e.name === 'QuotaExceededError'
+      || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22);
+    if (isQuota && !_draftQuotaWarned) {
+      _draftQuotaWarned = true;
+      try {
+        showToast('Brouillon non sauvegardé : l\'espace local est saturé. '
+          + 'Supprimez d\'anciens brouillons, ou générez ce brief maintenant.', 'error');
+      } catch (e2) { /* non-fatal */ }
+    }
+    return false;
+  }
 }
 
 // Exposé pour preparations.js (rendu liste).
@@ -966,9 +1068,24 @@ function _collectSnapshot() {
       document.querySelectorAll('#wizard-outcome-chips .wizard-chip.is-on'),
     ).map((c) => c.dataset.outcome).filter(Boolean);
   } catch (e) {}
+  // Sources (composant lib/source-basket.js). `snapshotEntries` ampute les
+  // textes collés au-delà d'un budget volontairement bas : un brouillon
+  // tronqué et signalé vaut mieux qu'un brouillon perdu par dépassement de
+  // quota (cf. _writeAllDrafts).
+  let sources = [];
+  try {
+    const snap = snapshotEntries(_sourceEntries());
+    sources = snap.entries;
+    if (snap.degraded && !_draftQuotaWarned) {
+      _draftQuotaWarned = true;
+      showToast('Les textes collés sont trop volumineux pour le brouillon : '
+        + 'ils y sont abrégés. Générez le brief sans fermer le wizard pour '
+        + 'les conserver entiers.', 'error');
+    }
+  } catch (e) {}
   return {
     step: _currentStep || 0,
-    fields, participants, themes, outcomes,
+    fields, participants, themes, outcomes, sources,
     title: fields['wizard-subject'] || '(brouillon sans titre)',
     updatedAt: Date.now(),
   };
@@ -1001,6 +1118,26 @@ function _applySnapshot(snap) {
     // Idem au retour : la méthode exposée est _themesChipsSetThemes.
     if (tc && tc._themesChipsSetThemes && Array.isArray(snap.themes)) {
       tc._themesChipsSetThemes(snap.themes);
+    }
+  } catch (e) {}
+  // Sources — panier de l'étape 3.
+  try {
+    const basket = _basketEl();
+    if (basket) {
+      if (Array.isArray(snap.sources) && snap.sources.length) {
+        setSourceBasketEntries(basket, snap.sources);
+      } else if (snap.fields['wizard-drive-folder']) {
+        // Brouillon antérieur au panier : son dossier collé ne vivait que
+        // dans le champ texte. On le remonte en entrée pour qu'il reste
+        // visible et supprimable, au lieu d'un champ devenu invisible.
+        setSourceBasketEntries(basket, [{
+          type: 'drive_folder',
+          id: snap.fields['wizard-drive-folder'],
+          label: snap.fields['wizard-drive-folder'],
+          origin: 'link',
+          meta: 'Dossier Drive collé',
+        }]);
+      }
     }
   } catch (e) {}
   // Coaching — restaure les chips d'intention.
