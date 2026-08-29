@@ -455,6 +455,53 @@ def test_post_meeting_prep_inline_source_reaches_prompt_without_drive(cg):
     assert "plafond" not in repr(meta["sources"])
 
 
+def test_prior_meeting_source_never_bumps_last_viewed(cg):
+    """Piocher une réunion comme source ne doit pas la marquer « consultée ».
+
+    `last_viewed_at` alimente le scoring d'auto-link entre audios et
+    préparations : le bumper depuis une génération fausserait ce signal.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    calls = []
+
+    def _fake_internal(method, path, **kwargs):
+        calls.append((path, kwargs.get("params") or {}))
+        if path.endswith("/audio-files"):
+            return {"audio_files": [{"key_points_summary": "Budget non tranché."}]}
+        return {"preparation": {"content": {"objective_reformulated": "Arbitrer le budget"}}}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.routes.request_internal_preparation_api",
+               side_effect=_fake_internal), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Suite du comité",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "sources": [{"type": "preparation", "id": "p-1", "label": "Comité de mars",
+                         "include": ["brief", "key_points"]}],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    detail_calls = [(p, params) for p, params in calls if not p.endswith("/audio-files")]
+    assert detail_calls, "le brief de la réunion source doit être lu"
+    assert all(params.get("track_view") == "false" for _p, params in detail_calls)
+
+    # Et le contenu atterrit dans {PRIOR_MEETINGS}, jusqu'ici jamais alimenté.
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "Budget non tranché." in prompt_sent
+    assert "Arbitrer le budget" in prompt_sent
+
+
 def test_post_meeting_prep_rejects_oversized_payload(cg):
     """Garde de taille : la route n'hérite plus des 100 Mo prévus pour l'audio."""
     client, mod = cg
