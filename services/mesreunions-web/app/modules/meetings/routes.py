@@ -360,9 +360,17 @@ def send_meeting_cr(meeting_id: str):
             preparation = None
 
     # Respecte le toggle send_cr_email sauf override explicite (?force=true).
+    # Fail-closed : si la prep est liée mais n'a pas pu être chargée
+    # (preparation=None après l'except ci-dessus), on ne peut pas vérifier
+    # l'opt-in — on n'envoie pas plutôt que d'envoyer sans consentement.
     force = bool(payload.get("force"))
-    if not force and preparation is not None:
-        if not preparation.get("send_cr_email"):
+    if not force:
+        if prep_id and preparation is None:
+            return jsonify({
+                "ok": False, "sent": 0,
+                "skipped_reason": "preparation_unreachable",
+            })
+        if preparation is not None and not preparation.get("send_cr_email"):
             return jsonify({
                 "ok": False, "sent": 0,
                 "skipped_reason": "toggle_disabled",
