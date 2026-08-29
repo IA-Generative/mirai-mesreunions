@@ -699,12 +699,19 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         brief["_meta"] = meta
 
     _update(phase="persisting")
+    # Le dossier retenu est celui collé s'il y en a un, sinon le premier
+    # choisi dans le navigateur : la fiche n'affiche son bloc « Sources
+    # Drive » que si ce champ est renseigné, et le versement Drive s'en sert
+    # comme dossier cible.
+    primary_folder_id = folder_id or next(
+        (s["id"] for s in sources if s["type"] == "drive_folder"), None,
+    )
     preparation_id = None
     try:
         created = prep_service.create_preparation({
             "user_sub": user_sub,
             "subject": subject,
-            "drive_folder_id": folder_id,
+            "drive_folder_id": primary_folder_id,
             "role": role_viewpoint,
             "expectation": expectation,
             "focus": focus_areas,
@@ -758,7 +765,7 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             from ..drive_sync import schedule_drive_brief_sync
             schedule_drive_brief_sync(
                 user_sub, preparation_id, brief, used, prompt,
-                drive_folder_id=folder_id,
+                drive_folder_id=primary_folder_id,
             )
         except Exception:
             logger.exception("preparations: schedule_drive_brief_sync raised")

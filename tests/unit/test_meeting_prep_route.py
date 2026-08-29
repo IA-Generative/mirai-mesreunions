@@ -502,6 +502,45 @@ def test_prior_meeting_source_never_bumps_last_viewed(cg):
     assert "Arbitrer le budget" in prompt_sent
 
 
+def test_folder_chosen_by_browsing_is_persisted_as_drive_folder(cg):
+    """Un dossier choisi dans le navigateur vaut un dossier collé.
+
+    La fiche n'affiche son bloc « Sources Drive » que si `drive_folder_id`
+    est renseigné, et le versement Drive s'en sert comme dossier cible.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    fake_drive = MagicMock()
+    fake_drive.exchange_refresh.return_value = "AT"
+    fake_drive.list_children.return_value = []
+    persisted = {}
+
+    def _capture(_method, _path, **kwargs):
+        persisted.update(kwargs.get("json_body") or {})
+        return {"preparation": {"id": "b-1"}}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock(return_value=fake_drive)), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"x"), \
+         patch("libs.shared.app.secrets_crypto.decrypt", return_value="RT"), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               side_effect=_capture):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "sources": [{"type": "drive_folder", "id": "folder-xyz"}],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert persisted.get("drive_folder_id") == "folder-xyz"
+
+
 def test_post_meeting_prep_rejects_oversized_payload(cg):
     """Garde de taille : la route n'hérite plus des 100 Mo prévus pour l'audio."""
     client, mod = cg
