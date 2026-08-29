@@ -22,6 +22,7 @@ import requests as req
 from flask import Blueprint, jsonify, request, session
 
 from app.shared import get_current_user, request_internal_device_api, require_auth
+from app.modules.auth import token_store
 
 bp = Blueprint("youtube_import", __name__, url_prefix="/api/youtube")
 logger = logging.getLogger("mesreunions_web.youtube_import")
@@ -35,7 +36,9 @@ def _video_ingest_base() -> str:
 
 
 def _bearer() -> str | None:
-    return session.get("access_token") or None
+    # Jetons en base via token_ref ; repli sur la clé de session héritée
+    # (cookies posés avant la migration web_session_tokens).
+    return token_store.load_tokens().get("access_token") or session.get("access_token") or None
 
 
 def _user_sub() -> str | None:
@@ -50,7 +53,7 @@ def _refresh_access_token_if_possible() -> bool:
 
     Best-effort : aucun log d'erreur sensible, juste succès/échec.
     """
-    rt = session.get("refresh_token")
+    rt = token_store.load_tokens().get("refresh_token") or session.get("refresh_token")
     if not rt:
         return False
     try:
@@ -74,10 +77,17 @@ def _refresh_access_token_if_possible() -> bool:
         new_at = body.get("access_token")
         if not new_at:
             return False
-        session["access_token"] = new_at
-        # Keycloak renvoie un nouveau refresh_token (rotation)
-        if body.get("refresh_token"):
-            session["refresh_token"] = body["refresh_token"]
+        updated = token_store.update_tokens(
+            access_token=new_at,
+            refresh_token=body.get("refresh_token"),
+        )
+        if not updated:
+            # Session héritée (cookie d'avant la migration) : on garde
+            # l'ancien emplacement pour ne pas casser la requête en cours.
+            session["access_token"] = new_at
+            # Keycloak renvoie un nouveau refresh_token (rotation)
+            if body.get("refresh_token"):
+                session["refresh_token"] = body["refresh_token"]
         logger.info("OIDC access_token refreshed silently")
         return True
     except Exception:

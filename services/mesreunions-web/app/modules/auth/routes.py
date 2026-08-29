@@ -31,6 +31,7 @@ from libs.shared.app.oidc_auth import verify_id_token, OidcAuthError, is_user_ad
 from app.runtime import (
     get_oidc_cfg, get_oidc_internal_issuer, get_oidc_scope,
 )
+from app.modules.auth import token_store
 
 logger = logging.getLogger("mesreunions_web.auth.routes")
 
@@ -111,6 +112,17 @@ def auth_callback():
         if "invalid_grant" in body or "Code not valid" in body:
             session.pop("oidc_state", None)
             session.pop("oidc_nonce", None)
+            # Garde anti-boucle : un seul retour automatique vers /login.
+            # Sans elle, un cookie de session perdu côté navigateur
+            # transformait ce redirect en boucle infinie /login ↔ Keycloak
+            # (incident 2026-08-28).
+            if session.pop("oidc_retry", None):
+                logger.warning("OIDC login loop detected (invalid_grant twice) — stopping")
+                return ("Connexion impossible : le fournisseur d'identité refuse le code "
+                        "de connexion de façon répétée. Ferme cet onglet puis "
+                        "<a href=\"/login\">réessaie</a> ; si le problème persiste, "
+                        "vide les cookies du site.", 400)
+            session["oidc_retry"] = True
             return redirect(url_for("auth.login"))
         return "Echec de connexion OIDC (code expiré ou déjà utilisé).", 400
 
@@ -177,16 +189,28 @@ def auth_callback():
         "name": userinfo.get("name", userinfo.get("preferred_username", "")),
         "is_admin": _is_admin,
     }
-    session["id_token"] = token.get("id_token", "")
-    # Access token stocké pour les proxys serveur→serveur (ex. video-ingest).
-    # Refresh token aussi (durée SSO Session Idle Keycloak ≈ 30 min par défaut)
-    # pour permettre un refresh silencieux quand l'access expire pendant que
-    # l'user est encore actif sur la page.
-    session["access_token"] = token.get("access_token", "")
-    if token.get("refresh_token"):
-        session["refresh_token"] = token.get("refresh_token")
+    # Les jetons (id/access/refresh) ne vont PLUS dans le cookie de session :
+    # à trois JWT le cookie dépassait ~4093 octets et les navigateurs le
+    # jetaient silencieusement → boucle de login infinie (incident
+    # 2026-08-28). Ils vivent en base (web_session_tokens), le cookie ne
+    # porte que la référence. L'access sert aux proxys serveur→serveur
+    # (ex. video-ingest), le refresh au refresh silencieux (durée SSO
+    # Session Idle Keycloak ≈ 30 min par défaut).
+    ref = token_store.save_tokens(
+        userinfo.get("sub", ""),
+        id_token=token.get("id_token", ""),
+        access_token=token.get("access_token", ""),
+        refresh_token=token.get("refresh_token"),
+    )
+    if ref:
+        session["token_ref"] = ref
+    # Purge des clés héritées d'une session d'avant la migration (sinon un
+    # vieux cookie resté gros continuerait de déclencher la limite).
+    for legacy_key in ("id_token", "access_token", "refresh_token"):
+        session.pop(legacy_key, None)
     session.pop("oidc_state", None)
     session.pop("oidc_nonce", None)
+    session.pop("oidc_retry", None)
 
     if OIDC_OFFLINE_ACCESS:
         try:
@@ -205,7 +229,10 @@ def auth_callback():
 @bp.route("/logout")
 def logout():
     oidc_cfg = get_oidc_cfg()
-    id_token_hint = session.get("id_token")
+    # id_token en base (cookie → token_ref) ; repli sur la clé de session
+    # héritée pour les cookies posés avant la migration.
+    id_token_hint = token_store.load_tokens().get("id_token") or session.get("id_token")
+    token_store.delete_tokens()
     session.clear()
 
     post_logout_redirect_uri = oidc_cfg.redirect_uri.replace("/auth/callback", "/")

@@ -204,6 +204,39 @@ class PreparationGenerationJob(ExternalBase):
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class WebSessionToken(ExternalBase):
+    """Jetons OIDC d'une session web, référencés depuis le cookie.
+
+    Le cookie de session Flask embarquait id/access/refresh tokens
+    (3 JWT ≈ 4,2-4,6 Ko) ; au-delà de ~4093 octets le navigateur jette
+    silencieusement le cookie et l'utilisateur boucle /login ↔ Keycloak
+    sans jamais être connecté (incident 2026-08-28). Le cookie ne porte
+    plus que ``token_ref`` ; les jetons vivent ici, chiffrés Fernet quand
+    ``OIDC_REFRESH_TOKEN_FERNET_KEY`` est configurée (``encrypted=True``).
+
+    Hébergé en postgres-external comme preparation_generation_jobs :
+    mesreunions-web y a accès direct et les 2 réplicas partagent le store.
+    Rangée éphémère — purge opportuniste au login (TTL 14 j par défaut).
+    """
+    __tablename__ = "web_session_tokens"
+
+    token_ref = Column(String(64), primary_key=True)  # secrets.token_urlsafe(32)
+    user_sub = Column(String(255), nullable=False, index=True)
+    id_token = Column(Text, nullable=True)
+    access_token = Column(Text, nullable=True)
+    refresh_token = Column(Text, nullable=True)
+    encrypted = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(timezone.utc),
+                        onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_web_session_tokens_updated", "updated_at"),
+    )
+
+
 # ─── Zone Interne ───────────────────────────────────────────
 
 class IssuedToken(InternalBase):
