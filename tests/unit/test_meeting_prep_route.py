@@ -547,6 +547,50 @@ def test_folder_chosen_by_browsing_is_persisted_as_drive_folder(cg):
     assert persisted.get("drive_folder_id") == "folder-xyz"
 
 
+def test_each_drive_source_is_listed_against_its_own_instance(cg):
+    """Un dossier choisi sur une instance donnée doit être lu sur celle-ci.
+
+    Sans ce routage par source, un dossier du Drive DINUM serait listé
+    contre le Drive par défaut et remonterait « introuvable » sans que la
+    cause soit visible.
+    """
+    client, mod = cg
+    _login(client)
+
+    import libs.shared.app.config as _cfg
+    routes_map = {"beta.test": "https://beta.test", "dinum.test": "https://dinum.test"}
+    with patch.object(_cfg, "DRIVE_HOST_ROUTES", routes_map):
+        fake_llm = MagicMock()
+        fake_llm.chat_json.return_value = {"summary": "ok"}
+        built = []
+
+        def _make_client(**kwargs):
+            built.append(kwargs["base_url"])
+            inst = MagicMock()
+            inst.exchange_refresh.return_value = "AT"
+            inst.list_children.return_value = []
+            return inst
+
+        with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+             patch.object(mod._meeting_prep, "DriveClient", side_effect=_make_client), \
+             patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"x"), \
+             patch("libs.shared.app.secrets_crypto.decrypt", return_value="RT"), \
+             patch("app.modules.preparations.service.request_internal_preparation_api",
+                   return_value={"preparation": {"id": "b-1"}}):
+            r = client.post("/api/preparations?sync=1", json={
+                "subject": "Sujet", "role": "anime", "expectation": "GO",
+                "duration_minutes": 30, "focus": [],
+                "sources": [
+                    {"type": "drive_folder", "id": "f-beta", "host": "beta.test"},
+                    {"type": "drive_folder", "id": "f-dinum", "host": "dinum.test"},
+                ],
+            })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert "https://beta.test" in built
+    assert "https://dinum.test" in built
+
+
 def test_post_meeting_prep_rejects_oversized_payload(cg):
     """Garde de taille : la route n'hérite plus des 100 Mo prévus pour l'audio."""
     client, mod = cg

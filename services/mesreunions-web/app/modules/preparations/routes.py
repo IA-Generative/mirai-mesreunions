@@ -517,17 +517,27 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             logger.exception("preparations: failed to decrypt refresh token for sub=%s", user_sub)
             _fail("Token Drive illisible côté serveur.", 500)
 
-        # Routage Drive : si le user a collé une URL avec un hostname
-        # spécifique, on l'utilise (en passant par _resolve_drive_base_url
-        # qui peut court-circuiter le LB public via le service intra-cluster).
-        # Sinon → fallback DRIVE_BASE_URL env.
-        drive_base = _resolve_drive_base_url(job.get("folder_host"))
-        drive = _mp.DriveClient(
-            base_url=drive_base,
-            oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
-            oidc_client_id=oidc_cfg.client_id,
-            oidc_client_secret=oidc_cfg.client_secret,
-        )
+        # Routage Drive : chaque source porte l'instance d'où elle a été
+        # choisie. Un client par instance, sinon un dossier sélectionné sur le
+        # Drive DINUM serait listé contre le Drive par défaut — et échouerait
+        # en « dossier introuvable » sans que la cause soit visible.
+        _clients: dict = {}
+
+        def _client_for(source: dict):
+            base = _resolve_drive_base_url(source.get("host")) if source.get("host") else None
+            if not base and source.get("drive"):
+                base = _resolve_drive_by_key(source["drive"])[0]
+            base = base or _resolve_drive_base_url(job.get("folder_host"))
+            if base not in _clients:
+                _clients[base] = _mp.DriveClient(
+                    base_url=base,
+                    oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+                    oidc_client_id=oidc_cfg.client_id,
+                    oidc_client_secret=oidc_cfg.client_secret,
+                )
+            return _clients[base]
+
+        drive = _client_for(drive_sources[0])
         try:
             access_token = drive.exchange_refresh(refresh_token)
         except _mp.DriveAuthError:
@@ -551,12 +561,14 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             }, 401)
 
         # Les fournisseurs ne font aucune I/O à la construction : le listing
-        # part au premier count_hint(), donc à l'assemblage.
+        # part au premier count_hint(), donc à l'assemblage. Le jeton d'accès
+        # est le même partout — les instances partagent le realm Keycloak.
         for src in drive_sources:
+            src_drive = _client_for(src)
             if src["type"] == "drive_folder":
-                providers.append(_mp.DriveFolderProvider(drive, access_token, src["id"]))
+                providers.append(_mp.DriveFolderProvider(src_drive, access_token, src["id"]))
             else:
-                providers.append(_mp.DriveFilesProvider(drive, access_token, src["items"]))
+                providers.append(_mp.DriveFilesProvider(src_drive, access_token, src["items"]))
 
     # Sources sans Drive : textes collés et réunions passées.
     inline_entries = [s for s in other_sources if s["type"] == "inline"]
