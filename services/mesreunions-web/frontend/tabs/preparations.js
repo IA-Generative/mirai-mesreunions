@@ -219,10 +219,14 @@ function renderBriefBody(brief_json) {
   const parts = [];
   const objective = (bj.objective_reformulated || '').trim();
   const context = (bj.context_recap || '').trim();
-  if (objective || context) {
+  const successCriteria = (((bj._meta || {}).success_criteria) || '').trim();
+  if (objective || context || successCriteria) {
     let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">🎯</span>Objectif &amp; contexte</h3>';
     if (objective) html += `<p class="brief-objective">${esc(objective)}</p>`;
     if (context) html += `<p class="brief-context" style="margin-top:0.5rem;">${esc(context)}</p>`;
+    if (successCriteria) {
+      html += `<p class="brief-success-criteria">À la fin de la réunion : ${esc(successCriteria)}</p>`;
+    }
     html += '</section>';
     parts.push(html);
   }
@@ -282,6 +286,19 @@ function renderBriefBody(brief_json) {
   if (checklist.length) {
     let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">✅</span>À faire avant la réunion</h3><ul class="brief-list brief-list-checklist">';
     checklist.forEach((q) => { html += `<li>${esc(q)}</li>`; });
+    html += '</ul></section>';
+    parts.push(html);
+  }
+  const recos = (Array.isArray(bj.ai_recommendations) ? bj.ai_recommendations : [])
+    .filter((r) => r && typeof r === 'object' && (r.suggestion || '').trim());
+  if (recos.length) {
+    let html = '<section class="brief-section"><h3 class="brief-section-title"><span class="brief-section-icon">💡</span>Recommandations</h3>'
+      + '<p class="brief-reco-intro">Suggestions issues de la recherche sur les réunions — à prendre ou à laisser.</p>'
+      + '<ul class="brief-list brief-list-recos">';
+    recos.forEach((r) => {
+      const why = (r.rationale || '').trim();
+      html += `<li>${esc((r.suggestion || '').trim())}${why ? `<span class="brief-reco-why">${esc(why)}</span>` : ''}</li>`;
+    });
     html += '</ul></section>';
     parts.push(html);
   }

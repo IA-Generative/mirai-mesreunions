@@ -242,6 +242,22 @@ def brief_json_to_markdown(brief_json: dict) -> str:
                 out.append(f"- [ ] {c.get('item') or c.get('summary') or ''}")
         out.append("")
 
+    recos = brief_json.get("ai_recommendations") or []
+    reco_lines: list[str] = []
+    for r in recos:
+        if not isinstance(r, dict):
+            continue
+        suggestion = (r.get("suggestion") or "").strip()
+        if not suggestion:
+            continue
+        rationale = (r.get("rationale") or "").strip()
+        reco_lines.append(f"- {suggestion} _({rationale})_" if rationale else f"- {suggestion}")
+    if reco_lines:
+        _h("Recommandations")
+        out.append("_Suggestions issues de la recherche sur les réunions — à prendre ou à laisser._")
+        out.extend(reco_lines)
+        out.append("")
+
     return "\n".join(out).rstrip() + "\n"
 
 

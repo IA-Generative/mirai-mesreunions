@@ -254,6 +254,22 @@
             display: block; color: #64748b; font-size: 0.78rem; font-style: italic; margin-top: 0.15rem;
         }
         .brief-rendered .brief-empty { color: #94a3b8; font-style: italic; font-size: 0.85rem; }
+        /* Zone « Recommandations » — suggestions IA humbles, visuellement
+           distinctes du contenu métier (vert discret, jamais alarmant). */
+        .brief-rendered .brief-reco-intro {
+            color: #64748b; font-size: 0.8rem; font-style: italic; margin: 0 0 0.5rem;
+        }
+        .brief-rendered .brief-list-recos li {
+            padding: 0.45rem 0.8rem; border-left: 3px solid #68a532; background: #f4f7ee;
+            margin-bottom: 0.35rem; border-radius: 0 0.35rem 0.35rem 0;
+        }
+        .brief-rendered .brief-reco-why {
+            display: block; color: #5f7350; font-size: 0.78rem; margin-top: 0.15rem;
+        }
+        .brief-rendered .brief-success-criteria {
+            margin-top: 0.5rem; font-size: 0.85rem; color: #3a5a40;
+            background: #f4f7ee; border-radius: 0.35rem; padding: 0.4rem 0.7rem;
+        }
         .sessions-list { margin-top: 1rem; }
         /* Onglet "Mes réunions" en mode liste : la carte occupe la hauteur
            restante du viewport, et la liste interne scrolle. min-height
@@ -465,6 +481,21 @@
             user-select: none;
         }
         .wizard-chip:hover { background: #e3e8f6; }
+        .wizard-chip.is-on {
+            background: #000091; border-color: #000091; color: #fff;
+        }
+        .wizard-coach {
+            display: none; margin-top: 0.6rem; padding: 0.55rem 0.75rem;
+            background: #f4f7ee; border-left: 3px solid #68a532;
+            border-radius: 0 6px 6px 0; font-size: 0.82rem; color: #2e3b1f;
+        }
+        .wizard-coach.is-visible { display: flex; gap: 0.6rem; align-items: flex-start; }
+        .wizard-coach .coach-text { flex: 1; }
+        .wizard-coach .coach-source { display: block; margin-top: 0.2rem; font-size: 0.72rem; color: #5f7350; }
+        .wizard-coach .coach-dismiss {
+            background: none; border: none; cursor: pointer; color: #5f7350;
+            font-size: 0.75rem; padding: 0; text-decoration: underline; flex: none;
+        }
         .wizard-focus-grid {
             display: grid; grid-template-columns: 1fr 1fr; gap: 0.3rem 1rem;
             margin-top: 0.2rem;
@@ -3446,6 +3477,25 @@
                         <span class="wizard-chip">Apprendre le vocabulaire</span>
                     </div>
                 </div>
+                {# Coaching — intention de fin de réunion (résultat vérifiable) #}
+                <div class="wizard-question">
+                    <label for="wizard-success-criteria">À la fin de la réunion, qu'est-ce qui aura changé ?</label>
+                    <div class="hint">
+                        Optionnel — décrire le résultat espéré aide à structurer le brief,
+                        et permet de vérifier ensuite s'il est atteint.
+                    </div>
+                    <div class="wizard-chips" id="wizard-outcome-chips">
+                        <span class="wizard-chip" data-outcome="decision">Une décision sera prise</span>
+                        <span class="wizard-chip" data-outcome="actions">Un plan d'action daté</span>
+                        <span class="wizard-chip" data-outcome="alignement">Un alignement partagé</span>
+                        <span class="wizard-chip" data-outcome="idees">Des idées nouvelles</span>
+                        <span class="wizard-chip" data-outcome="information">Une information transmise</span>
+                    </div>
+                    <input type="text" id="wizard-success-criteria" maxlength="500"
+                           style="margin-top:0.4rem;"
+                           placeholder="Ex : le budget T4 est arbitré et chacun connaît sa prochaine action">
+                    <div id="wizard-coach-tip" class="wizard-coach" aria-live="polite"></div>
+                </div>
                 {# Lot 5 — Participants (optionnels) #}
                 <div class="wizard-question">
                     <label>Participants attendus (optionnel)</label>
@@ -3536,6 +3586,7 @@
                     des documents Drive associés.
                 </p>
                 <div class="wizard-recap" id="wizard-recap-content"></div>
+                <div id="wizard-coach-tip-recap" class="wizard-coach" aria-live="polite"></div>
             </div>
 
             <div id="wizard-status" class="wizard-status"></div>

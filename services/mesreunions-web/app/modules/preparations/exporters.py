@@ -95,6 +95,20 @@ def _sections(prep: dict[str, Any]) -> list[tuple[str, str, Any]]:
     if checklist:
         out.append(("✅", "À faire avant la réunion", checklist))
 
+    # Recommandations IA (suggestions humbles) — aplaties en chaînes pour
+    # réutiliser la branche « liste simple » des deux renderers binaires.
+    recos: list[str] = []
+    for r in (bj.get("ai_recommendations") or []):
+        if not isinstance(r, dict):
+            continue
+        suggestion = (r.get("suggestion") or "").strip()
+        if not suggestion:
+            continue
+        rationale = (r.get("rationale") or "").strip()
+        recos.append(f"{suggestion} ({rationale})" if rationale else suggestion)
+    if recos:
+        out.append(("💡", "Recommandations", recos))
+
     return out
 
 

@@ -84,6 +84,7 @@ function _showStep(idx) {
   _renderStepper();
   // Refresh recap on last step entry.
   if (idx === STEP_IDS.length - 1) _renderRecap();
+  _renderCoach();
   // Boutons précédent / suivant / valider
   const prevBtn = _qs('#wizard-prev-btn');
   const nextBtn = _qs('#wizard-next-btn');
@@ -139,6 +140,106 @@ function _parseDurationMinutes(raw) {
   return null;
 }
 
+// ── Coach réunion — suggestions humbles, ancrées dans la recherche ─────
+// Une seule suggestion à la fois, jamais bloquante, toujours masquable.
+// Les sources sont citées en petit : c'est la recherche qui parle, pas nous.
+const _COACH_TIPS = [
+  {
+    id: 'outcome_empty',
+    when: (s) => !s.outcomes.length && !s.successCriteria,
+    text: 'Une pratique qui aide souvent : décrire ce qui devra être vrai à la fin '
+      + '(« le budget est arbitré », « chacun connaît sa prochaine action »). '
+      + 'Et si aucune décision ni question à trancher n\'émerge, un échange écrit peut parfois suffire.',
+    source: 'S. Rogelberg, The Surprising Science of Meetings',
+  },
+  {
+    id: 'agenda_questions',
+    when: (s) => s.outcomes.includes('decision') || s.outcomes.includes('actions'),
+    text: 'Si c\'est utile : un ordre du jour formulé en questions à trancher, plutôt qu\'en thèmes, '
+      + 'clarifie qui doit vraiment être présent. Le brief généré proposera ces questions.',
+    source: 'S. Rogelberg — un agenda n\'aide que si sa formulation engage',
+  },
+  {
+    id: 'many_participants',
+    when: (s) => s.participantsCount > 8,
+    text: 'Au-delà de 8 participants, la participation de chacun chute nettement (mesuré à grande '
+      + 'échelle). Peut-être inviter au strict nécessaire — le compte-rendu informera les autres ?',
+    source: 'Étude Microsoft 2021 (efficacité & inclusion des réunions)',
+  },
+  {
+    id: 'long_break',
+    when: (s) => s.duration >= 90,
+    text: 'Au-delà d\'une heure, une pause de 5-10 minutes améliore réellement l\'attention de tous '
+      + '(mesuré par EEG). Peut-être la prévoir dans l\'ordre du jour ?',
+    source: 'Microsoft Human Factors Lab, 2021',
+  },
+  {
+    id: 'send_before',
+    when: () => true,
+    text: 'Le geste le plus rentable après la génération : envoyer ce brief aux participants '
+      + '24-48h avant la réunion. La lecture préalable est l\'un des facteurs d\'efficacité '
+      + 'les mieux documentés.',
+    source: 'Cambridge Handbook of Meeting Science (pré-communication)',
+  },
+];
+// Ordre d'affichage par écran : contexte = intention d'abord ; récap =
+// signaux de risque d'abord, sinon le conseil « envoyer avant ».
+const _COACH_BY_STEP = {
+  1: { container: 'wizard-coach-tip', tips: ['outcome_empty', 'agenda_questions', 'many_participants', 'long_break'] },
+  4: { container: 'wizard-coach-tip-recap', tips: ['many_participants', 'long_break', 'send_before'] },
+};
+let _coachDismissed = new Set();
+
+function _coachState() {
+  const list = _qs('#wizard-participants-list');
+  return {
+    outcomes: _qsa('#wizard-outcome-chips .wizard-chip.is-on').map((c) => c.dataset.outcome),
+    successCriteria: ((_qs('#wizard-success-criteria') || {}).value || '').trim(),
+    duration: _parseDurationMinutes((_qs('#wizard-duration') || {}).value) || 0,
+    participantsCount: list ? list.children.length : 0,
+  };
+}
+
+function _renderCoach() {
+  Object.values(_COACH_BY_STEP).forEach((cfg) => {
+    const el = document.getElementById(cfg.container);
+    if (el) { el.classList.remove('is-visible'); el.innerHTML = ''; }
+  });
+  const cfg = _COACH_BY_STEP[_currentStep];
+  if (!cfg) return;
+  const el = document.getElementById(cfg.container);
+  if (!el) return;
+  const state = _coachState();
+  const tip = cfg.tips
+    .map((id) => _COACH_TIPS.find((t) => t.id === id))
+    .find((t) => t && !_coachDismissed.has(t.id) && t.when(state));
+  if (!tip) return;
+  el.innerHTML = `
+    <span aria-hidden="true">💡</span>
+    <span class="coach-text">Suggestion — ${_esc(tip.text)}
+      <span class="coach-source">${_esc(tip.source)}</span></span>
+    <button type="button" class="coach-dismiss" data-coach-dismiss="${_esc(tip.id)}">Masquer</button>`;
+  el.classList.add('is-visible');
+  const btn = el.querySelector('[data-coach-dismiss]');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      _coachDismissed.add(tip.id);
+      _renderCoach();
+    });
+  }
+}
+
+function _bindOutcomeChips() {
+  const group = _qs('#wizard-outcome-chips');
+  if (!group) return;
+  _qsa('.wizard-chip', group).forEach((chip) => {
+    chip.addEventListener('click', () => {
+      chip.classList.toggle('is-on');
+      _renderCoach();
+    });
+  });
+}
+
 // ── Récap ───────────────────────────────────────────────────────────────
 function _collectValues() {
   const meetingType = (_qs('#wizard-meeting-type') || {}).value || 'general';
@@ -159,14 +260,28 @@ function _collectValues() {
   const themes = themesContainer ? serializeThemesChips(themesContainer) : [];
   const sendCrEl = _qs('#wizard-send-cr-email');
   const sendCrEmail = !!(sendCrEl && sendCrEl.checked);
+  // Coaching — intention de fin de réunion (chips + texte libre).
+  const expectedOutcomes = _qsa('#wizard-outcome-chips .wizard-chip.is-on')
+    .map((c) => c.dataset.outcome).filter(Boolean);
+  const successCriteria = ((_qs('#wizard-success-criteria') || {}).value || '').trim();
   return {
     meetingType, subject, role, expectation, drive, duration, focus, participants,
     isRecurring: isRecurring && !!recurrenceRule,
     recurrenceRule: isRecurring ? recurrenceRule : null,
     themes,
     sendCrEmail,
+    expectedOutcomes,
+    successCriteria,
   };
 }
+
+const _OUTCOME_RECAP_LABELS = {
+  decision: 'une décision prise',
+  actions: 'un plan d\'action daté',
+  alignement: 'un alignement partagé',
+  idees: 'des idées nouvelles',
+  information: 'une information transmise',
+};
 
 function _renderRecap() {
   const root = _qs('#wizard-recap-content');
@@ -179,6 +294,14 @@ function _renderRecap() {
       <dt>Durée :</dt><dd>${v.duration ? v.duration + ' min' : '<em>—</em>'}</dd>
       <dt>Votre rôle :</dt><dd>${_esc(v.role) || '<em>—</em>'}</dd>
       <dt>Attendu :</dt><dd>${_esc(v.expectation) || '<em>—</em>'}</dd>
+      <dt>Résultat espéré :</dt><dd>${
+        (v.expectedOutcomes.length || v.successCriteria)
+          ? _esc([
+              ...v.expectedOutcomes.map((o) => _OUTCOME_RECAP_LABELS[o] || o),
+              v.successCriteria,
+            ].filter(Boolean).join(' ; '))
+          : '<em>(non précisé)</em>'
+      }</dd>
       <dt>Dossier Drive :</dt><dd>${_esc(v.drive) || '<em>(aucun)</em>'}</dd>
       <dt>Focus :</dt><dd>${v.focus.length ? v.focus.map(_esc).join(', ') : '<em>(aucun)</em>'}</dd>
       <dt>Participants :</dt><dd>${
@@ -391,6 +514,9 @@ async function _submit(ev) {
   // Lot 9 — thématiques + Lot 8 — toggle CR auto.
   if (v.themes && v.themes.length) body.themes = v.themes;
   if (v.sendCrEmail) body.send_cr_email = true;
+  // Coaching — intention de fin de réunion.
+  if (v.expectedOutcomes.length) body.expected_outcomes = v.expectedOutcomes;
+  if (v.successCriteria) body.success_criteria = v.successCriteria;
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
@@ -553,6 +679,9 @@ export function openWizard(opts) {
   // Lot 8 — reset toggle CR.
   const sendCr = _qs('#wizard-send-cr-email');
   if (sendCr) sendCr.checked = false;
+  // Coaching — reset chips d'intention + suggestions masquées.
+  _qsa('#wizard-outcome-chips .wizard-chip.is-on').forEach((c) => c.classList.remove('is-on'));
+  _coachDismissed = new Set();
   const banner = _qs('#wizard-series-banner');
   if (banner) banner.style.display = sp ? '' : 'none';
   if (sp) {
@@ -637,6 +766,12 @@ function _bindEvents() {
   if (submitBtn) submitBtn.addEventListener('click', _submit);
   const driveTestBtn = _qs('#wizard-drive-test-btn');
   if (driveTestBtn) driveTestBtn.addEventListener('click', _testDriveAccess);
+  // Coaching — chips d'intention + rafraîchissement des suggestions quand
+  // les entrées qui les conditionnent changent (durée, participants, texte).
+  _bindOutcomeChips();
+  backdrop.addEventListener('input', () => _renderCoach());
+  backdrop.addEventListener('change', () => _renderCoach());
+  backdrop.addEventListener('click', () => _renderCoach());
   // Lot 5 — ajout participant dans le wizard step 2.
   const addPartBtn = _qs('#wizard-add-participant-btn');
   if (addPartBtn) {
@@ -760,6 +895,7 @@ function _collectSnapshot() {
     'wizard-target-date', 'wizard-series-parent',
     'wizard-recurring-toggle', 'wizard-rrule-freq', 'wizard-rrule-interval',
     'wizard-rrule-time', 'wizard-rrule-until', 'wizard-send-cr-email',
+    'wizard-success-criteria',
   ];
   NATIVE_IDS.forEach((id) => {
     const el = document.getElementById(id);
@@ -779,9 +915,16 @@ function _collectSnapshot() {
     const tc = document.getElementById('wizard-themes-container');
     if (tc && tc._themesChipsGetValues) themes = tc._themesChipsGetValues() || [];
   } catch (e) {}
+  // Coaching — chips d'intention (toggles multi-sélection).
+  let outcomes = [];
+  try {
+    outcomes = Array.from(
+      document.querySelectorAll('#wizard-outcome-chips .wizard-chip.is-on'),
+    ).map((c) => c.dataset.outcome).filter(Boolean);
+  } catch (e) {}
   return {
     step: _currentStep || 0,
-    fields, participants, themes,
+    fields, participants, themes, outcomes,
     title: fields['wizard-subject'] || '(brouillon sans titre)',
     updatedAt: Date.now(),
   };
@@ -813,6 +956,14 @@ function _applySnapshot(snap) {
     const tc = document.getElementById('wizard-themes-container');
     if (tc && tc._themesChipsSetValues && Array.isArray(snap.themes)) {
       tc._themesChipsSetValues(snap.themes);
+    }
+  } catch (e) {}
+  // Coaching — restaure les chips d'intention.
+  try {
+    if (Array.isArray(snap.outcomes)) {
+      document.querySelectorAll('#wizard-outcome-chips .wizard-chip').forEach((c) => {
+        c.classList.toggle('is-on', snap.outcomes.indexOf(c.dataset.outcome) !== -1);
+      });
     }
   } catch (e) {}
   // Step
