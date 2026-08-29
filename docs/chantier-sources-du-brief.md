@@ -1,5 +1,17 @@
 # Plan — « Sources du brief » (lots A → D) + lien externe
 
+> **État au 29 août 2026.** Les étapes 1 et 3 à 9 sont implémentées sur
+> `fix/prep-fin-de-cycle`. Suite de tests : **823 verts** contre 660 au point de
+> reprise, 21 échecs contre 40, 22 erreurs de collecte contre 43 — tous
+> préexistants et sans rapport avec ce chantier (voir « Vérification »).
+>
+> **Deux étapes restent ouvertes, faute de pouvoir être validées sans accès réel :**
+> l'étape 0 (déploiement en prod-bêta) et l'étape 2 (les trois sondes, qui
+> demandent une session authentifiée). La sonde d'écriture Drive est en place
+> derrière un drapeau d'environnement et doit être jouée **avant** la première
+> mise en service du versement : la valeur de `x-amz-acl` attendue par
+> l'instance n'est pas déductible du code.
+
 ## Context
 
 Le wizard de préparation de réunion (`mesreunions-web`) ne sait aujourd'hui recevoir des
