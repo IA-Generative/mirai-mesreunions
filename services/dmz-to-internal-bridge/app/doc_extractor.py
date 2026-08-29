@@ -45,6 +45,13 @@ logger = logging.getLogger(__name__)
 
 
 # ─── MIME / extension routing table ──────────────────────────────
+#
+# ⚠ Mirrored in the browser by ``services/mesreunions-web/frontend/lib/
+# source-basket.js`` (``MIME_TO_KIND`` / ``EXT_TO_KIND`` / ``GENERIC_MIMES``),
+# so the Drive picker can grey out a file *before* downloading it. The two
+# tables must move together: adding a format here without adding it there
+# makes it unreachable from the picker; removing one there without removing it
+# here lets users pick files that will silently yield no text.
 
 # Specific MIME types we know how to read.
 _MIME_TO_KIND = {
