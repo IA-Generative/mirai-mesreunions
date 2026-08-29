@@ -165,6 +165,50 @@ def meeting_prep_new_page():
     return redirect("/?tab=brief&action=new", code=302)
 
 
+# Paramètres qu'une application tierce peut passer au wizard. Chacun est
+# facultatif : sans aucun, le lien ouvre simplement un wizard vierge.
+_EXTERNAL_LINK_PARAMS = {
+    "sujet": "subject",
+    "duree": "duration",
+    "type": "meeting_type",
+    "role": "role",
+    "attendu": "expectation",
+    "date": "target_date",
+    "serie": "series_parent_id",
+    "ref": "external_ref",
+}
+# Ces valeurs viennent d'un tiers et finissent dans le prompt du modèle :
+# elles sont bornées court, au même titre que les textes collés.
+_EXTERNAL_LINK_MAX_CHARS = 300
+
+
+@app.route("/preparer")
+@require_auth
+def preparer_page():
+    """Point d'entrée public du wizard pour une application tierce.
+
+    Sans paramètre, ouvre le wizard vierge. Avec, le pré-remplit — mais ne
+    déclenche JAMAIS la génération : c'est l'utilisateur qui vérifie et
+    valide. Sinon une application tierce pourrait provoquer des appels au
+    modèle à volonté, et le brief serait produit sans que personne n'ait lu
+    ce qui a été pré-rempli.
+    """
+    from urllib.parse import urlencode
+    from flask import request as _request
+
+    from app.meeting_prep import sanitize_source_text
+
+    out = {"tab": "brief", "action": "new"}
+    for public_name, internal_name in _EXTERNAL_LINK_PARAMS.items():
+        raw = _request.args.get(public_name)
+        if not raw:
+            continue
+        value = sanitize_source_text(raw)[:_EXTERNAL_LINK_MAX_CHARS]
+        if value:
+            out[internal_name] = value
+    return redirect("/?" + urlencode(out), code=302)
+
+
 # Import lazy : helpers meeting_prep (utilisés par les blueprints).
 from app import meeting_prep as _meeting_prep  # noqa: E402,F401
 

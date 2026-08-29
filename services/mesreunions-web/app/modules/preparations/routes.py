@@ -277,6 +277,8 @@ def create_preparation():
                 break
     # Lot 8 — toggle envoi CR auto post-transcription (défaut False).
     send_cr_email = bool(payload.get("send_cr_email"))
+    # Identifiant opaque de l'application tierce qui a ouvert le lien externe.
+    external_ref = (payload.get("external_ref") or "").strip()[:200]
     # Coaching — intention de fin de réunion (facultative, wizard step 2).
     success_criteria = (payload.get("success_criteria") or "").strip()[:500]
     outcomes_raw = payload.get("expected_outcomes")
@@ -339,6 +341,7 @@ def create_preparation():
         "success_criteria": success_criteria,
         "expected_outcomes": expected_outcomes,
         "sources": sources,
+        "external_ref": external_ref,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -691,6 +694,8 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             # Traçabilité de la sélection, sans les contenus (les textes
             # collés sont de la correspondance : ils ne sont pas persistés).
             meta["sources"] = prep_sources.public_view(sources)
+        if job.get("external_ref"):
+            meta["external_ref"] = job["external_ref"]
         brief["_meta"] = meta
 
     _update(phase="persisting")

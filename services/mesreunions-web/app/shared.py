@@ -15,7 +15,7 @@ import os
 from functools import wraps
 
 import requests as req
-from flask import redirect, session, url_for
+from flask import redirect, request, session, url_for
 
 import sys
 
@@ -34,12 +34,19 @@ def get_current_user():
 
 
 def require_auth(f):
-    """Décorateur Flask : redirige vers /login si pas de session OIDC."""
+    """Décorateur Flask : redirige vers /login si pas de session OIDC.
+
+    La page demandée est transmise en ``?next=`` pour être restaurée après
+    l'authentification : un lien entrant porteur de paramètres (cf. la route
+    ``/preparer``, ouverte depuis une application tierce) perdait sinon tout
+    son contexte dès lors que l'utilisateur n'était pas déjà connecté.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         user = get_current_user()
         if not user:
-            return redirect(url_for("auth.login"))
+            target = request.full_path if request.query_string else request.path
+            return redirect(url_for("auth.login", next=target))
         return f(*args, **kwargs)
     return decorated
 

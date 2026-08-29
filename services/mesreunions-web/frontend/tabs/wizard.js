@@ -38,6 +38,9 @@ const STEP_LABELS = [
 
 let _currentStep = 0;
 let _wizardOpenedOnce = false;
+// Identifiant opaque fourni par l'application tierce qui a ouvert le lien.
+// Transmis au brief pour que l'appelant puisse retrouver ce qu'il a déclenché.
+let _externalRef = '';
 
 function _qs(sel, root) { return (root || document).querySelector(sel); }
 function _qsa(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
@@ -521,6 +524,7 @@ async function _submit(ev) {
   // Coaching — intention de fin de réunion.
   if (v.expectedOutcomes.length) body.expected_outcomes = v.expectedOutcomes;
   if (v.successCriteria) body.success_criteria = v.successCriteria;
+  if (_externalRef) body.external_ref = _externalRef;
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
@@ -813,6 +817,34 @@ function _bindEvents() {
   _bindChips(backdrop);
 }
 
+// Champs pré-remplissables depuis un lien entrant (route /preparer). Le
+// serveur a déjà borné et assaini ces valeurs ; ici on ne fait que les poser.
+const _PREFILL_FIELDS = {
+  subject: 'wizard-subject',
+  duration: 'wizard-duration',
+  role: 'wizard-role',
+  expectation: 'wizard-expectation',
+  meeting_type: 'wizard-meeting-type',
+};
+
+function _applyPrefillFromQuery(params) {
+  Object.entries(_PREFILL_FIELDS).forEach(([param, id]) => {
+    const value = params.get(param);
+    if (!value) return;
+    const el = document.getElementById(id);
+    if (!el || el.value) return;
+    if (el.tagName === 'SELECT') {
+      // Un type de réunion inconnu est ignoré plutôt que posé en dur :
+      // la valeur vient d'une application tierce.
+      if (Array.from(el.options).some((o) => o.value === value)) el.value = value;
+    } else {
+      el.value = value;
+    }
+  });
+  const ref = params.get('external_ref');
+  if (ref) _externalRef = ref;
+}
+
 function _autoOpenFromQuery() {
   try {
     const params = new URLSearchParams(window.location.search || '');
@@ -822,7 +854,12 @@ function _autoOpenFromQuery() {
         const tabBtn = document.getElementById('tab-btn-brief');
         if (tabBtn) tabBtn.click();
       } catch (e) {}
-      openWizard();
+      openWizard({
+        seriesParentId: params.get('series_parent_id') || '',
+        targetMeetingDate: params.get('target_date') || '',
+      });
+      // Après openWizard, qui réinitialise les champs.
+      _applyPrefillFromQuery(params);
     }
   } catch (e) { /* non-fatal */ }
 }
