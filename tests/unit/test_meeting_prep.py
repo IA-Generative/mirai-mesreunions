@@ -18,6 +18,7 @@ and exercise the pure helpers (no Drive / no LLM HTTP calls):
 
 import importlib.util
 import os
+import re
 import sys
 import types
 from unittest.mock import MagicMock
@@ -255,13 +256,17 @@ def test_assemble_corpus_concatenates_and_records_used():
     drive = _fake_drive(children, downloads)
     corpus, used = mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
 
-    assert "--- Note de cadrage.txt ---" in corpus
+    # Les en-têtes portent désormais un nonce imprévisible (anti-forgerie de
+    # frontière de document) : on vérifie le nom et la forme, pas le littéral.
+    assert re.search(r"--- \[SRC [0-9a-f]{8}\] Note de cadrage\.txt · drive ---", corpus)
     assert "Cadrage : le sujet est le budget Q3." in corpus
-    assert "--- Diagnostic.md ---" in corpus
+    assert re.search(r"--- \[SRC [0-9a-f]{8}\] Diagnostic\.md · drive ---", corpus)
     assert "Les risques principaux sont X et Y." in corpus
     statuses = {u["name"]: u["status"] for u in used}
     assert statuses["Note de cadrage.txt"] == "ingested"
     assert statuses["Diagnostic.md"] == "ingested"
+    # L'origine est portée par toutes les entrées, chemin historique compris.
+    assert all(u.get("origin") == "drive" for u in used)
 
 
 def test_assemble_corpus_skips_folders():
