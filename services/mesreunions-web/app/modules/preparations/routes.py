@@ -1416,6 +1416,139 @@ def test_drive_access():
     return jsonify(result), 200
 
 
+# ─── Navigation Drive (wizard, étape Sources) ───────────────────────
+
+
+def _drive_instances() -> list[dict]:
+    """Instances Drive proposées à la navigation.
+
+    Dérivé de ``DRIVE_HOST_ROUTES`` : le front n'a pas à connaître les
+    hostnames, il manipule une clé logique.
+    """
+    from libs.shared.app.config import DRIVE_BASE_URL, DRIVE_HOST_ROUTES
+
+    out: list[dict] = []
+    seen: set = set()
+    for host, base in (DRIVE_HOST_ROUTES or {}).items():
+        key = str(host).split(".")[0].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"key": key, "host": host, "label": host, "base_url": base})
+    if not out and DRIVE_BASE_URL:
+        out.append({"key": "default", "host": None, "label": "Mon Drive",
+                    "base_url": DRIVE_BASE_URL})
+    if out:
+        out[0]["is_default"] = True
+    return out
+
+
+@bp.route("/drive/instances", methods=["GET"])
+@require_auth
+def drive_instances():
+    """Liste des Drives navigables (clé logique + libellé)."""
+    return jsonify({"drives": _drive_instances()})
+
+
+def _resolve_drive_by_key(drive_key: "str | None"):
+    """(base_url, host) pour une clé d'instance, ou le Drive par défaut."""
+    instances = _drive_instances()
+    if drive_key:
+        for inst in instances:
+            if inst["key"] == drive_key:
+                return inst["base_url"], inst.get("host")
+    if instances:
+        return instances[0]["base_url"], instances[0].get("host")
+    from libs.shared.app.config import DRIVE_BASE_URL
+    return DRIVE_BASE_URL, None
+
+
+@bp.route("/drive/browse", methods=["GET"])
+@require_auth
+def drive_browse():
+    """Navigue dans un Drive : contenu d'un dossier, ou racine si aucun id.
+
+    Endpoint distinct de ``test-drive`` à dessein : ce dernier répond 200 avec
+    un champ ``error`` dans tous les cas d'échec, ce qui convient à un
+    diagnostic mais pas à une navigation, où le front doit distinguer « pas
+    accès » de « introuvable » de « Drive en panne ».
+    """
+    from libs.shared.app.config import OIDC_TOKEN_ENDPOINT
+    from libs.shared.app.oidc_refresh_store import fetch_ciphertext
+    from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
+    from app.main import oidc_cfg
+
+    _mp = _meeting_prep_module()
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+
+    folder_raw = (request.args.get("folder_id") or "").strip()
+    drive_key = (request.args.get("drive") or "").strip() or None
+
+    folder_id: "str | None" = None
+    folder_host: "str | None" = None
+    if folder_raw:
+        folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
+        if not folder_id:
+            return _err("Identifiant ou URL de dossier Drive invalide.", 400)
+
+    ciphertext = fetch_ciphertext(user_sub)
+    if not ciphertext:
+        return _err({
+            "error": "Aucun accès Drive enregistré. Déconnectez-vous puis reconnectez-vous.",
+            "code": "no_refresh_token",
+        }, 401)
+    try:
+        refresh_token = decrypt_secret(ciphertext)
+    except Exception:
+        logger.exception("drive/browse: refresh token illisible pour sub=%s", user_sub)
+        return _err("Accès Drive illisible côté serveur.", 500)
+
+    base_url = (_resolve_drive_base_url(folder_host) if folder_host
+                else _resolve_drive_by_key(drive_key)[0])
+    if not base_url or not OIDC_TOKEN_ENDPOINT:
+        return _err("Le Drive n'est pas configuré côté serveur.", 503)
+
+    drive = _mp.DriveClient(
+        base_url=base_url,
+        oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+        oidc_client_id=oidc_cfg.client_id,
+        oidc_client_secret=oidc_cfg.client_secret,
+    )
+    try:
+        access_token = drive.exchange_refresh(refresh_token)
+        if folder_id:
+            raw_items = drive.list_children_paginated(access_token, folder_id)
+        else:
+            raw_items = drive.list_roots(access_token)
+    except _mp.DriveAuthError as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 403:
+            return _err({
+                "error": "Vous n'avez pas accès à ce dossier.",
+                "code": "drive_forbidden",
+            }, 403)
+        return _err({
+            "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
+            "code": "drive_auth",
+        }, 401)
+    except _mp.DriveApplicativeError:
+        return _err({"error": "Dossier introuvable.", "code": "drive_not_found"}, 404)
+    except _mp.DriveTransientError:
+        return _err({"error": "Le Drive est temporairement indisponible.",
+                     "code": "drive_transient"}, 502)
+
+    items = [_mp.normalize_drive_item(it) for it in (raw_items or [])]
+    items = [it for it in items if it["id"]]
+    return jsonify({
+        "drive": drive_key,
+        "folder_id": folder_id,
+        "is_root": not folder_id,
+        "folders": [it for it in items if it["is_folder"]],
+        "files": [it for it in items if not it["is_folder"]],
+    })
+
+
 # ─── Auto-link suggestion (diagnostic) ──────────────────────────────
 
 @bp.route("/link-suggestion", methods=["GET"])

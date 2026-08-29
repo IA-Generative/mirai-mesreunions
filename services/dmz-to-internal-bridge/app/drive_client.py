@@ -323,6 +323,44 @@ class DriveClient:
         items, _ = self._parse_item_page(resp, context=f"GET items/{parent_id}/children")
         return items
 
+    def list_children_paginated(self, access_token: str, parent_id: str, *,
+                                page_size: int = 200,
+                                max_pages: int = 10) -> list[dict]:
+        """Contenu COMPLET d'un dossier, pages suivies.
+
+        ``list_children`` s'arrête à la première page. Or la pagination du
+        Drive est à 20 éléments par défaut : un dossier de 25 documents en
+        perdait 5, silencieusement. Un navigateur de fichiers ne peut pas se
+        le permettre — l'utilisateur croirait le dossier plus petit qu'il
+        n'est.
+
+        On demande ``page_size`` (plafonné à 200 côté serveur) puis on suit
+        l'URL ``next`` renvoyée, plutôt que de fabriquer nous-mêmes le
+        paramètre de page : c'est la seule façon compatible avec les trois
+        paginateurs de DRF. ``max_pages`` borne le coût sur un dossier
+        anormalement gros.
+        """
+        url = (f"{self.base_url}{_API_PREFIX}/items/{parent_id}/children/"
+               f"?page_size={int(page_size)}")
+        out: list[dict] = []
+        for _ in range(max(1, max_pages)):
+            resp = self._get_with_retry(url, access_token=access_token,
+                                        label=f"list children {parent_id}")
+            self._raise_for_status(resp, context=f"GET items/{parent_id}/children")
+            items, next_url = self._parse_item_page(
+                resp, context=f"GET items/{parent_id}/children")
+            out.extend(items)
+            if not next_url:
+                break
+            # Garde : ne jamais suivre une URL hors du Drive. Sans ce test, un
+            # `next` forgé enverrait le jeton porteur de l'utilisateur vers un
+            # hôte arbitraire.
+            if not str(next_url).startswith(self.base_url):
+                logger.warning("drive: next page ignorée (hôte étranger)")
+                break
+            url = next_url
+        return out
+
     def list_roots(self, access_token: str) -> list[dict]:
         """
         GET /api/v1.0/items/ → les items racine de l'utilisateur.

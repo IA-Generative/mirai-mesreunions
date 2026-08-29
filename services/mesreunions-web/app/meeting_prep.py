@@ -552,6 +552,24 @@ def build_corpus(
     return buckets, used
 
 
+def normalize_drive_item(item: dict) -> dict:
+    """Vue stable d'un item Drive pour l'UI.
+
+    L'API ne garantit aucun schéma : selon les instances on observe ``title``
+    ou ``name``, ``type`` ou ``kind``. Cette normalisation était écrite en
+    double (ici et dans la route de diagnostic), avec des différences subtiles
+    sur ce qui compte comme dossier — une seule définition vaut mieux.
+    """
+    return {
+        "id": item.get("id") or "",
+        "name": _item_name(item),
+        "is_folder": _is_folder(item),
+        "mime_type": item.get("mime_type") or item.get("mimetype") or None,
+        "size": item.get("size"),
+        "updated_at": item.get("updated_at") or item.get("modified_at") or None,
+    }
+
+
 def assemble_corpus(
     drive: "DriveClient",
     access_token: str,
