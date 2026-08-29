@@ -376,6 +376,42 @@ def test_post_meeting_prep_persist_without_id_returns_502(cg):
     assert r.get_json().get("code") == "persist_failed"
 
 
+def test_post_meeting_prep_success_criteria_reaches_prompt_and_meta(cg):
+    """Coaching : chips d'intention + texte libre → prompt LLM et _meta du brief."""
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Arbitrage budget T4",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+            "expected_outcomes": ["decision", "bogus_slug", "decision"],
+            "success_criteria": "le budget T4 est arbitré",
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "une décision est prise" in prompt_sent
+    assert "le budget T4 est arbitré" in prompt_sent
+    body = r.get_json()
+    meta = (body["brief"] or {}).get("_meta") or {}
+    assert meta.get("success_criteria") == "le budget T4 est arbitré"
+    # Slug inconnu filtré, doublon dédupliqué.
+    assert meta.get("expected_outcomes") == ["decision"]
+
+
 # ─── GET /api/preparations/test-drive ──────────────────────────────
 
 

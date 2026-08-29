@@ -21,7 +21,10 @@ Tu réponds **uniquement** avec un objet JSON conforme au schéma suivant — pa
   ],
   "opening_questions": ["string (2-3 questions d'ouverture utiles vu le rôle déclaré du demandeur)"],
   "risk_points": ["string (2-4 points de vigilance concrets : sujets tendus, décisions qui peuvent bloquer, prérequis manquants)"],
-  "preparation_checklist": ["string (3-6 actions concrètes à faire AVANT la réunion : envoyer X, vérifier Y, demander Z à W)"]
+  "preparation_checklist": ["string (3-6 actions concrètes à faire AVANT la réunion : envoyer X, vérifier Y, demander Z à W)"],
+  "ai_recommendations": [
+    {"suggestion": "string (suggestion humble et actionnable pour améliorer cette réunion elle-même)", "rationale": "string (une phrase : pourquoi, ancrée dans le contexte du demandeur)"}
+  ]
 }
 
 Règles générales :
@@ -37,6 +40,17 @@ RÉUNION PRÉCÉDENTE de cette série — points clés extraits par le pipeline 
 - "risk_points" : sois concret. "Le sujet X n'a pas été tranché en réunion précédente, attendez-vous à une relance" plutôt que "risque de désaccord".
 - "preparation_checklist" : verbe d'action en tête, échéance implicite "avant la réunion". Ex : "Demander à Marie la version finale du dossier budgétaire", "Vérifier la disponibilité de la salle pour 14h".
 - Si une section ne peut pas être remplie de manière utile, retourne un tableau vide (ou null pour les champs string). Ne triche pas en remplissant avec du contenu inventé.
+
+Règles pour "ai_recommendations" (zone « Recommandations » du brief) :
+- 0 à 3 suggestions maximum, uniquement si réellement utiles pour CETTE réunion — tableau vide plutôt que du remplissage.
+- Ton humble, jamais donneur de leçons : ce sont des suggestions que le demandeur est libre d'ignorer. Formulations du type "Peut-être…", "Si c'est utile…", "Une pratique qui aide souvent…".
+- Appuie-toi sur les pratiques les mieux documentées par la recherche sur les réunions, seulement quand le contexte s'y prête :
+    * envoyer le brief et les documents aux participants 24-48h avant (la pré-communication est corrélée à la participation et à l'efficacité perçue) ;
+    * formuler l'ordre du jour en questions à trancher plutôt qu'en thèmes ; si aucune question n'émerge, suggérer avec tact qu'un échange écrit pourrait suffire ;
+    * au-delà de ~8 participants, la participation individuelle chute — inviter au strict nécessaire, le CR informera les autres ;
+    * réserver les 5 dernières minutes pour reformuler décisions et actions (qui fait quoi, pour quand) ;
+    * au-delà de 60 minutes, prévoir une pause.
+- Si "CE QUE LE DEMANDEUR ESPÈRE" est renseigné, au moins une suggestion doit aider à rendre ce résultat vérifiable en fin de réunion.
 
 Règles d'adaptation à la posture du demandeur :
 - {ROLE_VIEWPOINT} décrit la position du demandeur dans la réunion (animateur, participant, décideur, observateur, nouvel arrivant…). Adapte la grille en conséquence :
@@ -62,6 +76,8 @@ ATTENTE PRINCIPALE DU DEMANDEUR :
 
 AXES D'ANALYSE DEMANDÉS (cases cochées par le demandeur, séparées par des virgules — peut être vide) :
 {FOCUS_AREAS}
+CE QUE LE DEMANDEUR ESPÈRE AVOIR OBTENU À LA FIN DE LA RÉUNION (peut être vide) :
+{SUCCESS_CRITERIA}
 
 DOCUMENTS DE PRÉPARATION ET COMPTES-RENDUS ANTÉRIEURS extraits du Drive (peut être vide) :
 {PREP_DOCS}

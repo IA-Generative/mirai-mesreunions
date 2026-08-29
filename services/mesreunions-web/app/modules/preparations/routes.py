@@ -50,6 +50,17 @@ _ALLOWED_MEETING_TYPES = frozenset({
     "general", "one_on_one", "project_update", "steering_committee", "brainstorm",
 })
 
+# Coaching — résultats espérés en fin de réunion (chips du wizard step 2).
+# Les slugs voyagent dans le payload ; les libellés nourrissent le prompt
+# ({SUCCESS_CRITERIA}) et la zone ai_recommendations du brief.
+_OUTCOME_LABELS = {
+    "decision": "une décision est prise",
+    "actions": "un plan d'action daté existe (qui fait quoi, pour quand)",
+    "alignement": "un alignement partagé est acté",
+    "idees": "des idées nouvelles ont émergé",
+    "information": "l'information est transmise et comprise",
+}
+
 
 def _meeting_prep_module():
     """Import lazy de ``app.meeting_prep`` (évite cycle si réorg ultérieure)."""
@@ -236,6 +247,14 @@ def create_preparation():
                 break
     # Lot 8 — toggle envoi CR auto post-transcription (défaut False).
     send_cr_email = bool(payload.get("send_cr_email"))
+    # Coaching — intention de fin de réunion (facultative, wizard step 2).
+    success_criteria = (payload.get("success_criteria") or "").strip()[:500]
+    outcomes_raw = payload.get("expected_outcomes")
+    expected_outcomes: list[str] = []
+    if isinstance(outcomes_raw, list):
+        for o in outcomes_raw:
+            if isinstance(o, str) and o in _OUTCOME_LABELS and o not in expected_outcomes:
+                expected_outcomes.append(o)
     # Lot 5 — participants attendus saisis depuis le wizard. Liste d'objets
     # {name?, email?, role?}. Persistés en colonne JSONB côté DTA.
     participants_raw = payload.get("participants")
@@ -287,6 +306,8 @@ def create_preparation():
         "recurrence_rule": recurrence_rule_raw,
         "themes": themes_clean,
         "send_cr_email": send_cr_email,
+        "success_criteria": success_criteria,
+        "expected_outcomes": expected_outcomes,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -502,6 +523,16 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
                 series_parent_id,
             )
 
+    # Coaching : « résultat espéré à la fin » = chips (libellés) + texte libre.
+    success_criteria = (job.get("success_criteria") or "").strip()
+    expected_outcomes = [
+        o for o in (job.get("expected_outcomes") or []) if o in _OUTCOME_LABELS
+    ]
+    success_parts = [_OUTCOME_LABELS[o] for o in expected_outcomes]
+    if success_criteria:
+        success_parts.append(success_criteria)
+    success_text = " ; ".join(success_parts)
+
     prompt = _mp.build_prompt(
         template_text,
         objective=subject,
@@ -511,6 +542,7 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         focus_areas=focus_areas,
         prep_docs_text=corpus_text,
         prior_key_points_text=prior_key_points_text,
+        success_criteria_text=success_text,
     )
 
     _update(phase="generating_llm")
@@ -539,6 +571,12 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         if not isinstance(meta, dict):
             meta = {}
         meta["meeting_type"] = meeting_type
+        # Trace de l'intention déclarée — pas de migration : vit dans le
+        # content JSONB, relue par la fiche brief (« résultat espéré »).
+        if success_criteria:
+            meta["success_criteria"] = success_criteria
+        if expected_outcomes:
+            meta["expected_outcomes"] = expected_outcomes
         brief["_meta"] = meta
 
     _update(phase="persisting")

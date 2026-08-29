@@ -310,12 +310,16 @@ _REQUIRED_PLACEHOLDERS = (
     "{PRIOR_MEETINGS}",
 )
 
-# Placeholder optionnel (meeting-prep v2 §6). Présent dans les 5 templates,
-# substitué par les key_points_summary du dernier audio lié au brief parent
-# de la série. Non listé en REQUIRED pour permettre une migration progressive
-# des templates sans casser load_prompt_template().
+# Placeholders optionnels. Présents dans les 5 templates mais non listés en
+# REQUIRED pour permettre une migration progressive des templates sans casser
+# load_prompt_template().
+#   - {PRIOR_KEY_POINTS} : key_points_summary du dernier audio lié au brief
+#     parent de la série (meeting-prep v2 §6).
+#   - {SUCCESS_CRITERIA} : ce que le demandeur espère avoir obtenu à la fin
+#     de la réunion (coaching wizard) — nourrit la zone ai_recommendations.
 _OPTIONAL_PLACEHOLDERS = (
     "{PRIOR_KEY_POINTS}",
+    "{SUCCESS_CRITERIA}",
 )
 
 
@@ -341,6 +345,7 @@ def build_prompt(
     prep_docs_text: str,
     prior_meetings_text: str = "",
     prior_key_points_text: str = "",
+    success_criteria_text: str = "",
 ) -> str:
     """Substitute the wizard fields into the prompt template.
 
@@ -359,4 +364,5 @@ def build_prompt(
         .replace("{PREP_DOCS}", prep_docs_text.strip() or "(aucun document fourni)")
         .replace("{PRIOR_MEETINGS}", prior_meetings_text.strip() or "(aucun)")
         .replace("{PRIOR_KEY_POINTS}", prior_key_points_text.strip() or "(aucun)")
+        .replace("{SUCCESS_CRITERIA}", success_criteria_text.strip() or "(non précisé)")
     )
