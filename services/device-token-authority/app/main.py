@@ -1254,6 +1254,9 @@ def _preparation_to_dict(p: Preparation, *, with_full: bool = False) -> dict:
         "last_viewed_at": p.last_viewed_at.isoformat() if p.last_viewed_at else None,
         "drive_folder_id": p.drive_folder_id,
         "drive_prep_folder_id": p.drive_prep_folder_id,
+        # Exposé aussi en vue listing : c'est le cache du dossier « Préparations
+        # de réunion », sans lequel chaque versement en recréerait un doublon.
+        "drive_prep_root_folder_id": p.drive_prep_root_folder_id,
         "drive_sync_status": p.drive_sync_status,
         "drive_synced_at": p.drive_synced_at.isoformat() if p.drive_synced_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -1612,6 +1615,82 @@ def rename_preparation(preparation_id: str):
         p.title = new_title
         db.commit()
         return jsonify({"ok": True, "title": new_title})
+    finally:
+        db.close()
+
+
+# Quatre états, pas trois : `skipped` dit « aucun Drive utilisable » là où
+# `failed` dit « le versement a échoué ». Les confondre ferait afficher un
+# bouton « Réessayer » qui ne pourra jamais aboutir.
+_DRIVE_SYNC_STATUSES = {"pending", "synced", "failed", "skipped"}
+
+
+@app.route("/api/v1/preparations/<preparation_id>/drive-sync-status", methods=["POST"])
+def set_preparation_drive_sync_status(preparation_id: str):
+    """Publie l'état du versement Drive d'une préparation.
+
+    Endpoint dédié plutôt qu'une extension d'`/amend` : `/amend` ne porte que
+    du contenu écrit par l'utilisateur, et il bouge `updated_at`. Un état
+    machine qui passerait par là ferait remonter le brief en tête des
+    « modifiés récemment » plusieurs dizaines de secondes après la dernière
+    action de son auteur — d'où la préservation explicite d'`updated_at`.
+
+    Body: `user_sub`, `status` ∈ {pending, synced, failed, skipped}, plus les
+    ids de dossiers (`drive_prep_folder_id`, `drive_prep_root_folder_id`) que
+    le worker persiste au fur et à mesure pour ne pas recréer un doublon au
+    versement suivant.
+    """
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    user_sub = (data.get("user_sub") or "").strip()
+    status = (data.get("status") or "").strip().lower()
+    if not user_sub or not status:
+        return jsonify({"error": "user_sub and status required"}), 400
+    if status not in _DRIVE_SYNC_STATUSES:
+        return jsonify({
+            "error": f"status must be one of {sorted(_DRIVE_SYNC_STATUSES)}",
+        }), 400
+
+    db = SessionLocal()
+    try:
+        p = (
+            db.query(Preparation)
+            .filter(
+                Preparation.id == preparation_id,
+                Preparation.user_sub == user_sub,
+                Preparation.trashed_at.is_(None),
+            )
+            .first()
+        )
+        if not p:
+            return jsonify({"error": "not_found"}), 404
+
+        preserved_updated_at = p.updated_at
+        p.drive_sync_status = status
+        for field in ("drive_prep_folder_id", "drive_prep_root_folder_id"):
+            if field not in data:
+                continue  # champ absent = inchangé ; null explicite = effacé
+            value = data.get(field)
+            setattr(p, field, value.strip() or None if isinstance(value, str) else None)
+        if status == "synced":
+            p.drive_synced_at = datetime.now(timezone.utc)
+
+        # `updated_at` porte un `onupdate` SQLAlchemy : réassigner la même
+        # valeur ne suffit pas (l'ORM n'y voit aucun changement net et laisse
+        # l'onupdate écrire l'heure courante), d'où le flag explicite qui
+        # force la colonne dans le SET.
+        from sqlalchemy.orm.attributes import flag_modified
+        p.updated_at = preserved_updated_at
+        flag_modified(p, "updated_at")
+        db.commit()
+        return jsonify({
+            "ok": True,
+            "drive_sync_status": p.drive_sync_status,
+            "drive_prep_folder_id": p.drive_prep_folder_id,
+            "drive_prep_root_folder_id": p.drive_prep_root_folder_id,
+            "drive_synced_at": p.drive_synced_at.isoformat() if p.drive_synced_at else None,
+        })
     finally:
         db.close()
 
