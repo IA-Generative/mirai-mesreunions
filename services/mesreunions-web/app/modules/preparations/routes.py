@@ -33,17 +33,23 @@ from ...shared import (
     get_current_user,
     require_auth,
     request_internal_device_api,
+    request_internal_preparation_api,
     trigger_audio_reprocess,
 )
 from .. import glossary as glossary_module
 from . import exporters as prep_exporters
 from . import service as prep_service
 from . import generation_jobs
+from . import sources as prep_sources
 
 logger = logging.getLogger("mesreunions_web.preparations.routes")
 
 bp = Blueprint("preparations", __name__, url_prefix="/api/preparations")
 
+
+# Taille maximale du corps de POST /api/preparations. Sans borne dédiée, la
+# route hérite de MAX_CONTENT_LENGTH (100 Mo, dimensionné pour l'audio).
+PREP_PAYLOAD_MAX_BYTES = 2 * 1024 * 1024
 
 # Whitelist des types de réunion acceptés par le wizard.
 _ALLOWED_MEETING_TYPES = frozenset({
@@ -174,20 +180,22 @@ def create_preparation():
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
 
+    # Borne de taille AVANT la désérialisation. MAX_CONTENT_LENGTH vaut 100 Mo
+    # (dimensionné pour l'audio) : sans ce garde, un POST de plusieurs dizaines
+    # de Mo de JSON serait désérialisé en mémoire dans le worker. Les sources
+    # `inline` rendent ce chemin naturel à emprunter.
+    if (request.content_length or 0) > PREP_PAYLOAD_MAX_BYTES:
+        return _err(
+            "Requête trop volumineuse. Réduisez le nombre ou la taille des textes collés.",
+            413,
+        )
+
     payload = request.get_json(silent=True) or {}
     subject = (payload.get("subject") or "").strip()
     folder_raw = (payload.get("drive_folder") or "").strip()
 
-    # Pré-conditions config (LLM + éventuellement Drive).
     if not LITELLM_BASE_URL or not LITELLM_API_KEY:
         return _err("Le LLM (LiteLLM) n'est pas configuré côté serveur.", 503)
-    if folder_raw:
-        if not OIDC_OFFLINE_ACCESS:
-            return _err("Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé.", 503)
-        if not DRIVE_BASE_URL:
-            return _err("DRIVE_BASE_URL n'est pas configuré côté serveur.", 503)
-        if not OIDC_TOKEN_ENDPOINT:
-            return _err("OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur.", 503)
 
     role_viewpoint = (payload.get("role") or "").strip()
     expectation = (payload.get("expectation") or "").strip()
@@ -204,6 +212,28 @@ def create_preparation():
         folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
         if not folder_id:
             return _err("Identifiant de dossier Drive invalide.", 400)
+
+    # Sources multiples (le dossier collé est replacé en tête puis dédupliqué).
+    try:
+        sources = prep_sources.parse_sources(
+            payload.get("sources"),
+            drive_folder_id=folder_id,
+            drive_folder_host=folder_host,
+        )
+    except prep_sources.SourceError as exc:
+        return _err(str(exc), 400)
+
+    # Les pré-conditions Drive ne valent que si une source Drive est demandée :
+    # un brief nourri uniquement de réunions passées et de textes collés n'a
+    # besoin d'aucun jeton Drive.
+    if prep_sources.has_drive_source(sources):
+        if not OIDC_OFFLINE_ACCESS:
+            return _err("Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé.", 503)
+        if not DRIVE_BASE_URL:
+            return _err("DRIVE_BASE_URL n'est pas configuré côté serveur.", 503)
+        if not OIDC_TOKEN_ENDPOINT:
+            return _err("OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur.", 503)
+
     if not role_viewpoint:
         return _err("Le rôle dans la réunion est requis.", 400)
     if not expectation:
@@ -308,6 +338,7 @@ def create_preparation():
         "send_cr_email": send_cr_email,
         "success_criteria": success_criteria,
         "expected_outcomes": expected_outcomes,
+        "sources": sources,
     }
 
     # Mode async (par défaut, Lot 2).
@@ -366,6 +397,48 @@ class _SyncGenerationError(Exception):
         self.status = status
 
 
+def _make_prior_meeting_fetcher(user_sub: str):
+    """Compose le texte d'une réunion passée : brief, points clés, analyse.
+
+    Deux à trois appels internes par réunion, plutôt que l'export RAG en une
+    passe : ce dernier ramène jusqu'à 300 réunions et 80 000 caractères de
+    transcription par élément, soit des dizaines de méga-octets pour en
+    utiliser quelques pour cent.
+    """
+    def _fetch(preparation_id: str, include: list) -> str:
+        parts: list[str] = []
+
+        if "key_points" in include or "cr" in include:
+            audios = request_internal_preparation_api(
+                "GET", f"/api/v1/preparations/{preparation_id}/audio-files",
+                params={"user_sub": user_sub},
+            )
+            for row in (audios or {}).get("audio_files") or []:
+                kp = (row.get("key_points_summary") or "").strip()
+                if kp:
+                    parts.append(f"## Points clés du compte-rendu\n{kp}")
+                    break
+
+        if "brief" in include:
+            # track_view=false : piocher une réunion comme source ne doit pas
+            # la faire remonter dans « consultées récemment », signal qui sert
+            # au scoring d'auto-link entre audios et préparations.
+            detail = request_internal_preparation_api(
+                "GET", f"/api/v1/preparations/{preparation_id}",
+                params={"user_sub": user_sub, "track_view": "false"},
+            )
+            content = ((detail or {}).get("preparation") or {}).get("content")
+            if isinstance(content, dict):
+                from app.drive_brief_sync import brief_json_to_markdown
+                rendered = (brief_json_to_markdown(content) or "").strip()
+                if rendered:
+                    parts.append(f"## Brief préparé en amont\n{rendered}")
+
+        return "\n\n".join(parts).strip()
+
+    return _fetch
+
+
 def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
     """Cœur métier — partagé entre worker async (Lot 2) et mode sync (tests).
 
@@ -414,9 +487,20 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
 
     _update(phase="init")
 
+    sources = job.get("sources") or []
+    if not sources and folder_id:
+        # Chemin historique (appelants qui ne passent pas encore `sources`).
+        sources = [{"type": "drive_folder", "id": folder_id,
+                    "host": job.get("folder_host"), "label": ""}]
+    drive_sources = [s for s in sources if s["type"] in ("drive_folder", "drive_files")]
+    other_sources = [s for s in sources if s["type"] not in ("drive_folder", "drive_files")]
+
     corpus_text = ""
     used: list = []
-    if folder_id:
+    providers: list = []
+    buckets: dict = {}
+
+    if drive_sources:
         _update(phase="test_drive")
         ciphertext = fetch_ciphertext(user_sub)
         if not ciphertext:
@@ -463,18 +547,38 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
                 "code": "refresh_rejected",
             }, 401)
 
+        # Les fournisseurs ne font aucune I/O à la construction : le listing
+        # part au premier count_hint(), donc à l'assemblage.
+        for src in drive_sources:
+            if src["type"] == "drive_folder":
+                providers.append(_mp.DriveFolderProvider(drive, access_token, src["id"]))
+            else:
+                providers.append(_mp.DriveFilesProvider(drive, access_token, src["items"]))
+
+    # Sources sans Drive : textes collés et réunions passées.
+    inline_entries = [s for s in other_sources if s["type"] == "inline"]
+    if inline_entries:
+        providers.append(_mp.InlineProvider(inline_entries))
+    prior_entries = [s for s in other_sources if s["type"] == "preparation"]
+    if prior_entries:
+        providers.append(_mp.PriorMeetingProvider(
+            _make_prior_meeting_fetcher(user_sub), prior_entries,
+        ))
+
+    if providers:
         def _progress(**kw):
             _update(**kw)
 
+        first_folder = drive_sources[0]["id"] if drive_sources else None
         try:
-            corpus_text, used = _mp.assemble_corpus(
-                drive, access_token, folder_id, progress=_progress,
+            buckets, used = _mp.build_corpus(
+                providers, budgets=_mp.DEFAULT_BUDGETS, progress=_progress,
             )
         except _mp.DriveAuthError as exc:
             status_code = getattr(exc, "status_code", None)
             logger.warning(
                 "preparations: Drive auth error on folder %s (status=%s): %s",
-                folder_id, status_code, exc,
+                first_folder, status_code, exc,
             )
             if status_code == 403:
                 _fail({
@@ -486,14 +590,16 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
                 "code": "drive_auth",
             }, 401)
         except _mp.DriveApplicativeError as exc:
-            logger.info("preparations: Drive applicative error on folder %s: %s", folder_id, exc)
+            logger.info("preparations: Drive applicative error on folder %s: %s", first_folder, exc)
             _fail({
                 "error": "Dossier Drive introuvable. Vérifiez l'URL ou l'identifiant collé.",
                 "code": "drive_not_found",
             }, 404)
         except _mp.DriveTransientError as exc:
-            logger.warning("preparations: Drive transient error on folder %s: %s", folder_id, exc)
+            logger.warning("preparations: Drive transient error on folder %s: %s", first_folder, exc)
             _fail("Le Drive est temporairement indisponible.", 502)
+
+        corpus_text = buckets.get("prep_docs", "")
 
     try:
         template_text = _mp.load_prompt_template(
@@ -541,8 +647,12 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         expectation=expectation,
         focus_areas=focus_areas,
         prep_docs_text=corpus_text,
+        # {PRIOR_MEETINGS} était déclaré dans les 5 templates depuis l'origine
+        # mais aucun appelant ne l'alimentait : il valait toujours « (aucun) ».
+        prior_meetings_text=buckets.get("prior_meetings", ""),
         prior_key_points_text=prior_key_points_text,
         success_criteria_text=success_text,
+        inline_messages_text=buckets.get("inline_messages", ""),
     )
 
     _update(phase="generating_llm")
@@ -577,6 +687,10 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             meta["success_criteria"] = success_criteria
         if expected_outcomes:
             meta["expected_outcomes"] = expected_outcomes
+        if sources:
+            # Traçabilité de la sélection, sans les contenus (les textes
+            # collés sont de la correspondance : ils ne sont pas persistés).
+            meta["sources"] = prep_sources.public_view(sources)
         brief["_meta"] = meta
 
     _update(phase="persisting")

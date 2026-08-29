@@ -412,6 +412,79 @@ def test_post_meeting_prep_success_criteria_reaches_prompt_and_meta(cg):
     assert meta.get("expected_outcomes") == ["decision"]
 
 
+def test_post_meeting_prep_inline_source_reaches_prompt_without_drive(cg):
+    """Un brief nourri d'un texte collé n'exige aucun jeton Drive.
+
+    Avant, les pré-conditions OIDC/Drive étaient conditionnées à la seule
+    présence de `drive_folder` ; une préparation sans Drive qui aurait déclaré
+    des sources aurait été refusée en 503 chez un utilisateur sans jeton.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    fake_drive_cls = MagicMock()
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", fake_drive_cls), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext") as fc_mock, \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Arbitrage budget",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "sources": [
+                {"type": "inline", "title": "Re: budget", "text": "Le plafond est fixé à 12 k€."},
+            ],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "Le plafond est fixé à 12 k€." in prompt_sent
+    # Aucun accès Drive n'a été tenté.
+    fake_drive_cls.assert_not_called()
+    fc_mock.assert_not_called()
+    # La sélection est tracée, sans le contenu du message.
+    meta = (r.get_json()["brief"] or {}).get("_meta") or {}
+    assert meta["sources"][0]["title"] == "Re: budget"
+    assert "plafond" not in repr(meta["sources"])
+
+
+def test_post_meeting_prep_rejects_oversized_payload(cg):
+    """Garde de taille : la route n'hérite plus des 100 Mo prévus pour l'audio."""
+    client, mod = cg
+    _login(client)
+
+    huge = "x" * (3 * 1024 * 1024)
+    r = client.post(
+        "/api/preparations?sync=1",
+        data=huge,
+        content_type="application/json",
+    )
+    assert r.status_code == 413
+
+
+def test_post_meeting_prep_invalid_source_returns_400(cg):
+    client, mod = cg
+    _login(client)
+
+    r = client.post("/api/preparations?sync=1", json={
+        "subject": "Sujet",
+        "role": "anime",
+        "expectation": "GO",
+        "duration_minutes": 30,
+        "focus": [],
+        "sources": [{"type": "ftp", "id": "x"}],
+    })
+    assert r.status_code == 400
+    assert "Type de source inconnu" in (r.get_json() or {}).get("error", "")
+
+
 # ─── GET /api/preparations/test-drive ──────────────────────────────
 
 

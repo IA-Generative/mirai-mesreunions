@@ -156,6 +156,16 @@ DEFAULT_PER_DOC_MAX_CHARS = 20_000
 DEFAULT_TOTAL_MAX_CHARS = 80_000
 DEFAULT_PER_DOC_MAX_BYTES = 5 * 1024 * 1024
 
+# Budgets par emplacement du prompt. Ils sont séparés parce que {PREP_DOCS},
+# {PRIOR_MEETINGS} et {INLINE_MESSAGES} sont trois sections distinctes : un
+# budget commun laisserait un gros dossier Drive évincer silencieusement les
+# réunions passées, que l'utilisateur a pourtant choisies explicitement.
+DEFAULT_BUDGETS = {
+    "prep_docs": DEFAULT_TOTAL_MAX_CHARS,
+    "prior_meetings": 30_000,
+    "inline_messages": 20_000,
+}
+
 
 def _item_name(item: dict) -> str:
     """Best-effort display name for a Drive item (used in the corpus header)."""
@@ -314,6 +324,124 @@ class DriveFolderProvider:
             )
             if not text:
                 return None, "skipped_unsupported_or_empty"
+            return text, "ingested"
+        return _load
+
+
+class DriveFilesProvider:
+    """Une sélection explicite de fichiers Drive (pas de listing préalable)."""
+
+    bucket = "prep_docs"
+
+    def __init__(self, drive, access_token: str, items: list, *,
+                 per_doc_max_bytes: int = DEFAULT_PER_DOC_MAX_BYTES,
+                 per_doc_max_chars: int = DEFAULT_PER_DOC_MAX_CHARS):
+        self._drive = drive
+        self._token = access_token
+        self._items = items or []
+        self._per_doc_max_bytes = per_doc_max_bytes
+        self._per_doc_max_chars = per_doc_max_chars
+
+    def count_hint(self) -> int:
+        return len(self._items)
+
+    def items(self):
+        for entry in self._items:
+            item_id = (entry.get("id") or "").strip()
+            name = (entry.get("name") or "").strip() or item_id or "(sans nom)"
+            if not item_id:
+                yield SourceItem(name, "", "drive", _rejected("skipped_no_id"))
+                continue
+            yield SourceItem(name, item_id, "drive", self._make_loader(item_id, name))
+
+    def _make_loader(self, item_id: str, name: str):
+        def _load(_budget: int):
+            try:
+                body, content_type = self._drive.download_item(
+                    self._token, item_id, max_bytes=self._per_doc_max_bytes
+                )
+            except DriveApplicativeError as exc:
+                logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
+                return None, "error_download"
+            except DriveTransientError as exc:
+                logger.warning(
+                    "meeting_prep: drive transient error on %s (skip + continue): %s",
+                    item_id, exc,
+                )
+                return None, "error_transient"
+            text = extract_text(
+                body, content_type, filename_hint=name, max_chars=self._per_doc_max_chars
+            )
+            if not text:
+                return None, "skipped_unsupported_or_empty"
+            return text, "ingested"
+        return _load
+
+
+class InlineProvider:
+    """Textes collés par l'utilisateur (mail, note). Aucune I/O.
+
+    Le contenu est déjà assaini au parsing du payload : ici on ne fait que
+    le verser sous plafond.
+    """
+
+    bucket = "inline_messages"
+
+    def __init__(self, entries: list):
+        self._entries = entries or []
+
+    def count_hint(self) -> int:
+        return len(self._entries)
+
+    def items(self):
+        for idx, entry in enumerate(self._entries):
+            title = entry.get("title") or "Texte collé"
+            text = entry.get("text") or ""
+            yield SourceItem(title, f"inline:{idx}", "inline", self._make_loader(text))
+
+    def _make_loader(self, text: str):
+        def _load(budget: int):
+            if not text:
+                return None, "skipped_unsupported_or_empty"
+            return text[:budget] if budget and len(text) > budget else text, "ingested"
+        return _load
+
+
+class PriorMeetingProvider:
+    """Réunions passées : brief, points clés et compte-rendu.
+
+    ``fetch`` est injecté (une fonction ``(preparation_id, include) -> texte``)
+    pour que le module reste testable sans réseau et sans connaître le
+    transport interne.
+    """
+
+    bucket = "prior_meetings"
+
+    def __init__(self, fetch, entries: list):
+        self._fetch = fetch
+        self._entries = entries or []
+
+    def count_hint(self) -> int:
+        return len(self._entries)
+
+    def items(self):
+        for entry in self._entries:
+            prep_id = entry.get("id") or ""
+            label = entry.get("label") or "Réunion précédente"
+            yield SourceItem(label, prep_id, "preparation",
+                             self._make_loader(prep_id, entry.get("include") or []))
+
+    def _make_loader(self, prep_id: str, include: list):
+        def _load(_budget: int):
+            try:
+                text = self._fetch(prep_id, include)
+            except Exception:
+                # Une réunion illisible dégrade cette source, jamais la
+                # génération entière.
+                logger.exception("meeting_prep: prior meeting fetch failed for %s", prep_id)
+                return None, "error_internal_api"
+            if not text or not text.strip():
+                return None, "skipped_empty_source"
             return text, "ingested"
         return _load
 
@@ -481,6 +609,7 @@ _REQUIRED_PLACEHOLDERS = (
 _OPTIONAL_PLACEHOLDERS = (
     "{PRIOR_KEY_POINTS}",
     "{SUCCESS_CRITERIA}",
+    "{INLINE_MESSAGES}",
 )
 
 
@@ -507,6 +636,7 @@ def build_prompt(
     prior_meetings_text: str = "",
     prior_key_points_text: str = "",
     success_criteria_text: str = "",
+    inline_messages_text: str = "",
 ) -> str:
     """Substitute the wizard fields into the prompt template.
 
@@ -526,4 +656,5 @@ def build_prompt(
         .replace("{PRIOR_MEETINGS}", prior_meetings_text.strip() or "(aucun)")
         .replace("{PRIOR_KEY_POINTS}", prior_key_points_text.strip() or "(aucun)")
         .replace("{SUCCESS_CRITERIA}", success_criteria_text.strip() or "(non précisé)")
+        .replace("{INLINE_MESSAGES}", inline_messages_text.strip() or "(aucun)")
     )
