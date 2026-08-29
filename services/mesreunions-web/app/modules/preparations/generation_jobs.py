@@ -20,6 +20,7 @@ Phases possibles (cf docstring originale + ORM model) :
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -43,6 +44,14 @@ _UPDATABLE_FIELDS = {
 # (GC opportuniste, pas de thread dédié — fréquence d'appel >> rythme
 # d'accumulation).
 _TTL_SECONDS = 3600
+
+# Seuil d'orphelinage (ADR-0001 liveness vs progress) : le worker est un
+# thread daemon dans le pod gunicorn — un rollout/restart le tue sans
+# mark_failed, et le job resterait en phase intermédiaire pour toujours
+# (le front pollerait indéfiniment). Au-delà de ce seuil sans finished_at,
+# get_job requalifie le job en failed avec un message actionnable.
+# Dimensionné large : LLM_HTTP_TIMEOUT_SECONDS=600 + lecture Drive.
+_STALE_AFTER_SECONDS = int(os.getenv("PREP_GENERATION_STALE_SECONDS", "1800"))
 
 
 def _gc(db) -> None:
@@ -164,6 +173,12 @@ def get_job(job_id: str, user_sub: str) -> Optional[dict]:
     Isolation : on ne révèle pas les jobs d'un autre user, même par
     accident. Le check est inclusif (user_sub vide = pas de filtre, comme
     l'ancien comportement).
+
+    Requalification d'orphelin (ADR-0001) : un job sans finished_at dont
+    le started_at dépasse ``_STALE_AFTER_SECONDS`` est considéré comme
+    abandonné (worker thread tué par un restart de pod) et marqué failed
+    au passage — le front sort de sa boucle de polling avec un message
+    actionnable au lieu de tourner indéfiniment.
     """
     if not job_id:
         return None
@@ -178,6 +193,23 @@ def get_job(job_id: str, user_sub: str) -> Optional[dict]:
             return None
         if user_sub and row.user_sub and row.user_sub != user_sub:
             return None
+        if row.finished_at is None and row.started_at is not None:
+            started = row.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+            if age > _STALE_AFTER_SECONDS:
+                logger.warning(
+                    "generation_jobs: job %s orphelin (phase=%s, âge=%ds) — requalifié failed",
+                    job_id, row.phase, int(age),
+                )
+                row.phase = "failed"
+                row.error = (
+                    "La génération a été interrompue (redémarrage du service ?). "
+                    "Vos réponses sont conservées dans le brouillon — relancez la génération."
+                )
+                row.finished_at = datetime.now(timezone.utc)
+                db.commit()
         return _row_to_dict(row)
     except Exception:
         logger.exception("generation_jobs.get_job failed job=%s", job_id)
