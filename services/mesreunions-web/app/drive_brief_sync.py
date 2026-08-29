@@ -62,6 +62,12 @@ def _drive_brief_sync_worker(user_sub, brief_id, brief_json, documents,
     try:
         _do_sync(user_sub, brief_id, brief_json, documents,
                  used_prompt, drive_folder_id)
+    except NotImplementedError as exc:
+        # État connu et catalogué (transport Drive pas encore branché) :
+        # une ligne de warning suffit. La stacktrace complète qui partait
+        # ici à CHAQUE génération faisait croire à un crash de fin de
+        # cycle dans les logs prod.
+        logger.warning("drive_brief_sync: skipped for brief=%s — %s", brief_id, exc)
     except Exception:
         logger.exception(
             "drive_brief_sync: failed for brief=%s user=%s (best-effort)",
