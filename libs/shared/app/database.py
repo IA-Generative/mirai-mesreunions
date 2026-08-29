@@ -5,7 +5,7 @@ import os
 import time
 
 from sqlalchemy import create_engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.orm import sessionmaker, Session
 
 from .config import DatabaseConfig
@@ -74,6 +74,22 @@ def init_tables(db_cfg: DatabaseConfig, base, max_attempts: int = None, backoff_
             if attempt > 1:
                 logger.info("init_tables succeeded on attempt %d/%d", attempt, max_attempts)
             return
+        except (IntegrityError, ProgrammingError) as e:
+            # Course entre replicas au rollout : deux pods bootent en même
+            # temps, les deux passent le checkfirst (table absente), un seul
+            # CREATE TABLE gagne — le perdant reçoit UniqueViolation sur
+            # pg_type (ou DuplicateTable). Vu en prod-bêta le 2026-08-29
+            # (web_session_tokens). Le retry suivant voit la table existante
+            # et la saute ; une vraie erreur de schéma épuise les retries.
+            last_err = e
+            engine.dispose()
+            if attempt >= max_attempts:
+                break
+            logger.warning(
+                "init_tables create race (attempt %d/%d) — retrying in %ss: %s",
+                attempt, max_attempts, backoff_seconds, str(e)[:200],
+            )
+            time.sleep(backoff_seconds)
         except OperationalError as e:
             last_err = e
             engine.dispose()
