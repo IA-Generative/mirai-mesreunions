@@ -150,12 +150,14 @@ class DriveClient:
 
     # ── Helpers internes ─────────────────────────────────────
 
-    def _get_with_retry(self, url: str, *, access_token: str,
-                         timeout: Optional[int] = None,
-                         max_attempts: int = 3,
-                         label: str = "GET"):
-        """GET avec retry exponentiel sur RequestException (ConnectionReset,
-        timeout, DNS, etc.).
+    def _request_with_retry(self, method: str, url: str, *,
+                            access_token: Optional[str] = None,
+                            timeout: Optional[int] = None,
+                            max_attempts: int = 3,
+                            label: str = "",
+                            extra_headers: Optional[dict] = None,
+                            **kwargs):
+        """Primitive HTTP unique du client : un verbe, un nombre de tentatives.
 
         On force `Connection: close` pour ne PAS réutiliser le pool de
         connexions de requests entre 2 appels. Constat prod 2026-05-24 :
@@ -166,32 +168,53 @@ class DriveClient:
         On NE retry PAS les 4xx/5xx applicatifs : le caller veut savoir
         si c'est auth vs not_found vs transient. Seul le RequestException
         au niveau socket déclenche le retry.
+
+        ``max_attempts`` est un paramètre et non une constante parce que la
+        rejouabilité dépend du verbe : un GET est sans effet de bord, un
+        POST /children/ rejoué après un échec réseau tardif créerait un
+        second item (renommé `brief_01.md`) invisible côté appelant.
         """
         import time as _time
         last_exc = None
         delay = 0.5
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Connection": "close",
-        }
+        headers = {"Connection": "close"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        if extra_headers:
+            headers.update(extra_headers)
+        verb = method.lower()
         for attempt in range(1, max_attempts + 1):
             try:
                 # Chaque appel a sa propre Session pour éviter qu'urllib3
                 # ré-utilise un pool de connexions partagé via le singleton
                 # req.get(). Session fermée explicitement après usage.
                 with req.Session() as s:
-                    return s.get(url, headers=headers, timeout=timeout or self.timeout)
+                    return getattr(s, verb)(
+                        url, headers=headers, timeout=timeout or self.timeout, **kwargs
+                    )
             except req.RequestException as exc:
                 last_exc = exc
                 if attempt == max_attempts:
                     break
                 logger.warning(
                     "drive_client.%s retry %d/%d after %s: %s",
-                    label, attempt, max_attempts, type(exc).__name__, exc,
+                    label or verb, attempt, max_attempts, type(exc).__name__, exc,
                 )
                 _time.sleep(delay)
                 delay *= 3
-        raise DriveTransientError(f"Drive {label} unreachable after {max_attempts} attempts: {last_exc}") from last_exc
+        raise DriveTransientError(
+            f"Drive {label or verb} unreachable after {max_attempts} attempts: {last_exc}"
+        ) from last_exc
+
+    def _get_with_retry(self, url: str, *, access_token: str,
+                         timeout: Optional[int] = None,
+                         max_attempts: int = 3,
+                         label: str = "GET"):
+        """GET rejouable — le seul verbe sans effet de bord côté Drive."""
+        return self._request_with_retry(
+            "GET", url, access_token=access_token, timeout=timeout,
+            max_attempts=max_attempts, label=label,
+        )
 
     # ── Step 2: metadata ─────────────────────────────────────
 
@@ -268,41 +291,22 @@ class DriveClient:
             download_url = f"{self.base_url}{_API_PREFIX}/items/{item_id}/download/"
             send_bearer = True
 
-        # Retry sur ConnectionReset/timeout — fréquent sur les gros docs.
-        # Pour la branche presigned-S3 sans bearer on n'utilise pas le helper
-        # (signature spécifique), on garde l'ancien flow + retry inline.
-        import time as _time
-        last_exc = None
-        delay = 0.5
-        max_attempts = 3
-        resp = None
-        headers = {"Connection": "close"}
-        if send_bearer:
-            headers["Authorization"] = f"Bearer {access_token}"
         # DEBUG : log la première URL téléchargée pour diagnostiquer où ça
         # plante. À retirer une fois le bug RST résolu.
         logger.info(
             "drive_client.download_item: item=%s download_url=%s send_bearer=%s",
             item_id, download_url[:200], send_bearer,
         )
-        for attempt in range(1, max_attempts + 1):
-            try:
-                with req.Session() as s:
-                    resp = s.get(download_url, headers=headers,
-                                  timeout=self.download_timeout, stream=False)
-                break
-            except req.RequestException as exc:
-                last_exc = exc
-                if attempt == max_attempts:
-                    raise DriveTransientError(
-                        f"Drive download unreachable after {max_attempts} attempts: {exc}"
-                    ) from exc
-                logger.warning(
-                    "drive_client.download_item retry %d/%d for item=%s: %s",
-                    attempt, max_attempts, item_id, exc,
-                )
-                _time.sleep(delay)
-                delay *= 3
+        # Retry sur ConnectionReset/timeout — fréquent sur les gros docs.
+        # Sur la branche presigned-S3, le bearer est volontairement omis :
+        # AWS 400 sur une requête signée qui porte un Authorization étranger.
+        resp = self._request_with_retry(
+            "GET", download_url,
+            access_token=access_token if send_bearer else None,
+            timeout=self.download_timeout,
+            label=f"download item {item_id}",
+            stream=False,
+        )
         if resp.status_code in (401, 403):
             raise DriveAuthError(
                 f"Drive download {resp.status_code} for item {item_id}",
