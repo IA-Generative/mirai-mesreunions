@@ -99,6 +99,47 @@ def rename_preparation(user_sub: str, preparation_id: str, title: str) -> dict:
     )
 
 
+def get_preparation_drive_state(user_sub: str, preparation_id: str) -> dict:
+    """Lecture d'une préparation SANS compter comme une consultation.
+
+    ``track_view=false`` est impératif : le versement Drive relit la
+    préparation pour retrouver ses ids de dossiers, et bumper
+    ``last_viewed_at`` au passage fausserait le scoring d'auto-link avec un
+    audio (un robot n'est pas un lecteur).
+    """
+    body = request_internal_preparation_api(
+        "GET", f"/api/v1/preparations/{preparation_id}",
+        params={"user_sub": user_sub, "track_view": "false"},
+    )
+    return (body or {}).get("preparation") or {}
+
+
+def set_drive_sync_status(
+    user_sub: str,
+    preparation_id: str,
+    status: str,
+    *,
+    drive_prep_folder_id: str | None = None,
+    drive_prep_root_folder_id: str | None = None,
+) -> dict:
+    """Publie l'état du versement Drive (pending|synced|failed|skipped).
+
+    Endpoint dédié plutôt qu'`/amend` : celui-ci bouge ``updated_at``, ce qui
+    ferait remonter le brief en tête des « modifiés récemment » à chaque
+    battement d'un traitement de fond. Les ids omis restent inchangés côté
+    serveur — le worker les publie au fur et à mesure qu'il les découvre.
+    """
+    body: dict = {"user_sub": user_sub, "status": status}
+    if drive_prep_folder_id is not None:
+        body["drive_prep_folder_id"] = drive_prep_folder_id
+    if drive_prep_root_folder_id is not None:
+        body["drive_prep_root_folder_id"] = drive_prep_root_folder_id
+    return request_internal_preparation_api(
+        "POST", f"/api/v1/preparations/{preparation_id}/drive-sync-status",
+        json_body=body,
+    )
+
+
 def trash_preparation(user_sub: str, preparation_id: str) -> dict:
     return request_internal_preparation_api(
         "DELETE", f"/api/v1/preparations/{preparation_id}",
