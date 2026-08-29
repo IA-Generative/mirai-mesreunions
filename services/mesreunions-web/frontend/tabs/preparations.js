@@ -559,8 +559,10 @@ async function _commitTargetDate() {
   }
   save.disabled = true;
   try {
+    // PUT (le blueprint n'exposait pas PATCH → 405 systématique sur la
+    // sauvegarde de la date cible ; le back accepte désormais les deux).
     const resp = await fetch(`/api/preparations/${encodeURIComponent(_briefDetailId)}`, {
-      method: 'PATCH',
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target_meeting_date: payloadValue }),
     });

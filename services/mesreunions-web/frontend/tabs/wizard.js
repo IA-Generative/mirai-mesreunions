@@ -273,40 +273,72 @@ function _hideGenerationStepper() {
 }
 
 let _pollTimer = null;
+let _pollStartedAt = 0;
+// Borne dure du polling : au-delà, le job est perdu (le serveur requalifie
+// les jobs orphelins à 30 min — on lui laisse une marge). Sans borne, un
+// pod redémarré en pleine génération laissait l'animation tourner sans fin.
+const _POLL_MAX_MS = 35 * 60 * 1000;
+
 function _stopPolling() {
   if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
 }
 
+function _failGeneration(message) {
+  // Échec : on garde le brouillon (les réponses de l'utilisateur), on
+  // réactive le bouton, on affiche la cause.
+  _stopPolling();
+  _setStatus(message || 'La génération a échoué.', 'err');
+  const submitBtn = _qs('#wizard-submit-btn');
+  if (submitBtn) submitBtn.disabled = false;
+}
+
 async function _pollJob(jobId, opts) {
+  if (_pollStartedAt && (Date.now() - _pollStartedAt) > _POLL_MAX_MS) {
+    _failGeneration('La génération a été interrompue (délai dépassé). '
+      + 'Vos réponses sont conservées — relancez la génération.');
+    return;
+  }
   try {
     const r = await fetch(`/api/preparations/jobs/${encodeURIComponent(jobId)}`);
     if (r.status === 404) {
-      _setStatus('Job de génération introuvable (expiré ?).', 'err');
-      _stopPolling();
+      _failGeneration('Job de génération introuvable (expiré ?). Relancez la génération.');
+      return;
+    }
+    if (r.redirected || ((r.headers.get('content-type') || '').indexOf('json') === -1)) {
+      // Session OIDC expirée : @require_auth renvoie une redirection HTML
+      // vers /login — sans ce garde, r.json() échouait et on repartait en
+      // boucle silencieuse pour toujours.
+      _failGeneration('Votre session a expiré. Reconnectez-vous puis relancez la génération '
+        + '(vos réponses sont conservées dans le brouillon).');
       return;
     }
     const d = await r.json().catch(() => ({}));
     _renderGenerationStepper(d, opts);
     if (d.phase === 'done') {
+      const newId = d.preparation_id;
+      if (!newId) {
+        // Défense en profondeur : un done sans preparation_id est un échec
+        // de sauvegarde — ne surtout pas jeter le brouillon.
+        _renderGenerationStepper({ phase: 'failed', error: 'Sauvegarde du brief incomplète.' }, opts);
+        _failGeneration('Le brief n\'a pas pu être sauvegardé. '
+          + 'Vos réponses sont conservées — relancez la génération.');
+        return;
+      }
       _stopPolling();
       _setStatus('Brief généré.', 'info');
-      const newId = d.preparation_id;
       // Brouillon validé -> retire de la liste localStorage.
       if (_currentDraftId) { try { deleteDraft(_currentDraftId); } catch (e) {} }
       closeWizard();
       try {
         if (typeof window.loadBriefs === 'function') window.loadBriefs();
-        if (newId && typeof window.showBriefDetail === 'function') {
+        if (typeof window.showBriefDetail === 'function') {
           setTimeout(() => window.showBriefDetail(newId), 100);
         }
       } catch (e) { /* non-fatal */ }
       return;
     }
     if (d.phase === 'failed') {
-      _stopPolling();
-      _setStatus(d.error || 'La génération a échoué.', 'err');
-      const submitBtn = _qs('#wizard-submit-btn');
-      if (submitBtn) submitBtn.disabled = false;
+      _failGeneration(d.error || 'La génération a échoué.');
       return;
     }
     _pollTimer = setTimeout(() => _pollJob(jobId, opts), 1500);
@@ -383,6 +415,7 @@ async function _submit(ev) {
     }
     // Mode async (Lot 2) : back renvoie {job_id} en 202.
     if (d.job_id) {
+      _pollStartedAt = Date.now();
       _pollJob(d.job_id, { hasDrive: !!v.drive });
       return;
     }
