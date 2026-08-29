@@ -227,7 +227,7 @@ def test_post_meeting_prep_with_drive_folder_but_no_refresh_token_returns_401(cg
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext",
                return_value=None) as fc_mock, \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
@@ -269,7 +269,7 @@ def test_post_meeting_prep_one_on_one_loads_correct_prompt(cg):
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Point hebdo Alice",
             "role": "manager",
@@ -299,7 +299,7 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
@@ -313,6 +313,67 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
     assert r.status_code == 200, r.get_data(as_text=True)
     body = r.get_json()
     assert body["meeting_type"] == "general"
+
+
+def test_post_meeting_prep_persist_failure_returns_502(cg):
+    """Échec de persistance DTA : plus d'avalement silencieux → 502 persist_failed.
+
+    Régression 2026-08 : l'exception était catchée sans re-raise, le job
+    passait ``done`` sans preparation_id, le front affichait « Brief
+    généré. » et supprimait le brouillon → brief + réponses perdus.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               side_effect=RuntimeError("DTA down")):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+        })
+
+    assert r.status_code == 502, r.get_data(as_text=True)
+    body = r.get_json()
+    assert body.get("code") == "persist_failed"
+    assert "brouillon" in (body.get("error") or "")
+
+
+def test_post_meeting_prep_persist_without_id_returns_502(cg):
+    """Réponse DTA sans id de préparation : contrat cassé → 502 persist_failed."""
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"no_id": True}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+        })
+
+    assert r.status_code == 502, r.get_data(as_text=True)
+    assert r.get_json().get("code") == "persist_failed"
 
 
 # ─── GET /api/preparations/test-drive ──────────────────────────────

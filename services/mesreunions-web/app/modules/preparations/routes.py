@@ -292,7 +292,15 @@ def create_preparation():
     # Mode async (par défaut, Lot 2).
     sync_mode = (request.args.get("sync") or "").lower() in ("1", "true", "yes")
     if not sync_mode:
-        job_id = generation_jobs.create_job(user_sub)
+        try:
+            job_id = generation_jobs.create_job(user_sub)
+        except Exception:
+            logger.exception("preparations: create_job failed for sub=%s", user_sub)
+            return _err(
+                "Le service est momentanément indisponible (base de suivi injoignable). "
+                "Réessayez dans quelques instants — vos réponses sont conservées.",
+                503,
+            )
         worker = threading.Thread(
             target=_run_generation_worker,
             args=(job_id, job_payload),
@@ -423,6 +431,16 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         except _mp.DriveTransientError as exc:
             logger.warning("preparations: Keycloak transient on token exchange: %s", exc)
             _fail("Le service d'identité est temporairement indisponible.", 502)
+        except _mp.DriveApplicativeError as exc:
+            # Keycloak 4xx hors 400 (client désactivé, realm reconfiguré…) —
+            # sans ce catch l'exception filait en RuntimeError générique
+            # (async) ou en 500 nu (sync).
+            logger.warning("preparations: Keycloak applicative error on token exchange: %s", exc)
+            _fail({
+                "error": "L'échange de jeton avec le service d'identité a été refusé. "
+                         "Déconnectez-vous puis reconnectez-vous.",
+                "code": "refresh_rejected",
+            }, 401)
 
         def _progress(**kw):
             _update(**kw)
@@ -546,16 +564,36 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             "send_cr_email": send_cr_email,
         })
         preparation_id = (created.get("preparation") or {}).get("id")
-
-        # Glossaire utilisateur global (best-effort).
-        if preparation_id:
-            _update(phase="extracting_glossary", preparation_id=preparation_id)
-            terms = glossary_module.extract_terms_from_brief(brief, used)
-            glossary_module.upsert_terms_for_user(
-                user_sub, terms, source_preparation_id=preparation_id,
-            )
     except Exception:
         logger.exception("preparations: failed to persist preparation for sub=%s", user_sub)
+        _fail({
+            "error": "Le brief a été généré mais sa sauvegarde a échoué. "
+                     "Vos réponses sont conservées dans le brouillon — relancez la génération.",
+            "code": "persist_failed",
+        }, 502)
+    if not preparation_id:
+        logger.error(
+            "preparations: create_preparation returned no id for sub=%s", user_sub,
+        )
+        _fail({
+            "error": "Le brief a été généré mais sa sauvegarde a échoué (réponse interne invalide). "
+                     "Vos réponses sont conservées dans le brouillon — relancez la génération.",
+            "code": "persist_failed",
+        }, 502)
+
+    # Glossaire utilisateur global (best-effort : un échec ici ne doit pas
+    # masquer un brief pourtant bien persisté).
+    try:
+        _update(phase="extracting_glossary", preparation_id=preparation_id)
+        terms = glossary_module.extract_terms_from_brief(brief, used)
+        glossary_module.upsert_terms_for_user(
+            user_sub, terms, source_preparation_id=preparation_id,
+        )
+    except Exception:
+        logger.exception(
+            "preparations: glossary extraction failed for prep=%s (non-fatal)",
+            preparation_id,
+        )
 
     # Versement Drive en arrière-plan (best-effort).
     if preparation_id:
@@ -637,10 +675,14 @@ def get_preparation(preparation_id: str):
     return jsonify({"preparation": prep})
 
 
-@bp.route("/<preparation_id>", methods=["PUT"])
+@bp.route("/<preparation_id>", methods=["PUT", "PATCH"])
 @require_auth
 def update_preparation(preparation_id: str):
-    """Alias PUT pour l'amend (UX REST plus standard)."""
+    """Alias PUT/PATCH pour l'amend (UX REST plus standard).
+
+    PATCH accepté aussi : le front (_commitTargetDate) l'utilisait déjà et
+    recevait un 405 — la sauvegarde de la date cible était cassée.
+    """
     return _amend_impl(preparation_id)
 
 

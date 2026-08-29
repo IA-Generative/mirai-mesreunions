@@ -35,8 +35,11 @@ def get_preparation(user_sub: str, preparation_id: str) -> dict:
 
 
 def create_preparation(payload: dict) -> dict:
+    # Timeout élargi : c'est l'appel le plus lourd du module (brief JSON
+    # complet + documents) sur le chemin dont l'échec coûte le plus cher
+    # (le brief LLM vient d'être généré). 10s par défaut = maillon court.
     return request_internal_preparation_api(
-        "POST", "/api/v1/preparations", json_body=payload,
+        "POST", "/api/v1/preparations", json_body=payload, timeout=30,
     )
 
 

@@ -327,14 +327,21 @@ def test_assemble_corpus_records_download_error_but_continues():
     assert "hello" in corpus
 
 
-def test_assemble_corpus_propagates_drive_transient():
-    """A transient Drive error must bubble — partial corpus would mislead the LLM."""
+def test_assemble_corpus_skips_doc_on_drive_transient():
+    """Erreur transitoire sur UN doc : skip + continue (décision 2026-05-24).
+
+    Avant, l'exception remontait et toute la génération échouait ; vu en
+    prod des HTTP 500 systématiques sur certains fichiers Drive. Le doc
+    fautif est marqué ``error_transient`` et le brief se construit sur le
+    reste. (Ce test était resté sur l'ancien contrat « must bubble ».)
+    """
     mp = mp_module_for_exc
     drive = MagicMock()
     drive.list_children.return_value = [{"id": "1", "title": "Doc.txt"}]
     drive.download_item.side_effect = mp.DriveTransientError("boom")
-    with pytest.raises(mp.DriveTransientError):
-        mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
+    corpus, used = mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
+    assert corpus == ""
+    assert used[0]["status"] == "error_transient"
 
 
 def test_assemble_corpus_marks_unsupported_documents():
