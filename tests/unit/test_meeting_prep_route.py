@@ -83,10 +83,16 @@ def _load_mesreunions_web():
 
     # ``main.py`` fait ``from app import meeting_prep`` (le package ``app``
     # est ``services/mesreunions-web/app/``). On rend ce package importable.
+    # Plusieurs services exposent un paquet nommé ``app``. Si un test voisin a
+    # déjà importé celui de device-token-authority, il reste dans sys.modules
+    # et ``from app import runtime`` résout vers le mauvais service. On purge
+    # donc tout l'arbre ``app`` et on force ce service en tête du chemin.
     cg_dir = os.path.join(ROOT, "services", "mesreunions-web")
-    if cg_dir not in sys.path:
-        sys.path.insert(0, cg_dir)
-    sys.modules.pop("app", None)
+    while cg_dir in sys.path:
+        sys.path.remove(cg_dir)
+    sys.path.insert(0, cg_dir)
+    for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        sys.modules.pop(name, None)
     sys.modules.pop("app.meeting_prep", None)
 
     # pika non plus n'est pas dans l'env minimal — libs.shared.app.queue_helper

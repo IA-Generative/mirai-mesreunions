@@ -42,10 +42,15 @@ def _load_web():
         if stub is not None and not getattr(stub, "__file__", None):
             sys.modules.pop(name, None)
 
+    # Plusieurs services exposent un paquet ``app`` : si celui d'un autre
+    # service est resté dans sys.modules, ``from app import runtime`` résout
+    # vers le mauvais. Purge de l'arbre complet + ce service en tête du chemin.
     web_dir = os.path.join(ROOT, "services", "mesreunions-web")
-    if web_dir not in sys.path:
-        sys.path.insert(0, web_dir)
-    sys.modules.pop("app", None)
+    while web_dir in sys.path:
+        sys.path.remove(web_dir)
+    sys.path.insert(0, web_dir)
+    for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        sys.modules.pop(name, None)
 
     if "pika" not in sys.modules:
         pika = types.ModuleType("pika")
