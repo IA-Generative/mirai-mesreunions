@@ -96,6 +96,18 @@ from app import meeting_intelligence as mi
 from app.glossary_loader import load_glossary_dir
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# pika journalise en INFO l'ouverture ET la fermeture de chaque connexion — une
+# vingtaine de lignes par sondage de file, et il y a un sondage toutes les
+# INTERNAL_PULL_QUEUE_INTERVAL_SECONDS (30 s) par worker gunicorn. Mesuré le
+# 2026-08-29 : 103 686 lignes en 24 h pour ce seul conteneur, dont 17 275
+# comptées pour des ERREURS par la supervision, au seul motif que le `repr`
+# d'une fermeture contient « error=None » et « pending-error= ». Aucune n'en
+# est une : elles disent toutes, mot pour mot, `(200) 'Normal shutdown'`. Ce
+# bruit cachait le vrai incident du jour — le worker de mesreunions-web sorti
+# en code 3 au démarrage.
+# Le réglage reste ouvert : PIKA_LOG_LEVEL=INFO rend le détail le jour où une
+# connexion AMQP pose vraiment question.
+logging.getLogger("pika").setLevel(os.getenv("PIKA_LOG_LEVEL", "WARNING"))
 logger = logging.getLogger(__name__)
 
 
