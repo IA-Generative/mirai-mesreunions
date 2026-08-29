@@ -474,6 +474,10 @@ async function _pollJob(jobId, opts) {
 // ── Submit POST /api/preparations ───────────────────────────────────────
 async function _submit(ev) {
   if (ev) ev.preventDefault();
+  // Le wizard est un <form> qui contient un bouton submit : taper Entrée dans
+  // n'importe quel champ texte déclenchait la soumission implicite HTML, donc
+  // une génération depuis l'étape 1, validée sur les seules étapes 0 et 1.
+  if (_currentStep !== STEP_IDS.length - 1) return;
   _clearStatus();
   _hideGenerationStepper();
   // Validation finale : on rejoue les checks des steps 0+1 (les autres ne
@@ -913,7 +917,10 @@ function _collectSnapshot() {
   let themes = [];
   try {
     const tc = document.getElementById('wizard-themes-container');
-    if (tc && tc._themesChipsGetValues) themes = tc._themesChipsGetValues() || [];
+    // serializeThemesChips lit le state du composant. L'ancien appel visait
+    // _themesChipsGetValues(), qui n'a jamais existé : gardé par un `if`, il
+    // échouait en silence et aucune thématique n'était sauvegardée.
+    if (tc) themes = serializeThemesChips(tc) || [];
   } catch (e) {}
   // Coaching — chips d'intention (toggles multi-sélection).
   let outcomes = [];
@@ -954,8 +961,9 @@ function _applySnapshot(snap) {
   // Thèmes
   try {
     const tc = document.getElementById('wizard-themes-container');
-    if (tc && tc._themesChipsSetValues && Array.isArray(snap.themes)) {
-      tc._themesChipsSetValues(snap.themes);
+    // Idem au retour : la méthode exposée est _themesChipsSetThemes.
+    if (tc && tc._themesChipsSetThemes && Array.isArray(snap.themes)) {
+      tc._themesChipsSetThemes(snap.themes);
     }
   } catch (e) {}
   // Coaching — restaure les chips d'intention.

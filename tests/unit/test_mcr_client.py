@@ -29,15 +29,19 @@ def _install_requests_stub():
     requests_stub = types.ModuleType("requests")
 
     class _Resp:
-        def __init__(self, status_code=200, json_data=None, text=""):
+        def __init__(self, status_code=200, json_data=None, text="", content=b""):
             self.status_code = status_code
             self._json = json_data or {}
             self.text = text
+            self.content = content
 
         def json(self):
             if isinstance(self._json, Exception):
                 raise self._json
             return self._json
+
+        def close(self):
+            """Le client ferme ses réponses de téléchargement (streaming)."""
 
     class _RequestException(Exception):
         pass
@@ -302,9 +306,17 @@ def test_download_audio_404_raises_applicative_error_with_clear_msg():
     assert resp.closed is True
 
 
-def test_download_audio_403_raises_auth_error():
-    _REQ.get.return_value = _resp(403)
-    with pytest.raises(MOD.MCRAuthError):
+def test_download_audio_403_raises_applicative_error():
+    """403 sur l'audio = refus applicatif, pas un problème d'auth.
+
+    L'authentification est déjà validée par le listing /api/meetings appelé
+    juste avant pour obtenir l'id. Un 403 ici signifie donc feature flag off,
+    rétention 7 j dépassée, ou autre policy — et le caller doit se rabattre
+    sur le transcript DOCX plutôt que de jeter le jeton. Ce test attendait
+    encore MCRAuthError, l'ancien comportement.
+    """
+    _REQ.get.return_value = _resp(403, text="feature flag disabled")
+    with pytest.raises(MOD.MCRApplicativeError):
         _client().download_audio("AT", "42")
 
 

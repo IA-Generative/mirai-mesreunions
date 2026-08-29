@@ -39,13 +39,56 @@ def _install_requests_stub():
                 raise ValueError("no json")
             return self._json
 
+        def close(self):
+            """Le client ferme ses réponses depuis le contournement LB (aeeb7cd)."""
+
     class _RequestException(Exception):
         pass
 
     requests_stub.RequestException = _RequestException
     requests_stub.get = MagicMock()
     requests_stub.post = MagicMock()
+    requests_stub.put = MagicMock()
+    requests_stub.delete = MagicMock()
     requests_stub._Resp = _Resp
+
+    class _Session:
+        """Session déléguant aux mêmes MagicMock que les appels module-level.
+
+        Depuis le commit aeeb7cd (2026-05-24), ``drive_client`` ouvre une
+        Session neuve par tentative pour forcer ``Connection: close`` derrière
+        le LB. Sans cette classe le stub lève ``AttributeError: module
+        'requests' has no attribute 'Session'`` — c'est ce qui rendait 18 des
+        28 tests de ce fichier rouges, donc ``list_children`` / ``get_item`` /
+        ``download_item`` sans couverture effective.
+
+        La délégation ``*args, **kwargs`` préserve la position de ``url`` et le
+        passage en mots-clés de ``headers``/``timeout``, si bien que les
+        assertions écrites sur ``_REQ.get`` continuent de porter à l'identique.
+        """
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, *a, **kw):
+            return requests_stub.get(*a, **kw)
+
+        def post(self, *a, **kw):
+            return requests_stub.post(*a, **kw)
+
+        def put(self, *a, **kw):
+            return requests_stub.put(*a, **kw)
+
+        def delete(self, *a, **kw):
+            return requests_stub.delete(*a, **kw)
+
+        def close(self):
+            pass
+
+    requests_stub.Session = _Session
     sys.modules["requests"] = requests_stub
     return requests_stub
 
@@ -79,6 +122,8 @@ def _client():
 def _reset_mocks():
     _REQ.get.reset_mock(side_effect=True, return_value=True)
     _REQ.post.reset_mock(side_effect=True, return_value=True)
+    _REQ.put.reset_mock(side_effect=True, return_value=True)
+    _REQ.delete.reset_mock(side_effect=True, return_value=True)
 
 
 # --- Constructor ---------------------------------------------------------
