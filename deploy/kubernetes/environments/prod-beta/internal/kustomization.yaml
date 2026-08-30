@@ -28,4 +28,4 @@ patches:
 # « deux versions en service en même temps, invisibles de tous » lors de la panne Drive.
 images:
   - name: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload
-    newTag: "20260829-204922"
+    newTag: "20260830-142546"
