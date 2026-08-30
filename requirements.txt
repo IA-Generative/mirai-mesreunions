@@ -27,4 +27,10 @@ python-pptx==1.0.2
 python-dateutil==2.9.0.post0
 # MCP SDK pour exposer video-ingest (et autres connecteurs) via le
 # transport streamable-http. Consommé par Open WebUI et agents.
-mcp>=1.2.0
+#
+# BORNE HAUTE OBLIGATOIRE. Sans elle, la construction du 2026-08-29 a tiré mcp 2.x,
+# où FastMCP est devenu MCPServer : video-ingest-mcp est mort au démarrage et a
+# redémarré 68 fois en 5 h 27 (mesuré le 2026-08-30), première source d'erreurs du
+# cluster ce jour-là. Le code importe `mcp.server.fastmcp` — API v1. Relever ce
+# plafond exige donc de migrer le code, pas seulement le chiffre.
+mcp>=1.2.0,<2
