@@ -3119,7 +3119,9 @@ def _reparse_speaker_tagged_blocks(text: str) -> list[dict]:
 
     Retourne une liste de dicts {speaker, start, end, text, header_line,
     body_lines} où header_line + body_lines sont les lignes brutes
-    originelles (pour pouvoir reconstruire à l'identique).
+    originelles (pour pouvoir reconstruire à l'identique) — à une exception
+    près : une ligne de continuation sans `>` est normalisée en `> …`, cf.
+    la branche correspondante plus bas.
     """
     if not text:
         return []
@@ -3144,6 +3146,16 @@ def _reparse_speaker_tagged_blocks(text: str) -> list[dict]:
             }
         elif current is not None and line.startswith(">"):
             current["body_lines"].append(raw)
+        elif current is not None and line.strip():
+            # Ligne de CONTINUATION : un texte de sous-titre contenant un
+            # retour à la ligne interne produisait un bloc `> …` étalé sur
+            # plusieurs lignes physiques, dont une seule portait le `>`.
+            # Les ignorer ici était une perte DÉFINITIVE : _rebuild_speaker_tagged
+            # ne réécrit que header_line + body_lines, donc le premier
+            # « barrer un bloc » ou « re-filtrer » effaçait ces lignes en base.
+            # On les rattache, en les remettant à la forme canonique `> …` pour
+            # que la réécriture soigne la fiche au passage.
+            current["body_lines"].append("> " + line.strip())
         # lignes vides : ignorées (séparateurs entre blocs)
     if current is not None:
         blocks.append(current)
