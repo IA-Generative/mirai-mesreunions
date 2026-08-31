@@ -34,6 +34,7 @@ import './tabs/useful-data.js';
 import * as adminTab from './tabs/admin.js';
 import { initTabManager } from './lib/tab-manager.js';
 import { initChatWidget } from './lib/chat-widget.js';
+import { initAdvancedToggleAnchor } from './lib/advanced-toggle-anchor.js';
 
 // Affichage conditionnel de l'onglet Admin dans la nav (selon claim OIDC).
 try { adminTab.revealNavIfAdmin && adminTab.revealNavIfAdmin(); } catch (e) {}
@@ -69,6 +70,11 @@ document.addEventListener('click', (ev) => {
 // Persistant, indépendant des onglets. Ne se révèle que si le RAG est
 // configuré côté serveur (sinon inerte → aucun impact).
 try { initChatWidget(); } catch (e) { /* widget non bloquant */ }
+
+// Toggle « Mode avancé » : le ranger SOUS la barre flottante du menu commun
+// (qui monte à z-index 2000 et le masquait), bord droit aligné sur l'avatar
+// du compte. Inerte si le menu commun n'est pas chargé.
+try { initAdvancedToggleAnchor(); } catch (e) { /* placement non bloquant */ }
 
 // Sentinelle utile au test e2e (vérifier que le bundle a bien initialisé).
 window.__MESREUNIONS_SHELL_READY__ = true;

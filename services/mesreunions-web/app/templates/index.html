@@ -74,6 +74,21 @@
             cursor: pointer; user-select: none;
             transition: all 0.12s ease;
         }
+        /* Ancré sous la barre flottante du menu commun : lib/advanced-toggle-anchor.js
+           mesure la barre et pose `top`/`right` au pixel (bord droit aligné sur celui
+           de l'avatar du compte). `absolute` et non `fixed` : la pastille appartient à
+           l'en-tête et doit défiler avec lui, pas flotter au-dessus du contenu. Le
+           repère est `.fr-header`, que le DSFR pose déjà en `position: relative`.
+           1000 et non 1 : sous le point de repli, le bloc-marque DSFR prend TOUTE la
+           largeur, en fond blanc et à z-index 750 — il enterrait la pastille (visible
+           nulle part, et inerte au clic). Ce 1000 reste enfermé dans le contexte
+           d'empilement de l'en-tête : jamais au-dessus du menu (2000), dont les
+           panneaux doivent pouvoir recouvrir la pastille. */
+        .header-user .advanced-toggle.is-anchored {
+            position: absolute;
+            z-index: 1000;
+            margin-top: 0;
+        }
         .header-user .advanced-toggle:hover {
             background: #f1f5f9; color: #0f172a; border-color: #94a3b8;
         }
