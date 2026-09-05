@@ -18,6 +18,7 @@ and exercise the pure helpers (no Drive / no LLM HTTP calls):
 
 import importlib.util
 import os
+import re
 import sys
 import types
 from unittest.mock import MagicMock
@@ -255,13 +256,17 @@ def test_assemble_corpus_concatenates_and_records_used():
     drive = _fake_drive(children, downloads)
     corpus, used = mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
 
-    assert "--- Note de cadrage.txt ---" in corpus
+    # Les en-têtes portent désormais un nonce imprévisible (anti-forgerie de
+    # frontière de document) : on vérifie le nom et la forme, pas le littéral.
+    assert re.search(r"--- \[SRC [0-9a-f]{8}\] Note de cadrage\.txt · drive ---", corpus)
     assert "Cadrage : le sujet est le budget Q3." in corpus
-    assert "--- Diagnostic.md ---" in corpus
+    assert re.search(r"--- \[SRC [0-9a-f]{8}\] Diagnostic\.md · drive ---", corpus)
     assert "Les risques principaux sont X et Y." in corpus
     statuses = {u["name"]: u["status"] for u in used}
     assert statuses["Note de cadrage.txt"] == "ingested"
     assert statuses["Diagnostic.md"] == "ingested"
+    # L'origine est portée par toutes les entrées, chemin historique compris.
+    assert all(u.get("origin") == "drive" for u in used)
 
 
 def test_assemble_corpus_skips_folders():
@@ -327,14 +332,21 @@ def test_assemble_corpus_records_download_error_but_continues():
     assert "hello" in corpus
 
 
-def test_assemble_corpus_propagates_drive_transient():
-    """A transient Drive error must bubble — partial corpus would mislead the LLM."""
+def test_assemble_corpus_skips_doc_on_drive_transient():
+    """Erreur transitoire sur UN doc : skip + continue (décision 2026-05-24).
+
+    Avant, l'exception remontait et toute la génération échouait ; vu en
+    prod des HTTP 500 systématiques sur certains fichiers Drive. Le doc
+    fautif est marqué ``error_transient`` et le brief se construit sur le
+    reste. (Ce test était resté sur l'ancien contrat « must bubble ».)
+    """
     mp = mp_module_for_exc
     drive = MagicMock()
     drive.list_children.return_value = [{"id": "1", "title": "Doc.txt"}]
     drive.download_item.side_effect = mp.DriveTransientError("boom")
-    with pytest.raises(mp.DriveTransientError):
-        mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
+    corpus, used = mp.assemble_corpus(drive, "ACCESS", "FOLDER_ID")
+    assert corpus == ""
+    assert used[0]["status"] == "error_transient"
 
 
 def test_assemble_corpus_marks_unsupported_documents():

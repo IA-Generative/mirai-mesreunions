@@ -1813,6 +1813,14 @@ function _ytLoadApi() {
     return _ytApiPromise;
 }
 
+// Trie l'index plat des words par timestamp de début. Le binary search
+// karaoke (applyKaraoke) suppose un tableau ordonné ; les timelines des
+// sources externes ne le garantissent pas. Tri stable sur (s, e).
+function _tcSortWordsFlat(arr) {
+    arr.sort((a, b) => (a.s - b.s) || (a.e - b.e));
+    return arr;
+}
+
 function _parseSpeakerTagged(text) {
     if (!text || typeof text !== 'string') return [];
     const lines = text.split('\n');
@@ -1830,7 +1838,14 @@ function _parseSpeakerTagged(text) {
                 end:   parseInt(m[4], 10) * 60 + parseFloat(m[5]),
                 text: '',
             };
-        } else if (current && line.startsWith('>')) {
+        } else if (current && line.trim()) {
+            // Toute ligne non vide sous un en-tête appartient au bloc.
+            // Le préfixe `>` est la forme canonique, mais un texte de
+            // sous-titre contenant un retour à la ligne interne produit des
+            // lignes de CONTINUATION sans `>` (cf.
+            // format_speaker_tagged_from_sentences côté bridge, qui écrit un
+            // seul `> ` devant un texte multi-lignes). Les ignorer faisait
+            // disparaître 54 % du transcript sur les imports YouTube.
             const t = line.replace(/^>\s?/, '').trim();
             current.text = current.text ? current.text + ' ' + t : t;
         }
@@ -2441,7 +2456,7 @@ async function mountTranscriptCorrector(container) {
 
     // Index plat des words pour binary-search dans le timeupdate karaoke
     // (perf : un audio d'1h peut avoir ~10k words, on évite l'itération
-    // linéaire à chaque tick). Les words sont déjà ordonnés par ``s``.
+    // linéaire à chaque tick).
     // ``const`` sur l'array (mutation via splice OK pour _tcRebuildAfterEdit).
     const wordsFlat = [];
     blocks.forEach((b, blockIdx) => {
@@ -2452,6 +2467,14 @@ async function mountTranscriptCorrector(container) {
             }
         });
     });
+    // Le binary search d'applyKaraoke EXIGE un tableau trié par ``s``. On ne
+    // peut pas le supposer : les sources externes dont les segments se
+    // chevauchent (chunks video-ingest avec 15s de recouvrement) produisent
+    // une timeline en dents de scie, et une dichotomie sur un tableau non
+    // trié rend un résultat arbitraire — le mot actif ne se rallume plus
+    // passé le premier recul. Un tri ici (une fois, au mount) rend la
+    // recherche saine quelle que soit la qualité de la donnée.
+    _tcSortWordsFlat(wordsFlat);
     let lastActiveWordEl = null;
 
     // Exposé pour _patchVisibleTranscriptOccurrences (édition correct-term) :
@@ -2511,6 +2534,7 @@ async function mountTranscriptCorrector(container) {
                 }
             });
         });
+        _tcSortWordsFlat(wordsFlat);
         // Reset le pointeur du dernier mot actif (peut référencer un span
         // détruit par notre innerHTML replacement).
         if (lastActiveWordEl && !document.contains(lastActiveWordEl)) {
@@ -2638,9 +2662,17 @@ async function mountTranscriptCorrector(container) {
                 if (_ytKaraokeRaf) cancelAnimationFrame(_ytKaraokeRaf);
                 return;
             }
-            if (_ytCtrl && typeof _ytCtrl.getState === 'function'
-                && _ytCtrl.getState() === 1) {
-                applyKaraoke((_ytCtrl.getTime() || 0) + YT_KARAOKE_LEAD_SEC);
+            // try/catch OBLIGATOIRE : l'appel précède la replanification du
+            // rAF ci-dessous. Une exception non rattrapée ici ne poserait
+            // jamais la frame suivante → la boucle meurt en silence et le
+            // karaoké s'arrête sans le moindre signal côté UI.
+            try {
+                if (_ytCtrl && typeof _ytCtrl.getState === 'function'
+                    && _ytCtrl.getState() === 1) {
+                    applyKaraoke((_ytCtrl.getTime() || 0) + YT_KARAOKE_LEAD_SEC);
+                }
+            } catch (e) {
+                console.warn('karaoke tick failed', e);
             }
             _ytKaraokeRaf = requestAnimationFrame(_ytKaraokeTick);
         };

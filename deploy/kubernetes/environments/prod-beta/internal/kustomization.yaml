@@ -1,0 +1,31 @@
+# Zone interne de prod-bêta. `video-ingest.yaml` porte la description complète des trois
+# charges, avec des hôtes EXPURGÉS (dépôt public).
+#
+# La surcharge `patch-hotes.local.yaml` est GITIGNORÉE (convention `*.local.yaml`) et
+# REQUISE : elle porte les hôtes réels du SSO et de la passerelle. Sans elle,
+# `kustomize build` échoue avec « no such file ». C'est voulu : appliquer ce dossier avec
+# une mauvaise adresse de SSO casserait l'authentification de tous les imports sans que
+# rien ne le dise. Un refus bruyant vaut mieux qu'un déploiement faux.
+#
+#   kustomize build --load-restrictor=LoadRestrictionsNone . | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: audio-internal
+
+resources:
+  - video-ingest.yaml
+
+patches:
+  - path: patch-hotes.local.yaml
+
+# TAG IMMUABLE — et non `latest`. Mesuré le 2026-08-30 : six des huit déploiements de
+# `audio-internal` tournaient sur `secure-audio-upload:latest`, tous sur le MÊME digest
+# (sha256:c073ca67…) que les deux déjà épinglés en `20260829-204922`. Les épingler est donc
+# un pur ré-étiquetage, sans changement de comportement — mais il ferme le piège : avec
+# `latest`, la prochaine construction re-pointait six déploiements vers une image neuve à
+# leur prochain redémarrage, sans rollout et sans trace. C'est exactement ce qui a produit
+# « deux versions en service en même temps, invisibles de tous » lors de la panne Drive.
+images:
+  - name: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload
+    newTag: "20260830-142546"

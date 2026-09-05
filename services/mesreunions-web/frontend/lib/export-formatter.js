@@ -42,6 +42,9 @@ function _sections(prep) {
   if (risks.length) out.push({ emoji: '⚠️', title: 'Points de vigilance', kind: 'list', payload: risks });
   const check = Array.isArray(bj.preparation_checklist) ? bj.preparation_checklist.filter(q => (q || '').trim()) : [];
   if (check.length) out.push({ emoji: '✅', title: 'À faire avant la réunion', kind: 'list', payload: check });
+  const recos = (Array.isArray(bj.ai_recommendations) ? bj.ai_recommendations : [])
+    .filter(r => r && typeof r === 'object' && (r.suggestion || '').trim());
+  if (recos.length) out.push({ emoji: '💡', title: 'Recommandations', kind: 'recos', payload: recos });
   return out;
 }
 
@@ -97,6 +100,12 @@ export function renderTxt(prep) {
         const src = (t.source || '').trim();
         out.push(src ? `- ${item} (source : ${src})` : `- ${item}`);
       });
+    } else if (sec.kind === 'recos') {
+      out.push('Suggestions issues de la recherche sur les réunions — à prendre ou à laisser.');
+      sec.payload.forEach(r => {
+        const why = (r.rationale || '').trim();
+        out.push(why ? `- ${(r.suggestion || '').trim()} (${why})` : `- ${(r.suggestion || '').trim()}`);
+      });
     } else {
       sec.payload.forEach(s => out.push(`- ${s}`));
     }
@@ -145,6 +154,13 @@ export function renderMd(prep) {
         if (!item) return;
         const src = (t.source || '').trim();
         out.push(src ? `- ${item} _(source : ${src})_` : `- ${item}`);
+      });
+    } else if (sec.kind === 'recos') {
+      out.push('_Suggestions issues de la recherche sur les réunions — à prendre ou à laisser._');
+      out.push('');
+      sec.payload.forEach(r => {
+        const why = (r.rationale || '').trim();
+        out.push(why ? `- ${(r.suggestion || '').trim()} _(${why})_` : `- ${(r.suggestion || '').trim()}`);
       });
     } else {
       sec.payload.forEach(s => out.push(`- ${s}`));

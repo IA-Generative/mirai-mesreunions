@@ -7,7 +7,7 @@
 // l'ancien _wizard_template.py mais distribués en 5 steps :
 //   1. Identité  : type + sujet (+ durée prévue, déplacée ici pour cohérence)
 //   2. Contexte  : rôle dans la réunion + attendu du brief
-//   3. Documents : dossier Drive optionnel
+//   3. Sources   : dossiers/fichiers Drive, réunions passées, textes collés
 //   4. Focus     : checkboxes "Sur quoi concentrer l'analyse ?"
 //   5. Récap     : récapitulatif + bouton Générer
 //
@@ -30,14 +30,40 @@ import {
   serializeThemesChips,
   loadThemesSuggestions,
 } from '../lib/themes-chips.js';
+import {
+  mountSourceBasket,
+  getSourceBasketEntries,
+  setSourceBasketEntries,
+  addSourceBasketEntries,
+  toApiSources,
+  snapshotEntries,
+} from '../lib/source-basket.js';
+import { openSourcePicker } from '../lib/source-pickers.js';
+import { isStackedModalOpen } from '../lib/stacked-modal.js';
+import { showToast } from '../lib/toast.js';
 
+// Le wizard reste à CINQ étapes. En ajouter une aurait deux conséquences
+// qu'aucun gain d'ergonomie ne compense : `_COACH_BY_STEP` est indexé par
+// numéro d'étape (les suggestions atterriraient sur le mauvais écran), et
+// surtout `_applySnapshot` restaure `snap.step` comme un entier brut, sans
+// champ de version — tous les brouillons déjà en localStorage rouvriraient
+// donc sur un écran décalé. L'étape 3 change seulement de nature : de
+// « Documents » (un champ Drive) à « Sources » (quatre pickers + panier).
 const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
 const STEP_LABELS = [
-  'Identité', 'Contexte', 'Documents', 'Focus', 'Récap',
+  'Identité', 'Contexte', 'Sources', 'Focus', 'Récap',
 ];
 
 let _currentStep = 0;
 let _wizardOpenedOnce = false;
+// Identifiant opaque fourni par l'application tierce qui a ouvert le lien.
+// Transmis au brief pour que l'appelant puisse retrouver ce qu'il a déclenché.
+let _externalRef = '';
+
+// Vrai dès qu'on a déjà prévenu l'utilisateur pour l'ouverture en cours —
+// le save est débouncé à 400 ms, sans ce drapeau le toast se répéterait à
+// chaque frappe.
+let _draftQuotaWarned = false;
 
 function _qs(sel, root) { return (root || document).querySelector(sel); }
 function _qsa(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
@@ -48,6 +74,43 @@ function _esc(s) {
 }
 
 function _statusBox() { return _qs('#wizard-status'); }
+
+// ── Panier de sources (étape 3) ─────────────────────────────────────────
+function _basketEl() { return _qs('#wizard-sources-basket'); }
+
+/**
+ * Recopie dans le champ historique `#wizard-drive-folder` (devenu un hidden)
+ * le premier dossier sans instance explicite, et lui seul.
+ *
+ * Pourquoi « sans instance » : le serveur replace `drive_folder` en tête de
+ * `sources[]` puis déduplique sur le triplet (drive, host, id). Le champ
+ * historique ne porte pas d'instance ; une entrée qui en porte une ne se
+ * dédupliquerait donc pas contre lui, et le dossier serait ingéré deux fois.
+ * Le picker Drive ne stampille une instance que lorsqu'il y a un choix à
+ * faire — dans le cas courant (un seul Drive), un dossier choisi en naviguant
+ * alimente donc bien ce champ, exactement comme un dossier collé.
+ */
+function _syncDriveHiddenInput(entries) {
+  const el = _qs('#wizard-drive-folder');
+  if (!el) return;
+  const legacy = (entries || []).find(
+    (e) => e && e.type === 'drive_folder' && !e.drive && !e.host,
+  );
+  el.value = legacy ? legacy.id : '';
+}
+
+function _onBasketChange(entries) {
+  _syncDriveHiddenInput(entries);
+  // Les pickers vivent dans `document.body`, donc hors du nœud sur lequel
+  // `_bindAutosave` délègue (`#wizard-modal-backdrop`) : sans ce rappel
+  // explicite, rien de ce que l'utilisateur choisit ne survivrait à une
+  // fermeture du wizard.
+  _scheduleSave();
+}
+
+function _sourceEntries() {
+  return getSourceBasketEntries(_basketEl());
+}
 
 function _setStatus(msg, kind) {
   const el = _statusBox();
@@ -84,6 +147,7 @@ function _showStep(idx) {
   _renderStepper();
   // Refresh recap on last step entry.
   if (idx === STEP_IDS.length - 1) _renderRecap();
+  _renderCoach();
   // Boutons précédent / suivant / valider
   const prevBtn = _qs('#wizard-prev-btn');
   const nextBtn = _qs('#wizard-next-btn');
@@ -139,6 +203,106 @@ function _parseDurationMinutes(raw) {
   return null;
 }
 
+// ── Coach réunion — suggestions humbles, ancrées dans la recherche ─────
+// Une seule suggestion à la fois, jamais bloquante, toujours masquable.
+// Les sources sont citées en petit : c'est la recherche qui parle, pas nous.
+const _COACH_TIPS = [
+  {
+    id: 'outcome_empty',
+    when: (s) => !s.outcomes.length && !s.successCriteria,
+    text: 'Une pratique qui aide souvent : décrire ce qui devra être vrai à la fin '
+      + '(« le budget est arbitré », « chacun connaît sa prochaine action »). '
+      + 'Et si aucune décision ni question à trancher n\'émerge, un échange écrit peut parfois suffire.',
+    source: 'S. Rogelberg, The Surprising Science of Meetings',
+  },
+  {
+    id: 'agenda_questions',
+    when: (s) => s.outcomes.includes('decision') || s.outcomes.includes('actions'),
+    text: 'Si c\'est utile : un ordre du jour formulé en questions à trancher, plutôt qu\'en thèmes, '
+      + 'clarifie qui doit vraiment être présent. Le brief généré proposera ces questions.',
+    source: 'S. Rogelberg — un agenda n\'aide que si sa formulation engage',
+  },
+  {
+    id: 'many_participants',
+    when: (s) => s.participantsCount > 8,
+    text: 'Au-delà de 8 participants, la participation de chacun chute nettement (mesuré à grande '
+      + 'échelle). Peut-être inviter au strict nécessaire — le compte-rendu informera les autres ?',
+    source: 'Étude Microsoft 2021 (efficacité & inclusion des réunions)',
+  },
+  {
+    id: 'long_break',
+    when: (s) => s.duration >= 90,
+    text: 'Au-delà d\'une heure, une pause de 5-10 minutes améliore réellement l\'attention de tous '
+      + '(mesuré par EEG). Peut-être la prévoir dans l\'ordre du jour ?',
+    source: 'Microsoft Human Factors Lab, 2021',
+  },
+  {
+    id: 'send_before',
+    when: () => true,
+    text: 'Le geste le plus rentable après la génération : envoyer ce brief aux participants '
+      + '24-48h avant la réunion. La lecture préalable est l\'un des facteurs d\'efficacité '
+      + 'les mieux documentés.',
+    source: 'Cambridge Handbook of Meeting Science (pré-communication)',
+  },
+];
+// Ordre d'affichage par écran : contexte = intention d'abord ; récap =
+// signaux de risque d'abord, sinon le conseil « envoyer avant ».
+const _COACH_BY_STEP = {
+  1: { container: 'wizard-coach-tip', tips: ['outcome_empty', 'agenda_questions', 'many_participants', 'long_break'] },
+  4: { container: 'wizard-coach-tip-recap', tips: ['many_participants', 'long_break', 'send_before'] },
+};
+let _coachDismissed = new Set();
+
+function _coachState() {
+  const list = _qs('#wizard-participants-list');
+  return {
+    outcomes: _qsa('#wizard-outcome-chips .wizard-chip.is-on').map((c) => c.dataset.outcome),
+    successCriteria: ((_qs('#wizard-success-criteria') || {}).value || '').trim(),
+    duration: _parseDurationMinutes((_qs('#wizard-duration') || {}).value) || 0,
+    participantsCount: list ? list.children.length : 0,
+  };
+}
+
+function _renderCoach() {
+  Object.values(_COACH_BY_STEP).forEach((cfg) => {
+    const el = document.getElementById(cfg.container);
+    if (el) { el.classList.remove('is-visible'); el.innerHTML = ''; }
+  });
+  const cfg = _COACH_BY_STEP[_currentStep];
+  if (!cfg) return;
+  const el = document.getElementById(cfg.container);
+  if (!el) return;
+  const state = _coachState();
+  const tip = cfg.tips
+    .map((id) => _COACH_TIPS.find((t) => t.id === id))
+    .find((t) => t && !_coachDismissed.has(t.id) && t.when(state));
+  if (!tip) return;
+  el.innerHTML = `
+    <span aria-hidden="true">💡</span>
+    <span class="coach-text">Suggestion — ${_esc(tip.text)}
+      <span class="coach-source">${_esc(tip.source)}</span></span>
+    <button type="button" class="coach-dismiss" data-coach-dismiss="${_esc(tip.id)}">Masquer</button>`;
+  el.classList.add('is-visible');
+  const btn = el.querySelector('[data-coach-dismiss]');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      _coachDismissed.add(tip.id);
+      _renderCoach();
+    });
+  }
+}
+
+function _bindOutcomeChips() {
+  const group = _qs('#wizard-outcome-chips');
+  if (!group) return;
+  _qsa('.wizard-chip', group).forEach((chip) => {
+    chip.addEventListener('click', () => {
+      chip.classList.toggle('is-on');
+      _renderCoach();
+    });
+  });
+}
+
 // ── Récap ───────────────────────────────────────────────────────────────
 function _collectValues() {
   const meetingType = (_qs('#wizard-meeting-type') || {}).value || 'general';
@@ -159,14 +323,32 @@ function _collectValues() {
   const themes = themesContainer ? serializeThemesChips(themesContainer) : [];
   const sendCrEl = _qs('#wizard-send-cr-email');
   const sendCrEmail = !!(sendCrEl && sendCrEl.checked);
+  // Coaching — intention de fin de réunion (chips + texte libre).
+  const expectedOutcomes = _qsa('#wizard-outcome-chips .wizard-chip.is-on')
+    .map((c) => c.dataset.outcome).filter(Boolean);
+  const successCriteria = ((_qs('#wizard-success-criteria') || {}).value || '').trim();
+  // Étape 3 — panier de sources. `drive` reste renseigné en parallèle pour
+  // le chemin historique (cf. _syncDriveHiddenInput).
+  const sources = _sourceEntries();
   return {
     meetingType, subject, role, expectation, drive, duration, focus, participants,
+    sources,
     isRecurring: isRecurring && !!recurrenceRule,
     recurrenceRule: isRecurring ? recurrenceRule : null,
     themes,
     sendCrEmail,
+    expectedOutcomes,
+    successCriteria,
   };
 }
+
+const _OUTCOME_RECAP_LABELS = {
+  decision: 'une décision prise',
+  actions: 'un plan d\'action daté',
+  alignement: 'un alignement partagé',
+  idees: 'des idées nouvelles',
+  information: 'une information transmise',
+};
 
 function _renderRecap() {
   const root = _qs('#wizard-recap-content');
@@ -179,6 +361,24 @@ function _renderRecap() {
       <dt>Durée :</dt><dd>${v.duration ? v.duration + ' min' : '<em>—</em>'}</dd>
       <dt>Votre rôle :</dt><dd>${_esc(v.role) || '<em>—</em>'}</dd>
       <dt>Attendu :</dt><dd>${_esc(v.expectation) || '<em>—</em>'}</dd>
+      <dt>Résultat espéré :</dt><dd>${
+        (v.expectedOutcomes.length || v.successCriteria)
+          ? _esc([
+              ...v.expectedOutcomes.map((o) => _OUTCOME_RECAP_LABELS[o] || o),
+              v.successCriteria,
+            ].filter(Boolean).join(' ; '))
+          : '<em>(non précisé)</em>'
+      }</dd>
+      <dt>Sources :</dt><dd>${
+        v.sources.length
+          ? '<ul style="margin:0;padding-left:1.1rem;">'
+            + v.sources.map((s) => (
+              `<li>${_esc(s.label)} <span style="color:#94a3b8;font-size:0.8em;">`
+              + `${_esc(s.meta || '')}</span></li>`
+            )).join('')
+            + '</ul>'
+          : '<em>(aucune)</em>'
+      }</dd>
       <dt>Dossier Drive :</dt><dd>${_esc(v.drive) || '<em>(aucun)</em>'}</dd>
       <dt>Focus :</dt><dd>${v.focus.length ? v.focus.map(_esc).join(', ') : '<em>(aucun)</em>'}</dd>
       <dt>Participants :</dt><dd>${
@@ -273,40 +473,72 @@ function _hideGenerationStepper() {
 }
 
 let _pollTimer = null;
+let _pollStartedAt = 0;
+// Borne dure du polling : au-delà, le job est perdu (le serveur requalifie
+// les jobs orphelins à 30 min — on lui laisse une marge). Sans borne, un
+// pod redémarré en pleine génération laissait l'animation tourner sans fin.
+const _POLL_MAX_MS = 35 * 60 * 1000;
+
 function _stopPolling() {
   if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
 }
 
+function _failGeneration(message) {
+  // Échec : on garde le brouillon (les réponses de l'utilisateur), on
+  // réactive le bouton, on affiche la cause.
+  _stopPolling();
+  _setStatus(message || 'La génération a échoué.', 'err');
+  const submitBtn = _qs('#wizard-submit-btn');
+  if (submitBtn) submitBtn.disabled = false;
+}
+
 async function _pollJob(jobId, opts) {
+  if (_pollStartedAt && (Date.now() - _pollStartedAt) > _POLL_MAX_MS) {
+    _failGeneration('La génération a été interrompue (délai dépassé). '
+      + 'Vos réponses sont conservées — relancez la génération.');
+    return;
+  }
   try {
     const r = await fetch(`/api/preparations/jobs/${encodeURIComponent(jobId)}`);
     if (r.status === 404) {
-      _setStatus('Job de génération introuvable (expiré ?).', 'err');
-      _stopPolling();
+      _failGeneration('Job de génération introuvable (expiré ?). Relancez la génération.');
+      return;
+    }
+    if (r.redirected || ((r.headers.get('content-type') || '').indexOf('json') === -1)) {
+      // Session OIDC expirée : @require_auth renvoie une redirection HTML
+      // vers /login — sans ce garde, r.json() échouait et on repartait en
+      // boucle silencieuse pour toujours.
+      _failGeneration('Votre session a expiré. Reconnectez-vous puis relancez la génération '
+        + '(vos réponses sont conservées dans le brouillon).');
       return;
     }
     const d = await r.json().catch(() => ({}));
     _renderGenerationStepper(d, opts);
     if (d.phase === 'done') {
+      const newId = d.preparation_id;
+      if (!newId) {
+        // Défense en profondeur : un done sans preparation_id est un échec
+        // de sauvegarde — ne surtout pas jeter le brouillon.
+        _renderGenerationStepper({ phase: 'failed', error: 'Sauvegarde du brief incomplète.' }, opts);
+        _failGeneration('Le brief n\'a pas pu être sauvegardé. '
+          + 'Vos réponses sont conservées — relancez la génération.');
+        return;
+      }
       _stopPolling();
       _setStatus('Brief généré.', 'info');
-      const newId = d.preparation_id;
       // Brouillon validé -> retire de la liste localStorage.
       if (_currentDraftId) { try { deleteDraft(_currentDraftId); } catch (e) {} }
       closeWizard();
       try {
         if (typeof window.loadBriefs === 'function') window.loadBriefs();
-        if (newId && typeof window.showBriefDetail === 'function') {
+        if (typeof window.showBriefDetail === 'function') {
           setTimeout(() => window.showBriefDetail(newId), 100);
         }
       } catch (e) { /* non-fatal */ }
       return;
     }
     if (d.phase === 'failed') {
-      _stopPolling();
-      _setStatus(d.error || 'La génération a échoué.', 'err');
-      const submitBtn = _qs('#wizard-submit-btn');
-      if (submitBtn) submitBtn.disabled = false;
+      _failGeneration(d.error || 'La génération a échoué.');
       return;
     }
     _pollTimer = setTimeout(() => _pollJob(jobId, opts), 1500);
@@ -319,6 +551,10 @@ async function _pollJob(jobId, opts) {
 // ── Submit POST /api/preparations ───────────────────────────────────────
 async function _submit(ev) {
   if (ev) ev.preventDefault();
+  // Le wizard est un <form> qui contient un bouton submit : taper Entrée dans
+  // n'importe quel champ texte déclenchait la soumission implicite HTML, donc
+  // une génération depuis l'étape 1, validée sur les seules étapes 0 et 1.
+  if (_currentStep !== STEP_IDS.length - 1) return;
   _clearStatus();
   _hideGenerationStepper();
   // Validation finale : on rejoue les checks des steps 0+1 (les autres ne
@@ -359,14 +595,30 @@ async function _submit(ev) {
   // Lot 9 — thématiques + Lot 8 — toggle CR auto.
   if (v.themes && v.themes.length) body.themes = v.themes;
   if (v.sendCrEmail) body.send_cr_email = true;
+  // Coaching — intention de fin de réunion.
+  if (v.expectedOutcomes.length) body.expected_outcomes = v.expectedOutcomes;
+  if (v.successCriteria) body.success_criteria = v.successCriteria;
+  if (_externalRef) body.external_ref = _externalRef;
+  // Étape 3 — sources combinées. `toApiSources` regroupe les fichiers Drive
+  // d'une même instance et retire toutes les clés d'affichage : le serveur ne
+  // reçoit que le contrat de `modules/preparations/sources.py`.
+  const apiSources = toApiSources(v.sources);
+  if (apiSources.length) body.sources = apiSources;
+
+  // Le stepper de génération masque les phases Drive quand aucune source ne
+  // les déclenche — un « Connexion au Drive » qui ne viendra jamais fait
+  // croire à un blocage.
+  const hasDrive = !!v.drive || apiSources.some(
+    (s) => s.type === 'drive_folder' || s.type === 'drive_files',
+  );
 
   const submitBtn = _qs('#wizard-submit-btn');
   if (submitBtn) submitBtn.disabled = true;
-  _setStatus(v.drive
+  _setStatus(hasDrive
     ? 'Lecture du Drive et génération du brief en cours…'
     : 'Génération du brief en cours…', 'info');
   // Affiche tout de suite le stepper en état initial pour feedback immédiat.
-  _renderGenerationStepper({ phase: 'init' }, { hasDrive: !!v.drive });
+  _renderGenerationStepper({ phase: 'init' }, { hasDrive });
 
   try {
     const r = await fetch('/api/preparations', {
@@ -383,7 +635,8 @@ async function _submit(ev) {
     }
     // Mode async (Lot 2) : back renvoie {job_id} en 202.
     if (d.job_id) {
-      _pollJob(d.job_id, { hasDrive: !!v.drive });
+      _pollStartedAt = Date.now();
+      _pollJob(d.job_id, { hasDrive });
       return;
     }
     // Fallback : ancienne réponse sync (compat).
@@ -404,48 +657,12 @@ async function _submit(ev) {
   }
 }
 
-// ── Test d'accès Drive (Lot 1) ───────────────────────────────────────────
-async function _testDriveAccess() {
-  const input = _qs('#wizard-drive-folder');
-  const result = _qs('#wizard-drive-test-result');
-  const spinner = _qs('#wizard-drive-test-spinner');
-  const btn = _qs('#wizard-drive-test-btn');
-  if (!input || !result) return;
-  const raw = (input.value || '').trim();
-  if (!raw) {
-    result.innerHTML = '<div class="fr-alert fr-alert--info fr-alert--sm"><p>Aucun dossier renseigné — le test est inutile.</p></div>';
-    return;
-  }
-  result.innerHTML = '';
-  if (spinner) spinner.style.display = '';
-  if (btn) btn.disabled = true;
-  try {
-    const url = '/api/preparations/test-drive?folder_id=' + encodeURIComponent(raw);
-    const r = await fetch(url);
-    const d = await r.json().catch(() => ({}));
-    if (d && d.ok) {
-      const n = d.docs_count || 0;
-      const docs = (d.docs || []).filter(x => !x.is_folder).slice(0, 10);
-      let list = '';
-      if (docs.length) {
-        list = '<ul style="margin:0.3rem 0 0 1.2rem;font-size:0.85rem;">'
-          + docs.map(x => `<li>${_esc(x.name)}</li>`).join('')
-          + (n > docs.length ? `<li><em>…et ${n - docs.length} autre(s)</em></li>` : '')
-          + '</ul>';
-      }
-      result.innerHTML = `<div class="fr-alert fr-alert--success fr-alert--sm">
-        <p><strong>${n} document(s) trouvé(s)</strong> dans ce dossier.</p>${list}</div>`;
-    } else {
-      const msg = (d && d.error) ? d.error : 'Accès au Drive impossible.';
-      result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>${_esc(msg)}</p></div>`;
-    }
-  } catch (err) {
-    result.innerHTML = `<div class="fr-alert fr-alert--error fr-alert--sm"><p>Erreur réseau : ${_esc(err && err.message ? err.message : err)}</p></div>`;
-  } finally {
-    if (spinner) spinner.style.display = 'none';
-    if (btn) btn.disabled = false;
-  }
-}
+// Le test d'accès Drive (ancien `_testDriveAccess`) a déménagé dans
+// `lib/source-pickers.js` avec le markup qu'il pilotait : le champ d'URL
+// vit désormais dans la modale « Coller un lien ». Il y est paramétré par
+// ses éléments (`testDriveAccess({input, result, spinner, btn})`) — le
+// wizard ne peut pas l'importer depuis les pickers ET l'inverse sans
+// créer un cycle d'import.
 
 // Validation step idx (sans afficher / déplacer l'utilisateur).
 function _validateStepIdx(idx) {
@@ -517,9 +734,21 @@ export function openWizard(opts) {
       }
     }).catch(() => {});
   }
+  // Étape 3 — panier de sources. Monté AVANT `_applySnapshot` : la
+  // restauration d'un brouillon repose sur `_sourceBasketSet`, posé par le
+  // montage. Monté après, elle échouerait en silence et le panier serait vide.
+  const basket = _basketEl();
+  if (basket) {
+    mountSourceBasket(basket, { onChange: _onBasketChange });
+    _syncDriveHiddenInput([]);
+  }
+  _draftQuotaWarned = false;
   // Lot 8 — reset toggle CR.
   const sendCr = _qs('#wizard-send-cr-email');
   if (sendCr) sendCr.checked = false;
+  // Coaching — reset chips d'intention + suggestions masquées.
+  _qsa('#wizard-outcome-chips .wizard-chip.is-on').forEach((c) => c.classList.remove('is-on'));
+  _coachDismissed = new Set();
   const banner = _qs('#wizard-series-banner');
   if (banner) banner.style.display = sp ? '' : 'none';
   if (sp) {
@@ -574,8 +803,14 @@ export function closeWizard() {
     try { _saveDraft(_currentDraftId, _collectSnapshot()); } catch (e) {}
   }
   _currentDraftId = null;
-  const driveTestResult = _qs('#wizard-drive-test-result');
-  if (driveTestResult) driveTestResult.innerHTML = '';
+  // Le panier est vidé APRÈS la sauvegarde ci-dessus, sinon on persisterait
+  // un brouillon amputé de ses sources.
+  const basket = _basketEl();
+  if (basket && basket._sourceBasketState) {
+    basket._sourceBasketState.entries = [];
+    if (basket._sourceBasketRender) basket._sourceBasketRender();
+  }
+  _syncDriveHiddenInput([]);
   // Nettoie ?action=new de l'URL pour éviter de réouvrir si reload.
   try {
     const url = new URL(window.location.href);
@@ -602,8 +837,29 @@ function _bindEvents() {
   if (nextBtn) nextBtn.addEventListener('click', _next);
   if (form) form.addEventListener('submit', _submit);
   if (submitBtn) submitBtn.addEventListener('click', _submit);
-  const driveTestBtn = _qs('#wizard-drive-test-btn');
-  if (driveTestBtn) driveTestBtn.addEventListener('click', _testDriveAccess);
+  // Étape 3 — ouverture des pickers par délégation sur `data-source-picker`.
+  // Ni `onclick=` (une fonction d'un module ES n'existe pas dans le scope
+  // global, le clic échouerait en ReferenceError), ni `data-action` (déjà
+  // possédé par `preparations.js::_onPanelClick`).
+  const sourceCards = _qs('#wizard-source-cards');
+  if (sourceCards) {
+    sourceCards.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest
+        ? ev.target.closest('[data-source-picker]') : null;
+      if (!btn) return;
+      ev.preventDefault();
+      openSourcePicker(btn.getAttribute('data-source-picker'), {
+        trigger: btn,
+        addEntries: (entries) => addSourceBasketEntries(_basketEl(), entries),
+      });
+    });
+  }
+  // Coaching — chips d'intention + rafraîchissement des suggestions quand
+  // les entrées qui les conditionnent changent (durée, participants, texte).
+  _bindOutcomeChips();
+  backdrop.addEventListener('input', () => _renderCoach());
+  backdrop.addEventListener('change', () => _renderCoach());
+  backdrop.addEventListener('click', () => _renderCoach());
   // Lot 5 — ajout participant dans le wizard step 2.
   const addPartBtn = _qs('#wizard-add-participant-btn');
   if (addPartBtn) {
@@ -636,9 +892,41 @@ function _bindEvents() {
   document.addEventListener('keydown', (ev) => {
     if (!_wizardOpenedOnce) return;
     if (!backdrop.classList.contains('is-open')) return;
+    // Une modale empilée (picker de sources) est au-dessus : ESC lui
+    // appartient. Sans cette garde, échapper d'un picker fermerait le wizard
+    // entier — et le travail en cours partirait avec lui.
+    if (isStackedModalOpen()) return;
     if (ev.key === 'Escape') { ev.preventDefault(); closeWizard(); }
   });
   _bindChips(backdrop);
+}
+
+// Champs pré-remplissables depuis un lien entrant (route /preparer). Le
+// serveur a déjà borné et assaini ces valeurs ; ici on ne fait que les poser.
+const _PREFILL_FIELDS = {
+  subject: 'wizard-subject',
+  duration: 'wizard-duration',
+  role: 'wizard-role',
+  expectation: 'wizard-expectation',
+  meeting_type: 'wizard-meeting-type',
+};
+
+function _applyPrefillFromQuery(params) {
+  Object.entries(_PREFILL_FIELDS).forEach(([param, id]) => {
+    const value = params.get(param);
+    if (!value) return;
+    const el = document.getElementById(id);
+    if (!el || el.value) return;
+    if (el.tagName === 'SELECT') {
+      // Un type de réunion inconnu est ignoré plutôt que posé en dur :
+      // la valeur vient d'une application tierce.
+      if (Array.from(el.options).some((o) => o.value === value)) el.value = value;
+    } else {
+      el.value = value;
+    }
+  });
+  const ref = params.get('external_ref');
+  if (ref) _externalRef = ref;
 }
 
 function _autoOpenFromQuery() {
@@ -650,7 +938,12 @@ function _autoOpenFromQuery() {
         const tabBtn = document.getElementById('tab-btn-brief');
         if (tabBtn) tabBtn.click();
       } catch (e) {}
-      openWizard();
+      openWizard({
+        seriesParentId: params.get('series_parent_id') || '',
+        targetMeetingDate: params.get('target_date') || '',
+      });
+      // Après openWizard, qui réinitialise les champs.
+      _applyPrefillFromQuery(params);
     }
   } catch (e) { /* non-fatal */ }
 }
@@ -692,7 +985,25 @@ function _readAllDrafts() {
 }
 
 function _writeAllDrafts(obj) {
-  try { localStorage.setItem(_DRAFTS_KEY, JSON.stringify(obj)); } catch (e) {}
+  // Cette fonction avalait toute erreur en silence. Or le quota localStorage
+  // (~5 Mo, partagé par TOUS les brouillons) est réellement atteignable
+  // depuis que les sources `inline` portent jusqu'à 20 000 caractères : le
+  // brouillon entier était alors perdu sans le moindre signal.
+  try {
+    localStorage.setItem(_DRAFTS_KEY, JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    const isQuota = e && (e.name === 'QuotaExceededError'
+      || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22);
+    if (isQuota && !_draftQuotaWarned) {
+      _draftQuotaWarned = true;
+      try {
+        showToast('Brouillon non sauvegardé : l\'espace local est saturé. '
+          + 'Supprimez d\'anciens brouillons, ou générez ce brief maintenant.', 'error');
+      } catch (e2) { /* non-fatal */ }
+    }
+    return false;
+  }
 }
 
 // Exposé pour preparations.js (rendu liste).
@@ -727,6 +1038,7 @@ function _collectSnapshot() {
     'wizard-target-date', 'wizard-series-parent',
     'wizard-recurring-toggle', 'wizard-rrule-freq', 'wizard-rrule-interval',
     'wizard-rrule-time', 'wizard-rrule-until', 'wizard-send-cr-email',
+    'wizard-success-criteria',
   ];
   NATIVE_IDS.forEach((id) => {
     const el = document.getElementById(id);
@@ -744,11 +1056,36 @@ function _collectSnapshot() {
   let themes = [];
   try {
     const tc = document.getElementById('wizard-themes-container');
-    if (tc && tc._themesChipsGetValues) themes = tc._themesChipsGetValues() || [];
+    // serializeThemesChips lit le state du composant. L'ancien appel visait
+    // _themesChipsGetValues(), qui n'a jamais existé : gardé par un `if`, il
+    // échouait en silence et aucune thématique n'était sauvegardée.
+    if (tc) themes = serializeThemesChips(tc) || [];
+  } catch (e) {}
+  // Coaching — chips d'intention (toggles multi-sélection).
+  let outcomes = [];
+  try {
+    outcomes = Array.from(
+      document.querySelectorAll('#wizard-outcome-chips .wizard-chip.is-on'),
+    ).map((c) => c.dataset.outcome).filter(Boolean);
+  } catch (e) {}
+  // Sources (composant lib/source-basket.js). `snapshotEntries` ampute les
+  // textes collés au-delà d'un budget volontairement bas : un brouillon
+  // tronqué et signalé vaut mieux qu'un brouillon perdu par dépassement de
+  // quota (cf. _writeAllDrafts).
+  let sources = [];
+  try {
+    const snap = snapshotEntries(_sourceEntries());
+    sources = snap.entries;
+    if (snap.degraded && !_draftQuotaWarned) {
+      _draftQuotaWarned = true;
+      showToast('Les textes collés sont trop volumineux pour le brouillon : '
+        + 'ils y sont abrégés. Générez le brief sans fermer le wizard pour '
+        + 'les conserver entiers.', 'error');
+    }
   } catch (e) {}
   return {
     step: _currentStep || 0,
-    fields, participants, themes,
+    fields, participants, themes, outcomes, sources,
     title: fields['wizard-subject'] || '(brouillon sans titre)',
     updatedAt: Date.now(),
   };
@@ -778,8 +1115,37 @@ function _applySnapshot(snap) {
   // Thèmes
   try {
     const tc = document.getElementById('wizard-themes-container');
-    if (tc && tc._themesChipsSetValues && Array.isArray(snap.themes)) {
-      tc._themesChipsSetValues(snap.themes);
+    // Idem au retour : la méthode exposée est _themesChipsSetThemes.
+    if (tc && tc._themesChipsSetThemes && Array.isArray(snap.themes)) {
+      tc._themesChipsSetThemes(snap.themes);
+    }
+  } catch (e) {}
+  // Sources — panier de l'étape 3.
+  try {
+    const basket = _basketEl();
+    if (basket) {
+      if (Array.isArray(snap.sources) && snap.sources.length) {
+        setSourceBasketEntries(basket, snap.sources);
+      } else if (snap.fields['wizard-drive-folder']) {
+        // Brouillon antérieur au panier : son dossier collé ne vivait que
+        // dans le champ texte. On le remonte en entrée pour qu'il reste
+        // visible et supprimable, au lieu d'un champ devenu invisible.
+        setSourceBasketEntries(basket, [{
+          type: 'drive_folder',
+          id: snap.fields['wizard-drive-folder'],
+          label: snap.fields['wizard-drive-folder'],
+          origin: 'link',
+          meta: 'Dossier Drive collé',
+        }]);
+      }
+    }
+  } catch (e) {}
+  // Coaching — restaure les chips d'intention.
+  try {
+    if (Array.isArray(snap.outcomes)) {
+      document.querySelectorAll('#wizard-outcome-chips .wizard-chip').forEach((c) => {
+        c.classList.toggle('is-on', snap.outcomes.indexOf(c.dataset.outcome) !== -1);
+      });
     }
   } catch (e) {}
   // Step

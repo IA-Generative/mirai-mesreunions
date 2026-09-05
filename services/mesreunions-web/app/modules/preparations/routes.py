@@ -33,22 +33,39 @@ from ...shared import (
     get_current_user,
     require_auth,
     request_internal_device_api,
+    request_internal_preparation_api,
     trigger_audio_reprocess,
 )
 from .. import glossary as glossary_module
 from . import exporters as prep_exporters
 from . import service as prep_service
 from . import generation_jobs
+from . import sources as prep_sources
 
 logger = logging.getLogger("mesreunions_web.preparations.routes")
 
 bp = Blueprint("preparations", __name__, url_prefix="/api/preparations")
 
 
+# Taille maximale du corps de POST /api/preparations. Sans borne dédiée, la
+# route hérite de MAX_CONTENT_LENGTH (100 Mo, dimensionné pour l'audio).
+PREP_PAYLOAD_MAX_BYTES = 2 * 1024 * 1024
+
 # Whitelist des types de réunion acceptés par le wizard.
 _ALLOWED_MEETING_TYPES = frozenset({
     "general", "one_on_one", "project_update", "steering_committee", "brainstorm",
 })
+
+# Coaching — résultats espérés en fin de réunion (chips du wizard step 2).
+# Les slugs voyagent dans le payload ; les libellés nourrissent le prompt
+# ({SUCCESS_CRITERIA}) et la zone ai_recommendations du brief.
+_OUTCOME_LABELS = {
+    "decision": "une décision est prise",
+    "actions": "un plan d'action daté existe (qui fait quoi, pour quand)",
+    "alignement": "un alignement partagé est acté",
+    "idees": "des idées nouvelles ont émergé",
+    "information": "l'information est transmise et comprise",
+}
 
 
 def _meeting_prep_module():
@@ -163,20 +180,22 @@ def create_preparation():
     user = get_current_user()
     user_sub = (user or {}).get("sub") or ""
 
+    # Borne de taille AVANT la désérialisation. MAX_CONTENT_LENGTH vaut 100 Mo
+    # (dimensionné pour l'audio) : sans ce garde, un POST de plusieurs dizaines
+    # de Mo de JSON serait désérialisé en mémoire dans le worker. Les sources
+    # `inline` rendent ce chemin naturel à emprunter.
+    if (request.content_length or 0) > PREP_PAYLOAD_MAX_BYTES:
+        return _err(
+            "Requête trop volumineuse. Réduisez le nombre ou la taille des textes collés.",
+            413,
+        )
+
     payload = request.get_json(silent=True) or {}
     subject = (payload.get("subject") or "").strip()
     folder_raw = (payload.get("drive_folder") or "").strip()
 
-    # Pré-conditions config (LLM + éventuellement Drive).
     if not LITELLM_BASE_URL or not LITELLM_API_KEY:
         return _err("Le LLM (LiteLLM) n'est pas configuré côté serveur.", 503)
-    if folder_raw:
-        if not OIDC_OFFLINE_ACCESS:
-            return _err("Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé.", 503)
-        if not DRIVE_BASE_URL:
-            return _err("DRIVE_BASE_URL n'est pas configuré côté serveur.", 503)
-        if not OIDC_TOKEN_ENDPOINT:
-            return _err("OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur.", 503)
 
     role_viewpoint = (payload.get("role") or "").strip()
     expectation = (payload.get("expectation") or "").strip()
@@ -193,6 +212,28 @@ def create_preparation():
         folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
         if not folder_id:
             return _err("Identifiant de dossier Drive invalide.", 400)
+
+    # Sources multiples (le dossier collé est replacé en tête puis dédupliqué).
+    try:
+        sources = prep_sources.parse_sources(
+            payload.get("sources"),
+            drive_folder_id=folder_id,
+            drive_folder_host=folder_host,
+        )
+    except prep_sources.SourceError as exc:
+        return _err(str(exc), 400)
+
+    # Les pré-conditions Drive ne valent que si une source Drive est demandée :
+    # un brief nourri uniquement de réunions passées et de textes collés n'a
+    # besoin d'aucun jeton Drive.
+    if prep_sources.has_drive_source(sources):
+        if not OIDC_OFFLINE_ACCESS:
+            return _err("Le mode hors-ligne OIDC est désactivé : aucun refresh token n'est conservé.", 503)
+        if not DRIVE_BASE_URL:
+            return _err("DRIVE_BASE_URL n'est pas configuré côté serveur.", 503)
+        if not OIDC_TOKEN_ENDPOINT:
+            return _err("OIDC_TOKEN_ENDPOINT n'est pas configuré côté serveur.", 503)
+
     if not role_viewpoint:
         return _err("Le rôle dans la réunion est requis.", 400)
     if not expectation:
@@ -236,6 +277,16 @@ def create_preparation():
                 break
     # Lot 8 — toggle envoi CR auto post-transcription (défaut False).
     send_cr_email = bool(payload.get("send_cr_email"))
+    # Identifiant opaque de l'application tierce qui a ouvert le lien externe.
+    external_ref = (payload.get("external_ref") or "").strip()[:200]
+    # Coaching — intention de fin de réunion (facultative, wizard step 2).
+    success_criteria = (payload.get("success_criteria") or "").strip()[:500]
+    outcomes_raw = payload.get("expected_outcomes")
+    expected_outcomes: list[str] = []
+    if isinstance(outcomes_raw, list):
+        for o in outcomes_raw:
+            if isinstance(o, str) and o in _OUTCOME_LABELS and o not in expected_outcomes:
+                expected_outcomes.append(o)
     # Lot 5 — participants attendus saisis depuis le wizard. Liste d'objets
     # {name?, email?, role?}. Persistés en colonne JSONB côté DTA.
     participants_raw = payload.get("participants")
@@ -287,12 +338,24 @@ def create_preparation():
         "recurrence_rule": recurrence_rule_raw,
         "themes": themes_clean,
         "send_cr_email": send_cr_email,
+        "success_criteria": success_criteria,
+        "expected_outcomes": expected_outcomes,
+        "sources": sources,
+        "external_ref": external_ref,
     }
 
     # Mode async (par défaut, Lot 2).
     sync_mode = (request.args.get("sync") or "").lower() in ("1", "true", "yes")
     if not sync_mode:
-        job_id = generation_jobs.create_job(user_sub)
+        try:
+            job_id = generation_jobs.create_job(user_sub)
+        except Exception:
+            logger.exception("preparations: create_job failed for sub=%s", user_sub)
+            return _err(
+                "Le service est momentanément indisponible (base de suivi injoignable). "
+                "Réessayez dans quelques instants — vos réponses sont conservées.",
+                503,
+            )
         worker = threading.Thread(
             target=_run_generation_worker,
             args=(job_id, job_payload),
@@ -335,6 +398,48 @@ class _SyncGenerationError(Exception):
         super().__init__(str(payload))
         self.payload = payload
         self.status = status
+
+
+def _make_prior_meeting_fetcher(user_sub: str):
+    """Compose le texte d'une réunion passée : brief, points clés, analyse.
+
+    Deux à trois appels internes par réunion, plutôt que l'export RAG en une
+    passe : ce dernier ramène jusqu'à 300 réunions et 80 000 caractères de
+    transcription par élément, soit des dizaines de méga-octets pour en
+    utiliser quelques pour cent.
+    """
+    def _fetch(preparation_id: str, include: list) -> str:
+        parts: list[str] = []
+
+        if "key_points" in include or "cr" in include:
+            audios = request_internal_preparation_api(
+                "GET", f"/api/v1/preparations/{preparation_id}/audio-files",
+                params={"user_sub": user_sub},
+            )
+            for row in (audios or {}).get("audio_files") or []:
+                kp = (row.get("key_points_summary") or "").strip()
+                if kp:
+                    parts.append(f"## Points clés du compte-rendu\n{kp}")
+                    break
+
+        if "brief" in include:
+            # track_view=false : piocher une réunion comme source ne doit pas
+            # la faire remonter dans « consultées récemment », signal qui sert
+            # au scoring d'auto-link entre audios et préparations.
+            detail = request_internal_preparation_api(
+                "GET", f"/api/v1/preparations/{preparation_id}",
+                params={"user_sub": user_sub, "track_view": "false"},
+            )
+            content = ((detail or {}).get("preparation") or {}).get("content")
+            if isinstance(content, dict):
+                from app.drive_brief_sync import brief_json_to_markdown
+                rendered = (brief_json_to_markdown(content) or "").strip()
+                if rendered:
+                    parts.append(f"## Brief préparé en amont\n{rendered}")
+
+        return "\n\n".join(parts).strip()
+
+    return _fetch
 
 
 def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
@@ -385,9 +490,20 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
 
     _update(phase="init")
 
+    sources = job.get("sources") or []
+    if not sources and folder_id:
+        # Chemin historique (appelants qui ne passent pas encore `sources`).
+        sources = [{"type": "drive_folder", "id": folder_id,
+                    "host": job.get("folder_host"), "label": ""}]
+    drive_sources = [s for s in sources if s["type"] in ("drive_folder", "drive_files")]
+    other_sources = [s for s in sources if s["type"] not in ("drive_folder", "drive_files")]
+
     corpus_text = ""
     used: list = []
-    if folder_id:
+    providers: list = []
+    buckets: dict = {}
+
+    if drive_sources:
         _update(phase="test_drive")
         ciphertext = fetch_ciphertext(user_sub)
         if not ciphertext:
@@ -401,17 +517,27 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             logger.exception("preparations: failed to decrypt refresh token for sub=%s", user_sub)
             _fail("Token Drive illisible côté serveur.", 500)
 
-        # Routage Drive : si le user a collé une URL avec un hostname
-        # spécifique, on l'utilise (en passant par _resolve_drive_base_url
-        # qui peut court-circuiter le LB public via le service intra-cluster).
-        # Sinon → fallback DRIVE_BASE_URL env.
-        drive_base = _resolve_drive_base_url(job.get("folder_host"))
-        drive = _mp.DriveClient(
-            base_url=drive_base,
-            oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
-            oidc_client_id=oidc_cfg.client_id,
-            oidc_client_secret=oidc_cfg.client_secret,
-        )
+        # Routage Drive : chaque source porte l'instance d'où elle a été
+        # choisie. Un client par instance, sinon un dossier sélectionné sur le
+        # Drive DINUM serait listé contre le Drive par défaut — et échouerait
+        # en « dossier introuvable » sans que la cause soit visible.
+        _clients: dict = {}
+
+        def _client_for(source: dict):
+            base = _resolve_drive_base_url(source.get("host")) if source.get("host") else None
+            if not base and source.get("drive"):
+                base = _resolve_drive_by_key(source["drive"])[0]
+            base = base or _resolve_drive_base_url(job.get("folder_host"))
+            if base not in _clients:
+                _clients[base] = _mp.DriveClient(
+                    base_url=base,
+                    oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+                    oidc_client_id=oidc_cfg.client_id,
+                    oidc_client_secret=oidc_cfg.client_secret,
+                )
+            return _clients[base]
+
+        drive = _client_for(drive_sources[0])
         try:
             access_token = drive.exchange_refresh(refresh_token)
         except _mp.DriveAuthError:
@@ -423,19 +549,51 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         except _mp.DriveTransientError as exc:
             logger.warning("preparations: Keycloak transient on token exchange: %s", exc)
             _fail("Le service d'identité est temporairement indisponible.", 502)
+        except _mp.DriveApplicativeError as exc:
+            # Keycloak 4xx hors 400 (client désactivé, realm reconfiguré…) —
+            # sans ce catch l'exception filait en RuntimeError générique
+            # (async) ou en 500 nu (sync).
+            logger.warning("preparations: Keycloak applicative error on token exchange: %s", exc)
+            _fail({
+                "error": "L'échange de jeton avec le service d'identité a été refusé. "
+                         "Déconnectez-vous puis reconnectez-vous.",
+                "code": "refresh_rejected",
+            }, 401)
 
+        # Les fournisseurs ne font aucune I/O à la construction : le listing
+        # part au premier count_hint(), donc à l'assemblage. Le jeton d'accès
+        # est le même partout — les instances partagent le realm Keycloak.
+        for src in drive_sources:
+            src_drive = _client_for(src)
+            if src["type"] == "drive_folder":
+                providers.append(_mp.DriveFolderProvider(src_drive, access_token, src["id"]))
+            else:
+                providers.append(_mp.DriveFilesProvider(src_drive, access_token, src["items"]))
+
+    # Sources sans Drive : textes collés et réunions passées.
+    inline_entries = [s for s in other_sources if s["type"] == "inline"]
+    if inline_entries:
+        providers.append(_mp.InlineProvider(inline_entries))
+    prior_entries = [s for s in other_sources if s["type"] == "preparation"]
+    if prior_entries:
+        providers.append(_mp.PriorMeetingProvider(
+            _make_prior_meeting_fetcher(user_sub), prior_entries,
+        ))
+
+    if providers:
         def _progress(**kw):
             _update(**kw)
 
+        first_folder = drive_sources[0]["id"] if drive_sources else None
         try:
-            corpus_text, used = _mp.assemble_corpus(
-                drive, access_token, folder_id, progress=_progress,
+            buckets, used = _mp.build_corpus(
+                providers, budgets=_mp.DEFAULT_BUDGETS, progress=_progress,
             )
         except _mp.DriveAuthError as exc:
             status_code = getattr(exc, "status_code", None)
             logger.warning(
                 "preparations: Drive auth error on folder %s (status=%s): %s",
-                folder_id, status_code, exc,
+                first_folder, status_code, exc,
             )
             if status_code == 403:
                 _fail({
@@ -447,14 +605,16 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
                 "code": "drive_auth",
             }, 401)
         except _mp.DriveApplicativeError as exc:
-            logger.info("preparations: Drive applicative error on folder %s: %s", folder_id, exc)
+            logger.info("preparations: Drive applicative error on folder %s: %s", first_folder, exc)
             _fail({
                 "error": "Dossier Drive introuvable. Vérifiez l'URL ou l'identifiant collé.",
                 "code": "drive_not_found",
             }, 404)
         except _mp.DriveTransientError as exc:
-            logger.warning("preparations: Drive transient error on folder %s: %s", folder_id, exc)
+            logger.warning("preparations: Drive transient error on folder %s: %s", first_folder, exc)
             _fail("Le Drive est temporairement indisponible.", 502)
+
+        corpus_text = buckets.get("prep_docs", "")
 
     try:
         template_text = _mp.load_prompt_template(
@@ -484,6 +644,16 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
                 series_parent_id,
             )
 
+    # Coaching : « résultat espéré à la fin » = chips (libellés) + texte libre.
+    success_criteria = (job.get("success_criteria") or "").strip()
+    expected_outcomes = [
+        o for o in (job.get("expected_outcomes") or []) if o in _OUTCOME_LABELS
+    ]
+    success_parts = [_OUTCOME_LABELS[o] for o in expected_outcomes]
+    if success_criteria:
+        success_parts.append(success_criteria)
+    success_text = " ; ".join(success_parts)
+
     prompt = _mp.build_prompt(
         template_text,
         objective=subject,
@@ -492,7 +662,12 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         expectation=expectation,
         focus_areas=focus_areas,
         prep_docs_text=corpus_text,
+        # {PRIOR_MEETINGS} était déclaré dans les 5 templates depuis l'origine
+        # mais aucun appelant ne l'alimentait : il valait toujours « (aucun) ».
+        prior_meetings_text=buckets.get("prior_meetings", ""),
         prior_key_points_text=prior_key_points_text,
+        success_criteria_text=success_text,
+        inline_messages_text=buckets.get("inline_messages", ""),
     )
 
     _update(phase="generating_llm")
@@ -521,15 +696,34 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
         if not isinstance(meta, dict):
             meta = {}
         meta["meeting_type"] = meeting_type
+        # Trace de l'intention déclarée — pas de migration : vit dans le
+        # content JSONB, relue par la fiche brief (« résultat espéré »).
+        if success_criteria:
+            meta["success_criteria"] = success_criteria
+        if expected_outcomes:
+            meta["expected_outcomes"] = expected_outcomes
+        if sources:
+            # Traçabilité de la sélection, sans les contenus (les textes
+            # collés sont de la correspondance : ils ne sont pas persistés).
+            meta["sources"] = prep_sources.public_view(sources)
+        if job.get("external_ref"):
+            meta["external_ref"] = job["external_ref"]
         brief["_meta"] = meta
 
     _update(phase="persisting")
+    # Le dossier retenu est celui collé s'il y en a un, sinon le premier
+    # choisi dans le navigateur : la fiche n'affiche son bloc « Sources
+    # Drive » que si ce champ est renseigné, et le versement Drive s'en sert
+    # comme dossier cible.
+    primary_folder_id = folder_id or next(
+        (s["id"] for s in sources if s["type"] == "drive_folder"), None,
+    )
     preparation_id = None
     try:
         created = prep_service.create_preparation({
             "user_sub": user_sub,
             "subject": subject,
-            "drive_folder_id": folder_id,
+            "drive_folder_id": primary_folder_id,
             "role": role_viewpoint,
             "expectation": expectation,
             "focus": focus_areas,
@@ -546,16 +740,36 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             "send_cr_email": send_cr_email,
         })
         preparation_id = (created.get("preparation") or {}).get("id")
-
-        # Glossaire utilisateur global (best-effort).
-        if preparation_id:
-            _update(phase="extracting_glossary", preparation_id=preparation_id)
-            terms = glossary_module.extract_terms_from_brief(brief, used)
-            glossary_module.upsert_terms_for_user(
-                user_sub, terms, source_preparation_id=preparation_id,
-            )
     except Exception:
         logger.exception("preparations: failed to persist preparation for sub=%s", user_sub)
+        _fail({
+            "error": "Le brief a été généré mais sa sauvegarde a échoué. "
+                     "Vos réponses sont conservées dans le brouillon — relancez la génération.",
+            "code": "persist_failed",
+        }, 502)
+    if not preparation_id:
+        logger.error(
+            "preparations: create_preparation returned no id for sub=%s", user_sub,
+        )
+        _fail({
+            "error": "Le brief a été généré mais sa sauvegarde a échoué (réponse interne invalide). "
+                     "Vos réponses sont conservées dans le brouillon — relancez la génération.",
+            "code": "persist_failed",
+        }, 502)
+
+    # Glossaire utilisateur global (best-effort : un échec ici ne doit pas
+    # masquer un brief pourtant bien persisté).
+    try:
+        _update(phase="extracting_glossary", preparation_id=preparation_id)
+        terms = glossary_module.extract_terms_from_brief(brief, used)
+        glossary_module.upsert_terms_for_user(
+            user_sub, terms, source_preparation_id=preparation_id,
+        )
+    except Exception:
+        logger.exception(
+            "preparations: glossary extraction failed for prep=%s (non-fatal)",
+            preparation_id,
+        )
 
     # Versement Drive en arrière-plan (best-effort).
     if preparation_id:
@@ -563,7 +777,7 @@ def _execute_generation(job: dict, *, job_id: "str | None") -> dict:
             from ..drive_sync import schedule_drive_brief_sync
             schedule_drive_brief_sync(
                 user_sub, preparation_id, brief, used, prompt,
-                drive_folder_id=folder_id,
+                drive_folder_id=primary_folder_id,
             )
         except Exception:
             logger.exception("preparations: schedule_drive_brief_sync raised")
@@ -637,10 +851,14 @@ def get_preparation(preparation_id: str):
     return jsonify({"preparation": prep})
 
 
-@bp.route("/<preparation_id>", methods=["PUT"])
+@bp.route("/<preparation_id>", methods=["PUT", "PATCH"])
 @require_auth
 def update_preparation(preparation_id: str):
-    """Alias PUT pour l'amend (UX REST plus standard)."""
+    """Alias PUT/PATCH pour l'amend (UX REST plus standard).
+
+    PATCH accepté aussi : le front (_commitTargetDate) l'utilisait déjà et
+    recevait un 405 — la sauvegarde de la date cible était cassée.
+    """
     return _amend_impl(preparation_id)
 
 
@@ -1215,6 +1433,139 @@ def test_drive_access():
         result["error"] = f"Drive injoignable : {exc}"
 
     return jsonify(result), 200
+
+
+# ─── Navigation Drive (wizard, étape Sources) ───────────────────────
+
+
+def _drive_instances() -> list[dict]:
+    """Instances Drive proposées à la navigation.
+
+    Dérivé de ``DRIVE_HOST_ROUTES`` : le front n'a pas à connaître les
+    hostnames, il manipule une clé logique.
+    """
+    from libs.shared.app.config import DRIVE_BASE_URL, DRIVE_HOST_ROUTES
+
+    out: list[dict] = []
+    seen: set = set()
+    for host, base in (DRIVE_HOST_ROUTES or {}).items():
+        key = str(host).split(".")[0].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"key": key, "host": host, "label": host, "base_url": base})
+    if not out and DRIVE_BASE_URL:
+        out.append({"key": "default", "host": None, "label": "Mon Drive",
+                    "base_url": DRIVE_BASE_URL})
+    if out:
+        out[0]["is_default"] = True
+    return out
+
+
+@bp.route("/drive/instances", methods=["GET"])
+@require_auth
+def drive_instances():
+    """Liste des Drives navigables (clé logique + libellé)."""
+    return jsonify({"drives": _drive_instances()})
+
+
+def _resolve_drive_by_key(drive_key: "str | None"):
+    """(base_url, host) pour une clé d'instance, ou le Drive par défaut."""
+    instances = _drive_instances()
+    if drive_key:
+        for inst in instances:
+            if inst["key"] == drive_key:
+                return inst["base_url"], inst.get("host")
+    if instances:
+        return instances[0]["base_url"], instances[0].get("host")
+    from libs.shared.app.config import DRIVE_BASE_URL
+    return DRIVE_BASE_URL, None
+
+
+@bp.route("/drive/browse", methods=["GET"])
+@require_auth
+def drive_browse():
+    """Navigue dans un Drive : contenu d'un dossier, ou racine si aucun id.
+
+    Endpoint distinct de ``test-drive`` à dessein : ce dernier répond 200 avec
+    un champ ``error`` dans tous les cas d'échec, ce qui convient à un
+    diagnostic mais pas à une navigation, où le front doit distinguer « pas
+    accès » de « introuvable » de « Drive en panne ».
+    """
+    from libs.shared.app.config import OIDC_TOKEN_ENDPOINT
+    from libs.shared.app.oidc_refresh_store import fetch_ciphertext
+    from libs.shared.app.secrets_crypto import decrypt as decrypt_secret
+    from app.main import oidc_cfg
+
+    _mp = _meeting_prep_module()
+    user = get_current_user()
+    user_sub = (user or {}).get("sub") or ""
+
+    folder_raw = (request.args.get("folder_id") or "").strip()
+    drive_key = (request.args.get("drive") or "").strip() or None
+
+    folder_id: "str | None" = None
+    folder_host: "str | None" = None
+    if folder_raw:
+        folder_id, folder_host = _mp.extract_folder_id_and_host(folder_raw)
+        if not folder_id:
+            return _err("Identifiant ou URL de dossier Drive invalide.", 400)
+
+    ciphertext = fetch_ciphertext(user_sub)
+    if not ciphertext:
+        return _err({
+            "error": "Aucun accès Drive enregistré. Déconnectez-vous puis reconnectez-vous.",
+            "code": "no_refresh_token",
+        }, 401)
+    try:
+        refresh_token = decrypt_secret(ciphertext)
+    except Exception:
+        logger.exception("drive/browse: refresh token illisible pour sub=%s", user_sub)
+        return _err("Accès Drive illisible côté serveur.", 500)
+
+    base_url = (_resolve_drive_base_url(folder_host) if folder_host
+                else _resolve_drive_by_key(drive_key)[0])
+    if not base_url or not OIDC_TOKEN_ENDPOINT:
+        return _err("Le Drive n'est pas configuré côté serveur.", 503)
+
+    drive = _mp.DriveClient(
+        base_url=base_url,
+        oidc_token_endpoint=OIDC_TOKEN_ENDPOINT,
+        oidc_client_id=oidc_cfg.client_id,
+        oidc_client_secret=oidc_cfg.client_secret,
+    )
+    try:
+        access_token = drive.exchange_refresh(refresh_token)
+        if folder_id:
+            raw_items = drive.list_children_paginated(access_token, folder_id)
+        else:
+            raw_items = drive.list_roots(access_token)
+    except _mp.DriveAuthError as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 403:
+            return _err({
+                "error": "Vous n'avez pas accès à ce dossier.",
+                "code": "drive_forbidden",
+            }, 403)
+        return _err({
+            "error": "Accès Drive refusé. Déconnectez-vous puis reconnectez-vous.",
+            "code": "drive_auth",
+        }, 401)
+    except _mp.DriveApplicativeError:
+        return _err({"error": "Dossier introuvable.", "code": "drive_not_found"}, 404)
+    except _mp.DriveTransientError:
+        return _err({"error": "Le Drive est temporairement indisponible.",
+                     "code": "drive_transient"}, 502)
+
+    items = [_mp.normalize_drive_item(it) for it in (raw_items or [])]
+    items = [it for it in items if it["id"]]
+    return jsonify({
+        "drive": drive_key,
+        "folder_id": folder_id,
+        "is_root": not folder_id,
+        "folders": [it for it in items if it["is_folder"]],
+        "files": [it for it in items if not it["is_folder"]],
+    })
 
 
 # ─── Auto-link suggestion (diagnostic) ──────────────────────────────

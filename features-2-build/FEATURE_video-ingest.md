@@ -388,6 +388,45 @@ ADR-0003 acté : [`docs/adr/0003-meeting-source-connectors.md`](../docs/adr/0003
 
 ---
 
+### 2026-08-30 — Manifestes fantômes, `mcp` 2.x, et remise sous git
+
+- **Panne** : `video-ingest-mcp` en `CrashLoopBackOff`, **68 redémarrages en 5 h 27**,
+  première source d'erreurs du cluster ce jour-là.
+  `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` — `mcp>=1.2.0` (sans borne
+  haute) avait tiré **2.x**, où `FastMCP` est devenu `MCPServer`. La construction de la
+  veille l'a introduit sans que rien ne le signale.
+- **Découverte en cherchant où corriger** : les trois charges `video-ingest-*` **n'avaient
+  aucun manifeste**. Le chemin annoncé au §9 (« slice infra », 2026-05-25),
+  `deploy/kubernetes/environments/prod-beta/internal/video-ingest.yaml`, **n'a jamais été
+  committé** (`git log --all` le prouve) et la machine de construction n'en a rien non plus
+  (`internal-zone/deployments.yaml` : zéro occurrence de « video-ingest »). Seule copie
+  survivante : l'annotation `last-applied-configuration` des objets du cluster.
+- **Remise sous git** : manifeste reconstruit depuis cette annotation, **prouvé conforme par
+  `kubectl diff` (exit 0)**. Dépôt public → les deux hôtes réels sont expurgés
+  (`sso.mirai.fake-domain.name`, `gateway.api.example.com`, conformément à
+  `SECURITY_REVIEW.md`), les vrais vivent dans un `patch-hotes.local.yaml` gitignoré que la
+  kustomization **exige** — sans lui le build échoue, ce qui vaut mieux qu'un SSO faux
+  appliqué en silence. Cf. **ADR-0005**.
+- **Correctif retenu : `mcp>=1.2.0,<2`**, pas la migration 2.x. La v2 déplace `host`/`port`
+  du constructeur vers `run()` ; or le code s'appuie sur le bind du constructeur, le serveur
+  MCP **n'a aucun test** et **aucune sonde**. Une migration bâclée aurait donné un pod vert,
+  sans sonde et injoignable — panne muette, pire qu'un plantage qui se compte. Trois bornes
+  hautes posées (`mcp` ×2, `psycopg2-binary`). **Dette assumée : migration 2.x à faire, avec
+  un test qui prouve le bind `0.0.0.0:8001` et un aller-retour sur un outil.**
+- **Tags immuables** : les 8 charges de `audio-internal` partageaient **le même digest**
+  (`sha256:c073ca67…`) — les 6 en `:latest` et les 2 épinglées étaient la même image.
+  L'épinglage fut donc un pur ré-étiquetage, sans changement de comportement. Résultat :
+  **0 image `latest`**. Cf. **ADR-0006**.
+- **Après bascule** : `Uvicorn running on http://0.0.0.0:8001`, **0 redémarrage**, 9/9
+  répliques. La carte « Mes réunions » du suivi repasse d'un verdict *dégradé* (8/9) à
+  *opérationnel*.
+- **Deux constats consignés, non corrigés** : (a) la `CiliumNetworkPolicy` **n'autorise pas**
+  la passerelle Kevent en sortie alors que `VIDEO_INGEST_KEVENT_GATEWAY_URL` est posée sur
+  les trois charges — le repli ASR Whisper ne peut pas aboutir (état du cluster depuis
+  96 jours) ; (b) `video-ingest-mcp` n'a **aucune sonde**. Les mêler à la remise sous git
+  aurait empêché de prouver la conformité par `kubectl diff`.
+
+
 ## 10. Definition of Done (Feature)
 
 Une fois V1 livrée, la feature est considérée *Done* si :

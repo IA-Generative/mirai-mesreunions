@@ -221,3 +221,174 @@ def test_uaf_kwargs_no_external_video_source_id():
     })
     kw = _es.materialize_payload_to_uaf_kwargs(validated)
     assert kw["external_video_source_id"] is None
+
+
+# ── Non-régression : alignement karaoké des imports sous-titres ─────────
+#
+# Trois bugs mesurés en prod sur un import YouTube réel (fiche
+# 88bb47de-06a6-49d5-b444-6569ed38079d) :
+#   - 390 lignes orphelines / 21 937 caractères jamais affichés, parce que le
+#     `\n` interne des cues survivait jusqu'au Markdown `> …` ;
+#   - 58 blocs strictement dupliqués, parce que la dédup ne comparait qu'au
+#     segment immédiatement précédent alors qu'un recouvrement de 15 s porte
+#     plusieurs phrases ;
+#   - 29 sauts en arrière dans la timeline, qui invalident la recherche
+#     dichotomique du karaoké frontend (elle exige un tableau trié).
+
+import json as _json
+import re as _re
+
+_HEAD_RE = _re.compile(
+    r"^\*\*([^*]+)\*\*\s*_\((\d+):(\d+(?:\.\d+)?)\s*→\s*(\d+):(\d+(?:\.\d+)?)\)_"
+)
+
+
+def _orphan_lines(speaker_tagged: str) -> list:
+    """Lignes qu'aucun des deux parseurs ne sait rattacher à un bloc."""
+    return [ln for ln in speaker_tagged.split("\n")
+            if ln.strip() and not ln.startswith(">") and not _HEAD_RE.match(ln)]
+
+
+def test_speaker_tagged_never_leaks_a_newline_into_a_quote_block():
+    """Un cue sur deux lignes ne doit pas produire de ligne sans « > »."""
+    segments = [
+        {"start_seconds": 0.0, "end_seconds": 6.0,
+         "text": "Le marché de l'emploi a cessé de savoir \nnommer ce qu'il achète."},
+        {"start_seconds": 6.0, "end_seconds": 10.0,
+         "text": "Le titre n'est plus\nqu'un paravent."},
+    ]
+    sentences = _es.sentence_align_segments(segments)
+    st = _es.format_speaker_tagged_from_sentences(sentences)
+
+    assert _orphan_lines(st) == []
+    # Et le texte perdu est bien de retour, en entier.
+    assert "nommer ce qu'il achète." in st
+    assert "qu'un paravent." in st
+
+
+def test_speaker_tagged_survives_a_raw_newline_even_without_sentence_split():
+    """Garantie d'invariant au niveau du formateur lui-même."""
+    st = _es.format_speaker_tagged_from_sentences(
+        [{"start_seconds": 0.0, "end_seconds": 3.0, "text": "deux\nlignes\tcollées"}]
+    )
+    assert _orphan_lines(st) == []
+    assert "> deux lignes collées" in st
+
+
+# Densité de parole, en caractères par seconde. `sentence_align_segments`
+# interpole les timecodes sur la position en CARACTÈRES : une fixture dont la
+# densité varie d'un chunk à l'autre produirait des timecodes incohérents et ne
+# reproduirait pas le recouvrement réel.
+_CHARS_PER_SEC = 5.0
+
+_STRADDLING = "Une phrase coupée net par la frontière du chunk."
+_SENTENCES = [
+    "Phrase initiale du premier chunk.",
+    "Deuxième phrase d'introduction du premier chunk.",
+    "Troisième phrase d'introduction du premier chunk.",
+    "Première phrase du recouvrement.",
+    "Deuxième phrase du recouvrement.",
+    "Troisième phrase du recouvrement.",
+    _STRADDLING,
+    "Phrase finale du second chunk.",
+]
+
+
+def _overlapping_chunks() -> list:
+    """Deux chunks reproduisant le recouvrement de 15 s de `chunking.chunk`.
+
+    Le second reprend les trois dernières phrases du premier. La phrase qui
+    enjambe la frontière n'est livrée ENTIÈRE que par le second : le premier
+    s'arrête au milieu — c'est exactement ce que fait `chunk()`, et c'est le
+    cas qu'une dédup par égalité de texte ne peut pas voir.
+    """
+    head = " ".join(_SENTENCES[:3])
+    overlap_and_rest = " ".join(_SENTENCES[3:])
+    chunk1_text = head + " " + " ".join(_SENTENCES[3:6]) + " Une phrase coupée net par la"
+    chunk2_start = (len(head) + 1) / _CHARS_PER_SEC
+    return [
+        {"start_seconds": 0.0,
+         "end_seconds": len(chunk1_text) / _CHARS_PER_SEC,
+         "text": chunk1_text},
+        {"start_seconds": chunk2_start,
+         "end_seconds": chunk2_start + len(overlap_and_rest) / _CHARS_PER_SEC,
+         "text": overlap_and_rest},
+    ]
+
+
+def test_sentence_align_deduplicates_a_multi_sentence_overlap():
+    sentences = _es.sentence_align_segments(_overlapping_chunks())
+    texts = [s["text"] for s in sentences]
+    for phrase in ("Première phrase du recouvrement.",
+                   "Deuxième phrase du recouvrement.",
+                   "Troisième phrase du recouvrement."):
+        assert texts.count(phrase) == 1, f"{phrase!r} dupliqué : {texts}"
+
+
+def test_sentence_align_keeps_the_complete_half_of_a_straddling_sentence():
+    """La phrase coupée par la frontière survit ENTIÈRE, une seule fois."""
+    sentences = _es.sentence_align_segments(_overlapping_chunks())
+    full = [s for s in sentences if "coupée net par la" in s["text"]]
+    assert len(full) == 1, [s["text"] for s in full]
+    assert full[0]["text"] == "Une phrase coupée net par la frontière du chunk."
+
+
+def test_sentence_align_output_is_monotonic():
+    sentences = _es.sentence_align_segments(_overlapping_chunks())
+    starts = [s["start_seconds"] for s in sentences]
+    assert starts == sorted(starts), starts
+    for a, b in zip(sentences, sentences[1:]):
+        assert b["start_seconds"] >= a["end_seconds"] - 1e-9, (a, b)
+
+
+def test_sentence_align_does_not_drop_text_it_cannot_dedupe():
+    """La dédup ne doit jamais servir de prétexte à perdre du contenu."""
+    sentences = _es.sentence_align_segments(_overlapping_chunks())
+    joined = " ".join(s["text"] for s in sentences)
+    for phrase in ("Phrase initiale du premier chunk.",
+                   "Phrase finale du second chunk."):
+        assert phrase in joined
+
+
+def test_words_json_is_sorted_even_when_segments_are_not():
+    """Le binary search karaoké exige un tableau trié — on le garantit ici."""
+    words = _es.flatten_segments_to_synthetic_words([
+        {"start_seconds": 30.0, "end_seconds": 34.0, "text": "arrivé en second"},
+        {"start_seconds": 10.0, "end_seconds": 14.0, "text": "arrivé en premier"},
+    ])
+    starts = [w["s"] for w in words]
+    assert starts == sorted(starts), starts
+    assert all(w["s"] <= w["e"] for w in words)
+
+
+def test_uaf_kwargs_end_to_end_on_overlapping_subtitle_chunks():
+    """Le chemin complet materialize : ni texte perdu, ni doublon, ni recul."""
+    validated = _es.validate_materialize_payload({
+        "provider": "youtube",
+        "user_sub": "u-1",
+        "method": "subtitle_manual",
+        "segments": _overlapping_chunks(),
+        "external_video_source_id": 7,
+    })
+    kw = _es.materialize_payload_to_uaf_kwargs(validated)
+
+    assert _orphan_lines(kw["speaker_tagged_text"]) == []
+    quoted = [ln for ln in kw["speaker_tagged_text"].split("\n") if ln.startswith(">")]
+    assert len(quoted) == len(set(quoted)), "blocs dupliqués par le recouvrement"
+
+    words = _json.loads(kw["transcription_words_json"])
+    starts = [w["s"] for w in words]
+    assert starts == sorted(starts), "timeline non monotone : karaoké cassé"
+
+
+def test_uaf_kwargs_newline_in_segments_does_not_reach_transcription_text():
+    validated = _es.validate_materialize_payload({
+        "provider": "youtube",
+        "user_sub": "u-1",
+        "method": "subtitle_auto",
+        "segments": [{"start_seconds": 0.0, "end_seconds": 4.0,
+                      "text": "une phrase\ncoupée en deux"}],
+    })
+    kw = _es.materialize_payload_to_uaf_kwargs(validated)
+    assert "\n" not in kw["transcription_text"]
+    assert kw["transcription_text"] == "une phrase coupée en deux"

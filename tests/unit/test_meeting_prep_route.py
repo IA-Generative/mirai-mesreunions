@@ -83,10 +83,16 @@ def _load_mesreunions_web():
 
     # ``main.py`` fait ``from app import meeting_prep`` (le package ``app``
     # est ``services/mesreunions-web/app/``). On rend ce package importable.
+    # Plusieurs services exposent un paquet nommé ``app``. Si un test voisin a
+    # déjà importé celui de device-token-authority, il reste dans sys.modules
+    # et ``from app import runtime`` résout vers le mauvais service. On purge
+    # donc tout l'arbre ``app`` et on force ce service en tête du chemin.
     cg_dir = os.path.join(ROOT, "services", "mesreunions-web")
-    if cg_dir not in sys.path:
-        sys.path.insert(0, cg_dir)
-    sys.modules.pop("app", None)
+    while cg_dir in sys.path:
+        sys.path.remove(cg_dir)
+    sys.path.insert(0, cg_dir)
+    for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+        sys.modules.pop(name, None)
     sys.modules.pop("app.meeting_prep", None)
 
     # pika non plus n'est pas dans l'env minimal — libs.shared.app.queue_helper
@@ -227,7 +233,7 @@ def test_post_meeting_prep_with_drive_folder_but_no_refresh_token_returns_401(cg
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext",
                return_value=None) as fc_mock, \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
@@ -269,7 +275,7 @@ def test_post_meeting_prep_one_on_one_loads_correct_prompt(cg):
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Point hebdo Alice",
             "role": "manager",
@@ -299,7 +305,7 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
          patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
          patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
          patch("app.modules.preparations.service.request_internal_preparation_api",
-               return_value={"preparation": {}}):
+               return_value={"preparation": {"id": "b-1"}}):
         r = client.post("/api/preparations?sync=1", json={
             "subject": "Sujet",
             "role": "anime",
@@ -313,6 +319,306 @@ def test_post_meeting_prep_unknown_meeting_type_falls_back_to_general(cg):
     assert r.status_code == 200, r.get_data(as_text=True)
     body = r.get_json()
     assert body["meeting_type"] == "general"
+
+
+def test_post_meeting_prep_persist_failure_returns_502(cg):
+    """Échec de persistance DTA : plus d'avalement silencieux → 502 persist_failed.
+
+    Régression 2026-08 : l'exception était catchée sans re-raise, le job
+    passait ``done`` sans preparation_id, le front affichait « Brief
+    généré. » et supprimait le brouillon → brief + réponses perdus.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               side_effect=RuntimeError("DTA down")):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+        })
+
+    assert r.status_code == 502, r.get_data(as_text=True)
+    body = r.get_json()
+    assert body.get("code") == "persist_failed"
+    assert "brouillon" in (body.get("error") or "")
+
+
+def test_post_meeting_prep_persist_without_id_returns_502(cg):
+    """Réponse DTA sans id de préparation : contrat cassé → 502 persist_failed."""
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"no_id": True}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+        })
+
+    assert r.status_code == 502, r.get_data(as_text=True)
+    assert r.get_json().get("code") == "persist_failed"
+
+
+def test_post_meeting_prep_success_criteria_reaches_prompt_and_meta(cg):
+    """Coaching : chips d'intention + texte libre → prompt LLM et _meta du brief."""
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Arbitrage budget T4",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "drive_folder": "",
+            "expected_outcomes": ["decision", "bogus_slug", "decision"],
+            "success_criteria": "le budget T4 est arbitré",
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "une décision est prise" in prompt_sent
+    assert "le budget T4 est arbitré" in prompt_sent
+    body = r.get_json()
+    meta = (body["brief"] or {}).get("_meta") or {}
+    assert meta.get("success_criteria") == "le budget T4 est arbitré"
+    # Slug inconnu filtré, doublon dédupliqué.
+    assert meta.get("expected_outcomes") == ["decision"]
+
+
+def test_post_meeting_prep_inline_source_reaches_prompt_without_drive(cg):
+    """Un brief nourri d'un texte collé n'exige aucun jeton Drive.
+
+    Avant, les pré-conditions OIDC/Drive étaient conditionnées à la seule
+    présence de `drive_folder` ; une préparation sans Drive qui aurait déclaré
+    des sources aurait été refusée en 503 chez un utilisateur sans jeton.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    fake_drive_cls = MagicMock()
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", fake_drive_cls), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext") as fc_mock, \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Arbitrage budget",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "meeting_type": "general",
+            "sources": [
+                {"type": "inline", "title": "Re: budget", "text": "Le plafond est fixé à 12 k€."},
+            ],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "Le plafond est fixé à 12 k€." in prompt_sent
+    # Aucun accès Drive n'a été tenté.
+    fake_drive_cls.assert_not_called()
+    fc_mock.assert_not_called()
+    # La sélection est tracée, sans le contenu du message.
+    meta = (r.get_json()["brief"] or {}).get("_meta") or {}
+    assert meta["sources"][0]["title"] == "Re: budget"
+    assert "plafond" not in repr(meta["sources"])
+
+
+def test_prior_meeting_source_never_bumps_last_viewed(cg):
+    """Piocher une réunion comme source ne doit pas la marquer « consultée ».
+
+    `last_viewed_at` alimente le scoring d'auto-link entre audios et
+    préparations : le bumper depuis une génération fausserait ce signal.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    calls = []
+
+    def _fake_internal(method, path, **kwargs):
+        calls.append((path, kwargs.get("params") or {}))
+        if path.endswith("/audio-files"):
+            return {"audio_files": [{"key_points_summary": "Budget non tranché."}]}
+        return {"preparation": {"content": {"objective_reformulated": "Arbitrer le budget"}}}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock()), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=None), \
+         patch("app.modules.preparations.routes.request_internal_preparation_api",
+               side_effect=_fake_internal), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               return_value={"preparation": {"id": "b-1"}}):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Suite du comité",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "sources": [{"type": "preparation", "id": "p-1", "label": "Comité de mars",
+                         "include": ["brief", "key_points"]}],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    detail_calls = [(p, params) for p, params in calls if not p.endswith("/audio-files")]
+    assert detail_calls, "le brief de la réunion source doit être lu"
+    assert all(params.get("track_view") == "false" for _p, params in detail_calls)
+
+    # Et le contenu atterrit dans {PRIOR_MEETINGS}, jusqu'ici jamais alimenté.
+    prompt_sent = fake_llm.chat_json.call_args.kwargs["messages"][0]["content"]
+    assert "Budget non tranché." in prompt_sent
+    assert "Arbitrer le budget" in prompt_sent
+
+
+def test_folder_chosen_by_browsing_is_persisted_as_drive_folder(cg):
+    """Un dossier choisi dans le navigateur vaut un dossier collé.
+
+    La fiche n'affiche son bloc « Sources Drive » que si `drive_folder_id`
+    est renseigné, et le versement Drive s'en sert comme dossier cible.
+    """
+    client, mod = cg
+    _login(client)
+
+    fake_llm = MagicMock()
+    fake_llm.chat_json.return_value = {"summary": "ok"}
+    fake_drive = MagicMock()
+    fake_drive.exchange_refresh.return_value = "AT"
+    fake_drive.list_children.return_value = []
+    persisted = {}
+
+    def _capture(_method, _path, **kwargs):
+        persisted.update(kwargs.get("json_body") or {})
+        return {"preparation": {"id": "b-1"}}
+
+    with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+         patch.object(mod._meeting_prep, "DriveClient", MagicMock(return_value=fake_drive)), \
+         patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"x"), \
+         patch("libs.shared.app.secrets_crypto.decrypt", return_value="RT"), \
+         patch("app.modules.preparations.service.request_internal_preparation_api",
+               side_effect=_capture):
+        r = client.post("/api/preparations?sync=1", json={
+            "subject": "Sujet",
+            "role": "anime",
+            "expectation": "GO",
+            "duration_minutes": 30,
+            "focus": [],
+            "sources": [{"type": "drive_folder", "id": "folder-xyz"}],
+        })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert persisted.get("drive_folder_id") == "folder-xyz"
+
+
+def test_each_drive_source_is_listed_against_its_own_instance(cg):
+    """Un dossier choisi sur une instance donnée doit être lu sur celle-ci.
+
+    Sans ce routage par source, un dossier du Drive DINUM serait listé
+    contre le Drive par défaut et remonterait « introuvable » sans que la
+    cause soit visible.
+    """
+    client, mod = cg
+    _login(client)
+
+    import libs.shared.app.config as _cfg
+    routes_map = {"beta.test": "https://beta.test", "dinum.test": "https://dinum.test"}
+    with patch.object(_cfg, "DRIVE_HOST_ROUTES", routes_map):
+        fake_llm = MagicMock()
+        fake_llm.chat_json.return_value = {"summary": "ok"}
+        built = []
+
+        def _make_client(**kwargs):
+            built.append(kwargs["base_url"])
+            inst = MagicMock()
+            inst.exchange_refresh.return_value = "AT"
+            inst.list_children.return_value = []
+            return inst
+
+        with patch.object(mod._meeting_prep, "LLMClient", MagicMock(return_value=fake_llm)), \
+             patch.object(mod._meeting_prep, "DriveClient", side_effect=_make_client), \
+             patch("libs.shared.app.oidc_refresh_store.fetch_ciphertext", return_value=b"x"), \
+             patch("libs.shared.app.secrets_crypto.decrypt", return_value="RT"), \
+             patch("app.modules.preparations.service.request_internal_preparation_api",
+                   return_value={"preparation": {"id": "b-1"}}):
+            r = client.post("/api/preparations?sync=1", json={
+                "subject": "Sujet", "role": "anime", "expectation": "GO",
+                "duration_minutes": 30, "focus": [],
+                "sources": [
+                    {"type": "drive_folder", "id": "f-beta", "host": "beta.test"},
+                    {"type": "drive_folder", "id": "f-dinum", "host": "dinum.test"},
+                ],
+            })
+
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert "https://beta.test" in built
+    assert "https://dinum.test" in built
+
+
+def test_post_meeting_prep_rejects_oversized_payload(cg):
+    """Garde de taille : la route n'hérite plus des 100 Mo prévus pour l'audio."""
+    client, mod = cg
+    _login(client)
+
+    huge = "x" * (3 * 1024 * 1024)
+    r = client.post(
+        "/api/preparations?sync=1",
+        data=huge,
+        content_type="application/json",
+    )
+    assert r.status_code == 413
+
+
+def test_post_meeting_prep_invalid_source_returns_400(cg):
+    client, mod = cg
+    _login(client)
+
+    r = client.post("/api/preparations?sync=1", json={
+        "subject": "Sujet",
+        "role": "anime",
+        "expectation": "GO",
+        "duration_minutes": 30,
+        "focus": [],
+        "sources": [{"type": "ftp", "id": "x"}],
+    })
+    assert r.status_code == 400
+    assert "Type de source inconnu" in (r.get_json() or {}).get("error", "")
 
 
 # ─── GET /api/preparations/test-drive ──────────────────────────────

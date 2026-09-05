@@ -39,13 +39,56 @@ def _install_requests_stub():
                 raise ValueError("no json")
             return self._json
 
+        def close(self):
+            """Le client ferme ses réponses depuis le contournement LB (aeeb7cd)."""
+
     class _RequestException(Exception):
         pass
 
     requests_stub.RequestException = _RequestException
     requests_stub.get = MagicMock()
     requests_stub.post = MagicMock()
+    requests_stub.put = MagicMock()
+    requests_stub.delete = MagicMock()
     requests_stub._Resp = _Resp
+
+    class _Session:
+        """Session déléguant aux mêmes MagicMock que les appels module-level.
+
+        Depuis le commit aeeb7cd (2026-05-24), ``drive_client`` ouvre une
+        Session neuve par tentative pour forcer ``Connection: close`` derrière
+        le LB. Sans cette classe le stub lève ``AttributeError: module
+        'requests' has no attribute 'Session'`` — c'est ce qui rendait 18 des
+        28 tests de ce fichier rouges, donc ``list_children`` / ``get_item`` /
+        ``download_item`` sans couverture effective.
+
+        La délégation ``*args, **kwargs`` préserve la position de ``url`` et le
+        passage en mots-clés de ``headers``/``timeout``, si bien que les
+        assertions écrites sur ``_REQ.get`` continuent de porter à l'identique.
+        """
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, *a, **kw):
+            return requests_stub.get(*a, **kw)
+
+        def post(self, *a, **kw):
+            return requests_stub.post(*a, **kw)
+
+        def put(self, *a, **kw):
+            return requests_stub.put(*a, **kw)
+
+        def delete(self, *a, **kw):
+            return requests_stub.delete(*a, **kw)
+
+        def close(self):
+            pass
+
+    requests_stub.Session = _Session
     sys.modules["requests"] = requests_stub
     return requests_stub
 
@@ -79,6 +122,8 @@ def _client():
 def _reset_mocks():
     _REQ.get.reset_mock(side_effect=True, return_value=True)
     _REQ.post.reset_mock(side_effect=True, return_value=True)
+    _REQ.put.reset_mock(side_effect=True, return_value=True)
+    _REQ.delete.reset_mock(side_effect=True, return_value=True)
 
 
 # --- Constructor ---------------------------------------------------------
@@ -309,3 +354,262 @@ def test_download_item_uses_metadata_mime_type_when_header_missing():
     _REQ.get.side_effect = fake_get
     _, ct = _client().download_item("AT", "x")
     assert ct == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+# --- Écritures : helpers de policy présignée -----------------------------
+
+
+def _policy_url(*, signed_headers="host", expires_in=60, skew_seconds=0):
+    """Fabrique une URL présignée façon boto3 ``generate_presigned_url``."""
+    from datetime import datetime, timedelta, timezone
+
+    signed_at = datetime.now(timezone.utc) - timedelta(seconds=skew_seconds)
+    return (
+        "https://s3.example.com/bucket/key"
+        "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        f"&X-Amz-Date={signed_at.strftime('%Y%m%dT%H%M%SZ')}"
+        f"&X-Amz-Expires={expires_in}"
+        f"&X-Amz-SignedHeaders={signed_headers}"
+        "&X-Amz-Signature=deadbeef"
+    )
+
+
+def test_policy_signed_headers_reads_the_query():
+    headers = MOD.policy_signed_headers(_policy_url(signed_headers="host;x-amz-acl"))
+    assert headers == ["host", "x-amz-acl"]
+
+
+def test_policy_expires_at_returns_none_on_unsigned_url():
+    assert MOD.policy_expires_at("https://s3.example.com/bucket/key") is None
+
+
+# --- find_child_by_title -------------------------------------------------
+
+
+def test_find_child_by_title_requires_exact_match():
+    """Le filtre serveur est un icontains : « brief.md » ramène ses homonymes."""
+    _REQ.get.return_value = _resp(200, json_data={"results": [
+        {"id": "1", "title": "ancien-brief.md"},
+        {"id": "2", "title": "brief.md"},
+    ]})
+    found = _client().find_child_by_title("AT", "folder-x", "brief.md")
+    assert found["id"] == "2"
+
+
+def test_find_child_by_title_returns_none_when_only_partial_matches():
+    _REQ.get.return_value = _resp(200, json_data={"results": [
+        {"id": "1", "title": "ancien-brief.md"},
+    ]})
+    assert _client().find_child_by_title("AT", "folder-x", "brief.md") is None
+
+
+def test_find_child_by_title_asks_for_the_max_page_size():
+    """PAGE_SIZE vaut 20 par défaut côté Drive — un dossier chargé perdrait des frères."""
+    _REQ.get.return_value = _resp(200, json_data={"results": []})
+    _client().find_child_by_title("AT", "folder-x", "brief.md")
+    params = _REQ.get.call_args.kwargs["params"]
+    assert params["title"] == "brief.md"
+    assert params["page_size"] == 200
+
+
+def test_find_child_by_title_does_not_follow_foreign_next_url():
+    """Le `next` porte notre bearer : hors du Drive interrogé, on ne le suit pas."""
+    seen = []
+
+    def fake_get(url, **kwargs):
+        seen.append(url)
+        return _resp(200, json_data={
+            "results": [{"id": "1", "title": "autre.md"}],
+            "next": "https://evil.example.com/api/v1.0/items/x/children/?page=2",
+        })
+
+    _REQ.get.side_effect = fake_get
+    assert _client().find_child_by_title("AT", "folder-x", "brief.md") is None
+    assert len(seen) == 1
+
+
+def test_find_child_by_title_follows_same_host_next_url():
+    pages = [
+        _resp(200, json_data={
+            "results": [{"id": "1", "title": "autre.md"}],
+            "next": "https://mesfichiers.example.com/api/v1.0/items/folder-x/children/?page=2",
+        }),
+        _resp(200, json_data={"results": [{"id": "2", "title": "brief.md"}]}),
+    ]
+    _REQ.get.side_effect = lambda url, **kw: pages.pop(0)
+    found = _client().find_child_by_title("AT", "folder-x", "brief.md")
+    assert found["id"] == "2"
+
+
+# --- create_folder -------------------------------------------------------
+
+
+def test_create_folder_posts_lowercase_type_and_title():
+    _REQ.post.return_value = _resp(201, json_data={"id": "new-folder", "title": "Préparations"})
+    out = _client().create_folder("AT", "root-1", "Préparations")
+    assert out["id"] == "new-folder"
+    body = _REQ.post.call_args.kwargs["json"]
+    assert body == {"type": "folder", "title": "Préparations"}
+
+
+def test_create_folder_is_never_retried():
+    """Un POST rejoué après traitement serveur créerait un doublon renommé."""
+    _REQ.post.side_effect = _REQ.RequestException("connection reset")
+    with pytest.raises(MOD.DriveTransientError):
+        _client().create_folder("AT", "root-1", "Préparations")
+    assert _REQ.post.call_count == 1
+
+
+def test_create_folder_403_raises_auth_error():
+    """Dossier partagé en lecture seule — le caller bascule sur le dossier géré."""
+    _REQ.post.return_value = _resp(403, text="read only")
+    with pytest.raises(MOD.DriveAuthError):
+        _client().create_folder("AT", "shared-folder", "Préparations")
+
+
+# --- upload_file ---------------------------------------------------------
+
+
+_DEFAULT_POLICY = object()
+
+
+def _wire_upload(policy=_DEFAULT_POLICY, put_status=200, ended_status=200, ended_json=None):
+    """Câble create → PUT → upload-ended et retourne le journal des appels."""
+    calls = []
+    policy = _policy_url() if policy is _DEFAULT_POLICY else policy
+
+    def fake_post(url, **kwargs):
+        calls.append(("POST", url))
+        if url.endswith("/children/"):
+            return _resp(201, json_data={"id": "item-1", "policy": policy})
+        return _resp(ended_status, json_data=ended_json,
+                     text="" if ended_json is None else "")
+
+    def fake_put(url, **kwargs):
+        calls.append(("PUT", url, kwargs.get("headers") or {}, kwargs.get("data")))
+        return _resp(put_status, text="denied" if put_status >= 400 else "")
+
+    def fake_delete(url, **kwargs):
+        calls.append(("DELETE", url))
+        return _resp(204)
+
+    _REQ.post.side_effect = fake_post
+    _REQ.put.side_effect = fake_put
+    _REQ.delete.side_effect = fake_delete
+    return calls
+
+
+def test_upload_file_chains_create_put_and_upload_ended():
+    calls = _wire_upload()
+    out = _client().upload_file("AT", "folder-x", "brief.md", b"# titre", "text/markdown")
+    assert out["id"] == "item-1"
+    assert [c[0] for c in calls] == ["POST", "PUT", "POST"]
+    assert calls[2][1].endswith("/items/item-1/upload-ended/")
+    assert calls[1][3] == b"# titre"
+
+
+def test_upload_file_sends_only_the_signed_headers():
+    """x-amz-acl non signé ne doit pas être envoyé : il casserait la signature."""
+    calls = _wire_upload(policy=_policy_url(signed_headers="host"))
+    _client().upload_file("AT", "folder-x", "brief.md", b"x", "text/markdown")
+    put_headers = calls[1][2]
+    assert "x-amz-acl" not in put_headers
+    assert "Content-Type" not in put_headers
+
+
+def test_upload_file_sends_acl_when_the_instance_signs_it():
+    calls = _wire_upload(policy=_policy_url(signed_headers="host;x-amz-acl;content-type"))
+    _client().upload_file("AT", "folder-x", "brief.md", b"x", "text/markdown")
+    put_headers = calls[1][2]
+    assert put_headers["x-amz-acl"] == "private"
+    assert put_headers["Content-Type"] == "text/markdown"
+
+
+def test_upload_file_deletes_the_pending_item_when_the_put_fails():
+    """Un item PENDING est invisible dans les listings mais occupe son titre."""
+    calls = _wire_upload(put_status=403)
+    with pytest.raises(MOD.DriveApplicativeError):
+        _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert any(c[0] == "DELETE" and c[1].endswith("/items/item-1/") for c in calls)
+
+
+def test_upload_file_deletes_the_pending_item_when_upload_ended_fails():
+    calls = _wire_upload(ended_status=400, ended_json={
+        "type": "validation_error",
+        "errors": [{"code": "file_type_not_allowed", "detail": "nope", "attr": "item"}],
+    })
+    with pytest.raises(MOD.DriveApplicativeError):
+        _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert any(c[0] == "DELETE" for c in calls)
+
+
+def test_upload_file_treats_state_not_pending_as_success():
+    """Clé d'idempotence offerte par l'API : le premier appel était passé."""
+    calls = _wire_upload(ended_status=400, ended_json={
+        "type": "validation_error",
+        "errors": [{"code": "item_upload_state_not_pending",
+                    "detail": "This action is only available for items in PENDING state.",
+                    "attr": "item"}],
+    })
+    out = _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert out["id"] == "item-1"
+    assert not any(c[0] == "DELETE" for c in calls)
+
+
+def test_upload_file_without_policy_deletes_the_item_and_raises():
+    calls = _wire_upload(policy="")
+    with pytest.raises(MOD.DriveApplicativeError):
+        _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert any(c[0] == "DELETE" for c in calls)
+
+
+def test_upload_file_retries_the_put_once_while_the_policy_lives():
+    _wire_upload()
+    attempts = {"n": 0}
+
+    def flaky_put(url, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _REQ.RequestException("connection reset by peer")
+        return _resp(200)
+
+    _REQ.put.side_effect = flaky_put
+    _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert attempts["n"] == 2
+
+
+def test_upload_file_does_not_retry_the_put_on_an_expired_policy():
+    """Rejouer une signature morte rend un 403 qu'on lirait comme un refus de droits."""
+    calls = _wire_upload(policy=_policy_url(expires_in=60, skew_seconds=600))
+    _REQ.put.side_effect = _REQ.RequestException("connection reset by peer")
+    with pytest.raises(MOD.DriveTransientError):
+        _client().upload_file("AT", "folder-x", "brief.md", b"x")
+    assert _REQ.put.call_count == 1
+    assert any(c[0] == "DELETE" for c in calls)
+
+
+# --- delete_item ---------------------------------------------------------
+
+
+def test_delete_item_treats_404_as_success():
+    _REQ.delete.return_value = _resp(404, text="not found")
+    assert _client().delete_item("AT", "gone") is True
+
+
+def test_delete_item_403_raises_auth_error():
+    _REQ.delete.return_value = _resp(403, text="not yours")
+    with pytest.raises(MOD.DriveAuthError):
+        _client().delete_item("AT", "someone-else")
+
+
+# --- list_roots ----------------------------------------------------------
+
+
+def test_list_roots_returns_items_with_main_workspace_flag():
+    _REQ.get.return_value = _resp(200, json_data={"results": [
+        {"id": "r1", "title": "Partagé", "main_workspace": False},
+        {"id": "r2", "title": "Mon espace", "main_workspace": True},
+    ]})
+    roots = _client().list_roots("AT")
+    assert [r["id"] for r in roots] == ["r1", "r2"]
+    assert roots[1]["main_workspace"] is True

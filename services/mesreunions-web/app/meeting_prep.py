@@ -30,6 +30,8 @@ import importlib.util
 import logging
 import os
 import re
+import unicodedata
+import uuid
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,16 @@ DEFAULT_PER_DOC_MAX_CHARS = 20_000
 DEFAULT_TOTAL_MAX_CHARS = 80_000
 DEFAULT_PER_DOC_MAX_BYTES = 5 * 1024 * 1024
 
+# Budgets par emplacement du prompt. Ils sont séparés parce que {PREP_DOCS},
+# {PRIOR_MEETINGS} et {INLINE_MESSAGES} sont trois sections distinctes : un
+# budget commun laisserait un gros dossier Drive évincer silencieusement les
+# réunions passées, que l'utilisateur a pourtant choisies explicitement.
+DEFAULT_BUDGETS = {
+    "prep_docs": DEFAULT_TOTAL_MAX_CHARS,
+    "prior_meetings": 30_000,
+    "inline_messages": 20_000,
+}
+
 
 def _item_name(item: dict) -> str:
     """Best-effort display name for a Drive item (used in the corpus header)."""
@@ -172,6 +184,392 @@ def _is_folder(item: dict) -> bool:
     return bool(item.get("is_folder")) or bool(item.get("children"))
 
 
+# ─── Assainissement des contenus de source ────────────────────────
+#
+# Tout texte entrant dans le corpus est une DONNÉE, pas une consigne. Deux
+# familles de contenus ne sont pas de confiance : les messages collés par
+# l'utilisateur (origine ``inline``) et — moins évident mais tout aussi vrai —
+# les documents Drive, dont le NOM est choisi par qui a partagé le dossier.
+
+# Caractères invisibles : zéro-largeur et overrides bidirectionnels. Ce sont
+# les vecteurs classiques d'instructions cachées dans un texte d'apparence
+# anodine (le lecteur humain ne voit rien, le modèle lit tout).
+_INVISIBLE_RE = re.compile(r"[​-‏⁠-⁯﻿‪-‮]")
+# Caractères de contrôle, sauf tabulation et saut de ligne.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MANY_NEWLINES_RE = re.compile(r"\n{4,}")
+
+
+def sanitize_source_text(text: str) -> str:
+    """Normalise un texte de source avant de le verser au corpus.
+
+    Ne fait pas d'anti-XSS (rien n'est rendu en HTML) : retire ce qui permet
+    de dissimuler des instructions à un relecteur humain tout en restant
+    lisible par le modèle.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    cleaned = unicodedata.normalize("NFKC", text)
+    cleaned = _INVISIBLE_RE.sub("", cleaned)
+    cleaned = _CONTROL_RE.sub("", cleaned)
+    cleaned = _MANY_NEWLINES_RE.sub("\n\n\n", cleaned)
+    return cleaned.strip()
+
+
+def new_corpus_nonce() -> str:
+    """Jeton imprévisible identifiant les frontières de document d'UNE génération."""
+    return uuid.uuid4().hex[:8]
+
+
+def format_source_header(nonce: str, name: str, origin: str) -> str:
+    """En-tête de document infalsifiable.
+
+    Le corpus séparait les documents par ``--- {nom} ---``. N'importe quel
+    contenu — un mail, ou simplement un fichier Drive nommé
+    ``--- Note officielle ---`` — pouvait donc fabriquer une fausse frontière
+    et faire passer son texte pour un autre document, voire pour la consigne
+    système. Le nonce n'étant pas devinable, la frontière redevient fiable.
+    """
+    safe_name = (name or "(sans nom)").replace("\n", " ").strip()[:200]
+    return f"--- [SRC {nonce}] {safe_name} · {origin} ---"
+
+
+def _strip_nonce(text: str, nonce: str) -> str:
+    """Retire du contenu toute occurrence du nonce (défense en profondeur)."""
+    if not nonce or nonce not in text:
+        return text
+    return text.replace(nonce, "")
+
+
+# ─── Fournisseurs de sources ──────────────────────────────────────
+#
+# Un fournisseur expose deux choses :
+#   - ``count_hint()`` : nombre d'items candidats, pour le stepper UI ;
+#   - ``items()`` : itérateur de ``SourceItem``.
+#
+# La PARESSE est structurante : ``load(budget)`` n'est appelé que si l'item a
+# encore sa place. Un fournisseur qui rendrait une liste déjà chargée
+# téléchargerait tout pour en jeter la moitié — c'est exactement ce que le
+# code d'origine évitait en s'arrêtant à ``ingested >= max_docs``.
+
+
+class SourceItem:
+    """Un candidat au corpus. ``load(budget) -> (texte|None, statut)``."""
+
+    __slots__ = ("name", "ref", "origin", "load")
+
+    def __init__(self, name: str, ref: str, origin: str, load):
+        self.name = name
+        self.ref = ref
+        self.origin = origin
+        self.load = load
+
+
+class DriveFolderProvider:
+    """Les documents feuilles d'un dossier Drive (comportement historique)."""
+
+    bucket = "prep_docs"
+
+    def __init__(self, drive, access_token: str, folder_id: str, *,
+                 per_doc_max_bytes: int = DEFAULT_PER_DOC_MAX_BYTES,
+                 per_doc_max_chars: int = DEFAULT_PER_DOC_MAX_CHARS):
+        self._drive = drive
+        self._token = access_token
+        self._folder_id = folder_id
+        self._per_doc_max_bytes = per_doc_max_bytes
+        self._per_doc_max_chars = per_doc_max_chars
+        self._children = None
+
+    def _load_children(self) -> list:
+        if self._children is None:
+            self._children = self._drive.list_children(self._token, self._folder_id) or []
+        return self._children
+
+    def count_hint(self) -> int:
+        return sum(1 for it in self._load_children() if not _is_folder(it))
+
+    def items(self):
+        for item in self._load_children():
+            item_id = item.get("id") or ""
+            name = _item_name(item)
+            if _is_folder(item):
+                yield SourceItem(name, item_id, "drive", _rejected("skipped_folder"))
+                continue
+            if not item_id:
+                yield SourceItem(name, "", "drive", _rejected("skipped_no_id"))
+                continue
+            yield SourceItem(name, item_id, "drive", self._make_loader(item_id, name))
+
+    def _make_loader(self, item_id: str, name: str):
+        def _load(_budget: int):
+            try:
+                body, content_type = self._drive.download_item(
+                    self._token, item_id, max_bytes=self._per_doc_max_bytes
+                )
+            except DriveApplicativeError as exc:
+                logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
+                return None, "error_download"
+            except DriveTransientError as exc:
+                # 2026-05-24 : best-effort sur les erreurs transitoires visant
+                # UN document — vu en prod des HTTP 500 systématiques sur
+                # certains fichiers. On saute le fautif, le brief se construit
+                # sur les autres.
+                logger.warning(
+                    "meeting_prep: drive transient error on %s (skip + continue): %s",
+                    item_id, exc,
+                )
+                return None, "error_transient"
+            text = extract_text(
+                body, content_type, filename_hint=name, max_chars=self._per_doc_max_chars
+            )
+            if not text:
+                return None, "skipped_unsupported_or_empty"
+            return text, "ingested"
+        return _load
+
+
+class DriveFilesProvider:
+    """Une sélection explicite de fichiers Drive (pas de listing préalable)."""
+
+    bucket = "prep_docs"
+
+    def __init__(self, drive, access_token: str, items: list, *,
+                 per_doc_max_bytes: int = DEFAULT_PER_DOC_MAX_BYTES,
+                 per_doc_max_chars: int = DEFAULT_PER_DOC_MAX_CHARS):
+        self._drive = drive
+        self._token = access_token
+        self._items = items or []
+        self._per_doc_max_bytes = per_doc_max_bytes
+        self._per_doc_max_chars = per_doc_max_chars
+
+    def count_hint(self) -> int:
+        return len(self._items)
+
+    def items(self):
+        for entry in self._items:
+            item_id = (entry.get("id") or "").strip()
+            name = (entry.get("name") or "").strip() or item_id or "(sans nom)"
+            if not item_id:
+                yield SourceItem(name, "", "drive", _rejected("skipped_no_id"))
+                continue
+            yield SourceItem(name, item_id, "drive", self._make_loader(item_id, name))
+
+    def _make_loader(self, item_id: str, name: str):
+        def _load(_budget: int):
+            try:
+                body, content_type = self._drive.download_item(
+                    self._token, item_id, max_bytes=self._per_doc_max_bytes
+                )
+            except DriveApplicativeError as exc:
+                logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
+                return None, "error_download"
+            except DriveTransientError as exc:
+                logger.warning(
+                    "meeting_prep: drive transient error on %s (skip + continue): %s",
+                    item_id, exc,
+                )
+                return None, "error_transient"
+            text = extract_text(
+                body, content_type, filename_hint=name, max_chars=self._per_doc_max_chars
+            )
+            if not text:
+                return None, "skipped_unsupported_or_empty"
+            return text, "ingested"
+        return _load
+
+
+class InlineProvider:
+    """Textes collés par l'utilisateur (mail, note). Aucune I/O.
+
+    Le contenu est déjà assaini au parsing du payload : ici on ne fait que
+    le verser sous plafond.
+    """
+
+    bucket = "inline_messages"
+
+    def __init__(self, entries: list):
+        self._entries = entries or []
+
+    def count_hint(self) -> int:
+        return len(self._entries)
+
+    def items(self):
+        for idx, entry in enumerate(self._entries):
+            title = entry.get("title") or "Texte collé"
+            text = entry.get("text") or ""
+            yield SourceItem(title, f"inline:{idx}", "inline", self._make_loader(text))
+
+    def _make_loader(self, text: str):
+        def _load(budget: int):
+            if not text:
+                return None, "skipped_unsupported_or_empty"
+            return text[:budget] if budget and len(text) > budget else text, "ingested"
+        return _load
+
+
+class PriorMeetingProvider:
+    """Réunions passées : brief, points clés et compte-rendu.
+
+    ``fetch`` est injecté (une fonction ``(preparation_id, include) -> texte``)
+    pour que le module reste testable sans réseau et sans connaître le
+    transport interne.
+    """
+
+    bucket = "prior_meetings"
+
+    def __init__(self, fetch, entries: list):
+        self._fetch = fetch
+        self._entries = entries or []
+
+    def count_hint(self) -> int:
+        return len(self._entries)
+
+    def items(self):
+        for entry in self._entries:
+            prep_id = entry.get("id") or ""
+            label = entry.get("label") or "Réunion précédente"
+            yield SourceItem(label, prep_id, "preparation",
+                             self._make_loader(prep_id, entry.get("include") or []))
+
+    def _make_loader(self, prep_id: str, include: list):
+        def _load(_budget: int):
+            try:
+                text = self._fetch(prep_id, include)
+            except Exception:
+                # Une réunion illisible dégrade cette source, jamais la
+                # génération entière.
+                logger.exception("meeting_prep: prior meeting fetch failed for %s", prep_id)
+                return None, "error_internal_api"
+            if not text or not text.strip():
+                return None, "skipped_empty_source"
+            return text, "ingested"
+        return _load
+
+
+def _rejected(status: str):
+    """Fabrique un ``load`` qui refuse d'emblée, sans I/O."""
+    def _load(_budget: int):
+        return None, status
+    return _load
+
+
+def build_corpus(
+    providers: list,
+    *,
+    max_docs: int = DEFAULT_MAX_DOCS,
+    per_doc_max_chars: int = DEFAULT_PER_DOC_MAX_CHARS,
+    budgets: "dict[str, int] | None" = None,
+    progress=None,
+    nonce: "str | None" = None,
+) -> tuple[dict, list[dict]]:
+    """Assemble le corpus à partir de fournisseurs, sous plafonds explicites.
+
+    Retourne ``({bucket: texte}, used)``. Les budgets sont **par bucket** et
+    non globaux : ``{PREP_DOCS}`` et ``{PRIOR_MEETINGS}`` occupent deux
+    emplacements distincts du prompt, et un budget unique laisserait un gros
+    dossier Drive évincer silencieusement les réunions passées.
+
+    ``progress`` reçoit les mêmes phases qu'avant (``listing_docs`` puis
+    ``reading_doc``) : ce sont des valeurs persistées en base qui pilotent
+    l'animation, on n'en invente pas de nouvelles.
+    """
+    def _emit(**kw):
+        if progress is None:
+            return
+        try:
+            progress(**kw)
+        except Exception:  # pragma: no cover — l'UI ne casse jamais le pipeline
+            logger.exception("meeting_prep: progress callback raised")
+
+    budgets = dict(budgets or {})
+    nonce = nonce or new_corpus_nonce()
+
+    _emit(phase="listing_docs")
+    docs_total = 0
+    for provider in providers:
+        try:
+            docs_total += provider.count_hint()
+        except Exception:
+            logger.exception("meeting_prep: count_hint failed on %s", type(provider).__name__)
+    docs_total = min(docs_total, max_docs)
+    _emit(phase="listing_docs", docs_total=docs_total)
+
+    used: list[dict] = []
+    parts: "dict[str, list[str]]" = {}
+    spent: "dict[str, int]" = {}
+    ingested = 0
+
+    for provider in providers:
+        bucket = getattr(provider, "bucket", "prep_docs")
+        budget_total = budgets.get(bucket, DEFAULT_TOTAL_MAX_CHARS)
+        for item in provider.items():
+            entry = {"name": item.name, "id": item.ref, "origin": item.origin}
+
+            if ingested >= max_docs:
+                used.append({**entry, "status": "skipped_doc_cap"})
+                continue
+
+            remaining = max(0, budget_total - spent.get(bucket, 0))
+            if remaining <= 0:
+                used.append({**entry, "status": "skipped_source_cap"})
+                continue
+
+            _emit(
+                phase="reading_doc",
+                current_doc=item.name,
+                docs_processed=ingested,
+                docs_total=docs_total,
+            )
+
+            text, status = item.load(min(remaining, per_doc_max_chars))
+            if not text or status != "ingested":
+                used.append({**entry, "status": status})
+                continue
+
+            text = _strip_nonce(text, nonce)
+            truncated = False
+            if len(text) > remaining:
+                text = text[:remaining].rstrip() + "\n[…tronqué]"
+                truncated = True
+
+            parts.setdefault(bucket, []).append(
+                f"{format_source_header(nonce, item.name, item.origin)}\n{text}"
+            )
+            spent[bucket] = spent.get(bucket, 0) + len(text)
+            ingested += 1
+            record = {**entry, "status": "ingested", "chars": len(text)}
+            if truncated:
+                record["truncated"] = True
+            used.append(record)
+            _emit(
+                phase="reading_doc",
+                current_doc=item.name,
+                docs_processed=ingested,
+                docs_total=docs_total,
+            )
+
+    buckets = {name: "\n\n".join(chunks).strip() for name, chunks in parts.items()}
+    return buckets, used
+
+
+def normalize_drive_item(item: dict) -> dict:
+    """Vue stable d'un item Drive pour l'UI.
+
+    L'API ne garantit aucun schéma : selon les instances on observe ``title``
+    ou ``name``, ``type`` ou ``kind``. Cette normalisation était écrite en
+    double (ici et dans la route de diagnostic), avec des différences subtiles
+    sur ce qui compte comme dossier — une seule définition vaut mieux.
+    """
+    return {
+        "id": item.get("id") or "",
+        "name": _item_name(item),
+        "is_folder": _is_folder(item),
+        "mime_type": item.get("mime_type") or item.get("mimetype") or None,
+        "size": item.get("size"),
+        "updated_at": item.get("updated_at") or item.get("modified_at") or None,
+    }
+
+
 def assemble_corpus(
     drive: "DriveClient",
     access_token: str,
@@ -183,116 +581,25 @@ def assemble_corpus(
     per_doc_max_bytes: int = DEFAULT_PER_DOC_MAX_BYTES,
     progress=None,
 ) -> tuple[str, list[dict]]:
-    """List the folder, download + extract each leaf doc, return a concatenated corpus.
+    """Corpus d'un unique dossier Drive — signature historique, préservée.
 
-    Returns ``(corpus_text, used)`` where ``used`` is a list of metadata dicts
-    describing what made it into the prompt (and what was skipped, with the
-    reason) — surfaced to the UI so the user sees which docs were ingested.
-
-    Drive errors propagate; the caller maps them to HTTP status codes.
-    Per-document extraction errors are captured as ``status="error_extract"``
-    so a single corrupt PDF does not kill the whole brief.
-
-    ``progress`` (callable optionnel) est invoqué aux étapes clés pour le
-    polling UI (Lot 2 — animation génération brief) :
-      - ``progress(phase="listing_docs")``
-      - ``progress(phase="reading_doc", current_doc=name, docs_processed=N, docs_total=M)``
-    Les erreurs du callback sont ignorées (best-effort).
+    Conserve strictement le contrat d'origine ``(corpus_text, used)`` : c'est
+    le chemin emprunté quand l'utilisateur ne fournit qu'un dossier Drive, et
+    les appelants comme les tests s'y adossent. Le travail réel est fait par
+    ``build_corpus``.
     """
-    def _emit(**kw):
-        if progress is None:
-            return
-        try:
-            progress(**kw)
-        except Exception:  # pragma: no cover — never let UI break the pipeline
-            logger.exception("meeting_prep: progress callback raised")
-
-    _emit(phase="listing_docs")
-    children = drive.list_children(access_token, folder_id)
-
-    # Pré-calcul du nombre total de docs candidats (hors dossiers) pour le stepper.
-    leaf_total = sum(1 for it in (children or []) if not _is_folder(it))
-    docs_total = min(leaf_total, max_docs)
-    _emit(phase="listing_docs", docs_total=docs_total)
-
-    used: list[dict] = []
-    parts: list[str] = []
-    total_chars = 0
-    ingested = 0
-
-    for item in children:
-        item_id = item.get("id") or ""
-        name = _item_name(item)
-        if _is_folder(item):
-            used.append({"name": name, "id": item_id, "status": "skipped_folder"})
-            continue
-        if not item_id:
-            used.append({"name": name, "id": "", "status": "skipped_no_id"})
-            continue
-        if ingested >= max_docs:
-            used.append({"name": name, "id": item_id, "status": "skipped_doc_cap"})
-            continue
-
-        _emit(
-            phase="reading_doc",
-            current_doc=name,
-            docs_processed=ingested,
-            docs_total=docs_total,
-        )
-
-        try:
-            body, content_type = drive.download_item(
-                access_token, item_id, max_bytes=per_doc_max_bytes
-            )
-        except DriveApplicativeError as exc:
-            logger.info("meeting_prep: drive applicative error on %s: %s", item_id, exc)
-            used.append({"name": name, "id": item_id, "status": "error_download"})
-            continue
-        except DriveTransientError as exc:
-            # 2026-05-24 : on bascule en best-effort sur les transient errors
-            # spécifiques à UN document — vu en prod des HTTP 500 systématiques
-            # sur certains fichiers Drive (bug applicatif côté drive-backend).
-            # Avant : raise → toute la génération échouait. Maintenant : on
-            # skip le doc fautif et on continue ; le brief sera construit sur
-            # les autres docs (mention "[…fichier indisponible]" si jamais
-            # tous ratent en cascade, le caller détectera corpus vide).
-            logger.warning(
-                "meeting_prep: drive transient error on %s (skip + continue): %s",
-                item_id, exc,
-            )
-            used.append({"name": name, "id": item_id, "status": "error_transient"})
-            continue
-
-        text = extract_text(body, content_type, filename_hint=name, max_chars=per_doc_max_chars)
-        if not text:
-            used.append({"name": name, "id": item_id, "status": "skipped_unsupported_or_empty"})
-            continue
-
-        remaining = max(0, total_max_chars - total_chars)
-        if remaining <= 0:
-            used.append({"name": name, "id": item_id, "status": "skipped_total_cap"})
-            continue
-        if len(text) > remaining:
-            text = text[:remaining].rstrip() + "\n[…tronqué]"
-
-        parts.append(f"--- {name} ---\n{text}")
-        total_chars += len(text)
-        ingested += 1
-        used.append({
-            "name": name,
-            "id": item_id,
-            "status": "ingested",
-            "chars": len(text),
-        })
-        _emit(
-            phase="reading_doc",
-            current_doc=name,
-            docs_processed=ingested,
-            docs_total=docs_total,
-        )
-
-    corpus = "\n\n".join(parts).strip()
-    return corpus, used
+    buckets, used = build_corpus(
+        [DriveFolderProvider(
+            drive, access_token, folder_id,
+            per_doc_max_bytes=per_doc_max_bytes,
+            per_doc_max_chars=per_doc_max_chars,
+        )],
+        max_docs=max_docs,
+        per_doc_max_chars=per_doc_max_chars,
+        budgets={"prep_docs": total_max_chars},
+        progress=progress,
+    )
+    return buckets.get("prep_docs", ""), used
 
 
 # ─── Prompt build ─────────────────────────────────────────────────
@@ -310,12 +617,17 @@ _REQUIRED_PLACEHOLDERS = (
     "{PRIOR_MEETINGS}",
 )
 
-# Placeholder optionnel (meeting-prep v2 §6). Présent dans les 5 templates,
-# substitué par les key_points_summary du dernier audio lié au brief parent
-# de la série. Non listé en REQUIRED pour permettre une migration progressive
-# des templates sans casser load_prompt_template().
+# Placeholders optionnels. Présents dans les 5 templates mais non listés en
+# REQUIRED pour permettre une migration progressive des templates sans casser
+# load_prompt_template().
+#   - {PRIOR_KEY_POINTS} : key_points_summary du dernier audio lié au brief
+#     parent de la série (meeting-prep v2 §6).
+#   - {SUCCESS_CRITERIA} : ce que le demandeur espère avoir obtenu à la fin
+#     de la réunion (coaching wizard) — nourrit la zone ai_recommendations.
 _OPTIONAL_PLACEHOLDERS = (
     "{PRIOR_KEY_POINTS}",
+    "{SUCCESS_CRITERIA}",
+    "{INLINE_MESSAGES}",
 )
 
 
@@ -341,6 +653,8 @@ def build_prompt(
     prep_docs_text: str,
     prior_meetings_text: str = "",
     prior_key_points_text: str = "",
+    success_criteria_text: str = "",
+    inline_messages_text: str = "",
 ) -> str:
     """Substitute the wizard fields into the prompt template.
 
@@ -359,4 +673,6 @@ def build_prompt(
         .replace("{PREP_DOCS}", prep_docs_text.strip() or "(aucun document fourni)")
         .replace("{PRIOR_MEETINGS}", prior_meetings_text.strip() or "(aucun)")
         .replace("{PRIOR_KEY_POINTS}", prior_key_points_text.strip() or "(aucun)")
+        .replace("{SUCCESS_CRITERIA}", success_criteria_text.strip() or "(non précisé)")
+        .replace("{INLINE_MESSAGES}", inline_messages_text.strip() or "(aucun)")
     )

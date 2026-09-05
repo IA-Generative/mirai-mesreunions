@@ -54,6 +54,24 @@ def _oidc_request_with_retry(method, url, *, max_attempts=3, retry_delay=0.7, **
     raise RuntimeError("OIDC request failed unexpectedly")
 
 
+def safe_next_target(raw: "str | None") -> "str | None":
+    """Valide une destination de retour après connexion.
+
+    N'accepte qu'un chemin interne : une URL absolue permettrait à un lien
+    entrant de faire rebondir l'utilisateur vers un site tiers juste après
+    son authentification (open redirect). ``//evil.tld`` et les schémas
+    exotiques sont donc refusés au même titre que ``https://…``.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    candidate = raw.strip()
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return None
+    if "\\" in candidate or "\n" in candidate or "\r" in candidate:
+        return None
+    return candidate[:500]
+
+
 @bp.route("/login")
 def login():
     oidc_cfg = get_oidc_cfg()
@@ -61,6 +79,14 @@ def login():
     nonce = secrets.token_urlsafe(24)
     session["oidc_state"] = state
     session["oidc_nonce"] = nonce
+    # Mémorise la page demandée : sans ça, un lien entrant portant des
+    # paramètres (cf. /preparer) perd tout son contexte quand l'utilisateur
+    # n'était pas déjà connecté, et atterrit sur l'accueil.
+    target = safe_next_target(request.args.get("next"))
+    if target:
+        session["post_login_next"] = target
+    else:
+        session.pop("post_login_next", None)
     params = {
         "response_type": "code",
         "client_id": oidc_cfg.client_id,
@@ -223,7 +249,8 @@ def auth_callback():
         except Exception:
             logger.exception("Failed to persist OIDC refresh token (login still succeeded)")
 
-    return redirect(url_for("index"))
+    target = safe_next_target(session.pop("post_login_next", None))
+    return redirect(target or url_for("index"))
 
 
 @bp.route("/logout")
