@@ -20,12 +20,20 @@ corrigées de ``app/external_source.py``.
 Ne touche NI ``transcription_text``, NI le compte-rendu, NI aucune colonne
 dérivée d'un LLM. Idempotent : rejouable sans effet de bord.
 
-Usage : depuis un pod ayant accès à la base interne ::
+Usage. ``tools/`` n'est PAS copié dans l'image (cf. deploy/docker/Dockerfile) :
+il faut pousser le script dans le pod avant de l'exécuter ::
 
-    kubectl exec deployment/internal-ingester -n audio-internal -- \\
+    CTX=<contexte internal-gw>
+    POD=$(kubectl --context $CTX -n audio-internal get pod \\
+            -l app=internal-ingester -o jsonpath='{.items[0].metadata.name}')
+    kubectl --context $CTX -n audio-internal exec -i $POD -- \\
+        sh -c 'mkdir -p /app/tools && cat > /app/tools/backfill_external_transcript_alignment.py' \\
+        < tools/backfill_external_transcript_alignment.py
+    kubectl --context $CTX -n audio-internal exec $POD -- \\
         python /app/tools/backfill_external_transcript_alignment.py
 
-Dry-run par défaut. Ajouter ``--apply`` pour persister.
+Dry-run par défaut. Ajouter ``--apply`` pour persister. Penser à ``rm`` le
+script du pod ensuite (il disparaît de toute façon au prochain rollout).
 """
 
 from __future__ import annotations
