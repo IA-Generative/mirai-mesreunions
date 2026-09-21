@@ -1,4 +1,5 @@
-// Onglet "Mes appareils" + "Enrôler un nouvel appareil".
+// Onglet « Associer mon téléphone » (ex-« Mes appareils ») + formulaire
+// d'association (ex-« Enrôler un nouvel appareil »).
 //
 // Migration PR6 (refonte UX devices DSFR) : les fonctions historiquement
 // hébergées dans frontend/legacy.js sont déplacées ici et exposées sur
@@ -36,6 +37,17 @@ try {
 
 // ── Helpers DOM ─────────────────────────────────────────────────────────
 function _$(id) { return document.getElementById(id); }
+
+// État d'association affiché sous le titre de l'onglet : compte les
+// téléphones non révoqués (même compteur que le message de liste vide).
+function _updateAssociationState(nonRevokedCount) {
+  const el = _$('devices-association-state');
+  if (!el) return;
+  const n = Number(nonRevokedCount) || 0;
+  el.textContent = n === 0
+    ? 'Aucun téléphone associé'
+    : `${n} téléphone${n > 1 ? 's' : ''} associé${n > 1 ? 's' : ''}`;
+}
 
 function _updateDeviceFilterButton() {
   const btn = _$('device-filter-btn');
@@ -193,6 +205,7 @@ export async function loadDevices() {
     const oneDayMs = 24 * 60 * 60 * 1000;
 
     const nonRevokedCount = devices.filter((d) => (d.status || '').toLowerCase() !== 'revoked').length;
+    _updateAssociationState(nonRevokedCount);
     // Sélection onglet par défaut au 1er chargement (idempotent).
     if (typeof window.pickDefaultTab === 'function') {
       try { window.pickDefaultTab(nonRevokedCount > 0); } catch (e) {}
@@ -225,8 +238,8 @@ export async function loadDevices() {
 
     if (!visibleDevices.length) {
       const msg = _showAllDevices
-        ? `Aucun appareil affichable. Appareils enrôlés non révoqués : <strong>${nonRevokedCount}</strong>.`
-        : `Aucun appareil enrôlé non révoqué. Compteur : <strong>${nonRevokedCount}</strong>.`;
+        ? `Aucun téléphone affichable. Téléphones associés non révoqués : <strong>${nonRevokedCount}</strong>.`
+        : `Aucun téléphone associé. Utilisez « Ajouter un téléphone » pour en associer un.`;
       container.innerHTML = `<div class="fr-callout fr-callout--blue-ecume" style="padding:0.6rem 0.8rem;">
         <p class="fr-callout__text" style="font-size:0.85rem;margin:0;">${msg}</p>
       </div>`;
@@ -305,7 +318,7 @@ Cette action est irréversible : la ligne sera retirée de la base de données (
 }
 
 export async function revokeAllDevices() {
-  if (!confirm('Révoquer tous vos appareils enrôlés ?')) return;
+  if (!confirm('Révoquer tous vos téléphones associés ?')) return;
   try {
     const resp = await fetch('/api/my-devices/revoke-all', { method: 'POST' });
     const data = await resp.json();

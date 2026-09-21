@@ -2533,11 +2533,15 @@
 <main class="fr-container page-shell">
 <div class="container">
 
-    <!-- Navigation onglets — ordre : (1) Mes transferts (vue principale,
-         là où l'utilisateur passe le plus de temps), (2) Mes appareils,
-         (3) Enrôler un nouvel appareil. L'onglet par défaut est choisi
-         par loadDevices : si aucun device enrôlé → "Enrôler", sinon
-         "Mes transferts et analyses". -->
+    <!-- Navigation onglets — ordre : (1) Mes réunions (IA) (vue principale,
+         là où l'utilisateur passe le plus de temps), (2) Préparation de
+         réunion, (3) Associer mon téléphone (téléphones associés + ajout
+         d'un téléphone, formulaire #panel-generate ouvert en modale par
+         window.openEnrollModal), (4) Mes données utiles, (5) Corbeille,
+         (6) Admin (révélé selon la claim). L'onglet par défaut est choisi
+         par pickDefaultTab (legacy.js) au 1er loadDevices : ?tab=, sinon
+         l'onglet mémorisé, sinon « Mes réunions (IA) » si un téléphone est
+         associé et le formulaire d'association (#panel-generate) sinon. -->
     {# Navigation onglets : DSFR `fr-tabs` natif. Les boutons gardent l'attribut
        `data-tab` pour compat avec le code legacy.js (activateTab + sélecteurs
        CSS `.tab-pane[data-tab="..."]`). Les panneaux (plus bas) portent à la fois
@@ -2560,10 +2564,11 @@
                         aria-controls="panel-brief">Préparation de réunion</button>
             </li>
             <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
+                <button type="button" class="fr-tabs__tab fr-tabs__tab--icon-left fr-icon-smartphone-line tab-btn" role="tab"
                         data-tab="devices" id="tab-btn-devices"
                         aria-selected="false" tabindex="-1"
-                        aria-controls="panel-devices">Mes appareils</button>
+                        aria-controls="panel-devices"
+                        title="Associez votre téléphone pour envoyer ici les enregistrements de son dictaphone, sans vous reconnecter.">Associer mon téléphone</button>
             </li>
             <li role="presentation">
                 <button type="button" class="fr-tabs__tab tab-btn" role="tab"
@@ -3084,15 +3089,15 @@
         </div>
     </div>
 
-    <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="tab-btn-generate" tabindex="0">
+    <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="generate-title" tabindex="0">
         <p style="margin:0 0 0.6rem;">
             <button type="button"
                     class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
                     data-action="back-to-devices"
-                    onclick="window.activateTab && window.activateTab('devices')">Retour à mes appareils</button>
+                    onclick="window.activateTab && window.activateTab('devices')">Retour à mes téléphones associés</button>
         </p>
-        <h1>Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
-        <p class="subtitle">Enrôler votre mobile pour permettre un upload facilité et sécurisé de votre enregistrement</p>
+        <h1 id="generate-title">Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
+        <p class="subtitle">Associez votre téléphone pour envoyer ici, de façon sécurisée, les enregistrements de son dictaphone.</p>
 
         <!-- Bloc replié si un device est déjà enrôlé. Conservé pour compat
              mais non révélé actuellement (cf. tabs/devices.js
@@ -3100,20 +3105,20 @@
         <div id="enrollment-collapsed" style="display:none;padding:0.45rem 0;">
             <div class="fr-callout fr-callout--blue-ecume">
                 <p class="fr-callout__text">
-                    Vous avez déjà au moins un appareil enrôlé. Vous pouvez uploader directement depuis lui.
+                    Vous avez déjà au moins un téléphone associé : vous pouvez envoyer vos enregistrements depuis lui.
                 </p>
                 <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                        data-action="show-enrollment-form">Enrôler un nouvel appareil</button>
+                        data-action="show-enrollment-form">Associer un autre téléphone</button>
             </div>
         </div>
 
         <div id="generate-form">
             <div class="fr-select-group">
                 <label class="fr-label" for="ttl">
-                    Fenêtre d'enrôlement
+                    Durée de validité du code
                     <span class="fr-hint-text">
-                        Délai pendant lequel le QR peut être scanné par un mobile pour s'enrôler.
-                        Une fois enrôlé, l'appareil est valide 15 jours pour uploader.
+                        Délai pendant lequel le QR code (ou le code court) peut être utilisé sur le téléphone.
+                        Une fois associé, le téléphone peut envoyer ses enregistrements pendant 15 jours.
                     </span>
                 </label>
                 <select id="ttl" class="fr-select">
@@ -3166,7 +3171,7 @@
 
     <div id="panel-devices" class="fr-tabs__panel card tab-pane" data-tab="devices" role="tabpanel" aria-labelledby="tab-btn-devices" tabindex="0">
         <div class="dsfr-inline-actions">
-            <h1 style="font-size:1.05rem;">Appareils enrôlés</h1>
+            <h1 style="font-size:1.05rem;">Mes téléphones associés</h1>
             <ul class="fr-btns-group fr-btns-group--sm fr-btns-group--inline" style="margin:0;gap:0.35rem;">
                 <li>
                     <button type="button" id="enroll-new-device-btn"
@@ -3187,8 +3192,12 @@
                 </li>
             </ul>
         </div>
+        <p id="devices-association-state" class="fr-text--sm" style="margin:0.4rem 0 0;font-weight:600;"
+           aria-live="polite"></p>
         <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
-            Ces appareils peuvent uploader sans rescanner tant que leur enrôlement est valide.
+            Associez votre téléphone (QR code ou code court) pour envoyer ici les enregistrements de son
+            dictaphone, sans vous reconnecter. Un téléphone associé envoie sans rescanner tant que son
+            association est valide ; « Renouveler » la prolonge.
         </p>
         <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils…</div>
     </div>

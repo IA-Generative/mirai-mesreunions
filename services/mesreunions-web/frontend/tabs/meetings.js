@@ -732,7 +732,7 @@ function renderRow(file, session) {
 function renderEmpty() {
   return `<div class="meetings-tab-empty">
     <p><strong>Vous n'avez pas encore importé de réunion.</strong></p>
-    <p>Cliquez sur <em>+ Importer</em> ci-dessus pour démarrer, ou enrôlez un téléphone depuis l'onglet <em>Mes appareils</em>.</p>
+    <p>Cliquez sur <em>+ Importer</em> ci-dessus pour démarrer, ou associez votre téléphone depuis l'onglet <em>Associer mon téléphone</em>.</p>
   </div>`;
 }
 

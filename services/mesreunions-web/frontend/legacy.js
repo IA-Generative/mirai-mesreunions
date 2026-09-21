@@ -1242,8 +1242,8 @@ window.showUploadHelp = function showUploadHelp() {
                 <li><strong>Depuis ce poste</strong> : bouton « Fichiers » (un ou
                     plusieurs fichiers) ou « Dossier » (un dossier complet) en haut
                     à droite de cette page.</li>
-                <li><strong>Depuis l'appli mobile MIrAI (PWA)</strong> : enrôlez
-                    votre téléphone via un QR depuis l'onglet « Appareils »,
+                <li><strong>Depuis l'appli mobile MIrAI (PWA)</strong> : associez
+                    votre téléphone via un QR depuis l'onglet « Associer mon téléphone »,
                     puis enregistrez ou choisissez un audio dans l'appli.</li>
             </ul>
             <div style="text-align:right;margin-top:0.8rem;">
@@ -5260,8 +5260,8 @@ let _tabsInitialised = false;
 const TAB_HEADER_LABELS = {
     transfers: 'Mes réunions IA',
     brief: 'Préparation de réunion',
-    devices: 'Mes appareils',
-    generate: 'Enrôlement d\'appareil',
+    devices: 'Associer mon téléphone',
+    generate: 'Associer mon téléphone',
     trash: 'Corbeille',
 };
 function activateTab(tabName) {
@@ -5427,7 +5427,7 @@ window.activateTab = activateTab;
 // handlers JS déjà bindés (mountPanel devices.js sur panel-generate).
 window.openEnrollModal = function openEnrollModal() {
     const panel = document.getElementById('panel-generate');
-    if (!panel) { alert('Formulaire d\'enrôlement indisponible.'); return; }
+    if (!panel) { alert('Formulaire d\'association du téléphone indisponible.'); return; }
     document.querySelectorAll('.enroll-modal-wrap').forEach((el) => el.remove());
 
     const wrap = document.createElement('div');
@@ -5445,7 +5445,7 @@ window.openEnrollModal = function openEnrollModal() {
         <div style="display:flex;justify-content:space-between;align-items:center;
                     padding:0.7rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
           <div id="enroll-modal-title" style="font-weight:600;color:#0c4498;font-size:1rem;">
-            ➕ Enrôler un nouvel appareil
+            📱 Associer mon téléphone
           </div>
           <button type="button" class="enroll-modal-close" aria-label="Fermer"
                   style="background:transparent;border:0;font-size:1.3rem;cursor:pointer;color:#64748b;">×</button>
