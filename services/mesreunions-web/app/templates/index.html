@@ -2651,8 +2651,8 @@
                     <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line"
                             id="brief-detail-target-date-save-btn"
                             data-action="commit-target-date"
-                            title="Enregistrer la date cible"
-                            aria-label="Enregistrer la date cible"
+                            title="Valider la date cible"
+                            aria-label="Valider la date cible"
                             disabled
                             style="padding:0.2rem 0.4rem;"></button>
                     <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-refresh-line"
@@ -2778,7 +2778,7 @@
                     <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
                             id="brief-detail-participants-save-btn"
                             data-action="save-detail-participants" style="display:none;">
-                        Enregistrer participants
+                        Sauvegarder les participants
                     </button>
                     <span id="brief-detail-participants-status"
                           style="font-size:0.78rem;color:#64748b;"></span>
@@ -2839,7 +2839,7 @@
                 <div style="margin-top:0.4rem;display:flex;gap:0.4rem;align-items:center;">
                     <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
                             id="brief-detail-recurrence-save-btn"
-                            data-action="save-detail-recurrence">Enregistrer</button>
+                            data-action="save-detail-recurrence">Sauvegarder</button>
                     <span id="brief-detail-recurrence-status"
                           style="font-size:0.78rem;color:#64748b;"></span>
                 </div>
@@ -2855,7 +2855,7 @@
                 <div style="margin-top:0.4rem;">
                     <button type="button" class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left"
                             id="brief-detail-themes-save-btn"
-                            data-action="save-detail-themes">Enregistrer thématiques</button>
+                            data-action="save-detail-themes">Sauvegarder les thématiques</button>
                 </div>
             </section>
             <!-- Lot 8 — Section "Emails" : invitation mailto + toggle CR auto -->
@@ -3042,11 +3042,11 @@
                     <div class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--inline-md"
                          style="margin-top:0.6rem;align-items:center;">
                         <button type="submit" id="amend-save-btn"
-                                class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left">Enregistrer</button>
+                                class="fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left">Sauvegarder</button>
                         <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
                                 data-action="toggle-amend">Annuler</button>
                         <span id="amend-save-spinner" style="display:none;font-size:0.8rem;color:#64748b;">
-                            Enregistrement…
+                            Sauvegarde…
                         </span>
                     </div>
                 </form>
@@ -3234,7 +3234,7 @@
                             onclick="document.getElementById('local-upload-files-input').click()"
                             title="Sélectionner un ou plusieurs fichiers audio">
                         <span class="local-upload-btn-icon" aria-hidden="true">📁</span>
-                        <span>Fichiers</span>
+                        <span>Importer un fichier audio</span>
                     </button>
                     <button type="button" class="local-upload-btn"
                             id="local-upload-folder-btn"
@@ -3242,7 +3242,7 @@
                             onclick="document.getElementById('local-upload-folder-input').click()"
                             title="Sélectionner un dossier — tous les fichiers audio à l'intérieur seront uploadés">
                         <span class="local-upload-btn-icon" aria-hidden="true">📂</span>
-                        <span>Dossier</span>
+                        <span>Importer un dossier audio</span>
                     </button>
                     <input type="file" id="local-upload-files-input"
                            accept="audio/*" multiple

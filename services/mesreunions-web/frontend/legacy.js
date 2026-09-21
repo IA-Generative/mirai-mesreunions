@@ -513,7 +513,7 @@ async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
     const statusEl = document.querySelector(`[data-meeting-dt-status-for="${fileId}"]`);
     const resetBtn = document.querySelector(`[data-meeting-dt-reset-for="${fileId}"]`);
     const saveBtn = document.querySelector(`[data-meeting-dt-save-for="${fileId}"]`);
-    if (statusEl) { statusEl.textContent = 'Enregistrement…'; statusEl.className = 'file-detail-meeting-status'; }
+    if (statusEl) { statusEl.textContent = 'Sauvegarde…'; statusEl.className = 'file-detail-meeting-status'; }
     try {
         const resp = await fetch(`/api/file/${fileId}/meeting-datetime`, {
             method: 'PATCH',
@@ -523,9 +523,9 @@ async function _doSaveMeetingDatetime(fileId, iso, inputEl) {
         const data = await resp.json();
         if (!resp.ok || !data.ok) throw new Error(data.error || 'save_failed');
         if (statusEl) {
-            statusEl.textContent = '✓ Enregistré';
+            statusEl.textContent = '✓ Sauvegardé';
             statusEl.className = 'file-detail-meeting-status saved';
-            setTimeout(() => { if (statusEl.textContent === '✓ Enregistré') statusEl.textContent = ''; }, 2500);
+            setTimeout(() => { if (statusEl.textContent === '✓ Sauvegardé') statusEl.textContent = ''; }, 2500);
         }
         // Met à jour la valeur "original" sur l'input pour neutraliser le
         // dirty-state (les boutons ✓/↺ se désactivent).
@@ -1239,9 +1239,9 @@ window.showUploadHelp = function showUploadHelp() {
                 Deux options :
             </p>
             <ul style="font-size:0.88rem;color:#1e293b;padding-left:1.1rem;">
-                <li><strong>Depuis ce poste</strong> : bouton « Fichiers » (un ou
-                    plusieurs fichiers) ou « Dossier » (un dossier complet) en haut
-                    à droite de cette page.</li>
+                <li><strong>Depuis ce poste</strong> : « Importer un fichier audio » (un ou
+                    plusieurs fichiers) ou « Importer un dossier audio » (un dossier complet)
+                    en haut de cette page.</li>
                 <li><strong>Depuis l'appli mobile MIrAI (PWA)</strong> : associez
                     votre téléphone via un QR depuis l'onglet « Associer mon téléphone »,
                     puis enregistrez ou choisissez un audio dans l'appli.</li>
@@ -4382,8 +4382,8 @@ async function loadSessions(opts) {
                                placeholder="Titre de la réunion" />
                         <button class="file-detail-action-btn file-detail-action-btn--validate file-detail-rename-btn"
                                 onclick="renameDetailTitle('${f.id}', this)"
-                                title="Enregistrer le nouveau titre"
-                                aria-label="Enregistrer le nouveau titre"
+                                title="Valider le nouveau titre"
+                                aria-label="Valider le nouveau titre"
                                 disabled>${ICONS.check}</button>
                         <button class="file-detail-action-btn file-detail-action-btn--revert"
                                 data-detail-title-revert-for="${f.id}"
@@ -4417,8 +4417,8 @@ async function loadSessions(opts) {
                         <button class="file-detail-action-btn file-detail-action-btn--validate"
                                 data-meeting-dt-save-for="${f.id}"
                                 onclick="saveMeetingDatetime('${f.id}', document.querySelector('[data-meeting-dt-for=\\'${f.id}\\']'))"
-                                title="Enregistrer la date de réunion"
-                                aria-label="Enregistrer la date de réunion"
+                                title="Valider la date de réunion"
+                                aria-label="Valider la date de réunion"
                                 disabled>${ICONS.check}</button>
                         <button class="file-detail-action-btn file-detail-action-btn--revert"
                                 data-meeting-dt-reset-for="${f.id}"

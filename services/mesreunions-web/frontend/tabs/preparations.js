@@ -387,7 +387,7 @@ async function _saveDetailRecurrence() {
     }
   }
   if (btn) btn.disabled = true;
-  if (status) status.textContent = 'Enregistrement…';
+  if (status) status.textContent = 'Sauvegarde…';
   try {
     const body = { is_recurring: isRecurring, recurrence_rule: recurrenceRule };
     const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
@@ -434,7 +434,7 @@ async function _saveDetailThemes() {
   if (!root) return;
   const themes = _serializeThemesChips(root);
   if (btn) btn.disabled = true;
-  if (status) status.textContent = 'Enregistrement…';
+  if (status) status.textContent = 'Sauvegarde…';
   try {
     const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
       method: 'POST',
@@ -480,7 +480,7 @@ async function _toggleSendCrEmail(ev) {
   const status = document.getElementById('brief-detail-emails-status');
   if (!toggle) return;
   const newVal = !!toggle.checked;
-  if (status) status.textContent = 'Enregistrement…';
+  if (status) status.textContent = 'Sauvegarde…';
   toggle.disabled = true;
   try {
     const r = await fetch(`/api/preparations/${_briefDetailId}/amend`, {
@@ -655,7 +655,7 @@ async function _saveDetailParticipants() {
   const participants = serializeParticipantsContainer(list);
   const btn = document.getElementById('brief-detail-participants-save-btn');
   if (btn) btn.disabled = true;
-  if (status) status.textContent = 'Enregistrement…';
+  if (status) status.textContent = 'Sauvegarde…';
   try {
     const r = await fetch(`/api/preparations/${_briefDetailId}/participants`, {
       method: 'POST',
@@ -1662,7 +1662,7 @@ function _openGlossaryModal() {
   cancel.addEventListener('click', closePrepModal);
   const save = document.createElement('button');
   save.type = 'button'; save.className = 'fr-btn fr-btn--sm fr-icon-save-line fr-btn--icon-left';
-  save.textContent = 'Enregistrer';
+  save.textContent = 'Sauvegarder';
   save.addEventListener('click', _saveGlossaryModal);
   foot.appendChild(cancel);
   foot.appendChild(save);

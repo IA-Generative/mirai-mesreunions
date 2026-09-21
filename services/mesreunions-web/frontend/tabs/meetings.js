@@ -276,12 +276,12 @@ function renderHeader() {
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:pick-files"
               title="Importer un ou plusieurs fichiers audio">
-        <span class="fr-icon-upload-line fr-icon--sm" aria-hidden="true"></span> Importer
+        <span class="fr-icon-upload-line fr-icon--sm" aria-hidden="true"></span> Importer un fichier audio
       </button></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:pick-folder"
               title="Importer un dossier entier (tous les audios à l'intérieur)">
-        <span class="fr-icon-folder-2-line fr-icon--sm" aria-hidden="true"></span> Dossier
+        <span class="fr-icon-folder-2-line fr-icon--sm" aria-hidden="true"></span> Importer un dossier audio
       </button></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:import-from-mcr"
@@ -300,8 +300,9 @@ function renderHeader() {
       </button></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:record-with-phone"
-              title="Associer votre téléphone : ses enregistrements arrivent ensuite ici">
+              title="L'enregistrement se lance sur votre téléphone, avec son dictaphone. Associez-le une fois : ses enregistrements arrivent ensuite ici.">
         <span class="fr-icon-smartphone-line fr-icon--sm" aria-hidden="true"></span> Enregistrer avec mon téléphone
+        <span class="mt-menu-soon">(depuis le dictaphone du téléphone)</span>
       </button></li>`,
   ];
   const moreItems = [
@@ -732,7 +733,7 @@ function renderRow(file, session) {
 function renderEmpty() {
   return `<div class="meetings-tab-empty">
     <p><strong>Vous n'avez pas encore importé de réunion.</strong></p>
-    <p>Cliquez sur <em>+ Importer</em> ci-dessus pour démarrer, ou associez votre téléphone depuis l'onglet <em>Associer mon téléphone</em>.</p>
+    <p>Cliquez sur <em>Apporter ou enregistrer une réunion</em> ci-dessus pour importer un fichier audio, ou associez votre téléphone depuis l'onglet <em>Associer mon téléphone</em> pour y envoyer les enregistrements de son dictaphone.</p>
   </div>`;
 }
 
