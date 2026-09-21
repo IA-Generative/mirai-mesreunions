@@ -5,8 +5,15 @@
 // l'utilisateur côté serveur (POST /api/rag/query) ; bouton « Indexer mes
 // réunions » (POST /api/rag/ingest). Ne se révèle que si le RAG est
 // configuré (GET /api/rag/status → configured), sinon reste inerte.
+//
+// Le bouton principal « Interroger mes réunions » de l'onglet réunions
+// (tabs/meetings.js) ouvre ce même panneau via openChatWidget(), et lit
+// chatWidgetState() pour dire clairement quand le service n'est pas
+// disponible plutôt que de disparaître. Chaque changement d'état est
+// annoncé par l'événement `mesreunions:rag-status` sur document.
 
 let _open = false;
+let _state = 'pending';     // 'pending' (statut en cours de lecture) | 'ready' | 'unavailable'
 let _busy = false;
 const _history = [];        // [{role:'user'|'assistant', content}]
 let _els = null;
@@ -276,14 +283,35 @@ function _build() {
   });
 }
 
+function _setState(state) {
+  _state = state;
+  try {
+    document.dispatchEvent(new CustomEvent('mesreunions:rag-status', { detail: { state } }));
+  } catch (e) { /* non bloquant */ }
+}
+
+// État du service, pour les boutons qui ouvrent le widget depuis l'écran.
+export function chatWidgetState() { return _state; }
+
+// Ouvre le panneau « Interroger mes réunions ». Renvoie false si le widget
+// n'est pas monté (RAG non configuré, ou statut pas encore connu).
+export function openChatWidget() {
+  if (!_els) return false;
+  _toggle(true);
+  return true;
+}
+
 export async function initChatWidget() {
   // Ne révèle le widget que si le RAG est configuré côté serveur.
   let status = {};
   try {
     const r = await fetch('/api/rag/status', { credentials: 'same-origin' });
     status = await r.json().catch(() => ({}));
-  } catch (e) { return; }
-  if (!status || status.configured !== true) return;  // inerte si non configuré
-  if (document.getElementById('rag-fab')) return;       // déjà monté
-  _build();
+  } catch (e) { _setState('unavailable'); return; }
+  if (!status || status.configured !== true) {        // inerte si non configuré
+    _setState('unavailable');
+    return;
+  }
+  if (!document.getElementById('rag-fab')) _build();  // sinon déjà monté
+  _setState('ready');
 }

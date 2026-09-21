@@ -5,8 +5,10 @@
 // n'a pas réussi à se brancher).
 //
 // Design (cf. spec utilisateur 2026-05-17) :
-//   • Header séparé de la liste : titre + compteur + tri date + 2 boutons
-//     d'import (fichiers / dossier). La purge n'apparaît qu'en mode bulk
+//   • Header séparé de la liste : trois actions principales avec icône
+//     (consulter / apporter ou enregistrer une réunion — menu qui regroupe
+//     les sources d'import — / interroger mes réunions) et un menu « Plus
+//     d'actions ». La purge n'apparaît qu'en mode bulk
 //     (touche Alt enfoncée + au moins 1 fichier sélectionné).
 //   • Liste : 1 ligne par fichier, grille à colonnes fixes pour empêcher
 //     tout chevauchement. Pastille status SVG inline (animée si pipeline
@@ -22,6 +24,7 @@
 //     n'est sélectionné.
 
 import { formatDuration, formatDate } from '../utils/format.js';
+import { openChatWidget, chatWidgetState } from '../lib/chat-widget.js';
 
 // ── Constantes ────────────────────────────────────────────────────────
 
@@ -203,45 +206,209 @@ function resolveTitle(file) {
 
 // ── Rendu HTML ────────────────────────────────────────────────────────
 
+// Menu déroulant ouvert dans l'en-tête ('add' | 'more' | '') — survit aux
+// re-render de la liste (poll 15 s) pour ne pas refermer un menu sous le
+// curseur de l'utilisateur.
+let _openMenu = '';
+
+// Libellé et état du bouton « Interroger mes réunions » selon le statut du
+// RAG (lib/chat-widget.js). Le bouton reste affiché même si le service n'est
+// pas configuré : il le dit, au lieu de disparaître.
+function _askButtonState() {
+  const st = chatWidgetState();
+  if (st === 'unavailable') {
+    return {
+      disabled: true,
+      hint: '(indisponible)',
+      title: "Le service qui répond aux questions sur vos réunions n'est pas disponible pour le moment.",
+    };
+  }
+  return {
+    disabled: false,
+    hint: '',
+    title: 'Poser une question sur le contenu de vos réunions (décisions, sujets, participants…)',
+  };
+}
+
+function _askButtonHtml() {
+  const a = _askButtonState();
+  return `<button type="button" class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-question-answer-line"
+              data-action="meetings-new:ask"
+              data-mt-ask
+              ${a.disabled ? 'aria-disabled="true"' : ''}
+              title="${escapeHtml(a.title)}">
+        Interroger mes réunions${a.hint ? ` <span class="mt-ask-hint">${escapeHtml(a.hint)}</span>` : ''}
+      </button>`;
+}
+
+// Le bouton « Mode avancé » de l'en-tête de page porte l'état (aria-pressed).
+function _advancedOn() {
+  const adv = document.getElementById('advanced-toggle');
+  return !!(adv && adv.getAttribute('aria-pressed') === 'true');
+}
+
+function _syncAdvancedItem() {
+  const item = document.querySelector('.meetings-tab-header [data-action="meetings-new:toggle-advanced"]');
+  if (!item) return;
+  const on = _advancedOn();
+  item.setAttribute('aria-checked', on ? 'true' : 'false');
+  const box = item.querySelector('[aria-hidden="true"]');
+  if (box) box.textContent = on ? '☑' : '☐';
+}
+
+function _menuHtml(id, items) {
+  const open = _openMenu === id;
+  return `<ul class="mt-menu" id="mt-menu-${id}" role="menu" ${open ? '' : 'hidden'}>
+      ${items.join('')}
+    </ul>`;
+}
+
 function renderHeader() {
-  // Pt0 : haut compact — pas de titre « Mes réunions » (redondant avec
-  // l'onglet), le compteur part dans la toolbar. Le rappel Alt est relocalisé
-  // à droite des boutons d'import.
-  return `<div class="meetings-tab-header">
-    <div class="meetings-tab-actions">
-      <button type="button" class="fr-btn fr-btn--sm"
+  // Trois actions principales, avec icône : consulter la liste, apporter ou
+  // enregistrer une réunion (menu qui regroupe toutes les sources), interroger
+  // ses réunions. Le reste (relance, mode avancé) passe sous « Plus
+  // d'actions ». Tous les data-action historiques sont conservés — seuls
+  // leurs emplacements changent.
+  const addOpen = _openMenu === 'add';
+  const moreOpen = _openMenu === 'more';
+  const advOn = _advancedOn();
+  const addItems = [
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:pick-files"
               title="Importer un ou plusieurs fichiers audio">
-        + Importer
-      </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+        <span class="fr-icon-upload-line fr-icon--sm" aria-hidden="true"></span> Importer
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:pick-folder"
               title="Importer un dossier entier (tous les audios à l'intérieur)">
-        + Dossier
-      </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+        <span class="fr-icon-folder-2-line fr-icon--sm" aria-hidden="true"></span> Dossier
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:import-from-mcr"
               title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
-        📥 Depuis MCR
-      </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+        <span aria-hidden="true">📥</span> Depuis MCR
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:youtube-import"
               title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
-        🎬 YouTube
-      </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
+        <span aria-hidden="true">🎬</span> YouTube
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:lasuite-import"
               title="Importer une visio ou un transcript depuis La Suite numérique (bientôt disponible)">
-        ${_LASUITE_LOGO}La Suite
-      </button>
-      <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary"
+        ${_LASUITE_LOGO}La Suite <span class="mt-menu-soon">(bientôt)</span>
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
+              data-action="meetings-new:record-with-phone"
+              title="Associer votre téléphone : ses enregistrements arrivent ensuite ici">
+        <span class="fr-icon-smartphone-line fr-icon--sm" aria-hidden="true"></span> Enregistrer avec mon téléphone
+      </button></li>`,
+  ];
+  const moreItems = [
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:resume-stuck"
               title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
         🔄 Relancer
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitemcheckbox" class="mt-menu-item"
+              data-action="meetings-new:toggle-advanced"
+              aria-checked="${advOn ? 'true' : 'false'}"
+              title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres)">
+        <span aria-hidden="true">${advOn ? '☑' : '☐'}</span> Mode avancé
+      </button></li>`,
+  ];
+  return `<div class="meetings-tab-header">
+    <div class="meetings-tab-actions meetings-main-actions" role="group" aria-label="Actions principales">
+      <button type="button" class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-list-unordered"
+              data-action="meetings-new:show-list"
+              title="Aller à la liste de mes réunions">
+        Consulter mes réunions
       </button>
+      <div class="mt-menu-wrap" data-mt-menu-wrap="add">
+        <button type="button" class="fr-btn fr-btn--icon-left fr-icon-add-circle-line"
+                data-action="meetings-new:toggle-menu" data-menu="add"
+                aria-haspopup="menu" aria-controls="mt-menu-add"
+                aria-expanded="${addOpen ? 'true' : 'false'}">
+          Apporter ou enregistrer une réunion <span aria-hidden="true">▾</span>
+        </button>
+        ${_menuHtml('add', addItems)}
+      </div>
+      ${_askButtonHtml()}
+      <div class="mt-menu-wrap" data-mt-menu-wrap="more">
+        <button type="button" class="fr-btn fr-btn--tertiary fr-btn--icon-left fr-icon-more-line"
+                data-action="meetings-new:toggle-menu" data-menu="more"
+                aria-haspopup="menu" aria-controls="mt-menu-more"
+                aria-expanded="${moreOpen ? 'true' : 'false'}">
+          Plus d'actions <span aria-hidden="true">▾</span>
+        </button>
+        ${_menuHtml('more', moreItems)}
+      </div>
       <span class="meetings-tab-althint">Maintenez <kbd>Alt</kbd> pour sélectionner plusieurs réunions</span>
     </div>
   </div>`;
+}
+
+// Ouvre/ferme un menu de l'en-tête sans re-render de la liste.
+function _setMenuOpen(id, focusFirst) {
+  _openMenu = id || '';
+  if (_openMenu === 'more') _syncAdvancedItem();
+  document.querySelectorAll('.meetings-tab-header [data-mt-menu-wrap]').forEach((wrap) => {
+    const key = wrap.getAttribute('data-mt-menu-wrap');
+    const open = key === _openMenu;
+    const menu = wrap.querySelector('.mt-menu');
+    const btn = wrap.querySelector('[data-action="meetings-new:toggle-menu"]');
+    if (menu) menu.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open && focusFirst && menu) {
+      const first = menu.querySelector('[role^="menuitem"]');
+      if (first) first.focus();
+    }
+  });
+}
+
+function _closeMenus(returnFocus) {
+  const was = _openMenu;
+  if (!was) return;
+  _setMenuOpen('');
+  if (returnFocus) {
+    const btn = document.querySelector(`.meetings-tab-header [data-menu="${was}"]`);
+    if (btn) btn.focus();
+  }
+}
+
+// Clavier dans un menu ouvert : Échap referme, flèches parcourent.
+function _onMenuKeyDown(e) {
+  if (!_openMenu) return;
+  const menu = document.getElementById('mt-menu-' + _openMenu);
+  if (!menu) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    _closeMenus(true);
+    return;
+  }
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const items = Array.from(menu.querySelectorAll('[role^="menuitem"]'));
+  if (!items.length) return;
+  e.preventDefault();
+  const i = items.indexOf(document.activeElement);
+  const next = e.key === 'ArrowDown'
+    ? items[(i + 1) % items.length]
+    : items[(i - 1 + items.length) % items.length];
+  next.focus();
+}
+
+// Clic hors d'un menu ouvert → on le referme.
+function _onDocClickCloseMenus(e) {
+  if (!_openMenu) return;
+  if (e.target && e.target.closest && e.target.closest('[data-mt-menu-wrap]')) return;
+  _setMenuOpen('');
+}
+
+// Met à jour le bouton « Interroger » quand le statut du RAG arrive (le
+// premier rendu de la liste peut précéder la réponse de /api/rag/status).
+function _onRagStatus() {
+  const cur = document.querySelector('.meetings-tab-header [data-mt-ask]');
+  if (cur) cur.outerHTML = _askButtonHtml();
 }
 
 // Boutons d'action en lot (réutilisés dans la toolbar quand ≥1 sélection).
@@ -662,6 +829,19 @@ function _ensureListStyles() {
     .meetings-tab-actions{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;}
     .meetings-tab-althint{font-size:.72rem;color:#8a8a8a;margin-left:auto;white-space:nowrap;}
     .meetings-tab-althint kbd{background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 .25rem;}
+    /* Actions principales + menus déroulants de l'en-tête */
+    .mt-menu-wrap{position:relative;display:inline-block;}
+    .mt-menu{position:absolute;top:100%;left:0;margin:.25rem 0 0;padding:.3rem 0;list-style:none;
+      min-width:280px;background:#fff;border:1px solid #cbd5e1;border-radius:.3rem;
+      box-shadow:0 10px 30px rgba(0,0,0,.15);z-index:50;font-size:.875rem;}
+    .mt-menu[hidden]{display:none;}
+    .mt-menu li{padding:0;margin:0;}
+    .mt-menu-item{display:flex;align-items:center;gap:.45rem;width:100%;text-align:left;
+      background:transparent;border:0;padding:.45rem .8rem;cursor:pointer;color:#161616;}
+    .mt-menu-item:hover,.mt-menu-item:focus{background:#eef2ff;}
+    .mt-menu-soon{color:#666;font-size:.78rem;}
+    .mt-ask-hint{font-weight:400;font-size:.78rem;margin-left:.25rem;}
+    [data-mt-ask][aria-disabled="true"]{opacity:.65;}
     /* Pt1 : toolbar unifiée (compteur/sélection + tri liens + bulk) */
     .meetings-tab-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.1rem 0 .5rem;font-size:.8125rem;}
     .mt-count{color:#666;white-space:nowrap;}
@@ -777,7 +957,14 @@ export function renderList(sessions) {
   // poll 15s ou un re-render renvoie l'utilisateur en haut).
   const _prevList = container.querySelector('.meetings-tab-list');
   const _prevScroll = _prevList ? _prevList.scrollTop : 0;
+  // Menu de l'en-tête ouvert : on garde l'en-tête tel quel (focus compris)
+  // au lieu de le reconstruire sous les yeux de l'utilisateur.
+  const _prevHeader = _openMenu ? container.querySelector('.meetings-tab-header') : null;
   container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}`;
+  if (_prevHeader) {
+    const _newHeader = container.querySelector('.meetings-tab-header');
+    if (_newHeader) _newHeader.replaceWith(_prevHeader);
+  }
   const _newList = container.querySelector('.meetings-tab-list');
   if (_newList && _prevScroll) _newList.scrollTop = _prevScroll;
   // Borne la hauteur du scroller au viewport (cf _sizeScroller).
@@ -1137,7 +1324,48 @@ function _onClick(ev) {
   const fileId = el.getAttribute('data-file-id') || '';
   ev.preventDefault();
 
+  // Un choix dans un menu de l'en-tête referme ce menu avant d'agir.
+  if (verb !== 'toggle-menu' && el.closest('.mt-menu')) _setMenuOpen('');
+
   switch (verb) {
+    case 'toggle-menu': {
+      const id = el.getAttribute('data-menu') || '';
+      _setMenuOpen(_openMenu === id ? '' : id, _openMenu !== id && ev.detail === 0);
+      break;
+    }
+    case 'show-list': {
+      // « Consulter mes réunions » : amène la liste à l'écran et donne le
+      // focus à la première réunion (ou au message de liste vide).
+      const list = document.querySelector('#sessions-list .meetings-tab-list');
+      if (list && typeof list.scrollIntoView === 'function') {
+        list.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+      const first = list && list.querySelector('[data-action="meetings-new:open-detail"], button, a');
+      if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
+      break;
+    }
+    case 'ask': {
+      if (openChatWidget()) break;
+      const msg = chatWidgetState() === 'unavailable'
+        ? "Interroger mes réunions n'est pas disponible pour le moment : le service n'est pas configuré."
+        : 'Interroger mes réunions se prépare, réessayez dans un instant.';
+      if (window.showToast) window.showToast(msg, 'info');
+      else window.alert(msg);
+      break;
+    }
+    case 'record-with-phone': {
+      // Le téléphone enregistre (dictaphone) ; l'association le relie au
+      // compte pour que ses fichiers arrivent ici.
+      if (typeof window.openEnrollModal === 'function') window.openEnrollModal();
+      break;
+    }
+    case 'toggle-advanced': {
+      // Même effet que le bouton « Mode avancé » de l'en-tête de page,
+      // qui reste la source de vérité (aria-pressed).
+      const adv = document.getElementById('advanced-toggle');
+      if (adv) adv.click();
+      break;
+    }
     case 'toggle-expand': {
       // Pt5 : dépliage LOCAL — on n'efface plus toute la liste, on insère/
       // retire juste le bloc déplié de la row ciblée (scroll préservé).
@@ -1751,6 +1979,9 @@ export function mount(container /*, ctx */) {
     panel.addEventListener('click', _onClick);
     document.addEventListener('keydown', _onKeyDown);
     document.addEventListener('keyup', _onKeyUp);
+    document.addEventListener('keydown', _onMenuKeyDown);
+    document.addEventListener('click', _onDocClickCloseMenus);
+    document.addEventListener('mesreunions:rag-status', _onRagStatus);
     window.addEventListener('resize', _onResize);
     _delegationBound = true;
   }
