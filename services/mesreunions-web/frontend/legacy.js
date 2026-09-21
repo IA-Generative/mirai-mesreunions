@@ -5524,10 +5524,15 @@ function pickDefaultTab(hasActiveDevice) {
         try { target = sessionStorage.getItem('mydevices-active-tab'); } catch (e) {}
     }
     if (!target) {
-        // Sans device : on guide direct vers le formulaire d'enrôlement.
-        // Avec device : vue principale = transferts/analyses.
-        target = hasActiveDevice ? 'transfers' : 'generate';
+        // R1 (2026-09-21) : l'écran s'ouvre TOUJOURS sur « Mes réunions » et ses trois
+        // actions. Il ouvrait l'enrôlement à qui n'avait pas de téléphone associé — soit
+        // presque tout le monde —, mais `generate` n'est plus un panneau (c'est une
+        // fenêtre) : l'en-tête annonçait « Associer mon téléphone » au-dessus de la liste
+        // des réunions, et aucun onglet n'était sélectionné.
+        target = 'transfers';
     }
+    // Un ancien choix mémorisé (`generate`) désigne désormais l'onglet du téléphone.
+    if (target === 'generate') target = 'devices';
     activateTab(target);
     if (target === 'brief') {
         // Migré vers tabs/preparations.js — `window.loadBriefs` publié au boot du module.
