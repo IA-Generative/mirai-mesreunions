@@ -3172,7 +3172,10 @@
     <div id="panel-devices" class="fr-tabs__panel card tab-pane" data-tab="devices" role="tabpanel" aria-labelledby="tab-btn-devices" tabindex="0">
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.05rem;">Mes téléphones associés</h1>
-            <ul class="fr-btns-group fr-btns-group--sm fr-btns-group--inline" style="margin:0;gap:0.35rem;">
+            <!-- R2 : `fr-btns-group--icon-left` est obligatoire — sans lui, le DSFR réduit à
+                 2rem tout bouton à icône d'un groupe --sm, et « Ajouter un téléphone » ne
+                 montrait qu'un « + » muet, alors que le texte d'aide y renvoie par son nom. -->
+            <ul class="fr-btns-group fr-btns-group--sm fr-btns-group--inline fr-btns-group--icon-left" style="margin:0;gap:0.35rem;">
                 <li>
                     <button type="button" id="enroll-new-device-btn"
                             class="fr-btn fr-btn--sm fr-btn--icon-left fr-icon-add-line"
