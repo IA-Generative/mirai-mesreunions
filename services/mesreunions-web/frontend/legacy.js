@@ -1561,7 +1561,7 @@ async function _openRegenerateModal(fileId, scope) {
 
     const scopeLabel = scope === 'full'
         ? 'transcription + diarisation (refonte complète du pipeline)'
-        : 'comptes-rendus (étapes LLM seulement, instantané)';
+        : 'le compte-rendu et le résumé pour les absents';
     // Raisons préremplies cliquables : remplissent le textarea (un clic).
     // Differencie par scope : les raisons LLM-only concernent le CR/glossaire/
     // mise en forme aval ; les raisons full concernent la qualité audio /
@@ -1573,6 +1573,7 @@ async function _openRegenerateModal(fileId, scope) {
         'Speakers mal identifiés',
         'Trop de mots manquants',
     ] : [
+        'Il manque le résumé pour les absents',
         'Termes corrigés à répercuter dans le CR',
         'Glossaire mis à jour',
         'CR confus ou hors-sujet',
@@ -1585,13 +1586,23 @@ async function _openRegenerateModal(fileId, scope) {
     // pour ça qu'il régénère. On pré-sélectionne le preset correspondant
     // et on affiche un hint contextuel "N corrections en attente".
     let initialReason = '', initialChip = '', contextHint = '';
+    // Venu de l'onglet « Pour les absents » (fiche épurée) : la raison est connue.
+    const _btnMotif = document.querySelector(`[data-feedback-regen="${scope}"][data-feedback-file="${fileId}"]`);
+    const _motif = _btnMotif && _btnMotif.dataset.motif;
+    if (_btnMotif) delete _btnMotif.dataset.motif;
     if (scope === 'llm-only') {
+        contextHint = "L'IA refait : correction des sigles, nettoyage, reformulation, compte-rendu et résumé pour les absents (5 à 15 minutes).";
+    }
+    if (_motif === 'absents') {
+        initialChip = 'Il manque le résumé pour les absents';
+        initialReason = initialChip;
+    } else if (scope === 'llm-only') {
         const pending = (typeof getPendingCorrectionsCount === 'function')
             ? getPendingCorrectionsCount(fileId) : 0;
         if (pending > 0) {
             initialChip = 'Termes corrigés à répercuter dans le CR';
             initialReason = initialChip;
-            contextHint = `${pending} correction${pending > 1 ? 's' : ''} de transcription en attente sur ce fichier.`;
+            contextHint = `${pending} correction${pending > 1 ? 's' : ''} de transcription en attente sur ce fichier. ` + contextHint;
         }
     }
     const reason = await _promptRegenReason(scopeLabel, presets, {
@@ -4346,7 +4357,7 @@ async function loadSessions(opts) {
                                     title="Autres actions">⋯<span class="fr-sr-only"> Autres actions</span></button>
                             <div class="fiche-pts-menu" role="menu" hidden>
                                 <button type="button" role="menuitem" data-fiche-action="question">❓ Poser une question sur mes réunions</button>
-                                <button type="button" role="menuitem" data-fiche-action="regen-llm">🔄 Régénérer le compte-rendu <small>~10 min</small></button>
+                                <button type="button" role="menuitem" data-fiche-action="regen-llm">🔄 Régénérer le compte-rendu et le résumé pour les absents <small>~10 min</small></button>
                                 ${(f.source_type || 'upload') === 'upload' ? `<button type="button" role="menuitem" data-fiche-action="regen-full">🔁 Refaire toute la transcription <small>long, ~1 h</small></button>` : ''}
                                 <button type="button" role="menuitem" data-fiche-action="infos" data-file-info-btn="${f.id}">ℹ️ Détails techniques</button>
                                 <div class="fiche-sep"></div>
@@ -4923,6 +4934,7 @@ document.addEventListener('click', (ev) => {
             if (window.showToast) window.showToast("Interroger mes réunions n'est pas disponible pour le moment.", 'info');
         } else if (quoi === 'regen-llm' || quoi === 'regen-full') {
             const cible = document.querySelector(`[data-feedback-regen="${quoi === 'regen-llm' ? 'llm-only' : 'full'}"][data-feedback-file="${CSS.escape(fid)}"]`);
+            if (cible && action.closest('[data-fiche-panneau="absents"]')) cible.dataset.motif = 'absents';
             if (cible) cible.click();
             else if (window.showToast) window.showToast('La régénération n\'est pas disponible pour cette réunion.', 'info');
         } else if (quoi === 'infos') {
@@ -5031,6 +5043,7 @@ async function loadTranscriptStatus(fileId, container) {
             'transcript-cleaned':      { label: 'Suppression des hésitations et redites',       desc: 'LLM retire les passages parasites du discours oral (faux départs, "euh", redites, bruits ambiants verbalisés).' },
             'transcript-reformulated': { label: 'Synthèse narrative',                            desc: 'LLM reformule au style indirect ("X explique que…") pour une lecture rapide.' },
             'meeting-cr':              { label: 'Compte-rendu structuré',                       desc: 'LLM produit l\'analyse 5 sections : acteurs, thématiques, décisions, gaps, recommandations.' },
+            'absentee':                { label: 'Résumé pour les absents',                      desc: 'LLM rédige 150 à 300 mots pour qui n\'était pas là : décisions, actions, points ouverts.' },
         };
         let stepsDetails = '';
         // Diagnostic visible quand la transcription est terminée OU pendant

@@ -181,10 +181,22 @@ def main():
         verifie("pas encore été rédigé" in pa.inner_text() and pa.locator('[data-fiche-action="regen-llm"]').count() == 1,
                 "F10 il le dit et propose « Rédiger le résumé pour les absents »")
         page.wait_for_selector('[data-feedback-regen="llm-only"][data-feedback-file="f2"]', state="attached", timeout=5_000)
-        page.evaluate("""() => { window.__regen2 = 0; document.querySelector('[data-feedback-regen="llm-only"][data-feedback-file="f2"]')
-                                .addEventListener('click', (e) => { window.__regen2++; e.stopImmediatePropagation(); e.preventDefault(); }, true); }""")
         pa.locator('[data-fiche-action="regen-llm"]').click()
-        verifie(page.evaluate("window.__regen2") == 1, "F10 le bouton lance la régénération")
+        page.wait_for_selector("#regen-reason-modal", timeout=5_000)
+        modale = page.evaluate("document.getElementById('regen-reason-modal').textContent")
+        verifie("résumé pour les absents" in modale, "F10 la fenêtre « Régénérer » nomme le résumé pour les absents")
+        verifie(page.input_value("#regen-reason-modal .regen-reason-input") == "Il manque le résumé pour les absents",
+                "F10 venu de l'onglet, la raison « Il manque le résumé pour les absents » est pré-remplie")
+        page.click("#regen-reason-modal .regen-cancel")
+        # Depuis « ⋯ », la raison n'est pas imposée, mais proposée.
+        f2.locator("[data-fiche-pts]").click()
+        verifie("résumé pour les absents" in f2.locator(".fiche-pts-menu").inner_text(), "F10 « ⋯ › Régénérer » annonce aussi le résumé")
+        f2.locator('.fiche-pts-menu [data-fiche-action="regen-llm"]').click()
+        page.wait_for_selector("#regen-reason-modal", timeout=5_000)
+        verifie(page.input_value("#regen-reason-modal .regen-reason-input") == ""
+                and page.locator('#regen-reason-modal [data-regen-preset="Il manque le résumé pour les absents"]').count() == 1,
+                "F10 depuis « ⋯ » : raison proposée, pas imposée")
+        page.click("#regen-reason-modal .regen-cancel")
 
         verifie(not erreurs, "F9 aucune erreur JavaScript" + (f" — {erreurs[:2]}" if erreurs else ""))
         page.screenshot(path=str(ICI / "fiche-epure.png"), full_page=False)
