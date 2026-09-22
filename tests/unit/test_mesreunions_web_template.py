@@ -209,6 +209,19 @@ def _have_node():
         return False
 
 
+def _is_menu_bootstrap(js: str) -> bool:
+    """Vrai pour l'amorce du menu commun : une IIFE de quelques lignes qui ne
+    fait que poser ``window.MIRAI_MENU`` depuis ``bootstrap-data``."""
+    compact = re.sub(r"\s+", " ", js).strip()
+    return (
+        "window.MIRAI_MENU" in compact
+        and "bootstrap-data" in compact
+        and len(compact) < 400
+        and "fetch(" not in compact
+        and "addEventListener" not in compact
+    )
+
+
 def test_no_inline_logic_script_remains(rendered_html):
     """Depuis PR4, tout le JS applicatif vit dans frontend/ (bundlé par
     Vite). Le template ne doit plus contenir que des ``<script type="module"
@@ -223,6 +236,12 @@ def test_no_inline_logic_script_remains(rendered_html):
     for blk in inline_blocks:
         stripped = re.sub(r'/\*.*?\*/', '', blk, flags=re.DOTALL)
         stripped = re.sub(r'//.*', '', stripped)
+        if _is_menu_bootstrap(stripped):
+            # Seule exception tolérée : l'amorce du menu commun de la bêta
+            # (window.MIRAI_MENU lu depuis bootstrap-data). Elle doit rester
+            # minuscule et ne rien faire d'autre — sinon c'est du JS
+            # applicatif qui a fui hors de frontend/.
+            continue
         assert stripped.strip() == "", (
             "Un <script> inline contient encore du JS applicatif :\n"
             + blk[:200]

@@ -198,6 +198,21 @@ c'est voulu — c'est le signal qui a fait découvrir la panne du 2026-08-30.
 - **Une ConfigMap montée `optional: true` qui manque ne casse rien** — elle dégrade en
   silence. Contrôler l'empreinte **vue par le pod**, pas la présence de la ConfigMap.
 
+## 8. Deux dépendances externes qui meurent en silence
+
+Relevé le 2026-09-16 dans les journaux d'`internal-ingester` (Loki, 14 jours) : **aucun
+`POST /jobs` Kevent, aucune transcription** sur la période — un seul pipeline, un import
+YouTube par sous-titres, dont quatre étapes LLM sur cinq sont sorties vides.
+
+| Symptôme dans les journaux | Cause | Geste |
+|---|---|---|
+| `Kevent GET /jobs → 401 body={"error":"token inactive"}` | la clé du Secret `kevent-api-key` (clé `kevent_api_key`) n'est plus acceptée par la passerelle. **La même clé dépose les jobs de transcription** : tout audio déposé finit `kevent_failed` / `kevent_auth_failed` (« Accès au moteur de transcription refusé »). | obtenir une nouvelle clé auprès des exploitants de la passerelle, la poser dans le Secret, redémarrer `internal-ingester`. Contrôle : un `GET /jobs` depuis le pod répond 200. |
+| `LiteLLM 400: … Invalid model name passed in model=mistral-small-24b` (idem `chat-small`) | le catalogue du hub a changé ; les défauts de `LLM_MODEL_SMALL`/`MEDIUM` n'existent plus pour notre clé. | depuis le pod, `GET $LITELLM_BASE_URL/v1/models` avec la clé (le hub est **verrouillé par IP** : depuis un poste il répond « Your IP address is not allowed », ce qui ne prouve rien). Poser `LLM_MODEL_*` sur des noms du catalogue. Depuis l'image qui embarque `LLM_MODEL_FALLBACKS` (défaut `chat,gptoss-120b`), la chaîne se replie seule et journalise le nom refusé en WARNING. |
+
+Ni l'un ni l'autre ne fait tomber un pod, ne change un `READY`, ni n'alerte : le service
+« répond ». Seuls les journaux, ou un utilisateur, le voient. Le contrôle de fin (§6) doit
+donc inclure ces deux lignes de journal.
+
 ## Voir aussi
 
 - [ADR-0005](adr/0005-manifestes-versionnes-hotes-expurges.md) — manifestes versionnés, hôtes expurgés

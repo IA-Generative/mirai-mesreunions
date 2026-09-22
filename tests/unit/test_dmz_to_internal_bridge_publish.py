@@ -70,6 +70,9 @@ def _install_stubs(trigger_url: str = ""):
 
     sec_stub = types.ModuleType("libs.shared.app.security")
     sec_stub.require_strong_shared_secret = lambda *_a, **_kw: None
+    # main.py importe aussi resolve_auto_transcribe (politique d'auto-
+    # transcription) — le stub doit suivre la signature d'import réelle.
+    sec_stub.resolve_auto_transcribe = lambda *_a, **_kw: False
     sys.modules["libs.shared.app.security"] = sec_stub
 
     # trigger_url is a real, pure module — load it normally so resolved_trigger_url
