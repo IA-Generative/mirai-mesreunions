@@ -2578,7 +2578,21 @@ function renderYoutubeRow(yt) {
     statusKind = 'queued';
     statusPct = 0;
     animated = false;
-    statusLabel = `Traitement non finalisé (${escapeHtml(yt.transcription_status || '?')}) — supprimable ou réimportable.`;
+    if (yt.job_error) {
+      // Verdict de la file video-ingest (vidéo privée, YouTube qui refuse
+      // le téléchargement…) : la cause, pas un code.
+      statusLabel = `Import impossible — ${escapeHtml(yt.job_error)} Supprimable ou réimportable.`;
+    } else {
+      statusLabel = `Traitement non finalisé (${escapeHtml(yt.transcription_status || '?')}) — supprimable ou réimportable.`;
+    }
+  } else if (ms === 'processing' && yt.transcription_status === 'video_ingest_retrying') {
+    // Backoff anti-robot côté video-ingest : « en cours » figé serait un
+    // mensonge, on dit qu'une nouvelle tentative est programmée.
+    statusKind = 'queued';
+    statusPct = 25;
+    animated = true;
+    const when = yt.job_next_attempt_at ? formatDate(yt.job_next_attempt_at, { withTime: true }) : '';
+    statusLabel = `YouTube a refusé une première fois — nouvelle tentative programmée${when ? ' le ' + escapeHtml(when) : ''}…`;
   } else if (ms === 'processing') {
     statusKind = 'processing';
     statusPct = 60;

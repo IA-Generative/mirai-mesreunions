@@ -41,6 +41,16 @@ log "=== Campagne de non-régression — $(date) ==="
 [ -n "$TAG" ] && log "Tag : $TAG"
 log ""
 
+# ── Run 0 : bout en bout (faux services HTTP, code de production) ────────────
+# Doit rester 100 % vert : ces scénarios reproduisent des incidents de prod
+# (catalogue LiteLLM qui bouge, jeton Kevent inactif, import YouTube en échec).
+log "── Run 0 : tests/e2e/ ──"
+E2E_OUT=$(python -m pytest tests/e2e/ 2>&1 || true)
+E2E_LAST=$(echo "$E2E_OUT" | tail -3 | tr -d '\n')
+log "$E2E_LAST"
+log ""
+E2E_FAILED=$(echo "$E2E_OUT" | grep -oE '[0-9]+ (failed|error)' | head -1 | grep -oE '[0-9]+' || echo 0)
+
 # ── Run 1 : périmètre video_ingest (notre code, doit être 100% vert) ─────────
 log "── Run 1 : tests/unit/test_video_ingest_*.py ──"
 VI_OUT=$(python -m pytest tests/unit/test_video_ingest_*.py 2>&1 || true)
@@ -82,8 +92,15 @@ log "video_ingest : ${VI_PASSED} passed / ${VI_FAILED} failed"
 log "historique   : ${HIST_PASSED} passed / ${HIST_FAILED} failed"
 log "total passed : $((VI_PASSED + HIST_PASSED))"
 
-# Critère 1 : video_ingest doit être 100% vert
+# Critère 0 : bout en bout doit être 100% vert
 FAIL_EXIT=0
+if [ "$E2E_FAILED" -gt 0 ]; then
+  log ""
+  log "❌ ÉCHEC : ${E2E_FAILED} scénarios bout en bout cassés (tests/e2e/). Bloquant."
+  FAIL_EXIT=1
+fi
+
+# Critère 1 : video_ingest doit être 100% vert
 if [ "$VI_FAILED" -gt 0 ]; then
   log ""
   log "❌ ÉCHEC : ${VI_FAILED} tests video_ingest cassés. Bloquant pour la slice."
