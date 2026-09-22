@@ -2522,14 +2522,16 @@ async function mountTranscriptCorrector(container) {
         return Number.isFinite(v) && v >= 0 ? v : 0.05;
     })();
 
-    // YouTube : les sous-titres auto ET getCurrentTime() de l'API IFrame
-    // accusent un léger retard vs la parole → le surlignage traîne. On
-    // ANTICIPE donc le karaoké d'un lead (positif = en avance), à l'inverse
-    // du lag audio. Tunable via localStorage.tc_karaoke_yt_lead (sec, float ;
-    // 0 = pas d'anticipation, augmenter si encore en retard).
+    // YouTube : avance du karaoké sur la vidéo (positif = en avance).
+    // Le 2026-06-11 un lead de 0,3 s avait corrigé un retard ; le 2026-09-22
+    // le PO constate l'inverse — le surlignage est EN AVANCE d'environ un mot
+    // (≈ 0,3 s) : le retard d'origine a disparu, le lead est resté. Défaut
+    // ramené à 0. Réglable par navigateur : localStorage.tc_karaoke_yt_lead
+    // (secondes, décimal ; négatif = retarder, positif = avancer).
     const YT_KARAOKE_LEAD_SEC = (() => {
-        const v = parseFloat(localStorage.getItem('tc_karaoke_yt_lead') || '0.3');
-        return Number.isFinite(v) ? v : 0.3;
+        let v = NaN;
+        try { v = parseFloat(localStorage.getItem('tc_karaoke_yt_lead') || '0'); } catch (e) { /* rien */ }
+        return Number.isFinite(v) ? v : 0;
     })();
 
     // Sync audio → text : pendant la lecture, highlight le bloc courant

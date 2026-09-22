@@ -503,3 +503,12 @@ def test_preview_tool_loads_template():
     tpl = mod.load_template()
     assert isinstance(tpl, str)
     assert len(tpl) > 10_000
+
+
+def test_karaoke_youtube_sans_avance_par_defaut():
+    """Le karaoké YouTube était avancé de 0,3 s (≈ un mot) par défaut depuis
+    le 2026-06-11 ; le PO le voit en avance le 2026-09-22 → défaut 0, réglable
+    par `localStorage.tc_karaoke_yt_lead`."""
+    legacy = open(_LEGACY_PATH, encoding="utf-8").read()
+    assert "localStorage.getItem('tc_karaoke_yt_lead') || '0')" in legacy
+    assert "tc_karaoke_yt_lead') || '0.3'" not in legacy
