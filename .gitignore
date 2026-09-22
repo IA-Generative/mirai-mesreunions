@@ -50,3 +50,4 @@ tests/fixtures/audio/
 # Fichiers et configuration locaux, non publiés (convention private/ et *.private/)
 private/
 *.private/
+tests/e2e/fiche-epure.png

@@ -48,6 +48,9 @@ TRANSCRIPT_KIND_TO_COLUMN = {
     "transcript-corrected": "glossary_corrected_text",
     "transcript-cleaned": "cleaned_text",
     "transcript-reformulated": "reformulated_text",
+    # « Pour les absents » (2026-09-22) : lu à l'écran depuis longtemps, il
+    # n'avait pas de téléchargement — la fiche épurée en propose un.
+    "absentee": "absentee_summary",
 }
 
 

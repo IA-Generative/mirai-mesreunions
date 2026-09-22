@@ -314,10 +314,12 @@ export function chatWidgetState() { return _state; }
 // Ouvre le panneau « Interroger mes réunions ». Renvoie false si le widget
 // n'est pas monté (RAG non configuré, ou statut pas encore connu).
 export function openChatWidget() {
-  if (!_els) return false;
+  if (!_els || _state === 'unavailable') return false;
   _toggle(true);
   return true;
 }
+// Pour la fiche d'une réunion (« ⋯ › Poser une question »), rendue par legacy.js.
+window.ouvrirQuestions = openChatWidget;
 
 export async function initChatWidget() {
   if (!document.getElementById('rag-fab')) _build();  // toujours montée

@@ -918,6 +918,10 @@ def api_file_transcript_download(kind, ext, file_id):
         if not text:
             return jsonify({"error": f"{kind}_unavailable"}), 410
         stem = svc.build_download_basename(file_obj, audio, kind)
+        if kind == "absentee" and "absents" not in stem:
+            # Le titre suggéré par l'IA est le même pour tous les documents :
+            # sans suffixe, « Pour les absents » écraserait le compte-rendu.
+            stem = f"{stem} - pour les absents"
         from app.transcript_formats import (
             text_to_docx_bytes, text_to_odt_bytes,
             text_to_plain_string, text_to_md_string,

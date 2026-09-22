@@ -331,6 +331,7 @@ DOCUMENT_KIND_LABELS = {
     "transcript-cleaned":      "Transcription nettoyée",
     "transcript-reformulated": "Synthèse narrative",
     "meeting-cr":              "Compte-rendu structuré",
+    "absentee":                "Pour les absents",
 }
 
 

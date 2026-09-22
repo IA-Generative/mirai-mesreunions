@@ -3112,7 +3112,10 @@ function _openCrEditorModal(fileId, data) {
       </div>
     `;
     document.body.appendChild(wrap);
-    const close = () => wrap.remove();
+    const close = () => {
+        wrap.remove();
+        try { document.dispatchEvent(new CustomEvent('mesreunions:cr-ferme', { detail: { fileId } })); } catch (e) { /* rien */ }
+    };
     wrap.querySelector('.cr-editor-close').addEventListener('click', close);
     wrap.addEventListener('click', (ev) => { if (ev.target === wrap) close(); });
     wrap.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') close(); });
@@ -4311,29 +4314,20 @@ async function loadSessions(opts) {
                 return `<div class="file-detail${isVirusBlocked ? ' file-detail-virus' : ''}" data-detail-file-id="${f.id}">
                     ${virusBanner}
                     <div class="file-detail-header">
-                        <button type="button" class="file-detail-back"
+                        <button type="button" class="file-detail-back fiche-retour"
                                 onclick="showFilesList()"
-                                title="Retour à la liste des réunions"
-                                aria-label="Retour à la liste">← Liste</button>
-                        <button type="button" class="icon-btn"
-                                onclick="deleteFile('${f.id}', '${escapeHtml(f.original_filename).replace(/'/g, '&#39;')}')"
-                                title="Mettre à la corbeille (supprimée automatiquement après 30 jours)"
-                                aria-label="Mettre à la corbeille">
-                            ${ICONS.trash}
-                        </button>
+                                title="Retour à la liste des réunions">← Mes réunions</button>
                     </div>
-                    <!-- Titre éditable : input flex + 2 boutons d'action
-                         (✓ valider activé si modifié, ↺ annuler activé si
-                         modifié = restore valeur originale) | bouton (i)
-                         info pipeline à l'extrême droite (cale à droite via
-                         margin-left:auto sur le (i)). La date d'upload est
-                         dans la techline ci-dessous (à droite du nom du
-                         fichier source). -->
+                    <!-- Fiche épurée (2026-09-22) : le titre se modifie sur place
+                         (✓ ↺ n'apparaissent que si le titre change) ; tout ce qui
+                         est rare — question, régénération, détails techniques,
+                         corbeille — est sous « ⋯ ». -->
                     <div class="file-detail-title-row">
                         <input class="file-detail-title-input file-detail-edit-input" type="text"
                                value="${escapeHtml(f.original_filename)}"
                                data-original-title="${escapeHtml(f.original_filename)}"
                                data-detail-title-for="${f.id}"
+                               aria-label="Titre de la réunion (modifiable)"
                                placeholder="Titre de la réunion" />
                         <button class="file-detail-action-btn file-detail-action-btn--validate file-detail-rename-btn"
                                 onclick="renameDetailTitle('${f.id}', this)"
@@ -4346,22 +4340,32 @@ async function loadSessions(opts) {
                                 title="Annuler les modifications"
                                 aria-label="Annuler les modifications du titre"
                                 disabled>${ICONS.revert}</button>
-                        <button class="file-detail-info-btn file-detail-info-btn--inline"
-                                type="button"
-                                data-file-info-btn="${f.id}"
-                                onclick="openFileInfoModal('${f.id}')"
-                                title="Détails techniques (statut, qualité, étapes IA, normalisation)"
-                                aria-label="Voir les détails techniques">i</button>
+                        <div class="fiche-pts-wrap">
+                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary fiche-pts"
+                                    data-fiche-pts="${f.id}" aria-haspopup="menu" aria-expanded="false"
+                                    title="Autres actions">⋯<span class="fr-sr-only"> Autres actions</span></button>
+                            <div class="fiche-pts-menu" role="menu" hidden>
+                                <button type="button" role="menuitem" data-fiche-action="question">❓ Poser une question sur mes réunions</button>
+                                <button type="button" role="menuitem" data-fiche-action="regen-llm">🔄 Régénérer le compte-rendu <small>~10 min</small></button>
+                                ${(f.source_type || 'upload') === 'upload' ? `<button type="button" role="menuitem" data-fiche-action="regen-full">🔁 Refaire toute la transcription <small>long, ~1 h</small></button>` : ''}
+                                <button type="button" role="menuitem" data-fiche-action="infos" data-file-info-btn="${f.id}">ℹ️ Détails techniques</button>
+                                <div class="fiche-sep"></div>
+                                <button type="button" role="menuitem" class="fiche-danger" data-fiche-action="corbeille"
+                                        data-fiche-nom="${escapeHtml(f.original_filename)}">🗑 Mettre à la corbeille</button>
+                            </div>
+                        </div>
                     </div>
-                    <!-- Date *réelle* de la réunion, surchargée par
-                         l'utilisateur. NULL côté serveur = pas d'override,
-                         l'UI retombe sur created_at pour l'affichage et
-                         le tri. 2 boutons : ✓ valider (activé si la valeur
-                         courante diffère de la valeur initiale) et ↺
-                         annuler (revert à la valeur sauvegardée ; quand
-                         la valeur est inchangée, le ↺ devient "effacer
-                         l'override" pour retomber sur created_at). -->
-                    <div class="file-detail-meeting-row">
+                    <p class="fiche-meta">
+                        <span>${escapeHtml(fileDateLabel)}</span>
+                        <button type="button" class="fiche-lien" data-fiche-date="${f.id}"
+                                title="Saisir la date réelle de la réunion">modifier</button>
+                        ${fileDurLabel ? `<span aria-hidden="true">·</span><span>${escapeHtml(fileDurLabel)}</span>` : ''}
+                        <span aria-hidden="true">·</span>
+                        <span title="${escapeHtml(f.original_filename)}">${escapeHtml(_ficheSource(f, s))}</span>
+                        <span aria-hidden="true">·</span>
+                        <span title="Date d'import (immuable)">importée le ${escapeHtml(_formatDateCompact(f.created_at))}</span>
+                    </p>
+                    <div class="file-detail-meeting-row" data-fiche-date-editeur hidden>
                         <span class="file-detail-meeting-label">Date de la réunion :</span>
                         <input type="datetime-local"
                                class="file-detail-meeting-input file-detail-edit-input"
@@ -4383,25 +4387,6 @@ async function loadSessions(opts) {
                                 ${f.meeting_datetime ? '' : 'disabled'}>${ICONS.revert}</button>
                         <span class="file-detail-meeting-status"
                               data-meeting-dt-status-for="${f.id}"></span>
-                    </div>
-                    <!-- Ligne sous le titre : date+durée à gauche, nom du
-                         fichier source au milieu, "Uploadé le ..." à droite
-                         (info immuable). Le bouton (i) info pipeline a
-                         migré sur la title row (à droite du nom de la
-                         réunion). -->
-                    <div class="file-detail-techline">
-                        <span class="file-row-meta">
-                            <span class="file-row-meta-date ${dateClass}">${escapeHtml(fileDateLabel)}</span>
-                            ${fileDurLabel ? `<span class="file-row-meta-dur">${escapeHtml(fileDurLabel)}</span>` : ''}
-                        </span>
-                        <span class="file-detail-source-filename"
-                              title="Nom d'origine du fichier audio">
-                            ${escapeHtml(f.original_filename)}
-                        </span>
-                        <span class="file-detail-upload-info"
-                              title="Date d'upload du fichier (immuable)">
-                            Uploadé le ${escapeHtml(_formatDateCompact(f.created_at))}
-                        </span>
                     </div>
                     <!-- transcript-section caché pour déclencher
                          loadTranscriptStatus qui met à jour la couleur du
@@ -4715,6 +4700,245 @@ function _buildInfoTooltip(status, engine, outputs, meta) {
     return lines.join('\n');
 }
 
+// ═══ La fiche d'une réunion (2026-09-22) ══════════════════════════════════
+// Maquette validée : 11 blocs → 5. En-tête (titre, une ligne de méta, « ⋯ »),
+// un état en une phrase, deux boutons (Télécharger ▾, Modifier), trois
+// onglets (Compte-rendu, Pour les absents, Transcription). Le compte-rendu
+// se LIT à l'écran : il fallait jusqu'ici le télécharger ou ouvrir la
+// modale d'édition. Les régénérations et les détails techniques passent
+// sous « ⋯ » ; les fichiers intermédiaires restent repliés dans Télécharger.
+
+const _ficheOnglet = new Map();   // fileId → 'cr' | 'absents' | 'tr' (survit au polling)
+
+const _FMT_TITRES = {
+    docx: 'Word (.docx)', odt: 'LibreOffice (.odt)', md: 'Markdown (.md)',
+    txt: 'Texte simple (.txt)', json: 'Données brutes (.json)', m4a: 'Audio',
+};
+
+function _ficheSource(f, s) {
+    const t = (f && f.source_type) || 'upload';
+    if (t === 'youtube') return 'YouTube';
+    if (t === 'mcr' || (f && f.origin === 'mcr_import')) return 'compte-rendu.mirai';
+    if (s && s.is_local_upload) return 'Fichier importé';
+    return 'Téléphone';
+}
+
+function _fichePastilles(url, exts) {
+    return exts.map((ext) => `<a class="fiche-fmt" href="${escapeHtml(url(ext))}" download target="_blank" rel="noopener"
+        role="menuitem" title="${escapeHtml(_FMT_TITRES[ext] || ext)}">${escapeHtml(ext)}</a>`).join('');
+}
+
+function _ficheLigne(libelle, pastilles, note) {
+    return `<div class="dl-ligne"><span>${escapeHtml(libelle)}${note ? ` <small>${escapeHtml(note)}</small>` : ''}</span><span class="fmts">${pastilles}</span></div>`;
+}
+
+// Du texte produit par un modèle, rendu en Markdown SANS HTML brut et sans
+// dépendre du CDN de marked : un rendu minimal (titres, listes, gras,
+// italique, paragraphes) sur un texte ÉCHAPPÉ d'abord — aucune balise venue
+// du texte ne peut s'exécuter, et la fiche reste lisible hors ligne.
+function _ficheEnLigne(t) {
+    return t
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[\s(])_([^_]+)_(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
+}
+function _ficheMarkdown(texte) {
+    const lignes = escapeHtml(String(texte || '')).split(/\r?\n/);
+    const out = [];
+    let liste = null;   // 'ul' | 'ol' | null
+    let para = [];
+    const fermerPara = () => { if (para.length) { out.push(`<p>${_ficheEnLigne(para.join(' '))}</p>`); para = []; } };
+    const fermerListe = () => { if (liste) { out.push(`</${liste}>`); liste = null; } };
+    for (const brute of lignes) {
+        const l = brute.trim();
+        let m;
+        if (!l) { fermerPara(); fermerListe(); continue; }
+        if ((m = l.match(/^#{1,6}\s+(.*)$/))) { fermerPara(); fermerListe(); out.push(`<h2>${_ficheEnLigne(m[1])}</h2>`); continue; }
+        if ((m = l.match(/^[-*•]\s+(.*)$/))) {
+            fermerPara();
+            if (liste !== 'ul') { fermerListe(); out.push('<ul>'); liste = 'ul'; }
+            out.push(`<li>${_ficheEnLigne(m[1])}</li>`); continue;
+        }
+        if ((m = l.match(/^\d+[.)]\s+(.*)$/))) {
+            fermerPara();
+            if (liste !== 'ol') { fermerListe(); out.push('<ol>'); liste = 'ol'; }
+            out.push(`<li>${_ficheEnLigne(m[1])}</li>`); continue;
+        }
+        fermerListe();
+        para.push(l);
+    }
+    fermerPara(); fermerListe();
+    return out.join('');
+}
+
+function _ficheHtml(fileId, data, statusBadge, audioOptions) {
+    const o = data.outputs || {};
+    const id = encodeURIComponent(fileId);
+    const lignes = [];
+    const inter = [];
+    if (o['meeting-cr']) {
+        lignes.push(_ficheLigne('Compte-rendu', _fichePastilles((e) => `/api/file/meeting-cr/${e}/${id}`, ['docx', 'odt', 'md'])));
+    }
+    if (o['absentee']) {
+        lignes.push(_ficheLigne('Pour les absents', _fichePastilles((e) => `/api/file/transcript/absentee/${e}/${id}`, ['docx', 'odt', 'md'])));
+    }
+    for (const kind of ['transcript-cleaned', 'transcript-reformulated']) {
+        if (!o[kind]) continue;
+        const fmts = (TRANSCRIPT_KIND_FORMATS[kind] || ['txt']).slice().sort((a, b) => (a === 'docx' ? -1 : b === 'docx' ? 1 : 0));
+        lignes.push(_ficheLigne(TRANSCRIPT_KIND_LABELS[kind], _fichePastilles((e) => `/api/file/transcript/${kind}/${e}/${id}`, fmts)));
+    }
+    for (const a of (audioOptions || [])) {
+        const interne = (a.label || '').toLowerCase().includes('interne');
+        const liens = [];
+        if (a.stream) liens.push(`<a class="fiche-fmt" href="${escapeHtml(a.stream)}" target="_blank" rel="noopener" role="menuitem" title="Écouter dans le navigateur">▶ écouter</a>`);
+        if (a.dl) liens.push(`<a class="fiche-fmt" href="${escapeHtml(a.dl)}" download target="_blank" rel="noopener" role="menuitem" title="Télécharger l'audio">audio</a>`);
+        if (!liens.length) continue;
+        (interne ? lignes : inter).push(_ficheLigne(interne ? 'Audio de la réunion' : (a.label || 'Audio'), liens.join('')));
+    }
+    for (const kind of ['transcript', 'transcript-tagged', 'transcript-corrected']) {
+        if (!o[kind]) continue;
+        inter.push(_ficheLigne(TRANSCRIPT_KIND_LABELS[kind].replace(/\s*\(.*\)\s*$/, ''),
+            _fichePastilles((e) => `/api/file/transcript/${kind}/${e}/${id}`, TRANSCRIPT_KIND_FORMATS[kind] || ['txt']),
+            'étape intermédiaire'));
+    }
+    if (o['meeting-cr']) inter.push(_ficheLigne('Compte-rendu, données brutes', _fichePastilles((e) => `/api/file/meeting-cr/${e}/${id}`, ['json'])));
+    const interHtml = inter.length
+        ? `<details class="downloads-inter"><summary>Fichiers intermédiaires <span class="downloads-inter-nb">(${inter.length})</span></summary>${inter.join('')}</details>`
+        : '';
+    const menuDl = lignes.length || inter.length
+        ? `<div class="fiche-dl-wrap">
+              <button type="button" class="fr-btn" data-fiche-dl aria-haspopup="menu" aria-expanded="false">
+                <span aria-hidden="true">⬇&nbsp;</span>Télécharger le compte-rendu <span aria-hidden="true">&nbsp;▾</span></button>
+              <div class="fiche-dl-menu" role="menu" hidden>${lignes.join('')}${interHtml}</div>
+           </div>`
+        : '';
+    const modifier = o['meeting-cr']
+        ? `<button type="button" class="fr-btn fr-btn--secondary" data-cr-edit="${escapeHtml(fileId)}"
+                   title="Corriger le compte-rendu : sélectionnez un mot pour le corriger, retrouvez la source brute"><span aria-hidden="true">✎&nbsp;</span>Modifier le compte-rendu</button>`
+        : '';
+
+    const kp = (data.key_points_summary || '').trim();
+    const crMd = data.meeting_analysis_json ? _formatMeetingAnalysisAsMarkdown(data.meeting_analysis_json) : '';
+    const panneauCr = (kp || crMd)
+        ? `${kp ? `<h3 class="fiche-h">En bref</h3><div class="fiche-enbref">${escapeHtml(kp)}</div>` : ''}
+           ${crMd ? `<div class="fiche-cr">${_ficheMarkdown(crMd)}</div>` : ''}`
+        : `<p class="fiche-vide">Le compte-rendu n'est pas encore prêt. Il apparaîtra ici dès la fin du traitement.</p>`;
+    const aAbsents = !!o['absentee'];
+    return `${statusBadge}
+        <div class="fiche-actions">${menuDl}${modifier}</div>
+        <div class="fiche-onglets" role="tablist" aria-label="Contenu de la réunion">
+            <button type="button" role="tab" data-fiche-onglet="cr">Compte-rendu</button>
+            ${aAbsents ? '<button type="button" role="tab" data-fiche-onglet="absents">Pour les absents</button>' : ''}
+            <button type="button" role="tab" data-fiche-onglet="tr">Transcription</button>
+        </div>
+        <div class="fiche-panneau" data-fiche-panneau="cr" role="tabpanel">${panneauCr}</div>
+        ${aAbsents ? '<div class="fiche-panneau" data-fiche-panneau="absents" role="tabpanel" hidden><p class="fiche-vide">Chargement…</p></div>' : ''}`;
+}
+
+function _ficheAppliquerOnglet(fileId, container, cle) {
+    const racine = container.closest('.file-detail') || container.parentNode;
+    const dispo = Array.from(container.querySelectorAll('[data-fiche-onglet]')).map((b) => b.getAttribute('data-fiche-onglet'));
+    if (!dispo.includes(cle)) cle = 'cr';
+    _ficheOnglet.set(fileId, cle);
+    container.querySelectorAll('[data-fiche-onglet]').forEach((b) => {
+        const on = b.getAttribute('data-fiche-onglet') === cle;
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+        b.tabIndex = on ? 0 : -1;
+    });
+    container.querySelectorAll('[data-fiche-panneau]').forEach((p) => {
+        p.hidden = p.getAttribute('data-fiche-panneau') !== cle;
+    });
+    if (racine) racine.setAttribute('data-onglet', cle);
+    if (cle === 'absents') {
+        const p = container.querySelector('[data-fiche-panneau="absents"]');
+        if (p && !p.dataset.charge) {
+            p.dataset.charge = '1';
+            _fetchTranscriptText(fileId, 'absentee').then((texte) => {
+                p.innerHTML = (texte && texte.trim())
+                    ? `<div class="fiche-cr">${_ficheMarkdown(texte)}</div>`
+                    : '<p class="fiche-vide">Pas de résumé pour les absents sur cette réunion.</p>';
+            });
+        }
+    }
+}
+
+function _ficheMonter(fileId, container, data) {
+    _ficheAppliquerOnglet(fileId, container, _ficheOnglet.get(fileId) || 'cr');
+    container.querySelectorAll('[data-fiche-onglet]').forEach((b) => {
+        b.addEventListener('click', () => _ficheAppliquerOnglet(fileId, container, b.getAttribute('data-fiche-onglet')));
+        b.addEventListener('keydown', (ev) => {
+            if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+            const tous = Array.from(container.querySelectorAll('[data-fiche-onglet]'));
+            const i = tous.indexOf(b);
+            const cible = tous[(i + (ev.key === 'ArrowRight' ? 1 : tous.length - 1)) % tous.length];
+            cible.focus();
+            _ficheAppliquerOnglet(fileId, container, cible.getAttribute('data-fiche-onglet'));
+        });
+    });
+}
+
+// Menus de la fiche (« ⋯ », Télécharger ▾) et le lien « modifier » de la date.
+// Délégation globale : la fiche est re-rendue par le polling.
+function _ficheFermerMenus(sauf) {
+    document.querySelectorAll('.fiche-pts-menu, .fiche-dl-menu').forEach((m) => {
+        if (m === sauf) return;
+        m.hidden = true;
+        const b = m.parentNode && m.parentNode.querySelector('[aria-expanded]');
+        if (b) b.setAttribute('aria-expanded', 'false');
+    });
+}
+document.addEventListener('click', (ev) => {
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const bouton = t.closest('[data-fiche-pts], [data-fiche-dl]');
+    if (bouton) {
+        ev.preventDefault();
+        const menu = bouton.parentNode.querySelector('.fiche-pts-menu, .fiche-dl-menu');
+        const ouvrir = menu && menu.hidden;
+        _ficheFermerMenus(menu);
+        if (menu) { menu.hidden = !ouvrir; bouton.setAttribute('aria-expanded', ouvrir ? 'true' : 'false'); }
+        return;
+    }
+    const action = t.closest('[data-fiche-action]');
+    if (action) {
+        ev.preventDefault();
+        const racine = action.closest('.file-detail');
+        const fid = racine && racine.getAttribute('data-detail-file-id');
+        _ficheFermerMenus();
+        if (!fid) return;
+        const quoi = action.getAttribute('data-fiche-action');
+        if (quoi === 'question') {
+            if (typeof window.ouvrirQuestions === 'function' && window.ouvrirQuestions()) return;
+            if (window.showToast) window.showToast("Interroger mes réunions n'est pas disponible pour le moment.", 'info');
+        } else if (quoi === 'regen-llm' || quoi === 'regen-full') {
+            const cible = document.querySelector(`[data-feedback-regen="${quoi === 'regen-llm' ? 'llm-only' : 'full'}"][data-feedback-file="${CSS.escape(fid)}"]`);
+            if (cible) cible.click();
+            else if (window.showToast) window.showToast('La régénération n\'est pas disponible pour cette réunion.', 'info');
+        } else if (quoi === 'infos') {
+            if (typeof window.openFileInfoModal === 'function') window.openFileInfoModal(fid);
+        } else if (quoi === 'corbeille') {
+            deleteFile(fid, action.getAttribute('data-fiche-nom') || '');
+        }
+        return;
+    }
+    const date = t.closest('[data-fiche-date]');
+    if (date) {
+        ev.preventDefault();
+        const racine = date.closest('.file-detail');
+        const ed = racine && racine.querySelector('[data-fiche-date-editeur]');
+        if (ed) {
+            ed.hidden = !ed.hidden;
+            date.textContent = ed.hidden ? 'modifier' : 'fermer';
+            if (!ed.hidden) { const i = ed.querySelector('input'); if (i) i.focus(); }
+        }
+        return;
+    }
+    if (!t.closest('.fiche-pts-menu, .fiche-dl-menu')) _ficheFermerMenus();
+});
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') _ficheFermerMenus(); });
+// Après une correction dans la modale « Modifier le compte-rendu », la
+// fiche relit le compte-rendu (sinon l'écran montre l'ancien texte).
+document.addEventListener('mesreunions:cr-ferme', () => refreshDownloadsBlocks());
+
 async function loadTranscriptStatus(fileId, container) {
     try {
         // Mode summary : on tire le statut + flags + key_points + le CR
@@ -5020,7 +5244,15 @@ async function loadTranscriptStatus(fileId, container) {
         // le bouton ✏️ "Modifier" sur la ligne "Compte-rendu structuré"
         // (cf dropdownBlock plus haut). On stocke `data` sur le container
         // pour que le click-handler global puisse y accéder sans re-fetch.
-        container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        // Vue détail (fiche épurée, 2026-09-22) : état, deux boutons, trois
+        // onglets, le compte-rendu LISIBLE à l'écran. La liste (mode compact)
+        // garde son rendu historique.
+        if (persistent) {
+            container.innerHTML = _ficheHtml(fileId, data, statusBadge, audioOptions);
+            _ficheMonter(fileId, container, data);
+        } else {
+            container.innerHTML = `${statusBadge}${subtitle}${dropdownBlock}`;
+        }
         if (persistent && data) {
             container._mesreunionsCrData = data;
             // Prefetch en arrière-plan des textes non-CR qui n'ont PAS été
