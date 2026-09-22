@@ -35,6 +35,7 @@ import * as adminTab from './tabs/admin.js';
 import { initTabManager } from './lib/tab-manager.js';
 import { initChatWidget } from './lib/chat-widget.js';
 import './lib/navigation.js';               // window.ouvrirEcran
+import './lib/annuler-corbeille.js';        // window.annoncerCorbeille
 import { initMenuHote } from './lib/menu-hote.js';
 import { initVisiteGuidee } from './lib/visite-guidee.js';
 

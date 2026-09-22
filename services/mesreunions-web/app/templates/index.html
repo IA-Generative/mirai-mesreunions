@@ -2079,6 +2079,10 @@
         .mr-nav .fr-nav__link[aria-current="page"] { color: var(--text-active-blue-france, #000091); }
         /* Un écran sans onglet (téléphones, corbeille, données utiles…) porte son retour. */
         .mr-retour { margin: 0 0 0.6rem; }
+        /* « Retirer » : le geste de la perte ou du vol — trouvable vite, jamais tentant.
+           Rouge en texte, pas en aplat. */
+        .mr-retirer-discret { color: #ce0500 !important; box-shadow: inset 0 0 0 1px #ddd !important; background: transparent !important; }
+        .mr-retirer-discret:hover { background: #fee9e9 !important; }
         /* Toasts feedback (bas-droite, disparaît après 4s).
            z-index 10500 : au-dessus des modales empilables (10200+, cf.
            lib/stacked-modal.js) et de la modale CR-editor (10000), qui
@@ -3217,7 +3221,7 @@
                 </li>
                 <li>
                     <button type="button" id="revoke-all-devices-btn"
-                            class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline btn-danger-mini"
+                            class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline mr-retirer-discret"
                             data-action="revoke-all-devices"
                             title="Téléphone perdu ou volé ? Tout retirer refuse leurs envois immédiatement">Tout retirer</button>
                 </li>

@@ -1059,6 +1059,10 @@ async function deleteFile(fileId, filenameRaw) {
         if (!resp.ok || !data.ok) throw new Error(data.error || 'delete_failed');
         // OK : force un loadSessions en arrière-plan pour resync compteurs / autres rows.
         loadSessions({ force: true });
+        // Le filet : « Annuler » pendant 10 s (lib/annuler-corbeille.js).
+        if (typeof window.annoncerCorbeille === 'function') {
+            window.annoncerCorbeille([{ type: 'file', id: fileId }], `« ${filename} » mise à la corbeille.`);
+        }
     } catch (e) {
         // Échec API : restaurer la row à sa position d'origine et alerter.
         if (revertSnapshot && revertSnapshot.parent) {

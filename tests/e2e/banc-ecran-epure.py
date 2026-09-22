@@ -26,6 +26,8 @@ Ce qu'il prouve :
       case « ne plus montrer », sans lien réel vers un magasin
   N8  le bouton flottant « Interroger mes réunions » reste monté quand le service
       n'est pas configuré, et le dit
+  N10 supprimer une réunion : le bandeau « Annuler » paraît, et « Annuler »
+      appelle la restauration (fichier → /api/file/<id>/restore)
   N9  ancien réflexe : `?tab=devices` (rechargement sur l'ancien onglet) ouvre
       l'écran Mes téléphones, pas une page vide
 
@@ -83,6 +85,9 @@ SESSIONS = [{
 STATUTS = {"f1": "kevent_failed", "f2": "completed", "f3": "kevent_failed", "f4": "completed"}
 
 
+APPELS = []
+
+
 def monter(ctx, html, devices):
     def route(r):
         url = r.request.url
@@ -120,6 +125,9 @@ def monter(ctx, html, devices):
             return r.fulfill(body=json.dumps({"files": [], "sessions": [], "briefs": [], "retention_days": 30}), content_type="application/json")
         if chemin.startswith("/api/preparations"):
             return r.fulfill(body=json.dumps({"preparations": [], "briefs": []}), content_type="application/json")
+        if r.request.method in ("DELETE", "POST") and chemin.startswith("/api/"):
+            APPELS.append((r.request.method, chemin))
+            return r.fulfill(body=json.dumps({"ok": True}), content_type="application/json")
         if chemin.startswith("/api/"):
             return r.fulfill(body="{}", content_type="application/json")
         return r.fulfill(status=204, body="")
@@ -245,6 +253,18 @@ def main():
         page.wait_for_selector(".meetings-tab-header", timeout=10_000)
         page.wait_for_timeout(2_500)
         verifie(page.locator("#mr-visite:not([hidden])").count() == 0, "N6 pas de rejeu seul au rechargement")
+
+        # N10 — le filet de la corbeille
+        page.once("dialog", lambda d: d.accept())
+        page.evaluate("window.deleteFile('f4', 'Réunion CESEDA.m4a')")
+        page.wait_for_selector("#mr-annuler:not([hidden])", timeout=5_000)
+        verifie("mise à la corbeille" in page.inner_text("#mr-annuler") and "Annuler" in page.inner_text("#mr-annuler"),
+                "N10 bandeau « … mise à la corbeille · Annuler · Voir la corbeille »")
+        verifie(("DELETE", "/api/file/f4") in APPELS, "N10 la suppression part (DELETE /api/file/f4)")
+        page.click("#mr-annuler [data-annuler]")
+        page.wait_for_timeout(500)
+        verifie(("POST", "/api/file/f4/restore") in APPELS, "N10 « Annuler » restaure (POST /api/file/f4/restore)")
+        verifie(page.evaluate("document.getElementById('mr-annuler').hidden") is True, "N10 le bandeau se ferme")
 
         # N9 — l'ancien réflexe ?tab=devices
         page.goto("https://mesreunions.numerique-interieur.com/?tab=devices")

@@ -1881,6 +1881,7 @@ async function _confirmBulkDelete() {
   const ok = window.confirm(`Mettre ${ids.length} réunion(s) à la corbeille ?\n\n(Suppression définitive automatique sous 30 jours, restaurable d'ici là.)`);
   if (!ok) return;
   let okCount = 0, failed = 0;
+  const misALaCorbeille = [];
   for (const id of ids) {
     try {
       // Différencie la cible : YouTube ET MCR sont des Meetings internes →
@@ -1896,8 +1897,12 @@ async function _confirmBulkDelete() {
       else if (isMcr) url = `/api/youtube/meetings/${encodeURIComponent(file.meeting_id)}`;
       else url = `/api/file/${encodeURIComponent(id)}`;
       const resp = await fetch(url, { method: 'DELETE' });
-      if (resp.ok) okCount++;
-      else failed++;
+      if (resp.ok) {
+        okCount++;
+        if (yt) misALaCorbeille.push({ type: 'meeting', id: yt.meeting_id });
+        else if (isMcr) misALaCorbeille.push({ type: 'meeting', id: file.meeting_id });
+        else misALaCorbeille.push({ type: 'file', id });
+      } else failed++;
     } catch (e) {
       failed++;
     }
@@ -1905,6 +1910,9 @@ async function _confirmBulkDelete() {
   _selectedIds.clear();
   if (failed > 0) {
     window.alert(`${okCount} supprimé(s), ${failed} échec(s). Rechargez la page pour vérifier l'état.`);
+  }
+  if (misALaCorbeille.length && typeof window.annoncerCorbeille === 'function') {
+    window.annoncerCorbeille(misALaCorbeille);
   }
   const fn = _resolveLegacyFn('loadSessions');
   if (fn) fn({ force: true });
@@ -1949,6 +1957,7 @@ export function mount(container /*, ctx */) {
     document.addEventListener('click', _onDocClickCloseMenus);
     document.addEventListener('mesreunions:rag-status', _onRagStatus);
     document.addEventListener('mesreunions:telephones', _onTelephones);
+    document.addEventListener('mesreunions:restauration', () => _refreshYoutubeImportsCache({ force: true }));
     window.addEventListener('resize', _onResize);
     _delegationBound = true;
   }
@@ -2435,6 +2444,9 @@ async function _deleteYoutubeMeeting(meetingId, title) {
     }
     // Force refresh immédiat de la liste.
     _refreshMeetingsListIfPossible();
+    if (typeof window.annoncerCorbeille === 'function') {
+      window.annoncerCorbeille([{ type: 'meeting', id: meetingId }], `${label} mis à la corbeille.`);
+    }
   } catch (err) {
     alert(`Erreur réseau : ${err.message}`);
   }

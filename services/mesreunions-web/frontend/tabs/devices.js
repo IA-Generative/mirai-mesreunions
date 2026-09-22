@@ -207,7 +207,7 @@ function _renderDeviceCard(d) {
               </button>
             </li>
             <li>
-              <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline btn-danger-mini"
+              <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline mr-retirer-discret"
                       data-action="revoke-device" data-device-id="${devId}"
                       data-device-revoke="${devId}" ${isRevoked ? 'disabled' : ''}
                       title="Téléphone perdu ou volé ? Retirer refuse ses envois immédiatement">
