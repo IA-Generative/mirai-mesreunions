@@ -52,7 +52,7 @@ function _updateAssociationState(nonRevokedCount) {
 function _updateDeviceFilterButton() {
   const btn = _$('device-filter-btn');
   if (!btn) return;
-  btn.textContent = _showAllDevices ? 'Masquer révoqués' : 'Voir révoqués';
+  btn.textContent = _showAllDevices ? 'Masquer les téléphones retirés' : 'Afficher les téléphones retirés';
 }
 
 function _schedulePendingDevicesPoll(devices) {
@@ -72,21 +72,58 @@ function _schedulePendingDevicesPoll(devices) {
   }
 }
 
-function _applyEnrollmentFormVisibility(/* devices */) {
-  // Form reste visible par défaut — la mécanique historique "masquer le
-  // form si un device est enrôlé" perturbait l'utilisateur qui ne trouvait
-  // plus le bouton "Générer". Le bloc #enrollment-collapsed n'est plus
-  // utilisé activement mais reste pour compatibilité éventuelle.
-  // EXCEPTION : si un QR vient d'être généré (#result.active), generateCode()
-  // a explicitement caché le form pour montrer seulement le QR ; ne pas
-  // réécraser sinon le form ré-apparaît au-dessus du QR (cf bug user 2026-05-18).
+// L'assistant « Associer en sécurité votre téléphone » (2026-09-22) se règle
+// sur l'état, sans case « ne plus montrer » :
+//   - première ouverture → les trois étapes ;
+//   - un téléphone actif → le bandeau « déjà associé » (nom, date, validité),
+//     la seconde voie devient « Associer un autre téléphone » ;
+//   - le formulaire du code reste TOUJOURS visible : c'est le seul chemin.
+//   EXCEPTION : si un QR vient d'être généré (#result.active), generateCode()
+//   a caché le form pour montrer le QR ; on ne le réécrase pas (bug 2026-05-18).
+const CLE_ASSISTANT_VU = 'mesreunions.assistant-telephone.vu';
+
+function _applyEnrollmentFormVisibility(devices) {
   const form = _$('generate-form');
   const result = _$('result');
   const collapsed = _$('enrollment-collapsed');
-  if (collapsed) collapsed.style.display = 'none';
+  const etapes = _$('assistant-etapes');
+  const actifs = (devices || []).filter((d) => {
+    const st = (d.status || '').toLowerCase();
+    return st !== 'revoked' && st !== 'pending';
+  });
+  let vu = false;
+  try { vu = localStorage.getItem(CLE_ASSISTANT_VU) === '1'; } catch (e) { /* navigation privée */ }
+  if (etapes) etapes.style.display = vu ? 'none' : '';
+  if (collapsed) {
+    if (actifs.length) {
+      const d = actifs[0];
+      const titre = _$('enrollment-collapsed-titre');
+      const detail = _$('enrollment-collapsed-detail');
+      const nom = d.device_name || 'téléphone sans nom';
+      if (titre) titre.textContent = actifs.length > 1
+        ? `${actifs.length} téléphones sont déjà associés (dont ${nom})`
+        : `Un téléphone est déjà associé : ${nom}`;
+      const validite = window.tokenValidityDaysLabel ? window.tokenValidityDaysLabel(d.retention_expires_at) : '';
+      if (detail) detail.textContent = `${validite ? 'Envois acceptés ' + validite + '. ' : ''}Vous pouvez enregistrer dès maintenant.`;
+      collapsed.style.display = '';
+    } else {
+      collapsed.style.display = 'none';
+    }
+  }
+  const eyebrow = _$('voie-code-eyebrow');
+  const titreVoie = _$('voie-code-titre');
+  const btn = _$('btn-generate');
+  if (eyebrow) eyebrow.textContent = actifs.length ? 'Un autre appareil' : "Disponible aujourd'hui";
+  if (titreVoie) titreVoie.textContent = actifs.length ? 'Associer un autre téléphone' : 'Utiliser le dictaphone du téléphone';
+  if (btn) btn.textContent = actifs.length ? 'Associer cet autre téléphone' : 'Associer ce téléphone';
   if (form && !(result && result.classList.contains('active'))) {
     form.style.display = '';
   }
+}
+
+// Marque l'explication comme vue dès que l'assistant a été affiché une fois.
+export function marquerAssistantVu() {
+  try { localStorage.setItem(CLE_ASSISTANT_VU, '1'); } catch (e) { /* rien */ }
 }
 
 export function showEnrollmentForm() {
@@ -125,9 +162,9 @@ function _renderDeviceCard(d) {
 
   // Badge DSFR pour l'état du token. Mapping → variants fr-badge--*.
   let badgeClass = 'fr-badge--success';
-  if (stateLabel === 'révoqué') badgeClass = 'fr-badge--error';
+  if (stateLabel === 'retiré') badgeClass = 'fr-badge--error';
   else if (stateLabel === 'expiré') badgeClass = 'fr-badge--warning';
-  else if (stateLabel === 'initialisation…') badgeClass = 'fr-badge--info';
+  else if (stateLabel === 'en attente du scan') badgeClass = 'fr-badge--info';
 
   const devId = _esc(d.device_id);
   const qr = _esc(d.qr_token || '');
@@ -166,14 +203,15 @@ function _renderDeviceCard(d) {
               <button type="button"
                       class="fr-btn fr-btn--sm fr-btn--secondary ${renewNeedsAttention ? 'btn-renew-alert' : ''}"
                       data-action="renew-device" data-qr-token="${qr}">
-                Renouveler
+                Prolonger
               </button>
             </li>
             <li>
               <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline btn-danger-mini"
                       data-action="revoke-device" data-device-id="${devId}"
-                      data-device-revoke="${devId}" ${isRevoked ? 'disabled' : ''}>
-                Révoquer
+                      data-device-revoke="${devId}" ${isRevoked ? 'disabled' : ''}
+                      title="Téléphone perdu ou volé ? Retirer refuse ses envois immédiatement">
+                Retirer
               </button>
             </li>
             <li>
@@ -206,6 +244,10 @@ export async function loadDevices() {
 
     const nonRevokedCount = devices.filter((d) => (d.status || '').toLowerCase() !== 'revoked').length;
     _updateAssociationState(nonRevokedCount);
+    // Pour la carte « Enregistrez depuis votre téléphone » de la liste des réunions
+    // (tabs/meetings.js) et le compte de l'entrée « Mes téléphones » du menu commun.
+    window.__mesreunionsTelephones = nonRevokedCount;
+    try { document.dispatchEvent(new CustomEvent('mesreunions:telephones', { detail: { n: nonRevokedCount } })); } catch (e) { /* rien */ }
     // Sélection onglet par défaut au 1er chargement (idempotent).
     if (typeof window.pickDefaultTab === 'function') {
       try { window.pickDefaultTab(nonRevokedCount > 0); } catch (e) {}
@@ -239,7 +281,7 @@ export async function loadDevices() {
     if (!visibleDevices.length) {
       const msg = _showAllDevices
         ? `Aucun téléphone affichable. Téléphones associés non révoqués : <strong>${nonRevokedCount}</strong>.`
-        : `Aucun téléphone associé. Utilisez « Ajouter un téléphone » pour en associer un.`;
+        : `Aucun téléphone associé. « Associer un téléphone » explique comment faire.`;
       container.innerHTML = `<div class="fr-callout fr-callout--blue-ecume" style="padding:0.6rem 0.8rem;">
         <p class="fr-callout__text" style="font-size:0.85rem;margin:0;">${msg}</p>
       </div>`;
@@ -274,7 +316,7 @@ export async function renameDevice(deviceId) {
 }
 
 export async function revokeDevice(deviceId) {
-  if (!confirm('Révoquer cet appareil ?')) return;
+  if (!confirm('Retirer ce téléphone ? Ses envois seront refusés immédiatement.')) return;
   const revokeBtn = document.querySelector(`[data-device-revoke="${deviceId}"]`);
   if (revokeBtn) revokeBtn.disabled = true;
   try {
@@ -283,7 +325,7 @@ export async function revokeDevice(deviceId) {
     if (!resp.ok || !data.ok) throw new Error(data.error || 'revoke_failed');
     const statusEl = document.querySelector(`[data-device-status="${deviceId}"]`);
     if (statusEl) {
-      statusEl.textContent = 'révoqué';
+      statusEl.textContent = 'retiré';
       statusEl.className = 'fr-badge fr-badge--sm fr-badge--error';
     }
     setTimeout(loadDevices, 250);
@@ -298,7 +340,7 @@ export async function deleteDevicePermanently(deviceId, deviceName) {
   const label = (deviceName || 'sans nom').slice(0, 60);
   if (!confirm(`Supprimer DÉFINITIVEMENT l'appareil « ${label} » ?
 
-Cette action est irréversible : la ligne sera retirée de la base de données (aucun audit conservé). Pour une suppression réversible, utilisez « Révoquer ».`)) {
+Cette action est irréversible : la ligne sera retirée de la base de données (aucun audit conservé). Pour une suppression réversible, utilisez « Retirer ».`)) {
     return;
   }
   if (!confirm(`Confirmer la suppression définitive de « ${label} » ?`)) return;
@@ -318,12 +360,12 @@ Cette action est irréversible : la ligne sera retirée de la base de données (
 }
 
 export async function revokeAllDevices() {
-  if (!confirm('Révoquer tous vos téléphones associés ?')) return;
+  if (!confirm('Retirer tous vos téléphones ? Leurs envois seront refusés immédiatement.')) return;
   try {
     const resp = await fetch('/api/my-devices/revoke-all', { method: 'POST' });
     const data = await resp.json();
     if (!resp.ok || !data.ok) throw new Error(data.error || 'revoke_all_failed');
-    alert(`Appareils révoqués: ${data.revoked || 0}`);
+    alert(`Téléphones retirés : ${data.revoked || 0}`);
     loadDevices();
   } catch (e) {
     alert('Echec révocation globale.');
@@ -336,7 +378,7 @@ export async function renewTokenByQr(qrToken) {
     return;
   }
   const retentionDays = Number(window.DEVICE_RETENTION_DAYS || 15);
-  if (!confirm(`Renouveler ce token pour ${retentionDays} jours ?`)) return;
+  if (!confirm(`Prolonger l'association de ${retentionDays} jours ?`)) return;
   try {
     // Pas de ttl_minutes : le serveur applique DEVICE_TOKEN_RETENTION_HOURS
     // (15j en prod-bêta) pour rester aligné avec la rétention device. Bug
@@ -441,6 +483,19 @@ function _onGenerateClick(ev) {
     resetForm();
   } else if (action === 'show-enrollment-form') {
     showEnrollmentForm();
+  } else if (action === 'store-bientot') {
+    // Simulation assumée : aucune application n'est publiée (voir le template).
+    const nom = target.getAttribute('data-store') || 'le magasin';
+    if (window.showToast) window.showToast(`L'application Transcript n'est pas encore publiée sur ${nom}. « M'avertir à la sortie » vous préviendra.`, 'info');
+  } else if (action === 'store-avertir') {
+    // Une idée déposée par « Mon avis » du menu commun : comptée, instruite.
+    if (window.MirAI && typeof window.MirAI.ouvrirAvis === 'function') {
+      window.MirAI.ouvrirAvis({ motif: 'je n’ai pas su faire', texte: "Prévenez-moi à la sortie de l'application Transcript (enregistrer avec mon téléphone)." });
+    } else if (window.showToast) {
+      window.showToast("Nous vous préviendrons à la sortie de l'application Transcript.", 'success');
+    }
+    target.textContent = '✓ Vous serez averti';
+    target.disabled = true;
   }
 }
 
@@ -513,5 +568,6 @@ window.renewTokenByQr = renewTokenByQr;
 window.toggleDeviceScope = toggleDeviceScope;
 window.updateDeviceFilterButton = updateDeviceFilterButton;
 window.showEnrollmentForm = showEnrollmentForm;
+window.marquerAssistantVu = marquerAssistantVu;
 window.generateCode = generateCode;
 window.resetForm = resetForm;

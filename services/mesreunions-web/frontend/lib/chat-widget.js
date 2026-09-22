@@ -4,12 +4,12 @@
 // persistant et indépendant des onglets. Interroge la partition perso de
 // l'utilisateur côté serveur (POST /api/rag/query) ; bouton « Indexer mes
 // réunions » (POST /api/rag/ingest). Ne se révèle que si le RAG est
-// configuré (GET /api/rag/status → configured), sinon reste inerte.
+// configuré (GET /api/rag/status → configured).
 //
-// Le bouton principal « Interroger mes réunions » de l'onglet réunions
-// (tabs/meetings.js) ouvre ce même panneau via openChatWidget(), et lit
-// chatWidgetState() pour dire clairement quand le service n'est pas
-// disponible plutôt que de disparaître. Chaque changement d'état est
+// Depuis le 2026-09-22 la bulle est le SEUL point d'entrée (le bouton de
+// l'en-tête de l'onglet, redondant, a été retiré) : elle est donc toujours
+// montée, et quand le service n'est pas disponible elle le dit sur elle-même
+// (« · indisponible ») au lieu de disparaître. Chaque changement d'état est
 // annoncé par l'événement `mesreunions:rag-status` sur document.
 
 let _open = false;
@@ -68,6 +68,8 @@ function _ensureStyles() {
       padding:.6rem .9rem;font:600 .9rem/1 Marianne,system-ui,sans-serif;cursor:pointer;
       box-shadow:0 4px 14px rgba(0,0,0,.25);}
     #rag-fab:hover{background:#1212a0;}
+    #rag-fab.is-unavailable{background:#666;}
+    #rag-fab .rag-ind{font-weight:400;opacity:.85;font-size:12px;}
     #rag-fab svg{width:18px;height:18px;}
     #rag-panel{position:fixed;right:1.1rem;bottom:1.1rem;z-index:9999;width:min(420px,94vw);
       height:min(620px,82vh);background:#fff;border:1px solid #ddd;border-radius:12px;
@@ -232,7 +234,7 @@ function _build() {
   const fab = document.createElement('button');
   fab.id = 'rag-fab';
   fab.type = 'button';
-  fab.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Interroger mes réunions`;
+  fab.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Interroger mes réunions<span data-rag-ind class="rag-ind"></span>`;
 
   const panel = document.createElement('div');
   panel.id = 'rag-panel';
@@ -264,7 +266,14 @@ function _build() {
     count: panel.querySelector('[data-rag-count]'),
   };
 
-  fab.addEventListener('click', () => _toggle(true));
+  fab.addEventListener('click', () => {
+    if (_state === 'unavailable') {
+      const msg = "Interroger mes réunions n'est pas disponible pour le moment : le service n'est pas configuré.";
+      if (window.showToast) window.showToast(msg, 'info'); else window.alert(msg);
+      return;
+    }
+    _toggle(true);
+  });
   panel.querySelector('[data-rag-close]').addEventListener('click', () => _toggle(false));
   _els.send.addEventListener('click', _send);
   _els.ingest.addEventListener('click', _ingest);
@@ -285,6 +294,15 @@ function _build() {
 
 function _setState(state) {
   _state = state;
+  if (_els && _els.fab) {
+    const off = state === 'unavailable';
+    _els.fab.classList.toggle('is-unavailable', off);
+    _els.fab.title = off
+      ? "Le service qui répond aux questions sur vos réunions n'est pas disponible pour le moment."
+      : 'Poser une question sur le contenu de vos réunions (décisions, sujets, participants…)';
+    const ind = _els.fab.querySelector('[data-rag-ind]');
+    if (ind) ind.textContent = off ? ' · indisponible' : '';
+  }
   try {
     document.dispatchEvent(new CustomEvent('mesreunions:rag-status', { detail: { state } }));
   } catch (e) { /* non bloquant */ }
@@ -302,16 +320,15 @@ export function openChatWidget() {
 }
 
 export async function initChatWidget() {
-  // Ne révèle le widget que si le RAG est configuré côté serveur.
+  if (!document.getElementById('rag-fab')) _build();  // toujours montée
   let status = {};
   try {
     const r = await fetch('/api/rag/status', { credentials: 'same-origin' });
     status = await r.json().catch(() => ({}));
   } catch (e) { _setState('unavailable'); return; }
-  if (!status || status.configured !== true) {        // inerte si non configuré
+  if (!status || status.configured !== true) {        // la bulle le dit
     _setState('unavailable');
     return;
   }
-  if (!document.getElementById('rag-fab')) _build();  // sinon déjà monté
   _setState('ready');
 }

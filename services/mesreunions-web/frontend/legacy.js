@@ -713,66 +713,17 @@ if (document.readyState === 'loading') {
 // confirmation pour refléter la vraie durée que Renouveler applique.
 const deviceRetentionDays = window.DEVICE_RETENTION_DAYS;
 
-// Mode "Mode avancé" pour les téléchargements : OFF (défaut) montre
-// le CR + audio interne + Transcription nettoyée + Synthèse narrative, le
-// reste va dans le menu "Autres". ON affiche tout à plat (pas de menu).
-// Persistant en sessionStorage. Astuce power-user non documentée : Alt
-// active un peek temporaire (sans changer l'état persistant) — pratique
-// pour jeter un œil sans toggler.
-let _dlAdvancedMode = false;
-try { _dlAdvancedMode = sessionStorage.getItem('mydevices-dl-mode') === 'advanced'; } catch(e){}
-let _altPeek = false;
-
-function effectiveAdvancedDl() { return _dlAdvancedMode || _altPeek; }
-
-function updateAdvancedToggleUi() {
-    const btn = document.getElementById('advanced-toggle');
-    if (btn) {
-        btn.classList.toggle('is-on', _dlAdvancedMode);
-        btn.classList.toggle('is-peek', _altPeek);
-        btn.setAttribute('aria-pressed', _dlAdvancedMode ? 'true' : 'false');
-    }
-    // body.adv-mode pilote la visibilité de .advanced-only (camion poubelle, etc.).
-    document.body.classList.toggle('adv-mode', effectiveAdvancedDl());
-}
-
-function toggleAdvancedDl() {
-    _dlAdvancedMode = !_dlAdvancedMode;
-    try { sessionStorage.setItem('mydevices-dl-mode', _dlAdvancedMode ? 'advanced' : 'simple'); } catch(e){}
-    updateAdvancedToggleUi();
-    refreshDownloadsBlocks();
-}
-
+// Le « Mode avancé » des téléchargements (à plat + aperçu par Alt + bouton de
+// purge) a été retiré le 2026-09-22 : les fichiers intermédiaires sont une
+// ligne REPLIÉE en bas du bloc de téléchargements de la fiche (un clic,
+// toujours là, rien à retenir). `refreshDownloadsBlocks` reste : la fiche
+// se relit quand un statut arrive.
 function refreshDownloadsBlocks() {
     document.querySelectorAll('.transcript-section[data-persistent-summary="1"]').forEach((container) => {
         const fileId = container.getAttribute('data-transcript-file-id');
         if (fileId) loadTranscriptStatus(fileId, container);
     });
 }
-
-// Peek temporaire via Alt enfoncé. Modifier-only keydown ne se répète
-// pas (autorepeat ignore Alt sur la plupart des navigateurs), donc on
-// fire bien une seule fois à l'appui.
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Alt' && !_altPeek) {
-        _altPeek = true;
-        updateAdvancedToggleUi();
-        refreshDownloadsBlocks();
-        e.preventDefault();
-    }
-});
-document.addEventListener('keyup', (e) => {
-    if (e.key === 'Alt' && _altPeek) {
-        _altPeek = false;
-        updateAdvancedToggleUi();
-        refreshDownloadsBlocks();
-    }
-});
-// Si la fenêtre perd le focus pendant un peek (Cmd+Tab…), on annule
-// pour ne pas rester coincé en mode peek.
-window.addEventListener('blur', () => {
-    if (_altPeek) { _altPeek = false; updateAdvancedToggleUi(); refreshDownloadsBlocks(); }
-});
 
 // Icônes SVG inline (Heroicons-like, simplifiés). Centralisées ici pour
 // que tous les boutons-icône partagent le même rendu et qu'on puisse les
@@ -931,17 +882,17 @@ function tokenIdShort(tokenValue) {
 
 function deviceTokenStateLabel(device) {
     const rawStatus = (device && device.status ? String(device.status) : '').toLowerCase();
-    if (rawStatus === 'revoked') return 'révoqué';
-    if (rawStatus === 'pending') return 'initialisation…';
+    if (rawStatus === 'revoked') return 'retiré';
+    if (rawStatus === 'pending') return 'en attente du scan';
     const endMs = new Date((device && (device.retention_expires_at || device.session_expires_at)) || '').getTime();
     if (Number.isFinite(endMs) && endMs <= Date.now()) return 'expiré';
-    return 'active';
+    return 'actif';
 }
 
 function deviceTokenStateColor(stateLabel) {
-    if (stateLabel === 'révoqué') return '#b91c1c';
+    if (stateLabel === 'retiré') return '#b91c1c';
     if (stateLabel === 'expiré') return '#b45309';
-    if (stateLabel === 'initialisation…') return '#64748b';
+    if (stateLabel === 'en attente du scan') return '#64748b';
     return '#166534';
 }
 // Publication globale des helpers partagés — consommés par tabs/devices.js
@@ -4963,22 +4914,23 @@ async function loadTranscriptStatus(fileId, container) {
                title="Écouter dans le navigateur" aria-label="Écouter">${ICONS.fmt_play}</a>`;
 
         // Direct (haut de section) = uniquement CR + audio (interne).
-        // Le reste passe dans la dropdown "Autres" :
-        //   - simple mode (default) : nettoyée + discours indirect seulement
-        //   - avancé (toggle ou Alt) : toutes les transcriptions + audios non-interne
+        // « Autres : » = transcription nettoyée + synthèse narrative.
+        // Les étapes intermédiaires (brute, par interlocuteur, sigles) et les
+        // audios d'origine/transcodé vont dans une ligne REPLIÉE « Fichiers
+        // intermédiaires » — ex-mode avancé (retiré le 2026-09-22).
         const SIMPLE_OTHER_KINDS = new Set([
             'transcript-cleaned',
             'transcript-reformulated',
         ]);
-        const advanced = effectiveAdvancedDl();
+        const interRows = [];
         for (const kind of Object.keys(TRANSCRIPT_KIND_LABELS)) {
             if (!outputs[kind]) continue;
-            if (!advanced && !SIMPLE_OTHER_KINDS.has(kind)) continue;
             const formats = TRANSCRIPT_KIND_FORMATS[kind] || ['txt'];
             const icons = formats.map((ext) =>
                 fmtIconHtml(ext, `/api/file/transcript/${kind}/${ext}/${fileId}`)
             ).join('');
-            otherRows.push({ label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons });
+            (SIMPLE_OTHER_KINDS.has(kind) ? otherRows : interRows)
+                .push({ label: TRANSCRIPT_KIND_LABELS[kind], iconsHtml: icons });
         }
 
         // Audios : interne → accès direct (toujours visible) ; les variantes
@@ -4993,11 +4945,11 @@ async function loadTranscriptStatus(fileId, container) {
                     label: "Écouter / Télécharger l'audio (interne)",
                     iconsHtml: icons.join(''),
                 });
-            } else if (advanced) {
+            } else {
                 const icons = [];
                 if (a.dl) icons.push(audioDlIcon(a.dl));
                 if (a.stream) icons.push(audioPlayIcon(a.stream));
-                otherRows.push({ label: a.label, iconsHtml: icons.join('') });
+                interRows.push({ label: a.label, iconsHtml: icons.join('') });
             }
         }
 
@@ -5014,7 +4966,7 @@ async function loadTranscriptStatus(fileId, container) {
         }
 
         let dropdownBlock = '';
-        if (defaultRows.length > 0 || otherRows.length > 0) {
+        if (defaultRows.length > 0 || otherRows.length > 0 || interRows.length > 0) {
             const defaultHtml = defaultRows.map(r => `
                 <div class="downloads-row">
                     <span class="downloads-row-label">${escapeHtml(r.label)}</span>
@@ -5045,7 +4997,19 @@ async function loadTranscriptStatus(fileId, container) {
                               data-other-icons-for="${selectId}"></span>
                     </div>`;
             }
-            dropdownBlock = `<div class="downloads-block">${defaultHtml}${otherSection}</div>`;
+            // Les fichiers intermédiaires : repliés, un clic, toujours là.
+            let interSection = '';
+            if (interRows.length > 0) {
+                interSection = `<details class="downloads-inter">
+                    <summary>Fichiers intermédiaires <span class="downloads-inter-nb">(${interRows.length})</span></summary>
+                    ${interRows.map(r => `
+                    <div class="downloads-row downloads-row--inter">
+                        <span class="downloads-row-label">${escapeHtml(r.label)}</span>
+                        <span class="downloads-row-icons">${r.iconsHtml}</span>
+                    </div>`).join('')}
+                </details>`;
+            }
+            dropdownBlock = `<div class="downloads-block">${defaultHtml}${otherSection}${interSection}</div>`;
         }
 
         // Le CR éditable est désormais exposé via une modale ouverte par
@@ -5268,6 +5232,8 @@ function activateTab(tabName) {
     document.querySelectorAll('.tab-btn').forEach((b) => {
         const on = b.getAttribute('data-tab') === tabName;
         b.setAttribute('aria-selected', on ? 'true' : 'false');
+        // La barre est un fr-nav (2026-09-22) : l'entrée courante se dit par aria-current.
+        if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
     document.querySelectorAll('.tab-pane').forEach((p) => {
         p.classList.toggle('is-active', p.getAttribute('data-tab') === tabName);
@@ -5445,7 +5411,7 @@ window.openEnrollModal = function openEnrollModal() {
         <div style="display:flex;justify-content:space-between;align-items:center;
                     padding:0.7rem 1rem;border-bottom:1px solid #e2e8f0;background:#f0f6ff;">
           <div id="enroll-modal-title" style="font-weight:600;color:#0c4498;font-size:1rem;">
-            📱 Associer mon téléphone
+            📱 Associer en sécurité votre téléphone
           </div>
           <button type="button" class="enroll-modal-close" aria-label="Fermer"
                   style="background:transparent;border:0;font-size:1.3rem;cursor:pointer;color:#64748b;">×</button>
@@ -5477,11 +5443,17 @@ window.openEnrollModal = function openEnrollModal() {
     //  - on cache l'alerte warning (info conservée mais on l'allège dans le
     //    contexte modal pour ne montrer que l'essentiel).
     // À la fermeture, tout est restauré (le reset des styles inline).
+    // L'assistant (étapes, bandeau, voies) reste entier dans la modale : seul le
+    // titre de page (répété par la modale) et le retour disparaissent.
     const hideEls = [];
-    panel.querySelectorAll('h1, .subtitle, .fr-alert').forEach((el) => {
+    panel.querySelectorAll('h1').forEach((el) => {
         hideEls.push({ el, prev: el.style.display });
         el.style.display = 'none';
     });
+    // Les trois étapes ne se montrent qu'une fois : vues maintenant.
+    const _etapes = panel.querySelector('#assistant-etapes');
+    const _dejaVu = !_etapes || _etapes.style.display === 'none';
+    if (typeof window.marquerAssistantVu === 'function') window.marquerAssistantVu();
     const backBtn = panel.querySelector('[data-action="back-to-devices"]');
     let backBtnParent = null;
     if (backBtn && backBtn.parentNode) {
@@ -5490,6 +5462,8 @@ window.openEnrollModal = function openEnrollModal() {
     }
 
     const close = () => {
+        // À la prochaine ouverture, l'explication a été vue.
+        if (_etapes && !_dejaVu) _etapes.style.display = 'none';
         // Restaure le panel à sa place d'origine + classes DSFR initiales
         // (sinon DSFR ne peut plus le gérer après) + visibilités initiales
         // des H1/subtitle/alert cachés pendant le modal.
@@ -5559,7 +5533,6 @@ function pickDefaultTab(hasActiveDevice) {
 // les ré-exports `export const ... = window.<fn>` sont résolus.
 const _WINDOW_EXPORTS = {
     // Mode avancé (header)
-    toggleAdvancedDl,
     // Liste / détail / chevron / corbeille (sessions + fichiers)
     showFileDetail,
     showFilesList,
@@ -5601,7 +5574,6 @@ for (const [name, fn] of Object.entries(_WINDOW_EXPORTS)) {
 
 setupTabs();
 updateDeviceFilterButton();
-updateAdvancedToggleUi();
 // Feedback visuel sur clic d'une icône de téléchargement : flash + scale.
 // Délégation globale — fonctionne pour les boutons re-rendus par
 // loadTranscriptStatus sans re-bind à chaque refresh.

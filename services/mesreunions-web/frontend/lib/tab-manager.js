@@ -49,7 +49,7 @@ async function _mountTab(tabId) {
 }
 
 function _onTabClick(ev) {
-  const btn = ev.target.closest && ev.target.closest('.fr-tabs__tab[data-tab]');
+  const btn = ev.target.closest && ev.target.closest('.tab-btn[data-tab]');
   if (!btn) return;
   const tabId = btn.getAttribute('data-tab');
   if (!tabId) return;

@@ -24,7 +24,6 @@
 //     n'est sélectionné.
 
 import { formatDuration, formatDate } from '../utils/format.js';
-import { openChatWidget, chatWidgetState } from '../lib/chat-widget.js';
 
 // ── Constantes ────────────────────────────────────────────────────────
 
@@ -211,49 +210,35 @@ function resolveTitle(file) {
 // curseur de l'utilisateur.
 let _openMenu = '';
 
-// Libellé et état du bouton « Interroger mes réunions » selon le statut du
-// RAG (lib/chat-widget.js). Le bouton reste affiché même si le service n'est
-// pas configuré : il le dit, au lieu de disparaître.
-function _askButtonState() {
-  const st = chatWidgetState();
-  if (st === 'unavailable') {
-    return {
-      disabled: true,
-      hint: '(indisponible)',
-      title: "Le service qui répond aux questions sur vos réunions n'est pas disponible pour le moment.",
-    };
+// Nombre de réunions en échec dans la liste connue : c'est le compteur du
+// bouton « Relancer ». Les réunions « bloquées » (sans activité depuis 5 min)
+// sont décidées par le serveur au clic ; ici on ne compte que ce que la
+// pastille de la ligne dit déjà (kind === 'error').
+function _nbEnEchec() {
+  let n = 0;
+  for (const sess of (_lastSessions || [])) {
+    if (typeof sess.id === 'string' && sess.id.startsWith('yt-')) continue;
+    for (const f of (sess.uploads || [])) {
+      const st = resolveStatus(f);
+      if (st && st.kind === 'error') n++;
+    }
   }
-  return {
-    disabled: false,
-    hint: '',
-    title: 'Poser une question sur le contenu de vos réunions (décisions, sujets, participants…)',
-  };
+  return n;
 }
 
-function _askButtonHtml() {
-  const a = _askButtonState();
-  return `<button type="button" class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-question-answer-line"
-              data-action="meetings-new:ask"
-              data-mt-ask
-              ${a.disabled ? 'aria-disabled="true"' : ''}
-              title="${escapeHtml(a.title)}">
-        Interroger mes réunions${a.hint ? ` <span class="mt-ask-hint">${escapeHtml(a.hint)}</span>` : ''}
-      </button>`;
-}
-
-// Le bouton « Mode avancé » de l'en-tête de page porte l'état (aria-pressed).
-function _advancedOn() {
-  const adv = document.getElementById('advanced-toggle');
-  return !!(adv && adv.getAttribute('aria-pressed') === 'true');
-}
-
-function _syncAdvancedItem() {
-  const item = document.querySelector('.meetings-tab-header [data-action="meetings-new:toggle-advanced"]');
-  if (!item) return;
-  const on = _advancedOn();
-  item.setAttribute('aria-checked', on ? 'true' : 'false');
-  const box = item.querySelector('[aria-hidden="true"]');
-  if (box) box.textContent = on ? '☑' : '☐';
+// La carte « Enregistrez vos réunions depuis votre téléphone », sous la liste,
+// tant qu'aucun téléphone n'est associé (tabs/devices.js publie le compte).
+function _carteTelephoneHtml() {
+  const n = window.__mesreunionsTelephones;
+  if (n === undefined || n > 0) return '';
+  return `<div class="mr-carte-tel" data-mr-carte-tel>
+    <div class="mr-tel" aria-hidden="true">📱</div>
+    <div>
+      <b>Enregistrez vos réunions depuis votre téléphone</b>
+      <p>Associez-le une fois : ses enregistrements arrivent directement ici, transcrits et résumés. Aucun téléphone n'est associé pour le moment.</p>
+      <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary" data-action="meetings-new:record-with-phone">Voir comment ça marche</button>
+    </div>
+  </div>`;
 }
 
 function _menuHtml(id, items) {
@@ -264,14 +249,14 @@ function _menuHtml(id, items) {
 }
 
 function renderHeader() {
-  // Trois actions principales, avec icône : consulter la liste, apporter ou
-  // enregistrer une réunion (menu qui regroupe toutes les sources), interroger
-  // ses réunions. Le reste (relance, mode avancé) passe sous « Plus
-  // d'actions ». Tous les data-action historiques sont conservés — seuls
-  // leurs emplacements changent.
+  // Deux boutons, depuis le 2026-09-22 : « Importer une réunion ▾ » (toutes
+  // les sources, téléphone compris) et « Relancer (n) ». « Consulter mes
+  // réunions » menait à la liste qu'on a sous les yeux ; « Interroger mes
+  // réunions » doublonnait le bouton flottant (lib/chat-widget.js), qui
+  // porte désormais l'état « indisponible ». Le mode avancé n'existe plus.
+  // Tous les data-action historiques sont conservés.
   const addOpen = _openMenu === 'add';
-  const moreOpen = _openMenu === 'more';
-  const advOn = _advancedOn();
+  const nbEchec = _nbEnEchec();
   const addItems = [
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:pick-files"
@@ -284,66 +269,44 @@ function renderHeader() {
         <span class="fr-icon-folder-2-line fr-icon--sm" aria-hidden="true"></span> Importer un dossier audio
       </button></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
-              data-action="meetings-new:import-from-mcr"
-              title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
-        <span aria-hidden="true">📥</span> Depuis MCR
-      </button></li>`,
-    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:youtube-import"
               title="Importer une vidéo YouTube par URL — sous-titres prioritaires, ASR Whisper en fallback">
-        <span aria-hidden="true">🎬</span> YouTube
+        <span aria-hidden="true">🎬</span> Depuis YouTube
+      </button></li>`,
+    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
+              data-action="meetings-new:import-from-mcr"
+              title="Importer une ou plusieurs réunions depuis compte-rendu.mirai">
+        <span aria-hidden="true">📥</span> Depuis compte-rendu.mirai
       </button></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:lasuite-import"
               title="Importer une visio ou un transcript depuis La Suite numérique (bientôt disponible)">
-        ${_LASUITE_LOGO}La Suite <span class="mt-menu-soon">(bientôt)</span>
+        ${_LASUITE_LOGO}Depuis La Suite numérique <span class="mt-menu-soon">(bientôt)</span>
       </button></li>`,
+    `<li role="none" class="mt-menu-sep"></li>`,
     `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
               data-action="meetings-new:record-with-phone"
-              title="L'enregistrement se lance sur votre téléphone, avec son dictaphone. Associez-le une fois : ses enregistrements arrivent ensuite ici.">
-        <span class="fr-icon-smartphone-line fr-icon--sm" aria-hidden="true"></span> Enregistrer avec mon téléphone
-        <span class="mt-menu-soon">(depuis le dictaphone du téléphone)</span>
-      </button></li>`,
-  ];
-  const moreItems = [
-    `<li role="none"><button type="button" role="menuitem" class="mt-menu-item"
-              data-action="meetings-new:resume-stuck"
-              title="Relancer les réunions bloquées (sans activité depuis 5min) OU en échec">
-        🔄 Relancer
-      </button></li>`,
-    `<li role="none"><button type="button" role="menuitemcheckbox" class="mt-menu-item"
-              data-action="meetings-new:toggle-advanced"
-              aria-checked="${advOn ? 'true' : 'false'}"
-              title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres)">
-        <span aria-hidden="true">${advOn ? '☑' : '☐'}</span> Mode avancé
+              title="Votre téléphone enregistre ; associé une fois, ses enregistrements arrivent ici, transcrits et résumés.">
+        <span class="fr-icon-smartphone-line fr-icon--sm" aria-hidden="true"></span> Enregistrer directement avec mon téléphone
+        ${window.__mesreunionsTelephones === 0 ? '<span class="mt-menu-soon">(première fois)</span>' : ''}
       </button></li>`,
   ];
   return `<div class="meetings-tab-header">
     <div class="meetings-tab-actions meetings-main-actions" role="group" aria-label="Actions principales">
-      <button type="button" class="fr-btn fr-btn--secondary fr-btn--icon-left fr-icon-list-unordered"
-              data-action="meetings-new:show-list"
-              title="Aller à la liste de mes réunions">
-        Consulter mes réunions
-      </button>
       <div class="mt-menu-wrap" data-mt-menu-wrap="add">
         <button type="button" class="fr-btn fr-btn--icon-left fr-icon-add-circle-line"
                 data-action="meetings-new:toggle-menu" data-menu="add"
                 aria-haspopup="menu" aria-controls="mt-menu-add"
                 aria-expanded="${addOpen ? 'true' : 'false'}">
-          Apporter ou enregistrer une réunion <span aria-hidden="true">▾</span>
+          Importer une réunion <span aria-hidden="true">▾</span>
         </button>
         ${_menuHtml('add', addItems)}
       </div>
-      ${_askButtonHtml()}
-      <div class="mt-menu-wrap" data-mt-menu-wrap="more">
-        <button type="button" class="fr-btn fr-btn--tertiary fr-btn--icon-left fr-icon-more-line"
-                data-action="meetings-new:toggle-menu" data-menu="more"
-                aria-haspopup="menu" aria-controls="mt-menu-more"
-                aria-expanded="${moreOpen ? 'true' : 'false'}">
-          Plus d'actions <span aria-hidden="true">▾</span>
-        </button>
-        ${_menuHtml('more', moreItems)}
-      </div>
+      <button type="button" class="fr-btn fr-btn--tertiary mt-relancer${nbEchec ? '' : ' mt-relancer--zero'}"
+              data-action="meetings-new:resume-stuck"
+              title="${nbEchec ? `Relancer les ${nbEchec} réunion${nbEchec > 1 ? 's' : ''} en échec, et celles bloquées sans activité depuis 5 min` : 'Relancer les réunions bloquées (sans activité depuis 5 min) ou en échec'}">
+        🔄 Relancer <span class="mt-relancer-nb" aria-label="${nbEchec} en échec">${nbEchec}</span>
+      </button>
       <span class="meetings-tab-althint">Maintenez <kbd>Alt</kbd> pour sélectionner plusieurs réunions</span>
     </div>
   </div>`;
@@ -352,7 +315,6 @@ function renderHeader() {
 // Ouvre/ferme un menu de l'en-tête sans re-render de la liste.
 function _setMenuOpen(id, focusFirst) {
   _openMenu = id || '';
-  if (_openMenu === 'more') _syncAdvancedItem();
   document.querySelectorAll('.meetings-tab-header [data-mt-menu-wrap]').forEach((wrap) => {
     const key = wrap.getAttribute('data-mt-menu-wrap');
     const open = key === _openMenu;
@@ -407,9 +369,20 @@ function _onDocClickCloseMenus(e) {
 
 // Met à jour le bouton « Interroger » quand le statut du RAG arrive (le
 // premier rendu de la liste peut précéder la réponse de /api/rag/status).
+// Le compte de téléphones arrive après le premier rendu : la carte « depuis
+// votre téléphone » et la mention « (première fois) » se relisent.
+function _onTelephones() {
+  const container = document.getElementById('sessions-list');
+  if (!container || !container.querySelector('.meetings-tab-header')) return;
+  const carte = container.querySelector('[data-mr-carte-tel]');
+  const html = _carteTelephoneHtml();
+  if (carte && !html) carte.remove();
+  else if (!carte && html) container.insertAdjacentHTML('beforeend', html);
+}
+
 function _onRagStatus() {
-  const cur = document.querySelector('.meetings-tab-header [data-mt-ask]');
-  if (cur) cur.outerHTML = _askButtonHtml();
+  // Depuis le 2026-09-22 l'état du service de questions se lit sur le bouton
+  // flottant lui-même (lib/chat-widget.js) : rien à re-rendre ici.
 }
 
 // Boutons d'action en lot (réutilisés dans la toolbar quand ≥1 sélection).
@@ -733,7 +706,7 @@ function renderRow(file, session) {
 function renderEmpty() {
   return `<div class="meetings-tab-empty">
     <p><strong>Vous n'avez pas encore importé de réunion.</strong></p>
-    <p>Cliquez sur <em>Apporter ou enregistrer une réunion</em> ci-dessus pour importer un fichier audio, ou associez votre téléphone depuis l'onglet <em>Associer mon téléphone</em> pour y envoyer les enregistrements de son dictaphone.</p>
+    <p>Cliquez sur <em>Importer une réunion</em> ci-dessus : un fichier audio, un dossier, une vidéo — ou enregistrez directement avec votre téléphone.</p>
   </div>`;
 }
 
@@ -841,8 +814,12 @@ function _ensureListStyles() {
       background:transparent;border:0;padding:.45rem .8rem;cursor:pointer;color:#161616;}
     .mt-menu-item:hover,.mt-menu-item:focus{background:#eef2ff;}
     .mt-menu-soon{color:#666;font-size:.78rem;}
-    .mt-ask-hint{font-weight:400;font-size:.78rem;margin-left:.25rem;}
-    [data-mt-ask][aria-disabled="true"]{opacity:.65;}
+    .mt-menu-sep{border-top:1px solid #e5e5e5;margin:.3rem 0;}
+    /* « Relancer (n) » : tertiaire, le compteur en pastille ; grisé à zéro. */
+    .mt-relancer-nb{font-size:.7rem;font-weight:700;border-radius:10px;padding:0 .45rem;
+      background:#fee7c9;color:#b34000;margin-left:.15rem;}
+    .mt-relancer--zero{color:#666 !important;}
+    .mt-relancer--zero .mt-relancer-nb{background:#f0f0f0;color:#929292;}
     /* Pt1 : toolbar unifiée (compteur/sélection + tri liens + bulk) */
     .meetings-tab-toolbar{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin:.1rem 0 .5rem;font-size:.8125rem;}
     .mt-count{color:#666;white-space:nowrap;}
@@ -961,7 +938,7 @@ export function renderList(sessions) {
   // Menu de l'en-tête ouvert : on garde l'en-tête tel quel (focus compris)
   // au lieu de le reconstruire sous les yeux de l'utilisateur.
   const _prevHeader = _openMenu ? container.querySelector('.meetings-tab-header') : null;
-  container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}`;
+  container.innerHTML = `${headerHtml}${toolbarHtml}<div class="meetings-tab-list">${listHtml}</div>${paginationHtml}${_carteTelephoneHtml()}`;
   if (_prevHeader) {
     const _newHeader = container.querySelector('.meetings-tab-header');
     if (_newHeader) _newHeader.replaceWith(_prevHeader);
@@ -1150,6 +1127,21 @@ function updateRowStatus(fileId) {
   if (titleEl) {
     titleEl.textContent = resolveTitle(file);
   }
+  _majCompteurRelancer();
+}
+
+// Le compteur de « Relancer (n) » suit les statuts qui arrivent après le
+// rendu (pré-fetch de transcript-status), sans reconstruire l'en-tête.
+function _majCompteurRelancer() {
+  const btn = document.querySelector('.meetings-tab-header .mt-relancer');
+  if (!btn) return;
+  const n = _nbEnEchec();
+  const nb = btn.querySelector('.mt-relancer-nb');
+  if (nb) { nb.textContent = String(n); nb.setAttribute('aria-label', `${n} en échec`); }
+  btn.classList.toggle('mt-relancer--zero', n === 0);
+  btn.title = n
+    ? `Relancer les ${n} réunion${n > 1 ? 's' : ''} en échec, et celles bloquées sans activité depuis 5 min`
+    : 'Relancer les réunions bloquées (sans activité depuis 5 min) ou en échec';
 }
 
 // ── Polling résumé enrichi (depuis /api/file/transcript-status) ───────
@@ -1334,37 +1326,10 @@ function _onClick(ev) {
       _setMenuOpen(_openMenu === id ? '' : id, _openMenu !== id && ev.detail === 0);
       break;
     }
-    case 'show-list': {
-      // « Consulter mes réunions » : amène la liste à l'écran et donne le
-      // focus à la première réunion (ou au message de liste vide).
-      const list = document.querySelector('#sessions-list .meetings-tab-list');
-      if (list && typeof list.scrollIntoView === 'function') {
-        list.scrollIntoView({ block: 'start', behavior: 'smooth' });
-      }
-      const first = list && list.querySelector('[data-action="meetings-new:open-detail"], button, a');
-      if (first && typeof first.focus === 'function') first.focus({ preventScroll: true });
-      break;
-    }
-    case 'ask': {
-      if (openChatWidget()) break;
-      const msg = chatWidgetState() === 'unavailable'
-        ? "Interroger mes réunions n'est pas disponible pour le moment : le service n'est pas configuré."
-        : 'Interroger mes réunions se prépare, réessayez dans un instant.';
-      if (window.showToast) window.showToast(msg, 'info');
-      else window.alert(msg);
-      break;
-    }
     case 'record-with-phone': {
       // Le téléphone enregistre (dictaphone) ; l'association le relie au
       // compte pour que ses fichiers arrivent ici.
       if (typeof window.openEnrollModal === 'function') window.openEnrollModal();
-      break;
-    }
-    case 'toggle-advanced': {
-      // Même effet que le bouton « Mode avancé » de l'en-tête de page,
-      // qui reste la source de vérité (aria-pressed).
-      const adv = document.getElementById('advanced-toggle');
-      if (adv) adv.click();
       break;
     }
     case 'toggle-expand': {
@@ -1983,6 +1948,7 @@ export function mount(container /*, ctx */) {
     document.addEventListener('keydown', _onMenuKeyDown);
     document.addEventListener('click', _onDocClickCloseMenus);
     document.addEventListener('mesreunions:rag-status', _onRagStatus);
+    document.addEventListener('mesreunions:telephones', _onTelephones);
     window.addEventListener('resize', _onResize);
     _delegationBound = true;
   }
@@ -2030,7 +1996,6 @@ export const toggleSortDir = window.toggleSortDir;
 export const handleLocalUploadInput = window.handleLocalUploadInput;
 export const uploadLocalFiles = window.uploadLocalFiles;
 export const loadTrash = window.loadTrash;
-export const toggleAdvancedDl = window.toggleAdvancedDl;
 export const loadTranscriptStatus = window.loadTranscriptStatus;
 export const updateOtherDownload = window.updateOtherDownload;
 export const updateDownloadButtons = window.updateDownloadButtons;

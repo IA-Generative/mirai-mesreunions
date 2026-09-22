@@ -76,12 +76,11 @@ def rendered_html():
 def test_render_contains_expected_landmarks(rendered_html):
     """Le rendu doit contenir les ancres UX clés du sprint."""
     must_have = [
-        "Mes réunions (IA)",        # onglet principal
+        ">Mes réunions</button>",   # entrée principale de la barre (2026-09-22)
         "transcript-status-spinner",  # animation dot post-rebrand (anc. file-row-dot)
         "downloads-icon-btn",       # icônes formats (référencée dans CSS)
-        "Mode avancé",              # toggle power-user (label visible)
         "file-detail-source-filename",  # nom de fichier audio bleuté (CSS)
-        "Préparation de réunion",   # 5e onglet (piste 1 meeting-prep first-class)
+        ">Préparer une réunion</button>",   # seconde entrée de la barre
         # Sprint meeting-prep amend UI : éditeur structuré (remplace textarea JSON).
         "data-amend-form",
         "data-add-agenda-item",
@@ -147,53 +146,74 @@ def test_dsfr_root_attributes_and_footer(rendered_html):
 
 
 def test_dsfr_fr_tabs_nav_structure(rendered_html):
-    """Refonte UX onglets : la nav doit utiliser la structure DSFR native
-    `fr-tabs` / `fr-tabs__list` / `fr-tabs__panel` (pas la nav custom
-    historique `.tabs-nav`)."""
-    assert '<div class="fr-tabs">' in rendered_html, (
-        "Le conteneur fr-tabs DSFR doit envelopper la nav d'onglets."
-    )
-    assert 'class="fr-tabs__list"' in rendered_html, (
-        "fr-tabs__list (ul) est requis par la structure DSFR fr-tabs."
-    )
-    # 6 onglets : transfers, brief, devices, useful-data, trash, admin
-    # (l'onglet "generate" a été retiré du template, le QR est généré
-    # depuis le wizard d'enregistrement device et non plus un onglet dédié)
-    expected_tab_ids = [
-        "tab-btn-transfers",
-        "tab-btn-brief",
-        "tab-btn-devices",
-        "tab-btn-useful-data",
-        "tab-btn-trash",
-        "tab-btn-admin",
-    ]
-    for tid in expected_tab_ids:
-        assert f'id="{tid}"' in rendered_html, (
-            f"Bouton d'onglet {tid} attendu dans la nav fr-tabs."
-        )
-    # 6 panneaux correspondants (cf. expected_tab_ids ci-dessus)
+    """Épure du 2026-09-22 : la barre est un `fr-nav` (le style de Mes
+    collections) à DEUX entrées. Les autres écrans restent des panneaux
+    `.tab-pane` sans bouton — ouverts depuis le menu commun (lib/menu-hote.js
+    → window.ouvrirEcran) — et portent un retour « Mes réunions »."""
+    assert '<div class="fr-tabs">' not in rendered_html, "Plus d'onglets fr-tabs : la barre est un fr-nav."
+    assert 'class="fr-nav mr-nav"' in rendered_html
+    assert rendered_html.count('class="fr-nav__link tab-btn"') == 2, "Deux entrées, pas plus."
+    assert 'id="tab-btn-transfers" aria-current="page"' in rendered_html
+    assert 'id="tab-btn-brief"' in rendered_html
+    for tid in ("tab-btn-devices", "tab-btn-useful-data", "tab-btn-trash", "tab-btn-admin"):
+        assert f'id="{tid}"' not in rendered_html, f"{tid} n'a plus d'onglet."
     expected_panel_ids = [
         "panel-transfers",
         "panel-brief",
         "panel-devices",
+        "panel-generate",
         "panel-useful-data",
         "panel-trash",
         "panel-admin",
     ]
     for pid in expected_panel_ids:
-        assert f'id="{pid}"' in rendered_html, (
-            f"Panneau {pid} attendu (référencé par aria-controls)."
-        )
-    # Panel transfers doit être pré-sélectionné par défaut.
-    assert 'fr-tabs__panel--selected card tab-pane" data-tab="transfers"' in rendered_html
+        assert f'id="{pid}"' in rendered_html, f"Panneau {pid} attendu : aucune fonction retirée."
+    # Le panneau des réunions est affiché au départ (classe legacy `is-active`).
+    assert 'class="card tab-pane is-active" data-tab="transfers"' in rendered_html
+    assert "fr-tabs__panel" not in rendered_html.replace("fr-tabs__panel--selected", "")
+    # Les écrans sans onglet portent leur retour.
+    assert rendered_html.count('data-action="mr:retour"') == 4
 
 
-def test_dsfr_admin_tab_hidden_by_default(rendered_html):
-    """L'onglet Admin est masqué par défaut dans la nav ; tabs/admin.js le
-    révèle au boot si la claim OIDC `admin` est présente. Le test render
-    sans rôle admin → le `<li>` doit avoir display:none."""
-    assert 'id="tab-btn-admin-li"' in rendered_html
-    assert 'id="tab-btn-admin-li" style="display:none;"' in rendered_html
+def test_mode_avance_retire(rendered_html):
+    """Le « Mode avancé » (téléchargements à plat, purge, aperçu Alt) est
+    retiré : ni bouton, ni classe, ni purge. Les fichiers intermédiaires sont
+    une ligne repliée dans la fiche (legacy.js, `downloads-inter`)."""
+    assert 'id="advanced-toggle"' not in rendered_html
+    assert "advanced-only" not in rendered_html
+    assert 'id="purge-btn"' not in rendered_html
+    assert ".downloads-inter" in rendered_html
+    legacy = open(_LEGACY_PATH, encoding="utf-8").read()
+    assert "effectiveAdvancedDl" not in legacy
+    assert "downloads-inter" in legacy and "Fichiers intermédiaires" in legacy
+
+
+def test_assistant_telephone(rendered_html):
+    """L'assistant « Associer en sécurité votre téléphone » : les trois étapes,
+    le bandeau « déjà associé », les deux voies (Transcript en simulation
+    assumée, le code), le pied qui dit où gérer ses téléphones — et aucune
+    case « ne plus montrer »."""
+    assert "Associer en sécurité votre téléphone" in rendered_html
+    assert "transcriptions et comptes-rendus arrivent directement dans Mes réunions" in rendered_html
+    assert 'id="assistant-etapes"' in rendered_html
+    assert "Retrouver dans Mes réunions" in rendered_html
+    assert 'id="enrollment-collapsed-titre"' in rendered_html
+    assert "Utiliser l'application Transcript" in rendered_html
+    assert 'data-action="store-bientot"' in rendered_html and "Pas encore publiée" in rendered_html
+    assert "apps.apple.com" not in rendered_html and "play.google.com" not in rendered_html, \
+        "Aucun lien réel vers un magasin : l'application n'existe pas."
+    assert 'id="btn-generate"' in rendered_html and "Associer ce téléphone" in rendered_html
+    assert "menu en haut à droite › Mes téléphones" in rendered_html
+    assert "Ne plus montrer" not in rendered_html
+
+
+def test_admin_sans_onglet(rendered_html):
+    """L'administration n'a plus d'onglet : elle est une entrée du menu commun,
+    posée par lib/menu-hote.js quand le compte est admin (isAdmin)."""
+    assert 'id="tab-btn-admin-li"' not in rendered_html
+    menu_hote = open(os.path.join(ROOT, "services", "mesreunions-web", "frontend", "lib", "menu-hote.js"),
+                     encoding="utf-8").read()
+    assert "isAdmin()" in menu_hote and "'Administration'" in menu_hote
 
 
 # ─── 3. Le <script> parse en JS (node --check) ─────────────────────────────

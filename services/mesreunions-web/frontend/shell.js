@@ -34,9 +34,12 @@ import './tabs/useful-data.js';
 import * as adminTab from './tabs/admin.js';
 import { initTabManager } from './lib/tab-manager.js';
 import { initChatWidget } from './lib/chat-widget.js';
-import { initAdvancedToggleAnchor } from './lib/advanced-toggle-anchor.js';
+import './lib/navigation.js';               // window.ouvrirEcran
+import { initMenuHote } from './lib/menu-hote.js';
+import { initVisiteGuidee } from './lib/visite-guidee.js';
 
-// Affichage conditionnel de l'onglet Admin dans la nav (selon claim OIDC).
+// L'administration n'a plus d'onglet (2026-09-22) : elle est une entrée du menu
+// commun, posée par lib/menu-hote.js quand le compte est admin.
 try { adminTab.revealNavIfAdmin && adminTab.revealNavIfAdmin(); } catch (e) {}
 
 // Orchestrateur global des onglets (DSFR ↔ legacy ↔ lazy-load).
@@ -56,7 +59,7 @@ try {
 // LAZY_TABS aujourd'hui ; pour transfers (eager-loaded), on écoute le
 // click directement sur la nav DSFR.
 document.addEventListener('click', (ev) => {
-  const btn = ev.target && ev.target.closest && ev.target.closest('.fr-tabs__tab[data-tab]');
+  const btn = ev.target && ev.target.closest && ev.target.closest('.tab-btn[data-tab]');
   if (!btn) return;
   const tabId = btn.getAttribute('data-tab');
   if (tabId === 'transfers') {
@@ -66,15 +69,18 @@ document.addEventListener('click', (ev) => {
   }
 }, true);
 
+// Quitter l'onglet réunions vers un écran sans onglet (lib/navigation.js).
+window.__quitterReunions = () => { try { meetingsTab.unmount && meetingsTab.unmount(); } catch (e) { /* rien */ } };
+
 // Widget « Interroger mes réunions » (agent conversationnel RAG, OpenRAG).
-// Persistant, indépendant des onglets. Ne se révèle que si le RAG est
-// configuré côté serveur (sinon inerte → aucun impact).
+// Persistant, indépendant des onglets ; la bulle dit elle-même quand le
+// service n'est pas disponible.
 try { initChatWidget(); } catch (e) { /* widget non bloquant */ }
 
-// Toggle « Mode avancé » : le ranger SOUS la barre flottante du menu commun
-// (qui monte à z-index 2000 et le masquait), bord droit aligné sur l'avatar
-// du compte. Inerte si le menu commun n'est pas chargé.
-try { initAdvancedToggleAnchor(); } catch (e) { /* placement non bloquant */ }
+// Les entrées de Mes réunions dans le menu commun (« Mes réunions · avancé »),
+// et la visite guidée de la première arrivée.
+try { initMenuHote(); } catch (e) { /* le menu commun peut être absent */ }
+try { initVisiteGuidee(); } catch (e) { /* jamais bloquant */ }
 
 // Sentinelle utile au test e2e (vérifier que le bundle a bien initialisé).
 window.__MESREUNIONS_SHELL_READY__ = true;

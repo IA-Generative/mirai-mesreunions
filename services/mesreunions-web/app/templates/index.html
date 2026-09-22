@@ -61,45 +61,6 @@
             font-size: 0.8rem;
             line-height: 1.2;
         }
-        /* Toggle "Mode avancé" sous le bouton Déconnexion. Pill compacte
-           qui change d'état visuel quand actif. Astuce power-user :
-           maintenir Alt fait peek temporairement vers le mode avancé
-           sans changer le toggle (état restauré au relâchement). */
-        .header-user .advanced-toggle {
-            margin-top: 0.15rem;
-            font-size: 0.7rem; line-height: 1;
-            padding: 0.18rem 0.5rem;
-            background: transparent; color: #64748b;
-            border: 1px solid #cbd5e1; border-radius: 999px;
-            cursor: pointer; user-select: none;
-            transition: all 0.12s ease;
-        }
-        /* Ancré sous la barre flottante du menu commun : lib/advanced-toggle-anchor.js
-           mesure la barre et pose `top`/`right` au pixel (bord droit aligné sur celui
-           de l'avatar du compte). `absolute` et non `fixed` : la pastille appartient à
-           l'en-tête et doit défiler avec lui, pas flotter au-dessus du contenu. Le
-           repère est `.fr-header`, que le DSFR pose déjà en `position: relative`.
-           1000 et non 1 : sous le point de repli, le bloc-marque DSFR prend TOUTE la
-           largeur, en fond blanc et à z-index 750 — il enterrait la pastille (visible
-           nulle part, et inerte au clic). Ce 1000 reste enfermé dans le contexte
-           d'empilement de l'en-tête : jamais au-dessus du menu (2000), dont les
-           panneaux doivent pouvoir recouvrir la pastille. */
-        .header-user .advanced-toggle.is-anchored {
-            position: absolute;
-            z-index: 1000;
-            margin-top: 0;
-        }
-        .header-user .advanced-toggle:hover {
-            background: #f1f5f9; color: #0f172a; border-color: #94a3b8;
-        }
-        .header-user .advanced-toggle.is-on {
-            background: #1e293b; color: #fff; border-color: #1e293b;
-        }
-        /* Pendant le peek Alt : on souligne le toggle pour indiquer que
-           c'est temporaire (n'a pas changé l'état persistant). */
-        .header-user .advanced-toggle.is-peek {
-            box-shadow: 0 0 0 2px #fde68a;
-        }
         .form-group { margin-bottom: 1rem; }
         label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem; color: #444; }
         select, input[type=number] {
@@ -744,6 +705,14 @@
            lignes par défaut — fond légèrement plus foncé, label "Autres :"
            à gauche, select étroit, icônes à droite. Séparée du bloc
            principal par un trait fin. */
+        /* « Fichiers intermédiaires » : la ligne repliée qui remplace le mode
+           avancé (2026-09-22). Même fond que « Autres : », un chevron natif. */
+        .downloads-inter { margin: 0.4rem -0.5rem -0.35rem -0.5rem; border-top: 1px solid #e2e8f0;
+            background: #f1f5f9; border-radius: 0 0 8px 8px; padding: 0.2rem 0.5rem 0.3rem; }
+        .downloads-inter summary { cursor: pointer; font-size: 0.72rem; color: #475569; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.04em; padding: 0.15rem 0; }
+        .downloads-inter-nb { font-weight: 400; text-transform: none; letter-spacing: 0; }
+        .downloads-row--inter { padding-left: 0.4rem; }
         .downloads-other-row {
             display: flex; align-items: center;
             gap: 0.45rem; padding: 0.35rem 0.5rem;
@@ -1736,9 +1705,6 @@
             opacity: 0.7;
         }
         .icon-btn-purge:hover .purge-workers { opacity: 1; }
-        /* Mode avancé : .advanced-only n'est visible que si body.adv-mode est posée. */
-        .advanced-only { display: none !important; }
-        body.adv-mode .advanced-only { display: inline-flex !important; }
         .file-row-expand {
             border: 1px solid transparent; background: transparent;
             cursor: pointer; color: #475569; font-size: 0.78rem;
@@ -2063,9 +2029,54 @@
            soit par la classe DSFR `.fr-tabs__panel--selected` (gérée par
            le JS DSFR sur les boutons fr-tabs). Les deux mécanismes
            cohabitent — voir frontend/lib/tab-manager.js pour la synchro. */
-        .tab-pane { display: none; }
-        .tab-pane.is-active,
-        .tab-pane.fr-tabs__panel--selected { display: block; }
+        /* L'assistant « Associer en sécurité votre téléphone » (2026-09-22). */
+        .mr-etapes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.75rem; margin: 0 0 1rem; }
+        .mr-etape { background: #f9f9fb; border: 1px solid #e5e5e5; border-radius: 6px; padding: 0.75rem; }
+        .mr-etape-n { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+            background: #000091; color: #fff; font-size: 0.75rem; font-weight: 700; margin-bottom: 0.4rem; }
+        .mr-etape b { display: block; font-size: 0.9rem; margin-bottom: 0.15rem; }
+        .mr-etape p { margin: 0; font-size: 0.8rem; color: #666; }
+        .mr-deja { display: flex; gap: 0.75rem; align-items: center; background: #b8fec9; border-left: 3px solid #18753c;
+            padding: 0.6rem 0.9rem; margin: 0 0 1rem; font-size: 0.88rem; color: #161616; }
+        .mr-deja-ok { color: #18753c; font-size: 1.1rem; }
+        .mr-deja b { display: block; }
+        .mr-deja small { display: block; color: #3a3a3a; }
+        .mr-deja .fr-btn { margin-left: auto; white-space: nowrap; }
+        .mr-voies { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+        .mr-voie { border: 1px solid #ddd; border-radius: 6px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.5rem; }
+        .mr-voie--reco { border-color: #000091; background: #eeeeff; }
+        .mr-voie > b { font-size: 0.95rem; }
+        .mr-voie > p { margin: 0; font-size: 0.85rem; color: #666; }
+        .mr-eyebrow { font-size: 0.68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #000091; }
+        .mr-stores { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .mr-store { display: inline-flex; align-items: center; gap: 0.5rem; background: #161616; color: #fff; border: 0;
+            border-radius: 6px; padding: 0.4rem 0.65rem; font-size: 0.7rem; line-height: 1.1; text-align: left; min-width: 128px;
+            opacity: .55; cursor: default; }
+        .mr-store b { display: block; font-size: 0.82rem; }
+        .mr-store-logo { font-size: 1.1rem; }
+        .mr-bientot-ligne { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+        .mr-bientot { font-size: 0.68rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #b34000;
+            background: #fee7c9; padding: 0.1rem 0.4rem; border-radius: 3px; }
+        .mr-assistant-pied { margin-top: 1rem; font-size: 0.8rem; color: #666; }
+        .mr-carte-tel { border: 1px dashed #ddd; border-radius: 6px; padding: 1rem 1.2rem; display: flex; gap: 1rem;
+            align-items: center; margin: 0.9rem 0 0; background: #f9f9fb; }
+        .mr-carte-tel .mr-tel { font-size: 2rem; }
+        .mr-carte-tel b { display: block; margin-bottom: 0.1rem; }
+        .mr-carte-tel p { margin: 0 0 0.5rem; color: #666; font-size: 0.85rem; max-width: 58ch; }
+        @media (max-width: 760px) { .mr-etapes, .mr-voies { grid-template-columns: 1fr; } }
+        /* Sans le JS des onglets DSFR (parti le 2026-09-22), `.is-active` est le SEUL
+           interrupteur : un panneau qui n'est pas actif est caché quoi qu'en disent
+           ses règles propres (`.tab-pane[data-tab="transfers"] { display:flex }`). */
+        .tab-pane:not(.is-active) { display: none !important; }
+        .tab-pane.is-active { display: block; }
+        /* La barre de navigation à deux entrées (2026-09-22). Des <button> dans le
+           fr-nav du DSFR : même rendu que ses liens (soulignement bleu sur l'entrée
+           courante), sans rechargement de page. */
+        .mr-nav { margin-bottom: 1rem; }
+        .mr-nav .fr-nav__link { background: none; border: 0; cursor: pointer; font: inherit; }
+        .mr-nav .fr-nav__link[aria-current="page"] { color: var(--text-active-blue-france, #000091); }
+        /* Un écran sans onglet (téléphones, corbeille, données utiles…) porte son retour. */
+        .mr-retour { margin: 0 0 0.6rem; }
         /* Toasts feedback (bas-droite, disparaît après 4s).
            z-index 10500 : au-dessus des modales empilables (10200+, cf.
            lib/stacked-modal.js) et de la modale CR-editor (10000), qui
@@ -2509,7 +2520,7 @@
           </div>
           <div class="fr-header__service">
             <a href="#" title="Accueil MIrAI">
-              <p class="fr-header__service-title">MIrAI <span id="header-tab-label" class="header-tab-label"></span><span class="beta-badge">Bêta</span></p>
+              <p class="fr-header__service-title">Mes réunions <span id="header-tab-label" class="header-tab-label" hidden></span><span class="beta-badge">Bêta</span></p>
             </a>
             <p class="fr-header__service-tagline">Concentrez-vous sur la réunion.</p>
           </div>
@@ -2517,13 +2528,11 @@
         {# Le nom de l'utilisateur et « Déconnexion » sont désormais portés par le menu
            commun de la bêta (bulle en haut à droite — /_beta/menu.js, table APPS du dépôt
            mirai-apps-menu : sortie « /logout »). Une seule commande de compte à l'écran. #}
-        <div class="header-user">
-          <div style="display:flex;gap:0.6rem;justify-content:flex-end;align-items:center;">
-            <button type="button" id="advanced-toggle" class="advanced-toggle"
-                    onclick="toggleAdvancedDl(this)"
-                    title="Mode avancé — affiche tous les téléchargements à plat (sans le menu Autres).&#10;Astuce power-user : maintiens Alt pour un peek temporaire."
-                    aria-pressed="false">Mode avancé</button>
-          </div>
+        {# Le « Mode avancé » (téléchargements à plat, bouton de purge, aperçu par Alt)
+           a été retiré le 2026-09-22 : trois effets pour un interrupteur que personne ne
+           se rappelait. Les fichiers intermédiaires sont une ligne repliée dans la fiche,
+           la sélection multiple remplace la purge. La bulle commune occupe ce coin. #}
+        <div class="header-user" aria-hidden="true"></div>
         </div>
       </div>
     </div>
@@ -2549,48 +2558,29 @@
        `panel-<tab>` référencé par `aria-controls`. L'orchestrateur
        frontend/lib/tab-manager.js écoute les changements DSFR pour appeler les
        hooks legacy (loadBriefs/loadTrash/showFilesList/mount-tab admin/useful-data). #}
-    <div class="fr-tabs">
-        <ul class="fr-tabs__list" role="tablist" aria-label="Sections principales">
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="transfers" id="tab-btn-transfers"
-                        aria-selected="true" tabindex="0"
-                        aria-controls="panel-transfers">Mes réunions (IA)</button>
+    {# Navigation principale — DEUX entrées, en `fr-nav` (le style de Mes collections),
+       depuis le 2026-09-22. Les autres écrans (téléphones, données utiles, corbeille,
+       administration, association) n'ont plus d'onglet : ils s'ouvrent depuis la section
+       « Mes réunions · avancé » du menu commun (frontend/lib/menu-hote.js →
+       window.ouvrirEcran) et portent un bouton « ← Mes réunions ». Les boutons gardent
+       `.tab-btn[data-tab]` : activateTab (legacy.js), tab-manager.js et shell.js s'y
+       accrochent. `aria-current` est posé par activateTab. #}
+    <nav class="fr-nav mr-nav" role="navigation" aria-label="Navigation principale" id="nav-principale">
+        <ul class="fr-nav__list">
+            <li class="fr-nav__item">
+                <button type="button" class="fr-nav__link tab-btn" data-tab="transfers"
+                        id="tab-btn-transfers" aria-current="page"
+                        aria-controls="panel-transfers">Mes réunions</button>
             </li>
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="brief" id="tab-btn-brief"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-brief">Préparation de réunion</button>
-            </li>
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab fr-tabs__tab--icon-left fr-icon-smartphone-line tab-btn" role="tab"
-                        data-tab="devices" id="tab-btn-devices"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-devices"
-                        title="Associez votre téléphone pour envoyer ici les enregistrements de son dictaphone, sans vous reconnecter.">Associer mon téléphone</button>
-            </li>
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="useful-data" id="tab-btn-useful-data"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-useful-data">Mes données utiles</button>
-            </li>
-            <li role="presentation">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="trash" id="tab-btn-trash"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-trash">Corbeille</button>
-            </li>
-            <li role="presentation" id="tab-btn-admin-li" style="display:none;">
-                <button type="button" class="fr-tabs__tab tab-btn" role="tab"
-                        data-tab="admin" id="tab-btn-admin"
-                        aria-selected="false" tabindex="-1"
-                        aria-controls="panel-admin">Admin</button>
+            <li class="fr-nav__item">
+                <button type="button" class="fr-nav__link tab-btn" data-tab="brief"
+                        id="tab-btn-brief" aria-controls="panel-brief">Préparer une réunion</button>
             </li>
         </ul>
+    </nav>
+    <div class="mr-ecrans">
 
-    <div id="panel-brief" class="fr-tabs__panel card tab-pane" data-tab="brief" role="tabpanel" aria-labelledby="tab-btn-brief" tabindex="0">
+    <div id="panel-brief" class="card tab-pane" data-tab="brief" role="tabpanel" aria-labelledby="tab-btn-brief" tabindex="0">
         <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
         <div id="brief-list-view">
             <div class="dsfr-inline-actions">
@@ -3077,7 +3067,10 @@
         </div>
     </div>
 
-    <div id="panel-trash" class="fr-tabs__panel card tab-pane" data-tab="trash" role="tabpanel" aria-labelledby="tab-btn-trash" tabindex="0">
+    <div id="panel-trash" class="card tab-pane" data-tab="trash" role="tabpanel" aria-label="Corbeille" tabindex="0">
+        <p class="mr-retour"><button type="button"
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.1rem;">Corbeille</h1>
             <span style="color:#64748b;font-size:0.78rem;">
@@ -3089,28 +3082,57 @@
         </div>
     </div>
 
-    <div id="panel-generate" class="fr-tabs__panel card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="generate-title" tabindex="0">
+    <div id="panel-generate" class="card tab-pane" data-tab="generate" role="tabpanel" aria-labelledby="generate-title" tabindex="0">
         <p style="margin:0 0 0.6rem;">
             <button type="button"
                     class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
                     data-action="back-to-devices"
-                    onclick="window.activateTab && window.activateTab('devices')">Retour à mes téléphones associés</button>
+                    onclick="window.ouvrirEcran && window.ouvrirEcran('devices')">Mes téléphones</button>
         </p>
-        <h1 id="generate-title">Téléverser facilement vos fichiers audio depuis votre téléphone</h1>
-        <p class="subtitle">Associez votre téléphone pour envoyer ici, de façon sécurisée, les enregistrements de son dictaphone.</p>
+        <h1 id="generate-title" style="font-size:1.2rem;">Associer en sécurité votre téléphone</h1>
+        <p class="subtitle mr-assistant-intro">Enregistrez simplement avec votre téléphone : transcriptions et comptes-rendus arrivent directement dans Mes réunions.</p>
 
-        <!-- Bloc replié si un device est déjà enrôlé. Conservé pour compat
-             mais non révélé actuellement (cf. tabs/devices.js
-             applyEnrollmentFormVisibility). -->
-        <div id="enrollment-collapsed" style="display:none;padding:0.45rem 0;">
-            <div class="fr-callout fr-callout--blue-ecume">
-                <p class="fr-callout__text">
-                    Vous avez déjà au moins un téléphone associé : vous pouvez envoyer vos enregistrements depuis lui.
-                </p>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary"
-                        data-action="show-enrollment-form">Associer un autre téléphone</button>
-            </div>
+        {# L'assistant (2026-09-22). Les trois étapes ne s'affichent qu'à la première
+           ouverture (localStorage `mesreunions.assistant-telephone.vu`, tabs/devices.js) ;
+           ensuite l'écran s'ouvre sur l'état : téléphone associé → bandeau, sinon → le
+           code. Pas de case « ne plus montrer » : elle cacherait aussi le seul chemin. #}
+        <div class="mr-etapes" id="assistant-etapes">
+            <div class="mr-etape"><span class="mr-etape-n">1</span><b>Associer le téléphone</b>
+                <p>Un QR code à scanner, ou un code court à saisir. Valable 5 minutes ; l'association tient {{ device_retention_days|default(15) }} jours.</p></div>
+            <div class="mr-etape"><span class="mr-etape-n">2</span><b>Enregistrer</b>
+                <p>Avec l'application Transcript, ou avec le dictaphone que vous avez déjà.</p></div>
+            <div class="mr-etape"><span class="mr-etape-n">3</span><b>Retrouver dans Mes réunions</b>
+                <p>L'enregistrement se retrouve directement dans la liste de Mes réunions, transcrit et résumé sans rien faire. Comptez 5 à 15 minutes par heure d'audio.</p></div>
         </div>
+
+        {# Téléphone déjà associé : on le dit, on ne refait pas faire une association. #}
+        <div id="enrollment-collapsed" class="mr-deja" style="display:none;">
+            <span class="mr-deja-ok" aria-hidden="true">✓</span>
+            <div><b id="enrollment-collapsed-titre">Un téléphone est déjà associé</b>
+                <small id="enrollment-collapsed-detail">Vous pouvez enregistrer dès maintenant.</small></div>
+            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                    onclick="window.ouvrirEcran && window.ouvrirEcran('devices')">Gérer mes téléphones</button>
+        </div>
+
+        <div class="mr-voies">
+            <div class="mr-voie mr-voie--reco">
+                <span class="mr-eyebrow">Recommandé</span>
+                <b>Utiliser l'application Transcript</b>
+                <p>Enregistre et envoie dans Mes réunions en un geste, même hors ligne : l'envoi part quand le réseau revient.</p>
+                {# Les magasins : SIMULATION assumée — aucune application n'est publiée. Un
+                   vrai lien vers un magasin où elle n'existe pas produirait « le lien ne
+                   marche pas » dès la cohorte. « M'avertir » dépose une idée via Mon avis. #}
+                <div class="mr-stores">
+                    <button type="button" class="mr-store" data-action="store-bientot" data-store="App Store" aria-disabled="true"><span class="mr-store-logo" aria-hidden="true"></span><span>Bientôt sur<b>App Store</b></span></button>
+                    <button type="button" class="mr-store" data-action="store-bientot" data-store="Google Play" aria-disabled="true"><span class="mr-store-logo" aria-hidden="true">▶</span><span>Bientôt sur<b>Google Play</b></span></button>
+                </div>
+                <div class="mr-bientot-ligne"><span class="mr-bientot">Pas encore publiée</span>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline" data-action="store-avertir">M'avertir à la sortie</button></div>
+            </div>
+            <div class="mr-voie">
+                <span class="mr-eyebrow" id="voie-code-eyebrow">Disponible aujourd'hui</span>
+                <b id="voie-code-titre">Utiliser le dictaphone du téléphone</b>
+                <p>Vous enregistrez comme d'habitude, puis vous envoyez le fichier depuis le téléphone associé.</p>
 
         <div id="generate-form">
             <div class="fr-select-group">
@@ -3146,13 +3168,13 @@
             <input type="checkbox" id="auto-transcribe" checked style="display:none;">
             <button type="button" class="fr-btn fr-btn--sm" id="btn-generate"
                     data-action="generate-code">
-                Générer un code
+                Associer ce téléphone
             </button>
         </div>
-
-        <div class="fr-alert fr-alert--warning fr-mt-2w">
-            <p>Pour limiter les risques en cas de perte ou vol de votre téléphone, supprimez régulièrement les fichiers du téléphone, par exemple après la retranscription.</p>
+            </div>
         </div>
+
+        <p class="mr-assistant-pied">Pour gérer vos téléphones (en ajouter un, retirer un téléphone perdu ou volé) : menu en haut à droite › Mes téléphones. Pour limiter les risques en cas de perte ou de vol, effacez les enregistrements du téléphone après leur transcription.</p>
 
         <div class="result" id="result">
             <p style="font-size:0.9rem; color:#666; margin-bottom:0.5rem;">
@@ -3169,9 +3191,12 @@
         </div>
     </div>
 
-    <div id="panel-devices" class="fr-tabs__panel card tab-pane" data-tab="devices" role="tabpanel" aria-labelledby="tab-btn-devices" tabindex="0">
+    <div id="panel-devices" class="card tab-pane" data-tab="devices" role="tabpanel" aria-label="Mes téléphones" tabindex="0">
+        <p class="mr-retour"><button type="button"
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
         <div class="dsfr-inline-actions">
-            <h1 style="font-size:1.05rem;">Mes téléphones associés</h1>
+            <h1 style="font-size:1.1rem;">Mes téléphones</h1>
             <!-- R2 : `fr-btns-group--icon-left` est obligatoire — sans lui, le DSFR réduit à
                  2rem tout bouton à icône d'un groupe --sm, et « Ajouter un téléphone » ne
                  montrait qu'un « + » muet, alors que le texte d'aide y renvoie par son nom. -->
@@ -3180,32 +3205,32 @@
                     <button type="button" id="enroll-new-device-btn"
                             class="fr-btn fr-btn--sm fr-btn--icon-left fr-icon-add-line"
                             data-action="open-enroll"
-                            title="Générer un code/QR pour ajouter un nouveau téléphone"
-                            onclick="window.openEnrollModal && window.openEnrollModal()">Ajouter un téléphone</button>
+                            title="Associer un téléphone : QR code ou code court"
+                            onclick="window.openEnrollModal && window.openEnrollModal()">Associer un téléphone</button>
                 </li>
                 <li>
                     <button type="button" id="device-filter-btn"
                             class="fr-btn fr-btn--sm fr-btn--secondary device-filter-btn"
-                            data-action="toggle-device-scope">Voir révoqués</button>
+                            data-action="toggle-device-scope">Afficher les téléphones retirés</button>
                 </li>
                 <li>
                     <button type="button" id="revoke-all-devices-btn"
                             class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline btn-danger-mini"
-                            data-action="revoke-all-devices">Révoquer tous</button>
+                            data-action="revoke-all-devices"
+                            title="Téléphone perdu ou volé ? Tout retirer refuse leurs envois immédiatement">Tout retirer</button>
                 </li>
             </ul>
         </div>
         <p id="devices-association-state" class="fr-text--sm" style="margin:0.4rem 0 0;font-weight:600;"
            aria-live="polite"></p>
         <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
-            Associez votre téléphone (QR code ou code court) pour envoyer ici les enregistrements de son
-            dictaphone, sans vous reconnecter. Un téléphone associé envoie sans rescanner tant que son
-            association est valide ; « Renouveler » la prolonge.
+            Les téléphones autorisés à envoyer leurs enregistrements dans Mes réunions. Un téléphone
+            associé le reste {{ device_retention_days|default(15) }} jours, puis se prolonge d'un clic.
         </p>
         <div id="devices-list" style="font-size:0.84rem;color:#64748b;">Chargement appareils…</div>
     </div>
 
-    <div id="panel-transfers" class="fr-tabs__panel fr-tabs__panel--selected card tab-pane" data-tab="transfers" role="tabpanel" aria-labelledby="tab-btn-transfers" tabindex="0">
+    <div id="panel-transfers" class="card tab-pane is-active" data-tab="transfers" role="tabpanel" aria-labelledby="tab-btn-transfers" tabindex="0">
         <div id="recent-activities-panel" class="recent-activities-panel open">
             <div class="dsfr-inline-actions">
                 <h1 style="font-size:1.1rem;">Mes réunions (IA)</h1>
@@ -3256,49 +3281,9 @@
                            style="display:none;"
                            onchange="handleLocalUploadInput(this)" />
                 </div>
-                <!-- Action lourde « tout mettre à la corbeille ». Cachée par
-                     défaut, visible uniquement en mode avancé (toggle ON ou
-                     Alt enfoncé) via .advanced-only + body.adv-mode. Icône
-                     composée : benne à ordures + 2 silhouettes d'éboueurs +
-                     mini-poubelle qui bascule au hover (animation CSS). -->
-                <button type="button" id="purge-btn" class="icon-btn icon-btn-purge advanced-only" disabled
-                        data-action="meetings:purge-all"
-                        onclick="purgeSessions()"
-                        title="Mettre toute la liste à la corbeille (supprimée automatiquement après 30 jours)"
-                        aria-label="Tout mettre à la corbeille">
-                    <svg viewBox="0 0 32 24" fill="none" stroke="currentColor"
-                         stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
-                         aria-hidden="true" class="purge-icon-svg">
-                        <!-- mini-poubelle prête à être chargée (anime translateY au hover) -->
-                        <g class="purge-bin">
-                          <rect x="2" y="14" width="4" height="6" rx="0.4"/>
-                          <line x1="1.5" y1="14" x2="6.5" y2="14"/>
-                          <line x1="3" y1="13" x2="5" y2="13"/>
-                        </g>
-                        <!-- benne du camion + cabine -->
-                        <path d="M8 8h13v12H8z" fill="currentColor" fill-opacity="0.08"/>
-                        <path d="M8 8h13v12H8z"/>
-                        <path d="M21 12h4l3 3v5h-7z" fill="currentColor" fill-opacity="0.05"/>
-                        <path d="M21 12h4l3 3v5h-7z"/>
-                        <path d="M22 14h3" />
-                        <!-- 4 stries verticales sur la benne -->
-                        <path d="M11 9v10M14 9v10M17 9v10"/>
-                        <!-- roues -->
-                        <circle cx="12" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
-                        <circle cx="12" cy="21" r="1.6"/>
-                        <circle cx="24" cy="21" r="1.6" fill="currentColor" fill-opacity="0.15"/>
-                        <circle cx="24" cy="21" r="1.6"/>
-                        <!-- 2 silhouettes d'éboueurs (têtes + corps simplifiés) à l'arrière du camion -->
-                        <g class="purge-workers">
-                          <!-- éboueur 1 -->
-                          <circle cx="29" cy="10" r="1.1" fill="currentColor" fill-opacity="0.2"/>
-                          <path d="M28.3 11.2v3.2M29.6 11.2v3.2"/>
-                          <!-- éboueur 2 -->
-                          <circle cx="30.5" cy="11.5" r="1" fill="currentColor" fill-opacity="0.2"/>
-                          <path d="M29.9 12.5v2.8M31.1 12.5v2.8"/>
-                        </g>
-                    </svg>
-                </button>
+                {# Le bouton « tout mettre à la corbeille » (mode avancé) est parti le
+                   2026-09-22 : la sélection multiple (Alt) + « Corbeille » fait la même
+                   chose, en voyant ce que l'on supprime. #}
             </div>
             <!-- Progression batch upload local. Affichée seulement quand
                  un upload est en cours. Tient sur 1 ligne + une barre. -->
@@ -3356,9 +3341,12 @@
 
     {# Onglet « Mes données utiles » — créé par PR-UX-Onglets. Contenu monté
        dynamiquement par frontend/tabs/useful-data.js au premier affichage. #}
-    <div id="panel-useful-data" class="fr-tabs__panel card tab-pane"
+    <div id="panel-useful-data" class="card tab-pane"
          data-tab="useful-data" role="tabpanel"
-         aria-labelledby="tab-btn-useful-data" tabindex="0">
+         aria-label="Mes données utiles" tabindex="0">
+        <p class="mr-retour"><button type="button"
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
         <div data-useful-data-root>
             <p style="color:#999;font-size:0.85rem;">Chargement…</p>
         </div>
@@ -3367,14 +3355,17 @@
     {# Onglet « Admin » — visible uniquement si l'utilisateur a la claim
        « admin » (cf. lib/auth.js isAdmin()). Le `<li>` parent du bouton est
        masqué côté template par défaut puis révélé par tabs/admin.js. #}
-    <div id="panel-admin" class="fr-tabs__panel card tab-pane"
+    <div id="panel-admin" class="card tab-pane"
          data-tab="admin" role="tabpanel"
-         aria-labelledby="tab-btn-admin" tabindex="0">
+         aria-label="Administration" tabindex="0">
+        <p class="mr-retour"><button type="button"
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
         <div data-admin-root>
             <p style="color:#999;font-size:0.85rem;">Chargement…</p>
         </div>
     </div>
-    </div> {# /fr-tabs #}
+    </div> {# /mr-ecrans #}
 </div>
 
 {# ── Wizard "Nouvelle préparation" — modale fullscreen (UX-Refonte-3 #3).
