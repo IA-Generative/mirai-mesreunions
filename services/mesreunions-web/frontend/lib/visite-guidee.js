@@ -135,7 +135,7 @@ function _placer() {
   _els.etape.textContent = `Étape ${_i + 1} sur ${PAS.length}`;
   _els.titre.textContent = pas.titre;
   _els.texte.textContent = pas.texte;
-  _els.prec.hidden = _i === 0;
+  _els.prec.style.display = _i === 0 ? 'none' : '';
   _els.suiv.textContent = _i === PAS.length - 1 ? 'Terminer' : 'Suivant';
   const vw = window.innerWidth, vh = window.innerHeight;
   const bw = Math.min(300, vw - 24);

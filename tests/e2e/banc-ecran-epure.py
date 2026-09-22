@@ -150,6 +150,7 @@ def main():
         etape = lambda pg: pg.evaluate("document.querySelector('#mr-visite [data-etape]').textContent")
         verifie(etape(page) == "Étape 1 sur 5", "N6 la visite guidée démarre seule, 5 pas")
         verifie("Vos réunions" in page.inner_text("#mr-visite"), "N6 pas 1 : « Vos réunions »")
+        verifie(not page.is_visible("#mr-visite [data-prec]"), "N6 pas 1 : pas de « Précédent » (le DSFR ignore [hidden])")
         for _ in range(4):
             page.click("#mr-visite [data-suiv]")
             page.wait_for_timeout(150)

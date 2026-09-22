@@ -32,7 +32,9 @@
             background: #f6f6f6; color: #161616; min-height: 100vh;
         }
         .page-shell { padding: 1.5rem 0 2rem; }
-        .container { max-width: 760px; width: 100%; }
+        /* Pleine largeur depuis le 2026-09-22 (maquette validée) : la liste des réunions
+           et les fiches s'étirent avec la page, dans le fr-container du DSFR. */
+        .container { max-width: none; width: 100%; }
         .card {
             background: #fff; border-radius: 0.5rem; padding: 1.5rem;
             border: 1px solid #e5e5e5; margin-bottom: 1rem;
