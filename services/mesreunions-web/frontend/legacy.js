@@ -4819,7 +4819,7 @@ function _ficheHtml(fileId, data, statusBadge, audioOptions) {
     const kp = (data.key_points_summary || '').trim();
     const crMd = data.meeting_analysis_json ? _formatMeetingAnalysisAsMarkdown(data.meeting_analysis_json) : '';
     const panneauCr = (kp || crMd)
-        ? `${kp ? `<h3 class="fiche-h">En bref</h3><div class="fiche-enbref">${escapeHtml(kp)}</div>` : ''}
+        ? `${kp ? `<h3 class="fiche-h">En bref</h3><div class="fiche-enbref fiche-cr">${_ficheMarkdown(kp)}</div>` : ''}
            ${crMd ? `<div class="fiche-cr">${_ficheMarkdown(crMd)}</div>` : ''}`
         : `<p class="fiche-vide">Le compte-rendu n'est pas encore prêt. Il apparaîtra ici dès la fin du traitement.</p>`;
     const aAbsents = !!o['absentee'];

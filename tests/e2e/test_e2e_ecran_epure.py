@@ -47,3 +47,14 @@ def test_banc_fiche_reunion():
     if proc.returncode != 0:
         pytest.fail("banc fiche en échec :\n" + proc.stdout[-4000:] + "\n" + proc.stderr[-2000:])
     assert "tout passe" in proc.stdout
+
+
+@pytest.mark.skipif(not _playwright_present(), reason="playwright (python) absent")
+@pytest.mark.skipif(not BUNDLE.is_file(), reason="bundle Vite absent : npm run build")
+@pytest.mark.skipif(not MENU_JS.is_file(), reason="mirai-apps-menu/src/menu.js introuvable (MENU_JS=…)")
+def test_banc_preparer():
+    banc = pathlib.Path(__file__).with_name("banc-preparer.py")
+    proc = subprocess.run([sys.executable, str(banc)], capture_output=True, text=True, cwd=str(RACINE), timeout=300)
+    if proc.returncode != 0:
+        pytest.fail("banc préparer en échec :\n" + proc.stdout[-4000:] + "\n" + proc.stderr[-2000:])
+    assert "tout passe" in proc.stdout

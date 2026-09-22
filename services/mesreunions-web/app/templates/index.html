@@ -2079,6 +2079,23 @@
         .mr-nav .fr-nav__link[aria-current="page"] { color: var(--text-active-blue-france, #000091); }
         /* Un écran sans onglet (téléphones, corbeille, données utiles…) porte son retour. */
         .mr-retour { margin: 0 0 0.6rem; }
+        .wizard-facultatif { font-weight: 400; font-size: .8rem; color: #666; margin-left: .3rem; }
+        .wizard-question[hidden] { display: none !important; }
+        /* Fiche du brief (2026-09-22) */
+        /* ✓ ↺ de la date : visibles seulement quand il y a quelque chose à valider. */
+        #brief-detail-target-date-save-btn:disabled, #brief-detail-target-date-reset-btn:disabled { display: none; }
+        .brief-btn-glyphe { min-width: 2rem; justify-content: center; }
+        .brief-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin: .8rem 0 1rem; }
+        .brief-menu { position: absolute; left: 0; top: 100%; z-index: 20; background: #fff; border: 1px solid #ddd;
+            border-radius: 6px; padding: .3rem 0; margin: .25rem 0 0; min-width: 240px; box-shadow: 0 10px 30px rgba(0,0,0,.15); list-style: none; }
+        .brief-menu--droite { left: auto; right: 0; min-width: 280px; }
+        .brief-menu li { padding: 0; margin: 0; }
+        .brief-menu button { display: flex; align-items: center; gap: .5rem; width: 100%; text-align: left; background: none;
+            border: 0; padding: .45rem .9rem; font: inherit; font-size: .875rem; color: #161616; cursor: pointer; }
+        .brief-menu button:hover, .brief-menu button:focus { background: #eeeeff; }
+        .brief-menu-nb { margin-left: auto; font-size: .72rem; color: #666; }
+        .brief-reglages { margin: 1.2rem 0 .6rem; border-top: 1px solid #e5e5e5; padding-top: .6rem; }
+        .brief-reglages > summary { cursor: pointer; color: #000091; font-size: .9rem; font-weight: 500; }
         /* ── La fiche d'une réunion (2026-09-22) ─────────────────────────────── */
         .file-detail-header { margin-bottom: .2rem; }
         .file-detail-back.fiche-retour { font-size: .875rem; color: #000091; padding: .25rem 0; }
@@ -2127,7 +2144,7 @@
             height: 2px; background: #000091; }
         .fiche-panneau { font-size: .95rem; line-height: 1.55; max-width: 80ch; }
         .fiche-h { font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #666; margin: 0 0 .4rem; }
-        .fiche-enbref { white-space: pre-line; margin-bottom: 1rem; }
+        .fiche-enbref { margin-bottom: 1rem; }
         .fiche-cr h1, .fiche-cr h2 { font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
             color: #666; margin: 1.1rem 0 .45rem; }
         .fiche-cr h3 { font-size: .95rem; margin: .8rem 0 .3rem; }
@@ -2649,21 +2666,20 @@
     <div id="panel-brief" class="card tab-pane" data-tab="brief" role="tabpanel" aria-labelledby="tab-btn-brief" tabindex="0">
         <!-- Sous-vue liste : titre + bouton « Nouveau » + liste briefs actifs -->
         <div id="brief-list-view">
-            <div class="dsfr-inline-actions">
-                <h1 style="font-size:1.1rem;">Préparation de réunion</h1>
+            {# Épure (2026-09-22) : pas de titre répété (la barre le dit), une phrase,
+               un bouton. #}
+            <p class="subtitle" style="margin:0 0 0.8rem;">
+                Avant une réunion, l'IA vous prépare un brief : ordre du jour, participants,
+                points en suspens, questions à poser. Il rejoint ensuite l'enregistrement de la réunion.
+            </p>
+            <div class="brief-actions" style="margin-top:0;">
                 <button type="button"
-                        class="fr-btn fr-btn--sm fr-icon-add-line fr-btn--icon-left"
+                        class="fr-btn fr-icon-add-line fr-btn--icon-left"
                         data-action="open-wizard"
                         onclick="window.openWizard && window.openWizard()">
-                    Nouvelle préparation
+                    Préparer une réunion
                 </button>
             </div>
-            <p class="subtitle" style="margin-top:0.4rem;margin-bottom:0.8rem;">
-                Préparez un brief avant chaque réunion : il sera automatiquement
-                rattaché à l'enregistrement audio correspondant pour enrichir la
-                transcription et le compte-rendu. Les briefs sont conservés et
-                restent éditables. La corbeille les retient 30 jours avant suppression définitive.
-            </p>
             <!-- Meeting-prep v2 §7 : banner purge invitée pour briefs > 90j
                  sans audio lié. Rendu conditionnel par loadBriefs() via la
                  réponse de /api/preparations?with_counts=true (older_than_90d_unlinked_count). -->
@@ -2686,8 +2702,8 @@
         <!-- Sous-vue détail : brief courant + Renommer + Amender (page-mode in-panel) -->
         <div id="brief-detail-view" style="display:none;">
             <div style="margin-bottom:0.6rem;">
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-icon-arrow-left-line fr-btn--icon-left"
-                        data-action="show-list">Retour à la liste</button>
+                <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                        data-action="show-list">← Préparer une réunion</button>
             </div>
             <!-- Lot 3a — Titre éditable inline + date cible à droite. -->
             <div id="brief-detail-title-wrap" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
@@ -2700,125 +2716,93 @@
                 <!-- Date cible (target_meeting_date) éditable inline. PATCH /api/preparations/<id>. -->
                 <span id="brief-detail-target-date-wrap"
                       style="display:flex;align-items:center;gap:0.3rem;font-size:0.82rem;color:#475569;">
-                    <span style="font-weight:600;">Date cible&nbsp;:</span>
+                    <span style="font-weight:600;">Date de la réunion&nbsp;:</span>
                     <input type="datetime-local" id="brief-detail-target-date-input"
                            style="border:1px solid #cbd5e1;border-radius:0.3rem;
                                   padding:0.2rem 0.4rem;font-size:0.82rem;">
-                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line"
+                    <button type="button" class="fr-btn fr-btn--sm brief-btn-glyphe"
                             id="brief-detail-target-date-save-btn"
                             data-action="commit-target-date"
                             title="Valider la date cible"
                             aria-label="Valider la date cible"
                             disabled
-                            style="padding:0.2rem 0.4rem;"></button>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-refresh-line"
+                            style="padding:0.2rem 0.4rem;"><span aria-hidden="true">✓</span></button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary brief-btn-glyphe"
                             id="brief-detail-target-date-reset-btn"
                             data-action="reset-target-date"
                             title="Annuler la modification (revenir à la valeur précédente)"
                             aria-label="Annuler la modification"
                             disabled
-                            style="padding:0.2rem 0.4rem;"></button>
+                            style="padding:0.2rem 0.4rem;"><span aria-hidden="true">↺</span></button>
                 </span>
                 <span id="brief-detail-title-edit-controls" style="display:none;gap:0.3rem;align-items:center;flex:1 1 100%;">
                     <input type="text" id="brief-detail-title-input" maxlength="120"
                            style="border:1px solid #cbd5e1;border-radius:0.3rem;padding:0.3rem 0.5rem;font-size:1rem;flex:1 1 auto;width:100%;">
-                    <button type="button" class="fr-btn fr-btn--sm fr-icon-check-line"
+                    <button type="button" class="fr-btn fr-btn--sm brief-btn-glyphe"
                             data-action="commit-rename-inline"
                             title="Valider le nouveau nom"
                             aria-label="Valider"
-                            style="padding:0.2rem 0.4rem;"></button>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-close-line"
+                            style="padding:0.2rem 0.4rem;"><span aria-hidden="true">✓</span></button>
+                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary brief-btn-glyphe"
                             data-action="cancel-rename-inline"
                             title="Annuler la modification"
                             aria-label="Annuler"
-                            style="padding:0.2rem 0.4rem;"></button>
+                            style="padding:0.2rem 0.4rem;"><span aria-hidden="true">✕</span></button>
                 </span>
             </div>
             <p id="brief-detail-meta" class="subtitle" style="margin-top:0.2rem;"></p>
-            <!-- Lot 3 — 5 actions en barre d'icônes compacte. Icon-only + tooltip rollover
-                 (title=) pour éviter le wrap multi-lignes des labels longs.
-                 Note : on évite .fr-btns-group car DSFR force ses enfants <div>
-                 à width:100% → les wrappers de dropdown (download / more) sont
-                 poussés à la ligne et les menus s'ancrent au bord du conteneur
-                 (mal positionnés). On garde juste un flex simple. -->
-            <div style="margin:0.6rem 0;display:flex;flex-wrap:wrap;align-items:center;gap:0.3rem;overflow:visible;">
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-book-2-line"
-                        id="brief-detail-glossary-btn"
-                        data-action="open-glossary-modal"
-                        aria-label="Glossaire"
-                        title="Glossaire (0 terme)"
-                        style="position:relative;">
-                    <span class="fr-sr-only">Glossaire (<span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span>)</span>
-                    <span id="brief-detail-glossary-count-badge"
-                          style="position:absolute;top:-4px;right:-4px;min-width:1.1rem;height:1.1rem;
-                                 line-height:1.1rem;padding:0 0.25rem;
-                                 background:#1d4ed8;color:#fff;border-radius:999px;
-                                 font-size:0.62rem;font-weight:700;text-align:center;display:none;">0</span>
-                </button>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-links-line"
-                        data-link-brief-btn id="brief-detail-link-audio-btn"
-                        data-action="open-link-audio-modal"
-                        aria-label="Lier un fichier audio"
-                        title="Lier un fichier audio"
-                        style="display:none;"></button>
-                <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-calendar-event-line"
-                        data-prepare-next-series-btn id="brief-detail-prepare-next"
-                        data-action="open-prepare-next-modal"
-                        aria-label="Préparer la prochaine réunion de cette série"
-                        title="Préparer la prochaine réunion de cette série"
-                        style="display:none;"></button>
-                <!-- Lot 4 — Menu "Télécharger" → TXT / MD / DOCX / ODT.
-                     TXT et MD générés côté front via lib/export-formatter.js,
-                     DOCX et ODT via GET /api/preparations/{id}/export?format=. -->
+            {# Fiche du brief épurée (2026-09-22) : deux boutons nommés — Télécharger ▾,
+               Modifier — et « ⋯ » pour le reste (glossaire, lier un enregistrement,
+               réunion suivante). Les identifiants et data-action historiques sont
+               conservés : tabs/preparations.js les pilote. #}
+            <div class="brief-actions">
                 <div style="position:relative;display:inline-block;" data-export-wrap>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-download-line"
+                    <button type="button" class="fr-btn"
                             data-action="toggle-export-menu"
                             aria-haspopup="true" aria-expanded="false"
-                            aria-label="Télécharger le brief"
-                            title="Télécharger (TXT, MD, DOCX, ODT)"
-                            id="brief-detail-export-btn"></button>
-                    <ul id="brief-detail-export-menu"
-                        style="display:none;position:absolute;left:0;top:100%;z-index:10;
-                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
-                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:200px;
-                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
-                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                                    data-action="export-brief" data-export-format="txt"
-                                    style="display:block;width:100%;text-align:left;border-radius:0;">Texte brut (.txt)</button></li>
-                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                                    data-action="export-brief" data-export-format="md"
-                                    style="display:block;width:100%;text-align:left;border-radius:0;">Markdown (.md)</button></li>
-                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                                    data-action="export-brief" data-export-format="docx"
-                                    style="display:block;width:100%;text-align:left;border-radius:0;">Word (.docx)</button></li>
-                        <li><button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                                    data-action="export-brief" data-export-format="odt"
-                                    style="display:block;width:100%;text-align:left;border-radius:0;">LibreOffice (.odt)</button></li>
+                            id="brief-detail-export-btn"><span aria-hidden="true">⬇&nbsp;</span>Télécharger le brief<span aria-hidden="true">&nbsp;▾</span></button>
+                    <ul id="brief-detail-export-menu" class="brief-menu" style="display:none;">
+                        <li><button type="button" data-action="export-brief" data-export-format="docx">Word (.docx)</button></li>
+                        <li><button type="button" data-action="export-brief" data-export-format="odt">LibreOffice (.odt)</button></li>
+                        <li><button type="button" data-action="export-brief" data-export-format="md">Markdown (.md)</button></li>
+                        <li><button type="button" data-action="export-brief" data-export-format="txt">Texte brut (.txt)</button></li>
                     </ul>
                 </div>
-                <!-- Menu "Plus d'actions" → conserve l'accès à l'édition avancée (amend). -->
-                <div style="position:relative;display:inline-block;" data-more-actions-wrap>
-                    <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary fr-icon-more-line"
+                <button type="button" class="fr-btn fr-btn--secondary" data-action="toggle-amend"
+                        title="Corriger le brief section par section, sans refaire appel à l'IA"><span aria-hidden="true">✎&nbsp;</span>Modifier le brief</button>
+                <div style="position:relative;display:inline-block;margin-left:auto;" data-more-actions-wrap>
+                    <button type="button" class="fr-btn fr-btn--tertiary"
                             data-action="toggle-more-actions"
                             aria-haspopup="true" aria-expanded="false"
-                            aria-label="Plus d'actions"
-                            title="Plus d'actions (amender, supprimer…)"
-                            id="brief-detail-more-btn"></button>
-                    <ul id="brief-detail-more-menu"
-                        style="display:none;position:absolute;left:0;top:100%;z-index:10;
-                               background:#fff;border:1px solid #cbd5e1;border-radius:0.4rem;
-                               padding:0.3rem 0;margin:0.25rem 0 0;min-width:240px;
-                               box-shadow:0 4px 12px rgba(0,0,0,0.08);list-style:none;">
-                        <li>
-                            <button type="button" class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
-                                    data-action="toggle-amend"
-                                    style="display:block;width:100%;text-align:left;border-radius:0;">
-                                Édition avancée (amend)
-                            </button>
-                        </li>
+                            title="Autres actions"
+                            id="brief-detail-more-btn">⋯<span class="fr-sr-only"> Autres actions</span></button>
+                    <ul id="brief-detail-more-menu" class="brief-menu brief-menu--droite" style="display:none;">
+                        <li><button type="button" data-prepare-next-series-btn id="brief-detail-prepare-next"
+                                    data-action="open-prepare-next-modal" style="display:none;">🔁 Préparer la réunion suivante</button></li>
+                        <li><button type="button" data-link-brief-btn id="brief-detail-link-audio-btn"
+                                    data-action="open-link-audio-modal" style="display:none;">🔗 Lier un enregistrement</button></li>
+                        <li><button type="button" id="brief-detail-glossary-btn" data-action="open-glossary-modal">📚 Glossaire
+                                <span class="brief-menu-nb"><span id="brief-detail-glossary-count">0</span> terme<span id="brief-detail-glossary-plural">s</span></span>
+                                <span id="brief-detail-glossary-count-badge" hidden>0</span></button></li>
                     </ul>
                 </div>
             </div>
+            <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
+            <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
+            <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
+                 référence pour le test test_mesreunions_web_template (landmark
+                 « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
+            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;display:none;"></div>
+            <!-- Lot 7 — Timeline horizontale de la série (Time machine).
+                 Remplace progressivement #brief-detail-series-chain ; rempli
+                 par loadBriefSeries() depuis preparations.js + lib/series-timeline.js. -->
+            <div id="brief-detail-series-timeline" style="margin:0.6rem 0;"></div>
+            <div id="brief-detail-body" class="brief-rendered"></div>
+            {# Participants, récurrence et envoi du compte-rendu : des réglages, pas le
+               contenu du brief — sous le brief, repliés (2026-09-22). #}
+            <details class="brief-reglages" id="brief-reglages">
+                <summary>Participants, récurrence et envoi du compte-rendu</summary>
             <!-- Lot 5 — Participants éditables inline depuis la fiche brief. -->
             <section id="brief-detail-participants" style="margin:0.6rem 0;
                      border:1px solid #e2e8f0;border-radius:0.4rem;padding:0.5rem 0.7rem;background:#fafbfc;">
@@ -2933,24 +2917,12 @@
                     </label>
                 </div>
                 <div style="margin-top:0.3rem;font-size:0.78rem;color:#64748b;">
-                    Le bouton "Inviter par mail" ouvre votre client mail avec un brouillon pré-rempli
-                    (sujet, agenda, dossier Drive). Le toggle CR auto requiert qu'au moins un participant
-                    ait une adresse email valide et que le serveur SMTP soit configuré.
+                    « Inviter par mail » ouvre votre messagerie avec un brouillon prêt (sujet, ordre du jour).
+                    L'envoi du compte-rendu suppose qu'au moins un participant ait une adresse.
                 </div>
             </section>
             <!-- Section "Sources Drive" : rendue par _applyBriefPayload si drive_folder_id présent -->
-            <div id="brief-detail-drive-sources" style="margin:0.6rem 0;font-size:0.85rem;"></div>
-            <!-- Section "Fichier(s) audio lié(s)" : remplie par loadBriefAudioFiles() -->
-            <div id="brief-detail-linked-audios" style="margin:0.6rem 0;font-size:0.85rem;"></div>
-            <!-- Section "Cette série" : rendue si parent ou enfants. Présente en
-                 référence pour le test test_mesreunions_web_template (landmark
-                 « Suite de : » apparaîtra dans le wizard côté PREP_BRIEF_TEMPLATE). -->
-            <div id="brief-detail-series-chain" style="margin:0.6rem 0;font-size:0.85rem;display:none;"></div>
-            <!-- Lot 7 — Timeline horizontale de la série (Time machine).
-                 Remplace progressivement #brief-detail-series-chain ; rempli
-                 par loadBriefSeries() depuis preparations.js + lib/series-timeline.js. -->
-            <div id="brief-detail-series-timeline" style="margin:0.6rem 0;"></div>
-            <div id="brief-detail-body" class="brief-rendered"></div>
+            </details>
             <div id="brief-amend-pane" style="display:none;margin-top:0.6rem;">
                 <p style="font-size:0.8rem;color:#64748b;">
                     Édition manuelle. Pas de ré-appel LLM.
@@ -3135,8 +3107,8 @@
 
     <div id="panel-trash" class="card tab-pane" data-tab="trash" role="tabpanel" aria-label="Corbeille" tabindex="0">
         <p class="mr-retour"><button type="button"
-                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
-                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">← Mes réunions</button></p>
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.1rem;">Corbeille</h1>
             <span style="color:#64748b;font-size:0.78rem;">
@@ -3259,8 +3231,8 @@
 
     <div id="panel-devices" class="card tab-pane" data-tab="devices" role="tabpanel" aria-label="Mes téléphones" tabindex="0">
         <p class="mr-retour"><button type="button"
-                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
-                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">← Mes réunions</button></p>
         <div class="dsfr-inline-actions">
             <h1 style="font-size:1.1rem;">Mes téléphones</h1>
             <!-- R2 : `fr-btns-group--icon-left` est obligatoire — sans lui, le DSFR réduit à
@@ -3411,8 +3383,8 @@
          data-tab="useful-data" role="tabpanel"
          aria-label="Mes données utiles" tabindex="0">
         <p class="mr-retour"><button type="button"
-                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
-                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">← Mes réunions</button></p>
         <div data-useful-data-root>
             <p style="color:#999;font-size:0.85rem;">Chargement…</p>
         </div>
@@ -3425,8 +3397,8 @@
          data-tab="admin" role="tabpanel"
          aria-label="Administration" tabindex="0">
         <p class="mr-retour"><button type="button"
-                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline fr-btn--icon-left fr-icon-arrow-left-line"
-                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">Mes réunions</button></p>
+                class="fr-btn fr-btn--sm fr-btn--tertiary-no-outline"
+                data-action="mr:retour" onclick="window.ouvrirEcran && window.ouvrirEcran('transfers')">← Mes réunions</button></p>
         <div data-admin-root>
             <p style="color:#999;font-size:0.85rem;">Chargement…</p>
         </div>
@@ -3444,12 +3416,10 @@
         <button type="button" class="wizard-modal-close" id="wizard-close-btn"
                 aria-label="Fermer le wizard">×</button>
         <h1 id="wizard-modal-title" style="font-size:1.2rem;margin:0 0 0.4rem;">
-            Préparer un brief de réunion
+            Préparer une réunion
         </h1>
         <p class="subtitle" style="margin:0 0 0.8rem;">
-            L'IA lit vos documents de prép (Drive si renseigné) et produit un
-            brief personnalisé + un glossaire qui enrichira la transcription
-            de l'audio de la réunion.
+            Trois questions, deux minutes. L'IA rédige ensuite le brief ; vous pourrez tout modifier.
         </p>
         <div id="wizard-stepper" class="wizard-stepper" aria-label="Étapes"></div>
 
@@ -3467,26 +3437,15 @@
 
             {# ── Step 1 : Identité ── #}
             <div id="wizard-step-identite" class="wizard-step is-active">
-                <h2>1. Identité de la réunion</h2>
+                <h2>La réunion</h2>
                 <div class="wizard-question">
-                    <label for="wizard-meeting-type">Type de réunion *</label>
-                    <div class="hint">Le brief sera structuré selon ce type.</div>
-                    <select id="wizard-meeting-type" required>
-                        <option value="general">Général</option>
-                        <option value="one_on_one">Entretien 1:1</option>
-                        <option value="project_update">Point projet / équipe</option>
-                        <option value="steering_committee">Comité de pilotage (COPIL)</option>
-                        <option value="brainstorm">Atelier / brainstorm</option>
-                    </select>
-                </div>
-                <div class="wizard-question">
-                    <label for="wizard-subject">Sujet de la réunion *</label>
+                    <label for="wizard-subject">De quoi s'agit-il ?</label>
                     <div class="hint">En une phrase, le thème ou la décision principale.</div>
                     <input type="text" id="wizard-subject" required maxlength="500"
                            placeholder="Ex : Arbitrer la trajectoire budgétaire 2027 du programme X">
                 </div>
                 <div class="wizard-question">
-                    <label for="wizard-duration">Durée prévue *</label>
+                    <label for="wizard-duration">Durée</label>
                     <input type="text" id="wizard-duration" required
                            placeholder="Ex : 1 heure">
                     <div class="wizard-chips" data-target="wizard-duration">
@@ -3502,11 +3461,10 @@
                 <div class="wizard-question">
                     <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
                         <input type="checkbox" id="wizard-recurring-toggle">
-                        <span>Cette réunion est récurrente</span>
+                        <span>Cette réunion se répète</span>
                     </label>
                     <div class="hint">
-                        Active la définition d'une règle de récurrence (RRULE) qui
-                        servira à pré-renseigner la prochaine occurrence.
+                        La réunion suivante pourra reprendre ce brief, ses points en suspens et son compte-rendu.
                     </div>
                     <div id="wizard-recurrence-form"
                          style="display:none;margin-top:0.5rem;border:1px solid #e2e8f0;
@@ -3559,13 +3517,23 @@
                         </div>
                     </div>
                 </div>
+                <div class="wizard-question">
+                    <label for="wizard-meeting-type">Type de réunion <span class="wizard-facultatif">facultatif — oriente la structure du brief</span></label>
+                    <select id="wizard-meeting-type" required>
+                        <option value="general">Général</option>
+                        <option value="one_on_one">Entretien 1:1</option>
+                        <option value="project_update">Point projet / équipe</option>
+                        <option value="steering_committee">Comité de pilotage (COPIL)</option>
+                        <option value="brainstorm">Atelier / brainstorm</option>
+                    </select>
+                </div>
             </div>
 
             {# ── Step 2 : Contexte ── #}
             <div id="wizard-step-contexte" class="wizard-step">
-                <h2>2. Votre rôle &amp; vos attentes</h2>
+                <h2>Vous et les autres</h2>
                 <div class="wizard-question">
-                    <label for="wizard-role">Quel est votre rôle dans cette réunion ? *</label>
+                    <label for="wizard-role">Votre rôle</label>
                     <input type="text" id="wizard-role" maxlength="300"
                            placeholder="J'anime la réunion, je participe, je dois décider…">
                     <div class="wizard-chips" data-target="wizard-role">
@@ -3576,8 +3544,11 @@
                         <span class="wizard-chip">J'observe</span>
                     </div>
                 </div>
-                <div class="wizard-question">
-                    <label for="wizard-expectation">Qu'attendez-vous principalement de ce brief ? *</label>
+                {# « Qu'attendez-vous du brief ? » et « qu'est-ce qui aura changé ? » posaient la
+                   même question à une personne pressée : la seconde reste, la première est
+                   déduite (tabs/wizard.js, _collectValues) — le champ vit pour les brouillons. #}
+                <div class="wizard-question" hidden>
+                    <label for="wizard-expectation">Qu'attendez-vous principalement de ce brief ?</label>
                     <input type="text" id="wizard-expectation" maxlength="300"
                            placeholder="Comprendre le contexte, anticiper les objections…">
                     <div class="wizard-chips" data-target="wizard-expectation">
@@ -3590,10 +3561,9 @@
                 </div>
                 {# Coaching — intention de fin de réunion (résultat vérifiable) #}
                 <div class="wizard-question">
-                    <label for="wizard-success-criteria">À la fin de la réunion, qu'est-ce qui aura changé ?</label>
+                    <label for="wizard-success-criteria">À la fin de la réunion, qu'est-ce qui doit être acquis ?</label>
                     <div class="hint">
-                        Optionnel — décrire le résultat espéré aide à structurer le brief,
-                        et permet de vérifier ensuite s'il est atteint.
+                        Une phrase suffit. C'est ce que le brief cherchera à rendre possible.
                     </div>
                     <div class="wizard-chips" id="wizard-outcome-chips">
                         <span class="wizard-chip" data-outcome="decision">Une décision sera prise</span>
@@ -3609,10 +3579,9 @@
                 </div>
                 {# Lot 5 — Participants (optionnels) #}
                 <div class="wizard-question">
-                    <label>Participants attendus (optionnel)</label>
+                    <label>Qui sera là <span class="wizard-facultatif">facultatif</span></label>
                     <div class="hint">
-                        Ajoutez les personnes attendues : nom, email (pour invitations / CR), rôle.
-                        Vous pourrez les modifier après création depuis la fiche du brief.
+                        Un nom, un rôle ; une adresse si vous voulez les inviter ou leur envoyer le compte-rendu.
                     </div>
                     <div id="wizard-participants-list"
                          style="display:flex;flex-direction:column;gap:0.3rem;margin-top:0.3rem;"></div>
@@ -3630,12 +3599,11 @@
                HORS de ce <form>, pour qu'aucun de leurs boutons ne puisse
                déclencher la soumission implicite du wizard. #}
             <div id="wizard-step-documents" class="wizard-step">
-                <h2>3. Sources du brief (optionnel)</h2>
+                <h2>Ce que l'IA doit lire</h2>
                 <div class="wizard-question">
                     <div class="hint">
-                        Ajoutez ce que l'IA doit lire avant de rédiger : des documents,
-                        des réunions déjà préparées, un échange collé. Tout est optionnel —
-                        sans source, le brief s'appuie sur vos seules réponses.
+                        Des documents, une réunion déjà préparée, un échange collé. Tout est
+                        facultatif — sans source, le brief s'appuie sur vos seules réponses.
                     </div>
                     <div id="wizard-source-cards" class="wizard-source-cards">
                         <button type="button" class="wizard-source-card" data-source-picker="drive">
@@ -3664,13 +3632,9 @@
                     <input type="hidden" id="wizard-drive-folder" value="">
                     <div id="wizard-sources-basket" style="margin-top:1rem;"></div>
                 </div>
-            </div>
 
-            {# ── Step 4 : Focus ── #}
-            <div id="wizard-step-focus" class="wizard-step">
-                <h2>4. Sur quoi concentrer l'analyse ?</h2>
-                <div class="wizard-question">
-                    <div class="hint">Cochez les axes pertinents (plusieurs choix possibles).</div>
+                <div class="wizard-question" style="margin-top:1.2rem;">
+                    <h3 class="fr-h6" style="margin-bottom:0.3rem;">Insister sur <span class="wizard-facultatif">facultatif</span></h3>
                     <div class="wizard-focus-grid">
                         <label><input type="checkbox" name="wizard-focus" value="Aspects budgétaires"> Aspects budgétaires</label>
                         <label><input type="checkbox" name="wizard-focus" value="Risques et points de vigilance"> Risques et points de vigilance</label>
@@ -3687,13 +3651,8 @@
                    autres sous-titres du wizard (sans classe, h3 héritait
                    du dimensionnement DSFR par défaut, démesuré). #}
                 <div class="wizard-question" style="margin-top:1.2rem;">
-                    <h3 class="fr-h6" style="margin-bottom:0.3rem;">Thématiques additionnelles</h3>
-                    <div class="hint">
-                        Ajoutez des sujets ou mots-clés spécifiques à votre contexte
-                        (ex. « Budget 2026 », « Plan de continuité »). Ces thématiques
-                        seront proposées en auto-complétion lors de vos prochaines
-                        préparations.
-                    </div>
+                    <h3 class="fr-h6" style="margin-bottom:0.3rem;">Un thème à vous <span class="wizard-facultatif">facultatif</span></h3>
+                    <div class="hint">Ex. « Budget 2026 », « Plan de continuité » — il vous sera reproposé la prochaine fois.</div>
                     <div id="wizard-themes-container" style="margin-top:0.6rem;"></div>
                 </div>
 
@@ -3701,27 +3660,16 @@
                 <div class="wizard-question" style="margin-top:1.2rem;">
                     <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
                         <input type="checkbox" id="wizard-send-cr-email">
-                        <span>Envoyer le CR aux participants à la fin de la transcription</span>
+                        <span>Envoyer le compte-rendu aux participants après la réunion</span>
                     </label>
                     <div class="hint" style="margin-top:0.3rem;">
-                        Requiert qu'au moins un participant ait une adresse email
-                        et que le serveur SMTP soit configuré côté infrastructure.
+                        Il faut qu'au moins un participant ait une adresse.
                     </div>
                 </div>
+                            <div id="wizard-coach-tip-recap" class="wizard-coach" aria-live="polite"></div>
             </div>
 
-            {# ── Step 5 : Récap ── #}
-            <div id="wizard-step-recap" class="wizard-step">
-                <h2>5. Récapitulatif</h2>
-                <p class="hint" style="margin-bottom:0.5rem;">
-                    Vérifiez les informations puis cliquez « Générer le brief ».
-                    La génération peut prendre quelques secondes selon la taille
-                    des documents Drive associés.
-                </p>
-                <div class="wizard-recap" id="wizard-recap-content"></div>
-                <div id="wizard-coach-tip-recap" class="wizard-coach" aria-live="polite"></div>
-            </div>
-
+            {# ── Step 4 : Focus ── #}
             <div id="wizard-status" class="wizard-status"></div>
             <div id="wizard-generation-progress" style="display:none;margin-top:0.6rem;"></div>
 
@@ -3739,7 +3687,7 @@
                     </button>
                     <button type="submit" class="fr-btn fr-btn--sm"
                             id="wizard-submit-btn" style="display:none;">
-                        Générer le brief
+                        Rédiger le brief
                     </button>
                 </div>
             </div>

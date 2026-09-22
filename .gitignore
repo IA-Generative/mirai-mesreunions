@@ -51,3 +51,4 @@ tests/fixtures/audio/
 private/
 *.private/
 tests/e2e/fiche-epure.png
+tests/e2e/preparer-epure.png

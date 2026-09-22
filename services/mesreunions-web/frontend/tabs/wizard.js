@@ -42,17 +42,20 @@ import { openSourcePicker } from '../lib/source-pickers.js';
 import { isStackedModalOpen } from '../lib/stacked-modal.js';
 import { showToast } from '../lib/toast.js';
 
-// Le wizard reste à CINQ étapes. En ajouter une aurait deux conséquences
-// qu'aucun gain d'ergonomie ne compense : `_COACH_BY_STEP` est indexé par
-// numéro d'étape (les suggestions atterriraient sur le mauvais écran), et
-// surtout `_applySnapshot` restaure `snap.step` comme un entier brut, sans
-// champ de version — tous les brouillons déjà en localStorage rouvriraient
-// donc sur un écran décalé. L'étape 3 change seulement de nature : de
-// « Documents » (un champ Drive) à « Sources » (quatre pickers + panier).
-const STEP_IDS = ['identite', 'contexte', 'documents', 'focus', 'recap'];
+// TROIS étapes depuis le 2026-09-22 (maquette validée) : « La réunion »,
+// « Vous et les autres », « Ce que l'IA doit lire ». Le récapitulatif a
+// disparu — le brief EST le récapitulatif, et tout s'y modifie ; « Focus »
+// a rejoint les sources. Deux conséquences traitées :
+//   - `_COACH_BY_STEP` est indexé par numéro d'étape → réindexé (1 et 2) ;
+//   - `_applySnapshot` restaurait `snap.step` comme un entier brut : les
+//     brouillons portent désormais `v: 3`, et un brouillon ancien (5 étapes)
+//     est ramené par `_ETAPE_ANCIENNE` (0→0, 1→1, 2/3/4→2).
+const STEP_IDS = ['identite', 'contexte', 'documents'];
 const STEP_LABELS = [
-  'Identité', 'Contexte', 'Sources', 'Focus', 'Récap',
+  'La réunion', 'Vous et les autres', "Ce que l'IA doit lire",
 ];
+const VERSION_BROUILLON = 3;
+const _ETAPE_ANCIENNE = [0, 1, 2, 2, 2];
 
 let _currentStep = 0;
 let _wizardOpenedOnce = false;
@@ -162,13 +165,11 @@ function _validateCurrentStep() {
   if (_currentStep === 0) {
     const subject = (_qs('#wizard-subject') || {}).value || '';
     const duration = _parseDurationMinutes((_qs('#wizard-duration') || {}).value);
-    if (!subject.trim()) { _setStatus('Le sujet est obligatoire.', 'err'); return false; }
+    if (!subject.trim()) { _setStatus('Dites en une phrase de quoi il s\'agit.', 'err'); return false; }
     if (!duration) { _setStatus('Durée non reconnue (ex : « 1h », « 45 minutes »).', 'err'); return false; }
   } else if (_currentStep === 1) {
     const role = (_qs('#wizard-role') || {}).value || '';
-    const exp = (_qs('#wizard-expectation') || {}).value || '';
-    if (!role.trim()) { _setStatus('Votre rôle est obligatoire.', 'err'); return false; }
-    if (!exp.trim()) { _setStatus("L'attendu du brief est obligatoire.", 'err'); return false; }
+    if (!role.trim()) { _setStatus('Indiquez votre rôle (un clic sur une proposition suffit).', 'err'); return false; }
   }
   return true;
 }
@@ -249,7 +250,7 @@ const _COACH_TIPS = [
 // signaux de risque d'abord, sinon le conseil « envoyer avant ».
 const _COACH_BY_STEP = {
   1: { container: 'wizard-coach-tip', tips: ['outcome_empty', 'agenda_questions', 'many_participants', 'long_break'] },
-  4: { container: 'wizard-coach-tip-recap', tips: ['many_participants', 'long_break', 'send_before'] },
+  2: { container: 'wizard-coach-tip-recap', tips: ['many_participants', 'long_break', 'send_before'] },
 };
 let _coachDismissed = new Set();
 
@@ -330,8 +331,19 @@ function _collectValues() {
   // Étape 3 — panier de sources. `drive` reste renseigné en parallèle pour
   // le chemin historique (cf. _syncDriveHiddenInput).
   const sources = _sourceEntries();
+  // L'attendu du brief n'est plus demandé (fusionné avec « ce qui doit être
+  // acquis ») ; le serveur l'exige : on le déduit, du plus précis au plus général.
+  const LIBELLES_ISSUE = {
+    decision: 'Préparer une décision', actions: 'Aboutir à un plan d\'action daté',
+    alignement: 'Obtenir un alignement partagé', idees: 'Faire émerger des idées',
+    information: 'Transmettre une information',
+  };
+  const attendu = expectation
+    || successCriteria
+    || expectedOutcomes.map((k) => LIBELLES_ISSUE[k]).filter(Boolean).join(' ; ')
+    || 'Comprendre le contexte et préparer la réunion';
   return {
-    meetingType, subject, role, expectation, drive, duration, focus, participants,
+    meetingType, subject, role, expectation: attendu, drive, duration, focus, participants,
     sources,
     isRecurring: isRecurring && !!recurrenceRule,
     recurrenceRule: isRecurring ? recurrenceRule : null,
@@ -1085,6 +1097,7 @@ function _collectSnapshot() {
   } catch (e) {}
   return {
     step: _currentStep || 0,
+    v: VERSION_BROUILLON,
     fields, participants, themes, outcomes, sources,
     title: fields['wizard-subject'] || '(brouillon sans titre)',
     updatedAt: Date.now(),
@@ -1149,7 +1162,11 @@ function _applySnapshot(snap) {
     }
   } catch (e) {}
   // Step
-  if (typeof snap.step === 'number') _showStep(snap.step);
+  if (typeof snap.step === 'number') {
+    // Brouillon d'avant le 2026-09-22 (5 étapes, sans `v`) : on le ramène.
+    const etape = snap.v === VERSION_BROUILLON ? snap.step : (_ETAPE_ANCIENNE[snap.step] ?? 0);
+    _showStep(Math.max(0, Math.min(etape, STEP_IDS.length - 1)));
+  }
 }
 
 function _scheduleSave() {

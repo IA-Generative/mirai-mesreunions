@@ -316,7 +316,13 @@ function _applyBriefPayload(briefId, d) {
   _currentBrief = b;
   if (titleEl) titleEl.textContent = b.title || b.subject || '(sans titre)';
   const created = (b.created_at || '').slice(0, 16).replace('T', ' ');
-  if (metaEl) metaEl.textContent = `Créé le ${created} · rôle: ${b.role || '—'} · durée: ${b.duration_minutes || '—'} min`;
+  // Une ligne de méta lisible (2026-09-22) : durée · rôle · date de création.
+  if (metaEl) {
+    const m = Number(b.duration_minutes) || 0;
+    const duree = m ? (m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? ' ' + String(m % 60).padStart(2, '0') : ''}` : `${m} min`) : '';
+    const cree = created ? `préparé le ${created.slice(8, 10)}/${created.slice(5, 7)} à ${created.slice(11, 16)}` : '';
+    metaEl.textContent = [duree, (b.role || '').trim(), cree].filter(Boolean).join(' · ');
+  }
   const content = b.content || b.brief_json || {};
   if (bodyEl) bodyEl.innerHTML = renderBriefBody(content);
   fillAmendForm(content);
@@ -1930,11 +1936,11 @@ function _onPanelClick(ev) {
       return;
     }
     case 'open-link-audio-modal':
-      ev.preventDefault(); _openLinkAudioModal(); return;
+      ev.preventDefault(); { const m = document.getElementById('brief-detail-more-menu'); if (m) m.style.display = 'none'; } _openLinkAudioModal(); return;
     case 'open-glossary-modal':
-      ev.preventDefault(); _openGlossaryModal(); return;
+      ev.preventDefault(); { const m = document.getElementById('brief-detail-more-menu'); if (m) m.style.display = 'none'; } _openGlossaryModal(); return;
     case 'open-prepare-next-modal':
-      ev.preventDefault(); _openPrepareNextModal(); return;
+      ev.preventDefault(); { const m = document.getElementById('brief-detail-more-menu'); if (m) m.style.display = 'none'; } _openPrepareNextModal(); return;
     case 'open-series-occurrence': {
       ev.preventDefault();
       const occId = actionEl.getAttribute('data-occurrence-id');
