@@ -249,20 +249,70 @@ def test_no_audio_file_after_ingest(tmp_path, monkeypatch):
 
 ---
 
-## 3. Checklist d'activation prod-bêta
+## 3. Activation prod-bêta — état au 2026-08-30
 
-À faire dans l'ordre, en main quand tu reprends :
+Le service **tourne en prod-bêta** depuis le 2026-05-25 (le serveur MCP depuis le 05-27).
+Ce qui suit remplace la checklist d'origine, dont plusieurs cases étaient cochées dans les
+faits mais pas dans le document — et dont une ligne était fausse.
 
-- [ ] Appliquer la migration : `psql … -f migrations/internal/019_video_ingest_initial.sql`
-- [ ] Créer le secret K8s : `kubectl create secret generic video-ingest-secret --from-literal=database_url='postgresql://…'`
-- [ ] Apply kustomize : `kustomize build --load-restrictor=LoadRestrictionsNone deploy/kubernetes/environments/prod-beta/internal/ | kubectl apply -f -`
-- [ ] Vérifier la NetworkPolicy : `kubectl describe cnp video-ingest-egress -n audio-internal`
-- [ ] Smoke test : `kubectl exec deploy/video-ingest-api -- curl -s http://localhost:8000/health`
-- [ ] Test bout-en-bout : `curl -H "Authorization: Bearer $TOKEN" -X POST http://<svc>/video/import -d '{"url":"https://youtu.be/dQw4w9WgXcQ"}'`
-- [ ] Wirer le client `mesreunions-web` (section 1)
-- [ ] Implémenter la slice ASR (section 2)
-- [ ] Itérer sur les Q ouvertes restantes (Q4 quotas, Q5 audit logging, Q2 lecteur horodaté)
+### Fait
+
+- [x] Migration appliquée (`019_video_ingest_initial.sql` → `023_video_ingest_job_retry.sql`)
+- [x] Secrets posés : `video-ingest-secret`, `kevent-api-key`, `internal-api-secret`
+- [x] Trois charges en service : `video-ingest-api` (8000), `-mcp` (8001), `-worker`
+- [x] `CiliumNetworkPolicy video-ingest-egress` en place
+- [x] Client `mesreunions-web` câblé, slice ASR livrée
+- [x] **Manifestes versionnés** — `deploy/kubernetes/environments/prod-beta/internal/`,
+      reconstruits le 2026-08-30 et prouvés conformes (`kubectl diff` exit 0)
+
+> ⚠ **La ligne « Apply kustomize » de la checklist d'origine était fausse.** Le chemin
+> qu'elle nommait **n'a jamais existé dans git** : les trois charges avaient été posées à la
+> main, et leur seule description survivante était l'annotation
+> `last-applied-configuration` du cluster. Un correctif appliqué aurait disparu au prochain
+> `apply`. Corrigé le 2026-08-30 — voir **ADR-0005** et
+> [`docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md`](../../docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md).
+
+### Déployer aujourd'hui
+
+```bash
+git push origin <branche>                                   # le build part de git
+export REGISTRY_NAMESPACE=funcscwnspricelessmontalcinhiacgnzi
+deploy/scripts/build-incluster.sh "$(date +%Y%m%d-%H%M%S)" --no-latest
+
+# poser le tag dans internal/kustomization.yaml (bloc images:), puis
+kustomize build --load-restrictor=LoadRestrictionsNone \
+  deploy/kubernetes/environments/prod-beta/internal/ | kubectl apply -f -
+```
+
+La surcharge `patch-hotes.local.yaml` (gitignorée) est **requise** : sans elle
+`kustomize build` échoue. Recopier `patch-hotes.local.yaml.example`.
+
+### Reste à faire — trois dettes nommées
+
+1. **Migrer vers l'API MCP 2.x.** Le code est épinglé `mcp>=1.2.0,<2` depuis le 2026-08-30 :
+   `2.x` renomme `FastMCP` en `MCPServer` et **déplace `host`/`port` du constructeur vers
+   `run()`**. Or `mcp_server.py` bind `0.0.0.0:8001` dans le constructeur. Migrer sans
+   déplacer ce bind donnerait un serveur en écoute sur loopback — pod « Running » et
+   injoignable. **Prérequis à la migration : un test qui prouve le bind et un aller-retour
+   sur un outil.**
+2. **Poser une sonde sur `video-ingest-mcp`.** Il n'en a aucune : rien ne distingue
+   aujourd'hui un serveur MCP sain d'un serveur qui n'écoute nulle part. C'est ce qui rend
+   la dette n°1 dangereuse.
+3. **Trancher la sortie vers la passerelle Kevent.** `VIDEO_INGEST_KEVENT_GATEWAY_URL` est
+   posée sur les trois charges, mais la `CiliumNetworkPolicy` ne l'autorise **pas** en
+   sortie : le repli ASR Whisper ne peut pas aboutir. État du cluster depuis 96 jours.
+   Soit on ouvre la sortie, soit on retire la variable qui promet ce qu'elle ne tient pas.
+
+### Contrôles
+
+```bash
+kubectl -n audio-internal get pods -l app=video-ingest \
+  -o custom-columns='NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount'
+kubectl -n audio-internal logs deploy/video-ingest-mcp --tail=5   # « Uvicorn running on http://0.0.0.0:8001 »
+kubectl -n audio-internal exec deploy/video-ingest-api -- curl -s http://localhost:8000/health
+```
 
 ---
 
-_Document généré le 2026-05-25 — à actualiser au fil de la mise en service._
+_Document du 2026-05-25, actualisé le 2026-08-30 (remise sous git des manifestes, borne
+haute sur `mcp`, tags immuables)._

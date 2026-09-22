@@ -154,6 +154,7 @@ Tous validés depuis la VM build-vm — cf
 | `LLM_MODEL_SMALL` | `chat-small` | modèle pour speaker naming |
 | `LLM_MODEL_MEDIUM` | `mistral-small-24b` | modèle pour cleaning + reformulation |
 | `LLM_MODEL_LARGE` | `gptoss-120b` | modèle pour meeting analysis |
+| `LLM_MODEL_FALLBACKS` | `chat,gptoss-120b` | modèles de repli, dans l'ordre, quand le hub répond `400 Invalid model name` pour le modèle demandé. Le catalogue du hub bouge sans préavis (2026-08-25 : `gpt-oss-120b` → `gptoss-120b` ; 2026-09-16 : `mistral-small-24b` et `chat-small` refusés pour notre clé) et un nom inconnu ne se voit qu'au premier appel — chaque étape rendait vide et le compte-rendu sortait « partiel ». Le nom refusé est mémorisé par processus (un seul détour 400), et journalisé en WARNING : corriger ensuite `LLM_MODEL_*`. Vide = aucun repli. |
 | `LLM_HTTP_TIMEOUT_SECONDS` | `180` | timeout par appel LLM |
 
 ## Activation séquencée en production

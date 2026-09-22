@@ -189,13 +189,23 @@ def test_subtitles_unavailable_falls_back_to_audio():
     provider = _provider()
     provider.fetch_subtitles.side_effect = SubtitlesUnavailable("no captions")
 
+    provider.fetch_audio_bytes.return_value = (b"FLAC", "dQw4w9WgXcQ.flac")
+
     with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
          patch.object(orchestrator.repo, "upsert_source", return_value=1), \
-         patch.object(orchestrator.repo, "insert_transcript"), \
-         patch.object(orchestrator.repo, "add_bookmark"):
+         patch.object(orchestrator.repo, "insert_transcript") as ins, \
+         patch.object(orchestrator.repo, "add_bookmark") as bk, \
+         patch.object(orchestrator, "_notify_materialize_audio", return_value=True) as hook:
         result = orchestrator.run_job(conn, [provider], _job())
 
-    provider.fetch_audio.assert_called_once_with("dQw4w9WgXcQ", language="fr")
+    provider.fetch_audio_bytes.assert_called_once_with("dQw4w9WgXcQ")
+    # L'audio part vers internal-ingester (Whisper + pyannote + LLM) ;
+    # aucun transcript n'est écrit côté video-ingest.
+    hook.assert_called_once()
+    assert hook.call_args.kwargs["audio_bytes"] == b"FLAC"
+    assert hook.call_args.kwargs["audio_basename"] == "dQw4w9WgXcQ.flac"
+    ins.assert_not_called()
+    bk.assert_called_once()
     assert result.reused is False
 
 
@@ -203,14 +213,34 @@ def test_force_audio_skips_subtitles_and_goes_to_audio():
     conn = MagicMock()
     provider = _provider()
 
+    provider.fetch_audio_bytes.return_value = (b"FLAC", "dQw4w9WgXcQ.flac")
+
     with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
          patch.object(orchestrator.repo, "upsert_source", return_value=1), \
          patch.object(orchestrator.repo, "insert_transcript"), \
-         patch.object(orchestrator.repo, "add_bookmark"):
+         patch.object(orchestrator.repo, "add_bookmark"), \
+         patch.object(orchestrator, "_notify_materialize_audio", return_value=True):
         orchestrator.run_job(conn, [provider], _job(force_audio=True))
 
     provider.fetch_subtitles.assert_not_called()
-    provider.fetch_audio.assert_called_once()
+    provider.fetch_audio_bytes.assert_called_once()
+
+
+def test_materialize_audio_endpoint_down_raises_needs_audio_fallback():
+    """Audio récupéré mais internal-ingester injoignable : le job doit
+    échouer avec un message explicite, pas rester silencieusement `done`."""
+    conn = MagicMock()
+    provider = _provider()
+    provider.fetch_subtitles.side_effect = SubtitlesUnavailable("no captions")
+    provider.fetch_audio_bytes.return_value = (b"FLAC", "x.flac")
+
+    with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
+         patch.object(orchestrator.repo, "upsert_source", return_value=1), \
+         patch.object(orchestrator.repo, "add_bookmark") as bk, \
+         patch.object(orchestrator, "_notify_materialize_audio", return_value=False):
+        with pytest.raises(orchestrator.NeedsAudioFallback):
+            orchestrator.run_job(conn, [provider], _job())
+    bk.assert_not_called()
 
 
 def test_fetch_audio_not_implemented_raises_needs_audio_fallback():
@@ -220,7 +250,7 @@ def test_fetch_audio_not_implemented_raises_needs_audio_fallback():
     conn = MagicMock()
     provider = _provider()
     provider.fetch_subtitles.side_effect = SubtitlesUnavailable("no captions")
-    provider.fetch_audio.side_effect = NotImplementedError("ASR pas configuré")
+    provider.fetch_audio_bytes.side_effect = NotImplementedError("ASR pas configuré")
 
     with patch.object(orchestrator.repo, "find_source_by_provider_id", return_value=None), \
          patch.object(orchestrator.repo, "upsert_source", return_value=1):

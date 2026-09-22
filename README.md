@@ -14,7 +14,7 @@
 > **3 invariants transverses** garantissent que ce cycle de vie reste industrialisable :
 > 1. **Données sensibles par construction** : conçu pour les ministères français, cloisonnement DMZ/interne strict (PULL uniquement côté interne), aucune donnée audio ne sort du périmètre souverain. Identification SSO Keycloak, chiffrement au repos et en transit.
 > 2. **Architecture sécurisée auditable** : 9 services nommés explicitement, séparation des rôles, pas de magie. Tout le cheminement d'un audio est traçable et testable. Conformité DSFR, déploiement sur infrastructure maîtrisée (Kubernetes, registry et bases hébergés dans le périmètre de l'organisation).
-> 3. **Processus résilients** : chaîne de traitement avec retry borné par budget (3 tentatives, backoff, fusible 90s par étape), watchdog avec séparation explicite *liveness vs progress* pour ne jamais laisser une opération dans un état en cours éternel, statut terminal explicite avec cause utilisateur compréhensible et action recommandée. Cf [ADR-0001](docs/adr/0001-pipeline-liveness-vs-progress.md), [ADR-0002](docs/adr/0002-pipeline-status-enum-source-of-truth.md), [chantier résilience](docs/chantier-resilience-batch-processing.md).
+> 3. **Processus résilients** : chaîne de traitement avec retry borné par budget (3 tentatives, backoff, fusible 90s par étape), watchdog avec séparation explicite *liveness vs progress* pour ne jamais laisser une opération dans un état en cours éternel, statut terminal explicite avec cause utilisateur compréhensible et action recommandée. Cf [ADR-0001](docs/adr/0001-pipeline-liveness-vs-progress.md), [ADR-0002](docs/adr/0002-pipeline-status-enum-source-of-truth.md). Le carnet de chantier qui capitalise ces classes de bugs n'est pas publié (il cite des incidents nominatifs).
 
 ---
 
@@ -38,6 +38,7 @@
 | Comprendre les choix de sécurité | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 | Brancher un backend de transcription | [docs/integrate-with-kevent.md](docs/integrate-with-kevent.md), [docs/integrate-with-mcr.md](docs/integrate-with-mcr.md) |
 | Comprendre le selector de diarisation | [docs/DIARIZATION_BACKEND.md](docs/DIARIZATION_BACKEND.md) |
+| Déployer sur prod-bêta sans rien casser | **[docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md](docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md)** |
 | Tester manuellement bout-en-bout | [tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md) |
 | Voir l'état de la couverture | [tests/TEST_COVERAGE_STATUS.md](tests/TEST_COVERAGE_STATUS.md) |
 
@@ -343,7 +344,9 @@ cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
 
 ## 7. Déploiement Kubernetes (prod-bêta)
 
-> **Règle d'or** : *toujours* passer par kustomize, *jamais* `kubectl apply -f` directement sur les manifests `base/`.
+> **Règle d'or** : *jamais* `kubectl apply -f` sur les manifestes `base/` — ils sont volontairement inertes. Un apply écraserait 17 variables d'exécution (`TRANSCRIPTION_BACKEND` passe de `kevent` à `stub`, les sept `KEVENT_*_ENABLED` à `false`, `LITELLM_BASE_URL` vidée…). Mesuré par `kubectl diff` le 2026-08-30.
+>
+> ⚠ **Mais l'overlay qui portait ces 17 variables n'existe plus** — `git log --all` prouve qu'il n'a jamais été committé, et la machine de construction ne l'a pas non plus. La commande `kustomize build … prod-beta/internal/` n'applique aujourd'hui **que les trois charges `video-ingest-*`**, seules à avoir été remises sous git (le 2026-08-30, cf. [ADR-0005](docs/adr/0005-manifestes-versionnes-hotes-expurges.md)) :
 >
 > ```bash
 > kustomize build --load-restrictor=LoadRestrictionsNone \
@@ -351,7 +354,9 @@ cp deploy/kubernetes/scripts/create-keycloak-test-users.local.env.example \
 >   | kubectl apply -f -
 > ```
 >
-> Sinon ~15 env vars critiques (`TRANSCRIPTION_BACKEND=kevent`, `KEVENT_*_ENABLED`, `LITELLM_BASE_URL`, …) sont écrasées → pipeline cassé.
+> Pour les cinq autres charges, le seul geste sûr est **ciblé** : `kubectl set image` / `kubectl set env`. La marche à suivre complète, et comment reconstruire un manifeste perdu depuis l'état vivant du cluster, sont dans **[docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md](docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md)**.
+>
+> Les images sont épinglées sur des étiquettes immuables ; `latest` est banni ([ADR-0006](docs/adr/0006-images-epinglees-latest-banni.md)).
 
 ### 7.1 Pipeline de build prod-bêta
 
@@ -362,7 +367,7 @@ Le script `deploy/scripts/commit-push-build.sh` :
 2. `deploy/scripts/build-incluster.sh` → applique un Job BuildKit sur le cluster
 3. Le Job clone `origin/<branche>` et construit `deploy/docker/Dockerfile`
 4. `push` vers le registry depuis le cluster (bande passante interne SCW)
-5. `kubectl set image` (rollout strategy `surge=100%` pour fast rollouts)
+5. `kubectl set image` sur une **étiquette immuable** — `build-incluster.sh --no-latest` (rollout strategy `surge=100%` pour fast rollouts)
 
 > Le build part de **git**, pas de la copie de travail : une garde refuse de lancer si le HEAD local n'est pas sur `origin`. Ce qui est construit est ce qui est poussé.
 
@@ -598,7 +603,6 @@ NetworkPolicies par namespace, deny-all par défaut côté interne, 2 exceptions
 |---|---|
 | [tests/DISCOVERY_TEST_PLAN.md](tests/DISCOVERY_TEST_PLAN.md) | Cahier humain bout-en-bout |
 | [tests/TEST_COVERAGE_STATUS.md](tests/TEST_COVERAGE_STATUS.md) | Couverture / résultats |
-| [tests/TEST_PLAN_DEVICE_ENROLLMENT.md](tests/TEST_PLAN_DEVICE_ENROLLMENT.md) | Enrôlement device |
 | [tests/unit/test_device_token.py](tests/unit/test_device_token.py) | Unitaire token device |
 | [tests/scenarios/device_enrollment_sequence.sh](tests/scenarios/device_enrollment_sequence.sh) | Scénario simulé |
 

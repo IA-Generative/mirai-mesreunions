@@ -280,6 +280,57 @@ def delete_youtube_meeting(meeting_id: str):
         return jsonify({"error": "suppression indisponible"}), 502
 
 
+# ─── Verdict de la file video-ingest pour un placeholder ───────────────
+
+# Nombre maximal de jobs NON terminaux relus par listing : borne la latence
+# de /my-imports (un appel HTTP par job encore en file). Les verdicts
+# terminaux sont mémorisés et ne coûtent plus rien.
+_JOB_LOOKUPS_PER_LISTING = 20
+_JOB_TERMINAL_STATUSES = ("done", "failed")
+# Cache de processus des jobs terminaux : {job_id: payload}. Un job `done`
+# ou `failed` ne change plus jamais d'état.
+_terminal_jobs: dict[int, dict] = {}
+
+_JOB_ERROR_LABELS = (
+    ("video_unavailable", "Vidéo indisponible (privée, supprimée ou restreinte)."),
+    ("needs_audio", "Aucun sous-titre et audio non récupérable."),
+    ("403", "YouTube a refusé le téléchargement (anti-robot). Réessayez plus tard."),
+    ("abandon après", "YouTube a refusé plusieurs fois de suite. Réessayez plus tard."),
+    ("provider_error", "Le fournisseur vidéo a répondu par une erreur."),
+    ("unexpected_error", "Erreur interne pendant l'import."),
+)
+
+
+def _humanize_job_error(raw: str | None) -> str:
+    """Traduit le ``error_message`` technique de video-ingest en phrase
+    utilisateur, sans en perdre la trace (le brut suit entre parenthèses)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return "Import interrompu sans détail."
+    for needle, label in _JOB_ERROR_LABELS:
+        if needle in raw:
+            return f"{label} ({raw[:160]})"
+    return raw[:200]
+
+
+def _lookup_job(job_id: int) -> dict | None:
+    """Lit le job video-ingest de l'utilisateur ; ``None`` si injoignable
+    ou introuvable (le listing reste alors sur le seul UAF)."""
+    cached = _terminal_jobs.get(job_id)
+    if cached is not None:
+        return cached
+    result, err = _call_video_ingest("GET", f"/video/jobs/{job_id}", timeout=5)
+    if err:
+        logger.warning("job %s lookup failed (non-fatal): %s", job_id, err)
+        return None
+    status, body = result
+    if status != 200 or not isinstance(body, dict):
+        return None
+    if body.get("status") in _JOB_TERMINAL_STATUSES:
+        _terminal_jobs[job_id] = body
+    return body
+
+
 # ─── GET /my-imports : liste enrichie ──────────────────────────────────
 
 @bp.get("/my-imports")
@@ -333,17 +384,43 @@ def my_imports():
     STALE_THRESHOLD_SEC = 60
     now_utc = datetime.now(timezone.utc)
     out = []
+    job_lookups_left = _JOB_LOOKUPS_PER_LISTING
     for m in meetings:
         vsid = m.get("video_source_id")
         meta = bookmarks_by_source.get(vsid, {})
         audio_preview = m.get("audio_preview") or {}
+        job_id = m.get("video_ingest_job_id")
+        job: dict | None = None
+        if not audio_preview and job_id is not None and job_lookups_left > 0:
+            # Placeholder sans UAF : le verdict est dans la file video-ingest.
+            # Sans cette lecture, un job `failed` (vidéo privée, YouTube
+            # qui refuse le téléchargement…) resterait « en cours » à vie —
+            # mesuré : des placeholders de 40 jours, journalisés « stale »
+            # à chaque ouverture de l'onglet.
+            job = _lookup_job(job_id)
+            if job is not None and job.get("status") not in _JOB_TERMINAL_STATUSES:
+                job_lookups_left -= 1
         # Calcul du materialization_status pour le front :
         # - 'pending' : UAF pas encore créé (placeholder seul)
         # - 'processing' : UAF en cours de pipeline (kevent_processing/transcribing)
         # - 'done' : UAF terminé (kevent_completed/partially)
         # - 'failed' : UAF en échec (kevent_failed)
         ts = audio_preview.get("transcription_status") or ""
-        if not audio_preview:
+        job_error: str | None = None
+        job_status = (job or {}).get("status")
+        if not audio_preview and job_status == "failed":
+            # Le job video-ingest a rendu son verdict : échec définitif.
+            materialization_status = "failed"
+            ts = "video_ingest_failed"
+            job_error = _humanize_job_error((job or {}).get("error_message"))
+        elif not audio_preview and job_status == "pending" and (job or {}).get("retrying"):
+            # Backoff anti-bot : une nouvelle tentative est programmée.
+            materialization_status = "processing"
+            ts = "video_ingest_retrying"
+        elif not audio_preview and job_status in ("pending", "running"):
+            # Le job est encore dans la file : pas de retard à signaler.
+            materialization_status = "pending"
+        elif not audio_preview:
             materialization_status = "pending"
         elif ts.startswith("kevent_completed") or ts == "kevent_partially_completed":
             materialization_status = "done"
@@ -351,10 +428,12 @@ def my_imports():
             materialization_status = "failed"
         else:
             materialization_status = "processing"
-        # Détection placeholder stale (materialize muet)
+        # Détection placeholder stale (materialize muet) : seulement quand
+        # la file video-ingest n'a plus rien à dire (job `done` sans UAF,
+        # ou job inconnu) — un job encore en file n'est pas « muet ».
         stale = False
         placeholder_age_s: int | None = None
-        if materialization_status == "pending":
+        if materialization_status == "pending" and job_status not in ("pending", "running"):
             created_raw = m.get("created_at")
             if created_raw:
                 try:
@@ -394,7 +473,10 @@ def my_imports():
             "materialization_status": materialization_status,
             "stale": stale,
             "placeholder_age_seconds": placeholder_age_s,
-            "transcription_status": audio_preview.get("transcription_status"),
+            "transcription_status": audio_preview.get("transcription_status") or (ts or None),
+            "job_status": job_status,
+            "job_error": job_error,
+            "job_next_attempt_at": (job or {}).get("next_attempt_at"),
             "key_points_summary": audio_preview.get("key_points_summary"),
             "has_meeting_analysis": audio_preview.get("has_meeting_analysis", False),
         })

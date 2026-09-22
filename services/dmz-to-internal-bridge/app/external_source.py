@@ -14,6 +14,25 @@ import json
 import re
 from typing import Iterable
 
+_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_ws(text: str | None) -> str:
+    r"""Écrase tout blanc — espaces, tabulations et RETOURS À LA LIGNE — en un
+    espace simple.
+
+    Invariant indispensable au format `speaker_tagged_text` : une phrase doit
+    tenir sur UNE ligne physique. Les cues de sous-titres YouTube sont très
+    souvent sur deux lignes et `youtube-transcript-api` rend le `\n` tel quel.
+    Ce `\n` traversait le chunking (`" ".join(s.text.strip())` ne touche que
+    les bords) puis se retrouvait au milieu d'un bloc `> …`, produisant une
+    ligne de continuation SANS `>` — que les deux parseurs (`_parseSpeakerTagged`
+    côté legacy.js, `_reparse_speaker_tagged_blocks` côté puller.py) ignorent
+    silencieusement. Mesuré en prod sur un import réel : 390 lignes orphelines,
+    21 937 caractères, soit 54 % du transcript jamais affiché.
+    """
+    return _WS_RE.sub(" ", text or "").strip()
+
 
 def flatten_segments_to_synthetic_words(segments: Iterable[dict]) -> list[dict]:
     """Convertit des segments horodatés en mots horodatés synthétiques.
@@ -44,7 +63,7 @@ def flatten_segments_to_synthetic_words(segments: Iterable[dict]) -> list[dict]:
             end = float(seg.get("end_seconds", 0.0))
         except (TypeError, ValueError):
             continue
-        text = (seg.get("text") or "").strip()
+        text = _normalize_ws(seg.get("text"))
         if not text:
             continue
         duration = max(0.0, end - start)
@@ -66,12 +85,40 @@ def flatten_segments_to_synthetic_words(segments: Iterable[dict]) -> list[dict]:
             w_end = min(end, cursor + duration * share)
             out.append({"w": w, "s": round(cursor, 3), "e": round(w_end, 3)})
             cursor = w_end
+    # Le docstring promet un tri par `s` croissant : on le GARANTIT au lieu de
+    # l'espérer. Le karaoké frontend fait une recherche dichotomique sur ce
+    # tableau ; sur une entrée non triée elle rend un résultat arbitraire.
+    out.sort(key=lambda w: (w["s"], w["e"]))
     return out
 
 
 _SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?…])\s+")
 _LONG_PHRASE_THRESHOLD_SEC = 20.0
 _SOFT_BOUNDARY_RE = re.compile(r"(?<=[,;:])\s+")
+
+# Fenêtre de rappel pour la dédup du recouvrement. Le chunking amont
+# (`video_ingest.chunking.chunk`, overlap_seconds=15.0) fait apparaître les
+# phrases de la zone de recouvrement dans DEUX chunks consécutifs, avec des
+# timecodes interpolés différents de part et d'autre. On regarde en arrière un
+# peu plus large que ce recouvrement pour les rattraper toutes.
+_OVERLAP_LOOKBACK_SEC = 25.0
+
+# Clé de comparaison : casse et ponctuation retirées. Les deux copies d'une
+# phrase à cheval sur une frontière de chunk peuvent être tokenisées
+# différemment (virgule finale absorbée d'un côté, pas de l'autre) — une
+# égalité stricte de chaîne les manquerait.
+_DEDUPE_STRIP_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _dedupe_key(text: str) -> str:
+    return _DEDUPE_STRIP_RE.sub("", _normalize_ws(text).lower())
+
+
+# Longueur minimale d'une clé pour qu'une relation préfixe/suffixe soit tenue
+# pour un fragment de la MÊME phrase. Sans ce garde-fou, une phrase courte
+# (« Oui. », « Merci. ») serait absorbée par n'importe quelle phrase voisine
+# qui se termine pareil.
+_FRAGMENT_MIN_KEY_LEN = 25
 
 
 def sentence_align_segments(coarse_segments: Iterable[dict]) -> list[dict]:
@@ -102,7 +149,7 @@ def sentence_align_segments(coarse_segments: Iterable[dict]) -> list[dict]:
     """
     out: list[dict] = []
     for c in coarse_segments or []:
-        text = (c.get("text") or "").strip()
+        text = _normalize_ws(c.get("text"))
         if not text:
             continue
         try:
@@ -132,7 +179,7 @@ def sentence_align_segments(coarse_segments: Iterable[dict]) -> list[dict]:
                 out.extend(_split_long_phrase(seg))
             else:
                 out.append(seg)
-    return _dedupe_overlap(out)
+    return _enforce_monotonic(_dedupe_overlap(out))
 
 
 def _split_long_phrase(seg: dict) -> list[dict]:
@@ -171,19 +218,85 @@ def _split_long_phrase(seg: dict) -> list[dict]:
 
 
 def _dedupe_overlap(segments: list[dict]) -> list[dict]:
-    """Supprime les phrases dupliquées par l'overlap de chunks (15s).
-    Heuristique : si la phrase N est identique en texte à la phrase N-1
-    et que leur start_seconds sont à < 20s d'écart, on garde la 1ère."""
-    if not segments:
-        return []
-    out = [segments[0]]
-    for cur in segments[1:]:
-        prev = out[-1]
-        same_text = cur["text"].strip() == prev["text"].strip()
-        close = abs(cur["start_seconds"] - prev["start_seconds"]) < 20.0
-        if same_text and close:
+    """Supprime les phrases dupliquées par le recouvrement des chunks (15 s).
+
+    L'implémentation précédente ne comparait qu'au segment IMMÉDIATEMENT
+    précédent. Or un recouvrement de 15 s porte typiquement 3 à 6 phrases : la
+    séquence est `… S1 S2 S3 | S1 S2 S3 …` et aucune comparaison consécutive
+    n'est une égalité — donc rien n'était jamais dédupliqué. Mesuré en prod sur
+    un import réel : 58 blocs strictement identiques sur 428.
+
+    On compare désormais à TOUTES les phrases déjà retenues dans la fenêtre de
+    recouvrement, sur une clé normalisée (cf. `_dedupe_key`).
+    """
+    out: list[dict] = []
+    recent: list[tuple[float, str, int]] = []   # (start, clé, index dans out)
+    for cur in segments or []:
+        key = _dedupe_key(cur.get("text", ""))
+        if not key:
+            continue
+        start = float(cur["start_seconds"])
+        # Purge ce qui est sorti de la fenêtre. Une copie issue du chunk
+        # suivant démarre AVANT l'originale (écart négatif) : elle reste donc
+        # bien dans la fenêtre, c'est exactement le cas qu'on veut attraper.
+        recent = [r for r in recent if start - r[0] <= _OVERLAP_LOOKBACK_SEC]
+        drop = False
+        for pos, (s0, k0, idx) in enumerate(recent):
+            if k0 == key:
+                drop = True
+                break
+            # Une frontière de chunk tombe au MILIEU d'une phrase : le chunk
+            # qui s'arrête n'en livre que le début, celui qui reprend la livre
+            # entière (et livre en tête le reste de la phrase précédente).
+            # Ces deux moitiés ne sont pas égales — seulement préfixe/suffixe
+            # l'une de l'autre.
+            if min(len(k0), len(key)) < _FRAGMENT_MIN_KEY_LEN:
+                continue
+            if key.startswith(k0) or key.endswith(k0):
+                # Ce qui est déjà retenu est le FRAGMENT. On le complète sur
+                # place au lieu d'ajouter un doublon : on garde son `start`
+                # (celui du chunk où la phrase commence vraiment, donc le plus
+                # fidèle) et on prend le texte complet du candidat.
+                out[idx] = {**out[idx],
+                            "text": cur["text"],
+                            "end_seconds": max(float(out[idx]["end_seconds"]),
+                                               float(cur["end_seconds"]))}
+                recent[pos] = (s0, key, idx)
+                drop = True
+                break
+            if k0.startswith(key) or k0.endswith(key):
+                # Le candidat est le fragment : la phrase est déjà couverte.
+                drop = True
+                break
+        if drop:
             continue
         out.append(cur)
+        recent.append((start, key, len(out) - 1))
+    return out
+
+
+def _enforce_monotonic(segments: list[dict]) -> list[dict]:
+    """Garantit une timeline non décroissante.
+
+    Le karaoké frontend fait une recherche dichotomique sur les words dérivés
+    de ces segments : elle exige un tableau trié par `s`. Après dédup il peut
+    subsister des reculs — une phrase à cheval sur une frontière de chunk,
+    tokenisée différemment de part et d'autre, échappe à la comparaison de clé.
+
+    On RECALE ces segments plutôt que de les jeter : perdre du texte pour
+    sauver la monotonie remplacerait un bug par un autre. Le recalage est borné
+    (`end` ne dépasse jamais sa valeur d'origine), donc pas de dérive cumulée
+    sur la suite de la timeline.
+    """
+    out: list[dict] = []
+    prev_end = 0.0
+    for seg in segments or []:
+        start = max(float(seg["start_seconds"]), prev_end)
+        end = max(float(seg["end_seconds"]), start)
+        out.append({**seg,
+                    "start_seconds": round(start, 2),
+                    "end_seconds": round(end, 2)})
+        prev_end = end
     return out
 
 
@@ -207,7 +320,9 @@ def format_speaker_tagged_from_sentences(sentences: Iterable[dict],
         return f"{m}:{s:05.2f}"
     lines: list[str] = []
     for seg in sentences or []:
-        text = (seg.get("text") or "").strip()
+        # `_normalize_ws` est la GARANTIE que `> {text}` tient sur une seule
+        # ligne physique — sans elle, un `\n` résiduel casse le parsing aval.
+        text = _normalize_ws(seg.get("text"))
         if not text:
             continue
         try:
@@ -224,7 +339,7 @@ def format_speaker_tagged_from_sentences(sentences: Iterable[dict],
 def concat_segments_text(segments: Iterable[dict]) -> str:
     """Concatène le texte des segments avec un espace simple — base pour
     `transcription_text` du UAF virtuel."""
-    parts = [(seg.get("text") or "").strip() for seg in (segments or [])]
+    parts = [_normalize_ws(seg.get("text")) for seg in (segments or [])]
     return " ".join(p for p in parts if p)
 
 

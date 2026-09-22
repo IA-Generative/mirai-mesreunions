@@ -53,6 +53,8 @@ PREPARATION_ENDPOINTS = [
     ("GET",    "/api/preparations"),
     ("GET",    "/api/preparations/"),
     ("GET",    "/api/preparations/test-drive"),
+    ("GET",    "/api/preparations/drive/browse"),
+    ("GET",    "/api/preparations/drive/instances"),
     ("GET",    "/api/preparations/link-suggestion"),
     ("GET",    "/api/preparations/00000000-0000-0000-0000-000000000000"),
     ("GET",    "/api/preparations/00000000-0000-0000-0000-000000000000/audio-files"),

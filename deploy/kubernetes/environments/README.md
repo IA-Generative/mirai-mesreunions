@@ -1,9 +1,7 @@
 # Environments
 
-Ce dossier décrit les **cibles de déploiement** du projet. Les manifestes de base
-(`deploy/kubernetes/external-zone/`, `internal-zone/`, `shared/`) ne sont pas dupliqués
-ici : chaque environnement documente uniquement ses **différences** par rapport à la
-base et la procédure d'application.
+Ce dossier décrit les **cibles de déploiement** du projet, et — depuis le 2026-08-30 — il
+héberge les manifestes de prod-bêta qui n'avaient de source nulle part.
 
 ## Vue d'ensemble
 
@@ -13,57 +11,76 @@ base et la procédure d'application.
 | 2 | `staging` | Kubernetes managé | 1 cluster | externe + interne dans un seul cluster (deux namespaces, séparation par NetworkPolicy) |
 | 3 | `prod-bêta` | Kubernetes managé | 2 clusters réseau-isolés | un cluster pour la zone externe, un autre pour la zone interne — séparation réseau réelle |
 
-Les noms et identifiants concrets de clusters, ainsi que les hôtes cibles d'intégration,
-ne sont **pas** documentés dans ce repo public. Ils vivent dans des fichiers `*.local.md`
-gitignorés sous chaque sous-dossier d'environnement (cf. exemple
-`environments/prod-beta/CLUSTER_DETAILS.local.md` à créer localement).
+Les noms et identifiants concrets de clusters, ainsi que les hôtes cibles, ne sont **pas**
+documentés dans ce dépôt public. Ils vivent dans des fichiers gitignorés (`*.local.yaml`,
+`*.local.md`).
 
-## Pourquoi deux clusters pour `prod-bêta`
+## ⚠ Où vivent réellement les manifestes de prod-bêta (état mesuré le 2026-08-30)
 
-L'architecture cible implémente le pattern **Cross Domain Solution** (vocabulaire ANSSI :
-*rupture protocolaire avec dépôt sur guichet*) — voir
-[`docs/REVIEW_RESPONSE_PLAN.md`](../../../docs/REVIEW_RESPONSE_PLAN.md) pour les références
-doctrinales (PG-075, PA-066, Eurydice ; NIST SC-7/AC-4 ; NSA RAIN ; Cloud π Native).
+**Ce README a longtemps renvoyé à `deploy/kubernetes/internal-zone/` et
+`external-zone/`. Ces dossiers ne sont pas dans le dépôt** : ils ont été retirés au
+`filter-repo` du 2026-05-20 (ils portaient des hôtes et des adresses privées), sont
+gitignorés, et ne sont synchronisés que vers la machine de construction par le `rsync` de
+`deploy/scripts/commit-push-build.sh` quand `REMOTE_HOST` est défini. Un clone frais ne les
+a pas. La correction de ce README fait partie du même chantier que le tableau ci-dessous.
 
-La séparation **réseau-réelle** entre les deux clusters Kubernetes matérialise la rupture
-de flux : aucun lien réseau entrant DMZ → interne, transferts de données initiés
-exclusivement depuis la zone la plus sensible (PULL via le bucket S3 de dépôt).
+Couverture réelle des huit charges de `audio-internal` :
 
-En `staging` (cluster unique), les deux zones cohabitent dans un même cluster sous deux
-namespaces : c'est suffisant pour la validation fonctionnelle, mais ne reproduit pas
-l'isolation réseau de la cible prod-bêta.
+| Charge | Source du manifeste |
+|---|---|
+| `device-token-authority`, `internal-ingester`, `transcription-relay` | `internal-zone/deployments.yaml` — hors dépôt (machine de construction) ⚠ **dérive grave, voir plus bas** |
+| `video-ingest-api`, `video-ingest-mcp`, `video-ingest-worker` | [`prod-beta/internal/video-ingest.yaml`](prod-beta/README.md) — **versionné ici depuis le 2026-08-30** |
+| `mesreunions-web`, `admin-console` | **aucune — encore fantômes** |
 
-## Mapping cluster ↔ zone (prod-bêta)
+**Piège de lecture** : `external-zone/deployments.yaml` contient bien des entrées nommées
+`mesreunions-web` et `admin-console`, mais en namespace **`audio-external`** — ce sont les
+charges de l'AUTRE cluster. Un `grep` sur le seul nom fait croire à tort que celles de
+`audio-internal` sont couvertes. Toujours vérifier le namespace.
 
-Le mapping concret (lequel des deux clusters joue la zone externe vs. la zone interne)
-dépend des contraintes opérationnelles de l'infrastructure d'accueil :
+## ⛔ Ne jamais appliquer `internal-zone/deployments.yaml` tel quel
 
-- **Zone externe** : cluster qui peut atteindre les services d'authentification de la
-  cible d'intégration (OIDC / SSO). Hébergera un proxy WireGuard ou équivalent vers le
-  réseau de la cible. Reçoit le trafic public via Ingress / LoadBalancer.
-- **Zone interne** : cluster avec égress restreint (ACL API server, NetworkPolicies) ;
-  ne parle qu'au PostgreSQL et S3 internes, et tire les fichiers depuis le bucket de
-  dépôt commun.
+C'est une **base minimale et volontairement inerte** (transcription en `stub`, options
+Kevent éteintes) pour qu'un développeur puisse la copier sans casser son poste. La
+configuration réelle de prod-bêta était portée par un overlay kustomize —
+**qui n'existe plus** : `git log --all` prouve qu'il n'a jamais été committé, et la machine
+de construction ne l'a pas non plus.
 
-Critère de choix entre les deux candidats : capacité à établir une connexion vers le SSO
-de la cible. Le script `scripts/check-cluster-sso.sh` aide à valider la connectivité une
-fois les routes (VPN, peering, whitelist) en place.
+Conséquence : **les valeurs de prod-bêta ne survivent que dans les pods en cours
+d'exécution.** Mesuré le 2026-08-30 par `kubectl diff`, un `apply` de la base ferait :
+
+- `TRANSCRIPTION_BACKEND` : `kevent` → **`stub`** (plus aucune transcription réelle)
+- les sept `KEVENT_*_ENABLED` : `true` → **`false`**
+- `KEVENT_GATEWAY_URL`, `LITELLM_BASE_URL`, `MCR_GATEWAY_URL`, `OIDC_TOKEN_ENDPOINT` → **vides**
+- `LLM_HTTP_TIMEOUT_SECONDS` → **supprimée**
+- `DEVICE_TOKEN_RETENTION_HOURS` : `360` → `168` (7 jours au lieu de 15)
+- `RABBITMQ_HOST` → un nom DNS qui ne résout pas depuis ce cluster
+
+Pour un changement ciblé sur ces trois charges, utiliser `kubectl set image` / `kubectl set
+env` : chirurgical, ne touche rien d'autre. La marche à suivre complète, et comment
+reconstruire un manifeste perdu, sont dans
+[`docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md`](../../../docs/RUNBOOK_DEPLOIEMENT_PROD_BETA.md).
 
 ## Conventions
 
-- Les **kubeconfigs** sont locaux et gitignorés ; voir
-  [`../kubeconfigs/README.md`](../kubeconfigs/README.md).
-- Les **secrets** (Keycloak, S3, RabbitMQ, internal API token) ne sont **jamais** commités ;
-  un fichier `secrets.<env>.local.yaml` est attendu par environnement, gitignoré.
-- Les **détails d'infrastructure** (noms de clusters, UUIDs, IPs, sous-réseaux, hôtes
-  cibles) ne sont **jamais** commités ; un fichier `<env>/CLUSTER_DETAILS.local.md` est
-  attendu, gitignoré (pattern `*.local.md`).
-- Les manifestes de base sous `deploy/kubernetes/{external,internal}-zone/` doivent rester
-  **déployables tels quels** (en ajustant uniquement images, replicas, env vars par patch
-  ou par variables d'environnement à l'apply).
+- Les **kubeconfigs** sont locaux et gitignorés ; voir [`../kubeconfigs/README.md`](../kubeconfigs/README.md).
+- Les **secrets** ne sont jamais commités : un `secrets.<env>.local.yaml` est attendu par environnement.
+- Les **hôtes réels** ne sont jamais commités. Les manifestes versionnés portent la
+  convention `*.fake-domain.name` / `example.com` et exigent une surcharge gitignorée
+  (cf. [ADR-0005](../../../docs/adr/0005-manifestes-versionnes-hotes-expurges.md)).
+- Les **images** sont épinglées sur un tag immuable ; `latest` est banni
+  (cf. [ADR-0006](../../../docs/adr/0006-images-epinglees-latest-banni.md)).
+
+## Pourquoi deux clusters pour `prod-bêta`
+
+L'architecture implémente le patron **Cross Domain Solution** (vocabulaire ANSSI : *rupture
+protocolaire avec dépôt sur guichet*). La séparation réseau-réelle entre les deux clusters
+matérialise la rupture de flux : aucun lien entrant DMZ → interne, transferts initiés
+exclusivement depuis la zone la plus sensible (PULL via le bucket S3 de dépôt).
+
+En `staging` (cluster unique), les deux zones cohabitent sous deux namespaces : suffisant
+pour la validation fonctionnelle, mais ne reproduit pas l'isolation réseau de la cible.
 
 ## Voir aussi
 
 - `local` → `deploy/docker/docker-compose.yml`
-- [`staging/`](staging/README.md)
-- [`prod-beta/`](prod-beta/README.md)
+- [`staging/`](staging/README.md) · [`prod-beta/`](prod-beta/README.md)

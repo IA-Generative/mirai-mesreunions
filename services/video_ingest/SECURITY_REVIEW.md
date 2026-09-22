@@ -109,9 +109,34 @@ Surfaces exposées :
 | `yt-dlp` | ⚠️ casse régulièrement quand YouTube bouge | Bump auto via Dependabot/Renovate + alerte si provider échoue en masse (à câbler en V1.5) |
 | `youtube-transcript-api` | ⚠️ idem | Bump auto |
 | `authlib` | ✅ stable, large adoption | Suivre les CVE |
-| `psycopg2-binary` | ✅ standard | |
+| `psycopg2-binary` (racine) | ✅ épinglé `==2.9.10` | |
 | `flask` 3.x + `gunicorn` 23.x | ✅ standard | |
-| `mcp` (Anthropic SDK) | ⚠️ jeune, API peut bouger | Pinner la version exacte en V1.5 |
+| `mcp` (Anthropic SDK) | 🔴 **le risque prédit ici s'est réalisé** | Borné `>=1.2.0,<2` le 2026-08-30 (voir ci-dessous) |
+| `psycopg2-binary` (composant) | ⚠️ `>=` sans plafond, 3.x est un paquet différent | Borné `>=2.9.0,<3` le 2026-08-30 |
+
+### Ce que cette ligne a coûté — incident du 2026-08-29/30
+
+La recommandation « pinner la version exacte en V1.5 » n'a pas été appliquée, et
+`mcp>=1.2.0` est resté sans plafond. Le SDK est passé en **2.x** ; la construction du
+2026-08-29 l'a tiré ; `FastMCP` y est devenu `MCPServer` et l'import a échoué.
+**`video-ingest-mcp` a redémarré 68 fois en 5 h 27**, première source d'erreurs du cluster.
+
+Deux leçons, au-delà du chiffre :
+
+1. **Une borne haute manquante est un incident à retardement, pas une dette de style.** Le
+   `requirements.txt` du composant expliquait sur six lignes pourquoi `yt-dlp` est épinglé
+   exact — « pas de `>=` flottant qui tirerait silencieusement une version non revue » — et
+   laissait `mcp` faire exactement cela deux lignes plus bas. La règle était écrite ; elle
+   n'avait pas été appliquée partout.
+2. **Sans sonde, la panne suivante sera muette.** `video-ingest-mcp` n'a ni `livenessProbe`
+   ni `readinessProbe`. Ici le processus mourait, donc Kubernetes le comptait. Une migration
+   vers 2.x qui oublierait de déplacer `host`/`port` du constructeur vers `run()` (changement
+   d'API réel) laisserait le pod « Running » en écoute sur loopback : **injoignable et
+   silencieux**. C'est pourquoi la migration a été refusée dans le même lot que le correctif.
+
+Portée sécurité : aucune donnée exposée, aucune élévation de privilège — c'est une perte de
+disponibilité d'un service interne. Mais elle est arrivée **par une mise à jour non revue
+d'une dépendance**, ce qui est bien le sujet de cette section.
 
 ---
 
@@ -119,11 +144,13 @@ Surfaces exposées :
 
 1. **Renseigner `VIDEO_INGEST_OIDC_AUDIENCE` et `VIDEO_INGEST_OIDC_ISSUER`** dans l'overlay prod-bêta.
 2. **Ne PAS exposer le port 8001 (MCP)** sans rajouter un middleware d'auth.
-3. **Configurer Dependabot/Renovate** sur `yt-dlp` + `youtube-transcript-api` (procédure à documenter dans le README).
+3. **Configurer Dependabot/Renovate** sur `yt-dlp` + `youtube-transcript-api` (procédure à documenter dans le README). ⬆ **Priorité relevée** après l'incident du 2026-08-29 : une revue humaine des montées de version est le seul filet en amont.
+3bis. **Poser une sonde sur `video-ingest-mcp`** — il n'en a aucune, et c'est ce qui rendrait muette la prochaine panne (cf. encart §4).
+3ter. **Migrer vers l'API MCP 2.x**, avec un test qui prouve le bind `0.0.0.0:8001` et un aller-retour sur un outil. Tant que ce test n'existe pas, la borne `<2` tient.
 4. **Cas force_audio** : surveiller la mémoire du worker (gros audios). Limit K8s actuelle = 1Gi → re-évaluer après les premières mesures.
 5. **Audit log retention** : décider d'une politique (purge >12 mois ? archivage S3 ?). Pas de purge auto en V1, à voir avec le DPO.
 6. **Pen-test léger** : OWASP ZAP en mode passif sur les endpoints + scan dépendances.
 
 ---
 
-_Rédigé le 2026-05-25 lors de la session de livraison V1._
+_Rédigé le 2026-05-25 lors de la session de livraison V1 ; §4 actualisé le 2026-08-30 après l'incident `mcp` 2.x._

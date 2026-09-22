@@ -15,7 +15,15 @@ youtube-transcript-api>=1.0.0,<2.0.0
 
 # BDD : psycopg2 direct, sans SQLAlchemy ORM (cf. README D14 — raw SQL
 # pour minimiser les deps lors de l'extraction du composant).
-psycopg2-binary>=2.9.0
+# Borne haute ici aussi : psycopg2 3.x est un paquet différent (`psycopg`), pas une
+# montée de version compatible. Le requirements.txt racine l'épingle à 2.9.10.
+psycopg2-binary>=2.9.0,<3
 
 # MCP SDK (transport streamable-http) — expose les 5 tools.
-mcp>=1.2.0
+#
+# Ce fichier explique six lignes plus haut pourquoi yt-dlp est épinglé EXACT — « pas de
+# `>=` flottant qui tirerait silencieusement une version non revue ». C'est exactement ce
+# que `mcp>=1.2.0` a fait le 2026-08-29 : 2.x est sorti, FastMCP y est devenu MCPServer,
+# et le serveur MCP est mort au démarrage (68 redémarrages en 5 h 27 le 2026-08-30).
+# La règle valait pour lui aussi.
+mcp>=1.2.0,<2

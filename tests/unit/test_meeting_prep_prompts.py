@@ -80,6 +80,33 @@ def test_each_prompt_loads_with_all_placeholders(key):
         assert placeholder in text, f"Prompt {key} missing placeholder {placeholder}"
 
 
+@pytest.mark.parametrize("key", [
+    "general", "one_on_one", "project_update", "steering_committee", "brainstorm",
+])
+def test_each_prompt_declares_optional_coaching_placeholders(key):
+    """Les 5 templates portent les placeholders optionnels (série + coaching)
+    et le champ ai_recommendations du schéma de sortie."""
+    mp = _load()
+    text = mp.load_prompt_template(mp.prompt_path_for_type(key))
+    for placeholder in mp._OPTIONAL_PLACEHOLDERS:
+        assert placeholder in text, f"Prompt {key} missing placeholder {placeholder}"
+    assert '"ai_recommendations"' in text, f"Prompt {key} missing ai_recommendations schema"
+
+
+def test_build_prompt_substitutes_success_criteria():
+    """{SUCCESS_CRITERIA} rempli si fourni, '(non précisé)' sinon."""
+    mp = _load()
+    template = "OBJ={OBJECTIVE} SC={SUCCESS_CRITERIA}"
+    kwargs = dict(
+        objective="Sujet", duration_minutes=30, role_viewpoint="anime",
+        expectation="GO", focus_areas=[], prep_docs_text="",
+    )
+    filled = mp.build_prompt(template, success_criteria_text="une décision est prise", **kwargs)
+    assert "SC=une décision est prise" in filled
+    empty = mp.build_prompt(template, **kwargs)
+    assert "SC=(non précisé)" in empty
+
+
 def test_load_prompt_template_default_is_general():
     """Backwards-compat: calling load_prompt_template() with no arg still
     returns the general prompt (no caller passing a path must break)."""

@@ -1,0 +1,270 @@
+# video-ingest — les trois charges du composant d'import vidéo, en zone interne (prod-bêta).
+#
+# POURQUOI CE FICHIER EXISTE (2026-08-30)
+# Il n'existait pas. Les Deployments `video-ingest-api`, `-mcp` et `-worker` tournaient
+# depuis le 2026-05-25 (le mcp depuis le 2026-05-27) SANS AUCUN MANIFESTE : ni dans git —
+# l'historique complet ne connaît que `environments/README.md` et `environments/staging/` —
+# ni sur la machine de construction, dont `internal-zone/deployments.yaml` contient zéro
+# occurrence de « video-ingest ». Ils avaient été posés à la main ; leur seule description
+# survivante était l'annotation `last-applied-configuration` portée par les objets du
+# cluster. Tant que c'était vrai, tout correctif appliqué au cluster disparaissait au
+# prochain `apply`, sans un mot. Ce fichier est reconstruit à l'identique depuis cette
+# annotation, puis vérifié par `kubectl diff` (aucun écart) avant d'être committé.
+#
+# HÔTES : ce dépôt est PUBLIC. Les deux hôtes réels (SSO ministériel, passerelle Kevent)
+# n'y figuraient nulle part avant ce jour — les écrire ici serait une fuite neuve. Ils
+# portent donc la convention maison `*.fake-domain.name` / `example.com`, déjà employée
+# dans tout le dépôt (cf. `services/video_ingest/SECURITY_REVIEW.md`, qui prescrit
+# exactement `sso.mirai.fake-domain.name` pour ces deux variables). Les valeurs de
+# prod-bêta vivent dans `patch-hotes.local.yaml`, gitignoré (convention `*.local.yaml`),
+# que la kustomization exige : sans lui `kustomize build` ÉCHOUE — un refus bruyant vaut
+# mieux qu'un service appliqué avec la mauvaise adresse de SSO.
+#
+# ISOLATION : `video-ingest` est un service mutualisé destiné à être extrait du dépôt
+# (règle D14) — aucun import Python croisé, tables préfixées `video_*`, identité `user_sub`
+# opaque. Le manifeste est donc autoporteur : il ne dépend d'aucune ressource décrite
+# ailleurs, hormis les trois secrets énumérés ci-dessous et le service `internal-ingester`.
+#
+# SECRETS attendus dans le namespace (jamais dans ce dépôt) :
+#   video-ingest-secret / database_url        — DSN PostgreSQL du composant
+#   kevent-api-key      / kevent_api_key      — jeton de la passerelle de transcription
+#   internal-api-secret / INTERNAL_API_TOKEN  — jeton d'appel interne (et jeton admin MCP)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-api
+  namespace: audio-internal
+  labels: {app: video-ingest, component: api, tier: frontend}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: video-ingest, component: api}
+  template:
+    metadata:
+      labels: {app: video-ingest, component: api, tier: frontend}
+    spec:
+      containers:
+        - name: video-ingest-api
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
+          # Le composant vit dans un sous-dossier de l'image du monorepo : sans ce
+          # workingDir, `app.api` ne se résout pas.
+          workingDir: /app/services/video_ingest
+          command: [gunicorn, -w, "2", -b, "0.0.0.0:8000", "app.api:create_app()"]
+          ports:
+            - {containerPort: 8000, name: http}
+          env:
+          # ⚠ ORDRE VOLONTAIRE : les variables d'hôtes viennent en TÊTE parce que la
+          # surcharge `patch-hotes.local.yaml` les remplace, et qu'une fusion stratégique
+          # kustomize remonte toujours les éléments patchés en premier. Aligner la base sur
+          # ce résultat rend `kubectl diff` vide ; l'inverse rejouerait un déploiement à
+          # chaque application, pour un simple changement d'ordre sans effet.
+            - name: VIDEO_INGEST_OIDC_JWKS_URL
+              value: https://sso.mirai.fake-domain.name/realms/mirai/protocol/openid-connect/certs
+            - name: VIDEO_INGEST_OIDC_ISSUER
+              value: https://sso.mirai.fake-domain.name/realms/mirai
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://gateway.api.example.com
+            - name: VIDEO_INGEST_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: video-ingest-secret, key: database_url}}
+            - name: VIDEO_INGEST_OIDC_AUDIENCE
+              value: mes-reunions
+            - name: VIDEO_INGEST_KEVENT_API_KEY
+              valueFrom: {secretKeyRef: {name: kevent-api-key, key: kevent_api_key}}
+            # Un import qui ne se matérialise pas en réunion est un import perdu :
+            # l'échec doit être franc, pas silencieux.
+            - name: VIDEO_INGEST_MATERIALIZE_REQUIRED
+              value: "true"
+            - name: VIDEO_INGEST_MATERIALIZE_URL
+              value: http://internal-ingester:8090/api/v1/external-source/materialize
+            - name: VIDEO_INGEST_INTERNAL_API_TOKEN
+              valueFrom: {secretKeyRef: {name: internal-api-secret, key: INTERNAL_API_TOKEN}}
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits:   {cpu: 500m, memory: 512Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-mcp
+  namespace: audio-internal
+  labels: {app: video-ingest, component: mcp, tier: frontend}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: video-ingest, component: mcp}
+  template:
+    metadata:
+      labels: {app: video-ingest, component: mcp, tier: frontend}
+    spec:
+      containers:
+        - name: video-ingest-mcp
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
+          workingDir: /app/services/video_ingest
+          command: [python, -m, app.mcp_server]
+          ports:
+            - {containerPort: 8001, name: mcp}
+          env:
+          # ⚠ ORDRE VOLONTAIRE : les variables d'hôtes viennent en TÊTE parce que la
+          # surcharge `patch-hotes.local.yaml` les remplace, et qu'une fusion stratégique
+          # kustomize remonte toujours les éléments patchés en premier. Aligner la base sur
+          # ce résultat rend `kubectl diff` vide ; l'inverse rejouerait un déploiement à
+          # chaque application, pour un simple changement d'ordre sans effet.
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://gateway.api.example.com
+            - name: VIDEO_INGEST_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: video-ingest-secret, key: database_url}}
+            - name: VIDEO_INGEST_KEVENT_API_KEY
+              valueFrom: {secretKeyRef: {name: kevent-api-key, key: kevent_api_key}}
+            # `video_purge` est un outil d'administration : il exige ce jeton.
+            - name: VIDEO_INGEST_MCP_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: internal-api-secret, key: INTERNAL_API_TOKEN}}
+          # ⚠ AUCUNE SONDE, et c'est un manque reconnu (consigné le 2026-08-30, non corrigé
+          #   ici pour ne pas mêler un changement de comportement à la remise sous git).
+          #   Conséquence mesurée : le serveur MCP bind 0.0.0.0:8001 dans le CONSTRUCTEUR
+          #   de FastMCP ; s'il retombait un jour sur le défaut loopback, le pod resterait
+          #   « Running » et personne ne l'apprendrait. À corriger avec la migration MCP 2.x.
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits:   {cpu: 500m, memory: 512Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-worker
+  namespace: audio-internal
+  labels: {app: video-ingest, component: worker, tier: worker}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: video-ingest, component: worker}
+  template:
+    metadata:
+      labels: {app: video-ingest, component: worker, tier: worker}
+    spec:
+      containers:
+        - name: video-ingest-worker
+          image: rg.fr-par.scw.cloud/funcscwnspricelessmontalcinhiacgnzi/secure-audio-upload:latest
+          imagePullPolicy: Always
+          workingDir: /app/services/video_ingest
+          command: [python, -m, app.worker]
+          env:
+          # ⚠ ORDRE VOLONTAIRE : les variables d'hôtes viennent en TÊTE parce que la
+          # surcharge `patch-hotes.local.yaml` les remplace, et qu'une fusion stratégique
+          # kustomize remonte toujours les éléments patchés en premier. Aligner la base sur
+          # ce résultat rend `kubectl diff` vide ; l'inverse rejouerait un déploiement à
+          # chaque application, pour un simple changement d'ordre sans effet.
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://gateway.api.example.com
+            - name: VIDEO_INGEST_DATABASE_URL
+              valueFrom: {secretKeyRef: {name: video-ingest-secret, key: database_url}}
+            - name: VIDEO_INGEST_KEVENT_API_KEY
+              valueFrom: {secretKeyRef: {name: kevent-api-key, key: kevent_api_key}}
+            - name: VIDEO_INGEST_MATERIALIZE_REQUIRED
+              value: "true"
+            - name: VIDEO_INGEST_MATERIALIZE_URL
+              value: http://internal-ingester:8090/api/v1/external-source/materialize
+            - name: VIDEO_INGEST_INTERNAL_API_TOKEN
+              valueFrom: {secretKeyRef: {name: internal-api-secret, key: INTERNAL_API_TOKEN}}
+            # Bail de 90 s rafraîchi toutes les 30 s, veilleur toutes les 60 s : un travail
+            # dont l'exécutant meurt est repris au plus tard 90 s après son dernier battement.
+            - name: VIDEO_INGEST_LEASE_SECONDS
+              value: "90"
+            - name: VIDEO_INGEST_HEARTBEAT_INTERVAL
+              value: "30"
+            - name: VIDEO_INGEST_WATCHDOG_INTERVAL
+              value: "60"
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+            limits:   {cpu: "1",  memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-ingest
+  namespace: audio-internal
+  labels: {app: video-ingest}
+spec:
+  type: ClusterIP
+  selector: {app: video-ingest, component: api}
+  ports:
+    - {name: http, port: 8000, targetPort: 8000, protocol: TCP}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-ingest-mcp
+  namespace: audio-internal
+  labels: {app: video-ingest}
+spec:
+  type: ClusterIP
+  selector: {app: video-ingest, component: mcp}
+  ports:
+    - {name: mcp, port: 8001, targetPort: 8001, protocol: TCP}
+---
+# Sortie en liste blanche (mode A) : résolution de noms, la base du composant, le
+# matérialisateur, les domaines YouTube, le SSO. Tout le reste est refusé.
+#
+# ⚠ CONSTAT DU 2026-08-30, laissé tel quel : la passerelle Kevent
+#   (`VIDEO_INGEST_KEVENT_GATEWAY_URL`, repli ASR Whisper) est configurée sur les trois
+#   charges mais N'EST PAS autorisée en sortie ici. Le repli audio ne peut donc pas
+#   aboutir. Ce n'est pas une régression introduite par ce fichier — c'est l'état du
+#   cluster depuis 96 jours, remis sous git pour qu'il cesse d'être invisible. À trancher
+#   à part : ouvrir la sortie, ou retirer la variable qui promet ce qu'elle ne peut tenir.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: video-ingest-egress
+  namespace: audio-internal
+spec:
+  endpointSelector:
+    matchLabels: {app: video-ingest}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEndpoints:
+        - matchLabels: {app: postgres-internal}
+      toPorts:
+        - ports:
+            - {port: "5432", protocol: TCP}
+    - toEndpoints:
+        - matchLabels:
+            k8s:app: internal-ingester
+            k8s:io.kubernetes.pod.namespace: audio-internal
+      toPorts:
+        - ports:
+            - {port: "8090", protocol: TCP}
+    - toFQDNs:
+        - matchPattern: "*.youtube.com"
+        - matchPattern: youtube.com
+        - matchPattern: "*.googlevideo.com"
+        - matchPattern: "*.ytimg.com"
+        - matchPattern: "*.youtu.be"
+        - matchPattern: youtu.be
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}
+    - toFQDNs:
+        - matchName: sso.mirai.fake-domain.name
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}

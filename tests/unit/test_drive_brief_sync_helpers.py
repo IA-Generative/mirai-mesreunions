@@ -1,7 +1,8 @@
 """Tests des helpers de rendu pour le versement Drive (§9bis du plan).
 
-Le pipeline Drive effectif (_do_sync) raise NotImplementedError ; on teste
-ici uniquement les fonctions pures de rendu markdown.
+Fonctions pures de rendu markdown et composition du lot de fichiers ;
+l'orchestration du versement est couverte par
+``test_drive_brief_sync_pipeline``.
 """
 
 import importlib.util
@@ -66,13 +67,42 @@ def test_documents_source_to_markdown_lists_docs_and_totals():
     assert "https://drive.example/items/abc" in md
 
 
-def test_schedule_drive_brief_sync_does_not_raise_on_failure():
-    """Garantit que le thread daemon ne propage pas son NotImplementedError."""
+def test_build_payload_omits_the_prompt_file_when_the_prompt_is_absent():
+    """Au réessai, `used_prompt` vaut None (il n'est pas persisté) : émettre
+    un « (non disponible) » écraserait un prompt-utilise.txt valide."""
+    out = dbs._build_brief_files_payload({"subject": "x"}, [], None)
+    assert "prompt-utilise.txt" not in out
+    assert {"brief.md", "glossaire.txt", "documents-source.md"} <= set(out)
+
+
+def test_build_payload_writes_the_prompt_when_available():
+    out = dbs._build_brief_files_payload({"subject": "x"}, [], "PROMPT SUBSTITUÉ")
+    assert out["prompt-utilise.txt"] == "PROMPT SUBSTITUÉ".encode("utf-8")
+
+
+def test_build_payload_truncates_a_very_long_prompt():
+    out = dbs._build_brief_files_payload({"subject": "x"}, [], "a" * 60_000)
+    assert out["prompt-utilise.txt"].endswith(b"[tronqu\xc3\xa9]")
+    assert len(out["prompt-utilise.txt"]) < 60_000
+
+
+def test_schedule_drive_brief_sync_does_not_raise_on_failure(monkeypatch):
+    """Garantit que le thread daemon n'expose aucune erreur au caller.
+
+    La préparation est déjà persistée quand ce thread démarre : tout ce qui
+    remonterait d'ici transformerait un export raté en échec de sauvegarde.
+    """
+    def boom(*_a, **_kw):
+        raise RuntimeError("Drive injoignable")
+
+    monkeypatch.setattr(dbs, "_do_sync", boom)
+    monkeypatch.setattr(dbs, "_report_status", lambda *_a, **_kw: None)
+
     # Doit retourner None sans exception.
-    dbs.schedule_drive_brief_sync(
+    assert dbs.schedule_drive_brief_sync(
         user_sub="user-a",
         brief_id="brief-1",
         brief_json={"subject": "x"},
         documents=[],
-    )
+    ) is None
     # Le worker tourne en daemon ; ses erreurs sont loguées, pas levées.

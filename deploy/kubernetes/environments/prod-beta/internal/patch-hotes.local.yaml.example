@@ -1,0 +1,95 @@
+# GABARIT — copier en `patch-hotes.local.yaml` et y mettre les hôtes RÉELS de prod-bêta.
+# Ce fichier ne fait qu'une chose : remplacer les hôtes expurgés de video-ingest.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-api
+  namespace: audio-internal
+spec:
+  template:
+    spec:
+      containers:
+        - name: video-ingest-api
+          env:
+            - name: VIDEO_INGEST_OIDC_JWKS_URL
+              value: https://REMPLACER-PAR-LE-SSO-REEL/realms/mirai/protocol/openid-connect/certs
+            - name: VIDEO_INGEST_OIDC_ISSUER
+              value: https://REMPLACER-PAR-LE-SSO-REEL/realms/mirai
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://REMPLACER-PAR-LA-PASSERELLE-REELLE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-mcp
+  namespace: audio-internal
+spec:
+  template:
+    spec:
+      containers:
+        - name: video-ingest-mcp
+          env:
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://REMPLACER-PAR-LA-PASSERELLE-REELLE
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-ingest-worker
+  namespace: audio-internal
+spec:
+  template:
+    spec:
+      containers:
+        - name: video-ingest-worker
+          env:
+            - name: VIDEO_INGEST_KEVENT_GATEWAY_URL
+              value: https://REMPLACER-PAR-LA-PASSERELLE-REELLE
+---
+# Le CNP est une CRD : pas de fusion stratégique possible, donc un patch JSON ciblé sur
+# le SEUL élément à changer (le FQDN du SSO, 5e règle de sortie).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: video-ingest-egress
+  namespace: audio-internal
+spec:
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEndpoints:
+        - matchLabels: {app: postgres-internal}
+      toPorts:
+        - ports:
+            - {port: "5432", protocol: TCP}
+    - toEndpoints:
+        - matchLabels:
+            k8s:app: internal-ingester
+            k8s:io.kubernetes.pod.namespace: audio-internal
+      toPorts:
+        - ports:
+            - {port: "8090", protocol: TCP}
+    - toFQDNs:
+        - matchPattern: "*.youtube.com"
+        - matchPattern: youtube.com
+        - matchPattern: "*.googlevideo.com"
+        - matchPattern: "*.ytimg.com"
+        - matchPattern: "*.youtu.be"
+        - matchPattern: youtu.be
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}
+    - toFQDNs:
+        - matchName: REMPLACER-PAR-LE-SSO-REEL
+      toPorts:
+        - ports:
+            - {port: "443", protocol: TCP}
