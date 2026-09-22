@@ -80,6 +80,10 @@ def main():
                 return route.fulfill(body=json.dumps(sans), content_type="application/json")
             return route.fallback()
         ctx.route("**/api/file/transcript-status/*", statut)
+        ctx.route("**/api/file/transcript-text/f4/speaker_tagged",
+                  lambda r: r.fulfill(body=json.dumps({"available": True, "text":
+                      "**M. Delorme** _(0:00.0 → 0:12.0)_\nBonjour à tous, on commence.\n\n**S. Kaci** _(0:12.0 → 0:30.0)_\nLe graphe est prêt."}),
+                      content_type="application/json"))
         ctx.route("**/api/file/transcript-text/f4/absentee",
                   lambda r: r.fulfill(body=json.dumps({"available": True, "text": "## Pour ceux qui n'étaient pas là\n\n- La collection sera publique."}),
                                       content_type="application/json"))
@@ -140,6 +144,12 @@ def main():
         verifie(fiche.get_attribute("data-onglet") == "tr", "F5 onglet Transcription actif")
         verifie(page.evaluate("getComputedStyle(document.querySelector('.file-detail-corrector-block')).display") != "none",
                 "F5 le correcteur s'affiche sur « Transcription »")
+        page.wait_for_selector('.file-detail[data-detail-file-id="f4"] .transcript-corrector, .file-detail[data-detail-file-id="f4"] .transcript-corrector-fallback',
+                               state="attached", timeout=8_000)
+        verifie(page.evaluate("""() => { const d = document.querySelector('.file-detail[data-detail-file-id="f4"] .transcript-corrector, .file-detail[data-detail-file-id="f4"] .transcript-corrector-fallback');
+                                         const s = d && d.querySelector(':scope > summary');
+                                         return !!d && d.open && (!s || getComputedStyle(s).display === 'none'); }"""),
+                "F5 la transcription est affichée en entier, sans chevron pour la replier")
 
         # F8 — l'onglet survit au rafraîchissement
         page.evaluate("window.refreshDownloadsBlocks ? window.refreshDownloadsBlocks() : null")
@@ -200,6 +210,9 @@ def main():
 
         verifie(not erreurs, "F9 aucune erreur JavaScript" + (f" — {erreurs[:2]}" if erreurs else ""))
         page.screenshot(path=str(ICI / "fiche-epure.png"), full_page=False)
+        page.evaluate("window.showFileDetail('f4')"); page.wait_for_timeout(800)
+        page.click('.file-detail[data-detail-file-id="f4"] [data-fiche-onglet="tr"]'); page.wait_for_timeout(800)
+        page.screenshot(path=str(ICI / "fiche-transcription.png"))
         ctx.close()
         nav.close()
 

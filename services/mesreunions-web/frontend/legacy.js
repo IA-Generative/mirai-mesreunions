@@ -2019,7 +2019,7 @@ async function mountTranscriptCorrector(container) {
         // Fallback : pas de speaker-tagged (échec diarisation) — afficher juste
         // la transcription brute non-éditable.
         container.innerHTML = `
-          <details class="transcript-corrector-fallback">
+          <details class="transcript-corrector-fallback" open>
             <summary>📜 Transcription complète (sans blocs interlocuteur)</summary>
             <pre class="transcript-corrector-raw">${escapeHtml(data.transcription_text || data.speaker_tagged_text || '(vide)')}</pre>
           </details>
@@ -2151,7 +2151,7 @@ async function mountTranscriptCorrector(container) {
               style="font-size:0.72rem;padding:1px 8px;border-radius:9999px;opacity:0;transition:opacity 0.3s;"></span>
       </div>`;
     container.innerHTML = `
-      <details class="transcript-corrector">
+      <details class="transcript-corrector" open>
         <summary class="transcript-corrector-summary">
           📜 Transcription de la réunion
           <span style="font-weight:400;font-size:0.78rem;color:#64748b;">

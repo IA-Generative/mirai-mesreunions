@@ -2170,6 +2170,11 @@
            leurs boutons (la fiche les déclenche) mais on ne les montre plus. */
         .file-detail:not([data-onglet="tr"]) .file-detail-corrector-block { display: none; }
         .file-detail .feedback-section--regen { display: none; }
+        /* La transcription est un onglet de la fiche : toujours dépliée, sans le
+           chevron qui la repliait (demande PO du 22/09). Le <details> reste — le
+           code s'y accroche — mais son en-tête pliant disparaît. */
+        .file-detail .transcript-corrector > summary,
+        .file-detail .transcript-corrector-fallback > summary { display: none; }
         /* « Retirer » : le geste de la perte ou du vol — trouvable vite, jamais tentant.
            Rouge en texte, pas en aplat. */
         .mr-retirer-discret { color: #ce0500 !important; box-shadow: inset 0 0 0 1px #ddd !important; background: transparent !important; }
