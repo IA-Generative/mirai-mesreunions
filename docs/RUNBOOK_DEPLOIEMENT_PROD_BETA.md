@@ -130,6 +130,7 @@ reconstruction du manifeste (§5).
 | Date | Charge | Geste | Pourquoi |
 |---|---|---|---|
 | 2026-09-22 | `internal-ingester` | `set env KEVENT_ABSENTEE_SUMMARY_ENABLED=true` | les autres étapes LLM étaient activées, celle-ci oubliée : aucun résumé « Pour les absents » n'était jamais produit |
+| 2026-09-22 | `internal-ingester` | `set image … :20260922-epure6` (était `20260905-050520`) | `/api/v1/audio/lookup` renvoie enfin `absentee_summary` ; embarque aussi le repli LiteLLM (fdd34f7). Retour : remettre `20260905-050520` |
 
 ---
 
