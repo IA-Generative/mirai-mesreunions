@@ -2094,6 +2094,19 @@
             border: 0; padding: .45rem .9rem; font: inherit; font-size: .875rem; color: #161616; cursor: pointer; }
         .brief-menu button:hover, .brief-menu button:focus { background: #eeeeff; }
         .brief-menu-nb { margin-left: auto; font-size: .72rem; color: #666; }
+        /* ✎ par section du brief : discret, révélé au survol ou au clavier. */
+        .brief-crayon { margin-left: auto; background: none; border: 0; color: #000091; font: inherit; font-size: .78rem;
+            font-weight: 400; cursor: pointer; padding: .1rem .3rem; opacity: .15; transition: opacity .15s; }
+        .brief-section:hover .brief-crayon, .brief-crayon:focus { opacity: 1; }
+        .brief-section-title { display: flex; align-items: center; gap: .4rem; }
+        .brief-amend-sur-place { margin: -.4rem 0 1rem; padding: .8rem 1rem; border: 2px solid #000091; border-radius: 6px; background: #fff; }
+        /* « Préparer la suite » : qu'est-ce qu'on reprend ? */
+        .reprise-bandeau { border-left: 3px solid #000091; background: #eeeeff; padding: .5rem .8rem; margin: 0 0 .8rem; font-size: .9rem; }
+        .reprise-question { font-weight: 600; margin: 1rem 0 .4rem; }
+        .reprise-choix { display: flex; gap: .6rem; align-items: flex-start; border: 1px solid #e5e5e5; border-radius: 4px;
+            padding: .5rem .75rem; margin: 0 0 .4rem; background: #f9f9fb; cursor: pointer; font-size: .9rem; }
+        .reprise-choix small { display: block; color: #666; font-size: .78rem; }
+        .reprise-choix input:disabled + span { opacity: .6; }
         .brief-reglages { margin: 1.2rem 0 .6rem; border-top: 1px solid #e5e5e5; padding-top: .6rem; }
         .brief-reglages > summary { cursor: pointer; color: #000091; font-size: .9rem; font-weight: 500; }
         /* ── La fiche d'une réunion (2026-09-22) ─────────────────────────────── */
@@ -2151,6 +2164,7 @@
         .fiche-cr ul, .fiche-cr ol { padding-left: 1.3rem; margin: 0 0 .5rem; }
         .fiche-cr li { margin-bottom: .3rem; }
         .fiche-vide { color: #666; font-style: italic; }
+        .fiche-aide { color: #666; font-size: .8rem; margin-top: .4rem; }
         /* La transcription (correcteur) est l'onglet « Transcription » ; hors de
            cet onglet elle se cache. Les régénérations sont sous « ⋯ » : on garde
            leurs boutons (la fiche les déclenche) mais on ne les montre plus. */

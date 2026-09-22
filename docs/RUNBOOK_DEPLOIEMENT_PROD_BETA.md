@@ -125,6 +125,14 @@ reconstruction du manifeste (§5).
 
 ---
 
+### Changements posés hors manifeste (à reporter dans le manifeste reconstruit)
+
+| Date | Charge | Geste | Pourquoi |
+|---|---|---|---|
+| 2026-09-22 | `internal-ingester` | `set env KEVENT_ABSENTEE_SUMMARY_ENABLED=true` | les autres étapes LLM étaient activées, celle-ci oubliée : aucun résumé « Pour les absents » n'était jamais produit |
+
+---
+
 ## 5. Reconstruire un manifeste perdu
 
 Tant que la charge tourne, sa description survit dans une annotation. C'est la seule copie —

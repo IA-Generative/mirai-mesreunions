@@ -23,6 +23,8 @@ vérifie :
       plus visibles en pied
   F7  « modifier » (date) ouvre l'éditeur de date, fermé par défaut
   F8  l'onglet choisi survit au rafraîchissement de la fiche
+  F10 une réunion SANS résumé pour les absents garde l'onglet, qui le dit et
+      propose « Rédiger le résumé pour les absents » (→ régénération)
   F9  aucune erreur JavaScript
 
     python3 tests/e2e/banc-fiche-reunion.py
@@ -73,6 +75,9 @@ def main():
             fid = route.request.url.split("?")[0].rsplit("/", 1)[1]
             if fid == "f4":
                 return route.fulfill(body=json.dumps(STATUT_F4), content_type="application/json")
+            if fid == "f2":
+                sans = dict(STATUT_F4, outputs={k: v for k, v in STATUT_F4["outputs"].items() if k != "absentee"})
+                return route.fulfill(body=json.dumps(sans), content_type="application/json")
             return route.fallback()
         ctx.route("**/api/file/transcript-status/*", statut)
         ctx.route("**/api/file/transcript-text/f4/absentee",
@@ -165,6 +170,21 @@ def main():
         verifie(not ed.is_visible(), "F7 éditeur de date fermé par défaut")
         fiche.locator("[data-fiche-date]").click()
         verifie(ed.is_visible(), "F7 « modifier » ouvre l'éditeur de date")
+
+        # F10 — sans résumé pour les absents
+        page.evaluate("window.showFileDetail('f2')")
+        page.wait_for_selector('.file-detail[data-detail-file-id="f2"] .fiche-onglets', timeout=10_000)
+        f2 = page.locator('.file-detail[data-detail-file-id="f2"]')
+        verifie(f2.locator('[data-fiche-onglet="absents"]').count() == 1, "F10 l'onglet « Pour les absents » est là, même sans résumé")
+        f2.locator('[data-fiche-onglet="absents"]').click()
+        pa = f2.locator('[data-fiche-panneau="absents"]')
+        verifie("pas encore été rédigé" in pa.inner_text() and pa.locator('[data-fiche-action="regen-llm"]').count() == 1,
+                "F10 il le dit et propose « Rédiger le résumé pour les absents »")
+        page.wait_for_selector('[data-feedback-regen="llm-only"][data-feedback-file="f2"]', state="attached", timeout=5_000)
+        page.evaluate("""() => { window.__regen2 = 0; document.querySelector('[data-feedback-regen="llm-only"][data-feedback-file="f2"]')
+                                .addEventListener('click', (e) => { window.__regen2++; e.stopImmediatePropagation(); e.preventDefault(); }, true); }""")
+        pa.locator('[data-fiche-action="regen-llm"]').click()
+        verifie(page.evaluate("window.__regen2") == 1, "F10 le bouton lance la régénération")
 
         verifie(not erreurs, "F9 aucune erreur JavaScript" + (f" — {erreurs[:2]}" if erreurs else ""))
         page.screenshot(path=str(ICI / "fiche-epure.png"), full_page=False)

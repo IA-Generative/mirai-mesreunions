@@ -138,6 +138,7 @@ Tous validés depuis la VM build-vm — cf
 | `KEVENT_OOB_CLEANING_ENABLED` | `false` | active le nettoyage OOB via LLM |
 | `KEVENT_REFORMULATION_ENABLED` | `false` | active la reformulation discours indirect |
 | `KEVENT_MEETING_ANALYSIS_ENABLED` | `false` | active l'analyse 5 sections |
+| `KEVENT_ABSENTEE_SUMMARY_ENABLED` | `false` | active le résumé « Pour les absents » (150-300 mots). ⚠ Oublié en prod-bêta jusqu'au 2026-09-22 (aucun résumé produit, onglet invisible) : posé à `true` sur `internal-ingester` par `kubectl set env` |
 | `KEVENT_GLOSSARY_CORRECTION_ENABLED` | `false` | active la correction LLM des sigles via glossaire (cf section *Glossaire* ci-dessous) |
 | `KEVENT_GLOSSARY_DIR` | `/app/glossaire` | dossier des fichiers de glossaire (`.md`/`.txt`/`.json`) lus au démarrage du worker |
 | `KEVENT_GLOSSARY_MAX_TERMS_PER_CALL` | `200` | nombre max de termes pertinents passés au LLM par appel (filtre `glossary_loader.filter_relevant`) |

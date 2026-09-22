@@ -4822,16 +4822,28 @@ function _ficheHtml(fileId, data, statusBadge, audioOptions) {
         ? `${kp ? `<h3 class="fiche-h">En bref</h3><div class="fiche-enbref fiche-cr">${_ficheMarkdown(kp)}</div>` : ''}
            ${crMd ? `<div class="fiche-cr">${_ficheMarkdown(crMd)}</div>` : ''}`
         : `<p class="fiche-vide">Le compte-rendu n'est pas encore prêt. Il apparaîtra ici dès la fin du traitement.</p>`;
+    // L'onglet « Pour les absents » est TOUJOURS là : une réunion sans résumé
+    // pour les absents le dit et propose de le rédiger, au lieu de faire
+    // disparaître l'onglet sans explication (vu en service le 22/09 : l'étape
+    // était désactivée côté chaîne, l'onglet n'apparaissait jamais).
     const aAbsents = !!o['absentee'];
+    const traite = !!(o['meeting-cr'] || o['transcript']);
+    const panneauAbsents = aAbsents
+        ? '<p class="fiche-vide">Chargement…</p>'
+        : (traite
+            ? `<p class="fiche-vide">Le résumé pour les absents n'a pas encore été rédigé pour cette réunion.</p>
+               <button type="button" class="fr-btn fr-btn--sm fr-btn--secondary" data-fiche-action="regen-llm">Rédiger le résumé pour les absents</button>
+               <p class="fiche-aide">L'IA relit la réunion et régénère aussi le compte-rendu (5 à 15 minutes).</p>`
+            : '<p class="fiche-vide">Il apparaîtra ici dès la fin du traitement.</p>');
     return `${statusBadge}
         <div class="fiche-actions">${menuDl}${modifier}</div>
         <div class="fiche-onglets" role="tablist" aria-label="Contenu de la réunion">
             <button type="button" role="tab" data-fiche-onglet="cr">Compte-rendu</button>
-            ${aAbsents ? '<button type="button" role="tab" data-fiche-onglet="absents">Pour les absents</button>' : ''}
+            <button type="button" role="tab" data-fiche-onglet="absents">Pour les absents</button>
             <button type="button" role="tab" data-fiche-onglet="tr">Transcription</button>
         </div>
         <div class="fiche-panneau" data-fiche-panneau="cr" role="tabpanel">${panneauCr}</div>
-        ${aAbsents ? '<div class="fiche-panneau" data-fiche-panneau="absents" role="tabpanel" hidden><p class="fiche-vide">Chargement…</p></div>' : ''}`;
+        <div class="fiche-panneau" data-fiche-panneau="absents" role="tabpanel" data-dispo="${aAbsents ? '1' : '0'}" hidden>${panneauAbsents}</div>`;
 }
 
 function _ficheAppliquerOnglet(fileId, container, cle) {
@@ -4850,7 +4862,7 @@ function _ficheAppliquerOnglet(fileId, container, cle) {
     if (racine) racine.setAttribute('data-onglet', cle);
     if (cle === 'absents') {
         const p = container.querySelector('[data-fiche-panneau="absents"]');
-        if (p && !p.dataset.charge) {
+        if (p && !p.dataset.charge && p.dataset.dispo === '1') {
             p.dataset.charge = '1';
             _fetchTranscriptText(fileId, 'absentee').then((texte) => {
                 p.innerHTML = (texte && texte.trim())
