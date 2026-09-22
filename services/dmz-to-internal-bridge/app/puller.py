@@ -2281,6 +2281,9 @@ def audio_lookup():
             "cleaned_text": row.cleaned_text,
             "reformulated_text": row.reformulated_text,
             "meeting_analysis_json": row.meeting_analysis_json,
+            # « Pour les absents » : rédigé et écrit en base, mais jamais RENVOYÉ
+            # ici jusqu'au 2026-09-22 — la fiche ne pouvait donc pas le voir.
+            "absentee_summary": row.absentee_summary,
             "diarization_json": row.diarization_json,
             "transcription_words_json": row.transcription_words_json,
             "audio_quality_score": row.audio_quality_score,

@@ -44,3 +44,15 @@ def test_nom_de_fichier_distinct_du_compte_rendu():
     src = open(os.path.join(WEB, "modules", "sessions", "routes.py"), encoding="utf-8").read()
     assert 'if kind == "absentee" and "absents" not in stem:' in src
     assert 'stem = f"{stem} - pour les absents"' in src
+
+
+def test_la_recherche_interne_renvoie_le_resume_pour_les_absents():
+    """internal-ingester `/api/v1/audio/lookup` est la SEULE source de la fiche :
+    une colonne qu'il ne renvoie pas n'existe pas pour l'écran (vu le 22/09 :
+    le résumé était en base, la fiche disait « pas encore rédigé »)."""
+    src = open(os.path.join(ROOT, "services", "dmz-to-internal-bridge", "app", "puller.py"), encoding="utf-8").read()
+    debut = src.index('@app.route("/api/v1/audio/lookup"')
+    fin = src.index("@app.route(", debut + 10)
+    route = src[debut:fin]
+    for col in ("meeting_analysis_json", "reformulated_text", "cleaned_text", "absentee_summary"):
+        assert f'"{col}": row.{col}' in route, f"{col} absent de la réponse de /api/v1/audio/lookup"
