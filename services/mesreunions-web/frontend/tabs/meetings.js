@@ -517,10 +517,12 @@ function _buildStatusTooltip(file, status) {
     }
   }
 
-  // Bloc erreur détaillée — surfacé quand status.kind === 'error' et qu'on
-  // a un last_error_kind en cache (migration 020 + endpoint transcript-status).
-  // Donne à l'utilisateur la cause + l'action possible.
-  if (status.kind === 'error' && cached && cached.errorKind) {
+  // Bloc erreur détaillée — surfacé quand la pastille est rouge (error) OU
+  // orange (partial), dès qu'on a un last_error_kind en cache (migration 020
+  // + endpoint transcript-status). Donne à l'utilisateur la cause + l'action
+  // possible. Le cas 'partial' manquait : la pastille (!) orange s'affichait
+  // sans la moindre explication, alors que le backend avait écrit le motif.
+  if ((status.kind === 'error' || status.kind === 'partial') && cached && cached.errorKind) {
     lines.push('');
     lines.push('⚠ ' + _humanizeErrorKind(cached.errorKind));
     if (cached.errorMessage) {
@@ -563,6 +565,7 @@ function _humanizeErrorKind(kind) {
     s3_object_purged: "L'audio a été supprimé du stockage (rétention dépassée). Non-relançable, supprimez la ligne.",
     s3_no_audio_path: "Pas de fichier audio associé à cette ligne. Non-relançable, supprimez la ligne.",
     llm_chain_partial: "Une ou plusieurs étapes de compte-rendu n'ont pas pu se terminer (voir détail ci-dessous). Cliquez Re-générer pour relancer la chaîne — les étapes manquantes seront retentées.",
+    diarization_failed: "La transcription est complète, mais la séparation des locuteurs n'a pas abouti (voir détail ci-dessous). Cliquez Relancer pour réessayer.",
   };
   return M[kind] || `Erreur : ${kind}. Cliquez Relancer ou contactez un administrateur.`;
 }

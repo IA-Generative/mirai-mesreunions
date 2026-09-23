@@ -666,6 +666,8 @@ def _llm_step_with_retry(step_name, callable_fn):
 
     ``status_str`` est l'une des valeurs :
     - ``ok`` : succès, ``result`` est utilisable
+    - ``skipped`` : l'étape n'avait rien à faire (p. ex. aucun sigle du
+      glossaire dans la transcription). Ce n'est PAS un échec.
     - ``empty`` : succès mais réponse vide/None (modèle a renvoyé rien)
     - ``budget_exceeded_after_N`` : timeout total dépassé après N tentatives
     - ``failed_after_N_attempts:<ExceptionName>`` : épuisé sans succès
@@ -686,6 +688,9 @@ def _llm_step_with_retry(step_name, callable_fn):
             return None, f"budget_exceeded_after_{attempt-1}_attempts"
         try:
             result = callable_fn()
+            if result is mi.NOTHING_TO_DO:
+                logger.info("LLM step %s : rien à faire, étape sautée", step_name)
+                return None, "skipped"
             if result is None or (isinstance(result, str) and not result.strip()):
                 logger.info("LLM step %s returned empty (attempt %d)",
                              step_name, attempt)
@@ -706,6 +711,20 @@ def _llm_step_with_retry(step_name, callable_fn):
     return None, f"failed_after_{_LLM_STEP_MAX_ATTEMPTS}_attempts:{last_exc_name}"
 
 
+# Étapes dont l'absence SE VOIT dans la fiche : seul leur échec justifie
+# de marquer la réunion « partiellement prête ». `glossary_correction` et
+# `cleaning` sont des étapes INTERMÉDIAIRES — leur sortie n'est jamais
+# affichée telle quelle, la chaîne repart du texte brut — et une réunion
+# sans sigle à corriger ni hésitation à nettoyer est une réunion normale.
+# Les brandir en orange dans la liste, c'est crier au loup : au 2026-09-23
+# les 7 réunions de la bêta étaient orange, aucune n'était incomplète.
+_STATUS_BEARING_STEPS = {
+    "suggest_metadata",
+    "reformulation",
+    "meeting_analysis",
+    "absentee_summary",
+}
+
 # Libellés humains des étapes LLM, utilisés pour construire le
 # last_error_message structuré quand des étapes échouent. Synchronisé avec
 # le STEP_INFO côté frontend (legacy.js).
@@ -723,7 +742,8 @@ def _build_chain_error_message(step_results: dict) -> str:
     """Construit un message lisible pour last_error_message à partir
     des statuts par étape. Liste explicitement les étapes échouées et
     leur cause courte."""
-    failed = [(k, v) for k, v in step_results.items() if v != "ok"]
+    failed = [(k, v) for k, v in step_results.items()
+              if v not in ("ok", "skipped")]
     if not failed:
         return ""
     parts = []
@@ -771,8 +791,10 @@ def _run_llm_chain_for_audio(
     Retourne ``(updates, status_delta)`` où :
       - ``updates`` est un dict de colonnes à écrire (clé → valeur).
       - ``status_delta`` est ``"kevent_completed"`` (succès) ou
-        ``"kevent_partially_completed"`` (au moins une étape obligatoire
-        a renvoyé None).
+        ``"kevent_partially_completed"`` — ce dernier UNIQUEMENT si une
+        étape porteuse (cf. ``_STATUS_BEARING_STEPS``) a échoué. Une étape
+        intermédiaire ratée, ou une étape qui n'avait rien à faire, laisse
+        la réunion « prête ».
     """
     updates: dict = {}
     status_delta = "kevent_completed"
@@ -804,8 +826,6 @@ def _run_llm_chain_for_audio(
         if corrected:
             updates["glossary_corrected_text"] = corrected
             base_for_llm = corrected
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
 
     # 3b-ter. Suggested filename + key points (1er run uniquement).
     if include_metadata and KEVENT_FILENAME_SUGGESTION_ENABLED:
@@ -820,8 +840,6 @@ def _run_llm_chain_for_audio(
             kp_serialized = mi.serialize_key_points(meta.get("key_points") or [])
             if kp_serialized:
                 updates["key_points_summary"] = kp_serialized
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
 
     # 3c. OOB cleaning.
     if KEVENT_OOB_CLEANING_ENABLED:
@@ -832,8 +850,6 @@ def _run_llm_chain_for_audio(
         step_results["cleaning"] = st
         if cleaned:
             updates["cleaned_text"] = cleaned
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
 
     # 3d. Reformulation. Source = cleaned_text si dispo, sinon
     # base_for_llm (fallback : même si cleaning a échoué on essaie).
@@ -846,8 +862,6 @@ def _run_llm_chain_for_audio(
         step_results["reformulation"] = st
         if reformulated:
             updates["reformulated_text"] = reformulated
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
 
     # 3e. Meeting analysis. Fallback aussi sur base_for_llm.
     if KEVENT_MEETING_ANALYSIS_ENABLED:
@@ -864,8 +878,6 @@ def _run_llm_chain_for_audio(
             serialized = mi.serialize_analysis(analysis)
             if serialized is not None:
                 updates["meeting_analysis_json"] = serialized
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
 
     # 3f. Absentee summary.
     if KEVENT_ABSENTEE_SUMMARY_ENABLED:
@@ -877,8 +889,25 @@ def _run_llm_chain_for_audio(
         step_results["absentee_summary"] = st
         if summary:
             updates["absentee_summary"] = summary
-        if st != "ok":
-            status_delta = "kevent_partially_completed"
+
+    # Décision de statut : seules les étapes PORTEUSES comptent. Une étape
+    # intermédiaire ratée dégrade la qualité du compte-rendu (la suite
+    # repart du texte brut), elle ne rend pas la réunion incomplète.
+    blocking = sorted(
+        k for k, v in step_results.items()
+        if v not in ("ok", "skipped") and k in _STATUS_BEARING_STEPS
+    )
+    if blocking:
+        status_delta = "kevent_partially_completed"
+    degraded = sorted(
+        k for k, v in step_results.items()
+        if v not in ("ok", "skipped") and k not in _STATUS_BEARING_STEPS
+    )
+    if degraded and not blocking:
+        logger.info(
+            "LLM chain : étapes intermédiaires ratées (%s) — réunion complète "
+            "malgré tout, statut inchangé", ", ".join(degraded),
+        )
 
     # Si au moins une étape a échoué, construire un message structuré
     # qui apparaîtra dans last_error_message côté UI (visible dans la
@@ -1288,6 +1317,10 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     final_status = "kevent_completed"
 
     # ── Step 2 — diarisation (optional) + merge to markdown ────────────
+    # Motifs des drapeaux posés HORS chaîne LLM (diarisation). Ils sont
+    # écrits dans last_error_* en fin de pipeline : un « partiellement
+    # prête » sans motif est une alerte que personne ne peut lever.
+    pipeline_issues: list[str] = []
     diarization: Optional[dict] = None
     if KEVENT_DIARIZATION_ENABLED:
         try:
@@ -1301,9 +1334,18 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
         except (KeventAuthError, KeventApplicativeError):
             logger.exception("Kevent diarisation failed (non-retryable), continuing")
             final_status = "kevent_partially_completed"
+            pipeline_issues.append(
+                "la séparation des locuteurs a été refusée par le moteur : "
+                "la transcription est complète mais n'indique pas qui parle"
+            )
         except KeventTransientError:
             logger.warning("Kevent diarisation transient failure, continuing without diarisation")
             final_status = "kevent_partially_completed"
+            pipeline_issues.append(
+                "la séparation des locuteurs n'a pas abouti (moteur "
+                "indisponible) : la transcription est complète mais "
+                "n'indique pas qui parle. Cliquez Relancer pour réessayer"
+            )
 
     # ── Step 3 — LLM-based steps (all optional, best-effort) ───────────
     llm = _build_llm_client()
@@ -1326,7 +1368,14 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
                 except Exception:
                     logger.exception("merger re-render with names failed")
             else:
-                final_status = "kevent_partially_completed" if final_status == "kevent_completed" else final_status
+                # Aucun nom trouvé = cas NORMAL (personne ne se nomme dans
+                # la réunion, ou un seul intervenant). Les locuteurs
+                # restent « Intervenant_NN » et la fiche est complète : ce
+                # n'est pas une réunion à moitié traitée.
+                logger.info(
+                    "speaker naming: aucun nom détecté pour %s, on garde les "
+                    "libellés anonymes", audio_file_id,
+                )
 
         if speaker_tagged is not None:
             updates["speaker_tagged_text"] = speaker_tagged
@@ -1375,6 +1424,19 @@ def _transcribe_via_kevent(audio_file_id, transcoded_filename: str,
     updates.update(chain_updates)
     if chain_status == "kevent_partially_completed":
         final_status = "kevent_partially_completed"
+
+    # Un « partiellement prête » DOIT porter son motif. La chaîne LLM
+    # renseigne le sien ; les drapeaux posés hors chaîne (diarisation)
+    # seraient sinon effacés par le `last_error_kind = None` du cas « chaîne
+    # entièrement OK », et l'utilisateur verrait une pastille orange sans
+    # la moindre explication.
+    if final_status == "kevent_partially_completed" and not updates.get("last_error_kind"):
+        updates["last_error_kind"] = "diarization_failed"
+        updates["last_error_message"] = (
+            "Étapes incomplètes : "
+            + " · ".join(pipeline_issues or ["cause non enregistrée"])
+            + "."
+        )
 
     _set_user_audio_status(audio_file_id, final_status, **updates)
     logger.info(

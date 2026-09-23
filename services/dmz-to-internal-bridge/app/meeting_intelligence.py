@@ -57,6 +57,22 @@ def _render(template: str, transcript: str) -> str:
     return template.replace("{TRANSCRIPT}", transcript)
 
 
+class _NothingToDo(str):
+    """Sortie d'une étape qui n'avait RIEN à faire.
+
+    À ne pas confondre avec une étape dont le moteur n'a rien renvoyé :
+    une réunion sans le moindre sigle du glossaire est une réunion
+    NORMALE, pas une réunion à moitié traitée. Sous-classe de ``str``
+    (vide) pour rester compatible avec les appelants typés
+    ``Optional[str]`` qui ne connaissent pas la sentinelle.
+    """
+
+    __slots__ = ()
+
+
+NOTHING_TO_DO = _NothingToDo()
+
+
 # Seuil au-delà duquel on chunke le transcript pour les LLM rewriters
 # (glossary / oob_cleaning / reformulation). Calibré pour rester en-dessous
 # du timeout HTTP par chunk même sur les modèles medium (mistral-small-24b
@@ -124,8 +140,14 @@ def _run_llm_rewrite(
         try:
             return llm.chat(model, [{"role": "user", "content": prompt}])
         except LLMError:
+            # On LAISSE REMONTER : c'est l'appelant (_llm_step_with_retry)
+            # qui sait réessayer et qui nomme la vraie cause. Avaler
+            # l'exception ici rendait `None`, que l'appelant traduisait en
+            # « le moteur n'a rien renvoyé » — alors qu'un 503 « Model is
+            # too busy » du hub n'a rien d'une réponse vide, et qu'aucune
+            # nouvelle tentative n'était jamais déclenchée.
             logger.warning("%s: LLM call failed", step_name, exc_info=True)
-            return None
+            raise
 
     chunks = _chunk_text(transcript)
     logger.info(
@@ -213,18 +235,22 @@ def apply_glossary_correction(
     before being embedded in the prompt so we don't burn context with
     hundreds of unrelated entries.
 
-    Returns the corrected transcript, or None when the LLM call failed
-    or there was nothing to correct (caller keeps the original).
+    Returns the corrected transcript, ``NOTHING_TO_DO`` quand il n'y avait
+    rien à corriger (aucun terme pertinent : l'appelant garde l'original et
+    ne compte PAS un échec), ou None sur transcript vide. Une erreur du
+    moteur remonte en exception (cf. ``_run_llm_rewrite``).
     """
-    if not transcript.strip() or not glossary_terms:
+    if not transcript.strip():
         return None
+    if not glossary_terms:
+        return NOTHING_TO_DO
     # Deferred import so unit tests can stub out the loader independently.
     from app.glossary_loader import filter_relevant
 
     relevant = filter_relevant(glossary_terms, transcript, max_terms_per_call)
     if not relevant:
         logger.info("glossary_correction: no relevant terms detected, skipping LLM call")
-        return None
+        return NOTHING_TO_DO
 
     logger.info("glossary_correction: %d relevant terms passed to LLM", len(relevant))
     return _run_llm_rewrite(

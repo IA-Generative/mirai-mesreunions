@@ -136,6 +136,20 @@ def test_extract_speaker_names_empty_transcript_skips_llm():
     fake.chat_json.assert_not_called()
 
 
+# --- sentinelle « rien à faire » -----------------------------------------
+
+def test_nothing_to_do_est_une_chaine_vide():
+    """Contrat de la sentinelle : elle vaut son IDENTITÉ, pas sa valeur.
+
+    Elle doit rester falsy — les appelants écrivent leur colonne sous
+    `if resultat:`, et une sentinelle truthy ferait enregistrer « rien à
+    corriger » comme s'il s'agissait du texte corrigé.
+    """
+    assert MI.NOTHING_TO_DO == ""
+    assert not MI.NOTHING_TO_DO
+    assert MI.NOTHING_TO_DO is not None
+
+
 # --- clean_oob ------------------------------------------------------------
 
 def test_clean_oob_returns_llm_output():
@@ -143,9 +157,14 @@ def test_clean_oob_returns_llm_output():
     assert MI.clean_oob("xx", fake, "m") == "texte nettoyé"
 
 
-def test_clean_oob_returns_none_on_llm_error():
+def test_clean_oob_propage_l_erreur_llm():
+    """Une erreur du moteur REMONTE : c'est l'orchestrateur qui réessaie et
+    qui nomme la cause. La rendre en `None` la faisait passer pour « le
+    moteur n'a rien renvoyé » — et aucune nouvelle tentative n'était
+    déclenchée (cf. 503 « Model is too busy » du 2026-09-23)."""
     fake = _llm_raising(LLM_MOD.LLMApplicativeError("context too long"))
-    assert MI.clean_oob("xx", fake, "m") is None
+    with pytest.raises(LLM_MOD.LLMApplicativeError):
+        MI.clean_oob("xx", fake, "m")
 
 
 def test_clean_oob_empty_transcript_returns_none():
@@ -161,9 +180,10 @@ def test_reformulate_returns_llm_output():
     assert MI.reformulate("xx", fake, "m") == "Jean a dit que…"
 
 
-def test_reformulate_returns_none_on_llm_error():
+def test_reformulate_propage_l_erreur_llm():
     fake = _llm_raising(LLM_MOD.LLMTransientError("timeout"))
-    assert MI.reformulate("xx", fake, "m") is None
+    with pytest.raises(LLM_MOD.LLMTransientError):
+        MI.reformulate("xx", fake, "m")
 
 
 # --- analyse_meeting ------------------------------------------------------

@@ -92,23 +92,25 @@ def test_correction_passes_only_relevant_terms_to_llm():
     assert "UNRELATED_XYZ" not in sent_prompt
 
 
-def test_correction_returns_none_when_no_relevant_terms():
-    """If the filter selects nothing, we don't even call the LLM."""
+def test_correction_rend_rien_a_faire_quand_aucun_terme_pertinent():
+    """Aucun sigle du glossaire dans la réunion → on n'appelle même pas le
+    moteur, et on rend la sentinelle NOTHING_TO_DO : « rien à corriger »
+    n'est PAS un échec, et ne doit pas peindre la réunion en orange."""
     fake = _llm_returning("should not be returned")
     out = MI.apply_glossary_correction(
         "Bonjour à tous, on commence.",
         fake, "model-medium", glossary_terms=["XYZ", "WXYZ"],  # no match
     )
-    assert out is None
+    assert out is MI.NOTHING_TO_DO
     fake.chat.assert_not_called()
 
 
-def test_correction_returns_none_on_llm_error():
+def test_correction_propage_l_erreur_llm():
     fake = _llm_raising(LLM_MOD.LLMTransientError("network fail"))
-    out = MI.apply_glossary_correction(
-        "Le DGSI a transmis", fake, "m", glossary_terms=GLOSSARY,
-    )
-    assert out is None
+    with pytest.raises(LLM_MOD.LLMTransientError):
+        MI.apply_glossary_correction(
+            "Le DGSI a transmis", fake, "m", glossary_terms=GLOSSARY,
+        )
 
 
 def test_correction_empty_transcript_skips_llm():
@@ -119,7 +121,8 @@ def test_correction_empty_transcript_skips_llm():
 
 def test_correction_empty_glossary_skips_llm():
     fake = _llm_returning("xxx")
-    assert MI.apply_glossary_correction("anything", fake, "m", glossary_terms=[]) is None
+    out = MI.apply_glossary_correction("anything", fake, "m", glossary_terms=[])
+    assert out is MI.NOTHING_TO_DO
     fake.chat.assert_not_called()
 
 

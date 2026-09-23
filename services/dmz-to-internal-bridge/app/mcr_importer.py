@@ -337,7 +337,16 @@ def _trigger_llm_chain_on_transcript(session_factory, audio_id: str, transcript:
             logger.exception("mcr_importer: LLM chain crashed for %s", audio_id)
             try:
                 from app.puller import _set_user_audio_status
-                _set_user_audio_status(audio_id, "kevent_partially_completed")
+                # Avec un motif : une pastille orange muette n'apprend rien
+                # à l'utilisateur et ne lui dit pas quoi faire.
+                _set_user_audio_status(
+                    audio_id, "kevent_partially_completed",
+                    last_error_kind="worker_crash",
+                    last_error_message=(
+                        "L'enrichissement du compte-rendu a planté après "
+                        "l'import. Cliquez Re-générer pour relancer la chaîne."
+                    ),
+                )
             except Exception:
                 logger.exception("mcr_importer: also failed to mark partially_completed")
 
