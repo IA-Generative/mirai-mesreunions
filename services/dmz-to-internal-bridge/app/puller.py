@@ -96,6 +96,18 @@ from app import meeting_intelligence as mi
 from app.glossary_loader import load_glossary_dir
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+# pika journalise en INFO l'ouverture ET la fermeture de chaque connexion — une
+# vingtaine de lignes par sondage de file, et il y a un sondage toutes les
+# INTERNAL_PULL_QUEUE_INTERVAL_SECONDS (30 s) par worker gunicorn. Mesuré le
+# 2026-08-29 : 103 686 lignes en 24 h pour ce seul conteneur, dont 17 275
+# comptées pour des ERREURS par la supervision, au seul motif que le `repr`
+# d'une fermeture contient « error=None » et « pending-error= ». Aucune n'en
+# est une : elles disent toutes, mot pour mot, `(200) 'Normal shutdown'`. Ce
+# bruit cachait le vrai incident du jour — le worker de mesreunions-web sorti
+# en code 3 au démarrage.
+# Le réglage reste ouvert : PIKA_LOG_LEVEL=INFO rend le détail le jour où une
+# connexion AMQP pose vraiment question.
+logging.getLogger("pika").setLevel(os.getenv("PIKA_LOG_LEVEL", "WARNING"))
 logger = logging.getLogger(__name__)
 
 
@@ -2185,6 +2197,51 @@ def audio_rag_export():
         return jsonify({"error": "internal_error"}), 500
     finally:
         db.close()
+
+
+@app.route("/api/v1/audio/search", methods=["POST"])
+def audio_search():
+    """Recherche plein texte dans les réunions d'un user (contrat de recherche
+    MirAI, consommé par ``GET /api/v1/search`` de mesreunions-web).
+
+    Corps : ``{user_sub, q, limit, from, to, uploads: [{simple_code, filename}]}``
+    — ``uploads`` = uploads VIVANTS de l'utilisateur en zone externe (fermé
+    par défaut : un upload absent de la liste n'est pas renvoyé ; un import
+    n'est renvoyé que si une réunion vivante lui est liée). Filtre
+    ``user_sub`` obligatoire, visibilité appliquée en SQL avant la limite.
+    Aucun appel LLM. Auth = INTERNAL_API_TOKEN. Lecture seule.
+
+    Ni ``q`` ni les contenus ne sont journalisés : en cas d'erreur SQL, seul
+    le type d'exception l'est (le message SQLAlchemy recopie les paramètres).
+    """
+    from app import meeting_search
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        params = meeting_search.validate_payload(request.get_json(silent=True))
+    except meeting_search.SearchValidationError as exc:
+        return jsonify({"error": "invalid_query", "message": str(exc)}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "search_unavailable"}), 503
+    t0 = time.monotonic()
+    db = SessionLocal()
+    try:
+        out = meeting_search.run_search(
+            db, params, reparse_blocks=_reparse_speaker_tagged_blocks)
+    except Exception as exc:
+        logger.error("audio_search failed user=%s error=%s",
+                     params["user_sub"][:12], type(exc).__name__)
+        return jsonify({"error": "search_unavailable"}), 503
+    finally:
+        try:
+            db.rollback()
+        finally:
+            db.close()
+    logger.info("audio_search user=%s q_len=%d limit=%d live_uploads=%d total=%d ms=%d",
+                params["user_sub"][:12], len(params["q"]), params["limit"],
+                len(params["up_codes"]), out["total"],
+                round((time.monotonic() - t0) * 1000))
+    return jsonify(out)
 
 
 @app.route("/api/v1/audio/lookup", methods=["POST"])
