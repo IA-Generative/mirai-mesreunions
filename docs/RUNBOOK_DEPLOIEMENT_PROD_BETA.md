@@ -131,6 +131,10 @@ reconstruction du manifeste (§5).
 |---|---|---|---|
 | 2026-09-22 | `internal-ingester` | `set env KEVENT_ABSENTEE_SUMMARY_ENABLED=true` | les autres étapes LLM étaient activées, celle-ci oubliée : aucun résumé « Pour les absents » n'était jamais produit |
 | 2026-09-22 | `internal-ingester` | `set image … :20260922-epure6` (était `20260905-050520`) | `/api/v1/audio/lookup` renvoie enfin `absentee_summary` ; embarque aussi le repli LiteLLM (fdd34f7). Retour : remettre `20260905-050520` |
+| 2026-10-05 | base interne | migration `024` appliquée (colonne `search_tsv`, triggers, index GIN, configuration `french_unaccent`) ; extension `unaccent` posée juste avant | recherche Mon portail. Additive : sans le code, rien ne la lit. Retour : inutile |
+| 2026-10-05 | `internal-ingester` | `set image … :20261005-recherche1` (était `20260922-epure6`) | `POST /api/v1/audio/search`. Image construite depuis `release/epure9-recherche` = epure9 (604a607) + main (PR #4). Retour : remettre `20260922-epure6` |
+| 2026-10-05 | `mesreunions-web` | `set image … :20261005-recherche1` (était `20260922-epure9`) ; `set env MESREUNIONS_CORS_ORIGINS=<origine Mon portail>`, `PUBLIC_BASE_URL=<hôte public>` | `GET /api/v1/search` et `/reunion/<id>?t=`. Retour : remettre `20260922-epure9` (les variables restent sans effet) |
+| 2026-10-05 | Ingress `mesreunions-search` | créé : chemin exact `/api/v1/search`, même hôte et même certificat que `mydevices-ingress`, `enable-access-log: "false"` | `q` passe dans l'URL et ne doit pas être journalisé. Retour : `kubectl delete ingress mesreunions-search` |
 
 ---
 
