@@ -122,6 +122,12 @@ Ouvre la fiche et se place au moment indiqué. Derrière la connexion : la
 destination survit au passage par le SSO dès que `require_auth` transmet
 `next=` (mécanisme du lien externe `/preparer`, livré séparément).
 
+## 6. Périmètre : les 30 derniers jours
+
+La purge quotidienne de l'ingester (`run_internal_purge_once`) supprime les lignes `user_audio_files` plus anciennes que `INTERNAL_PURGE_MAX_AGE_DAYS`, transcription comprise, qu'elles soient à la corbeille ou non. En prod-bêta, ce délai est de 30 jours. La recherche ne couvre donc que les réunions des 30 derniers jours. Une réunion plus ancienne introuvable est normale, ce n'est pas une panne. Mon portail l'indique sous le groupe « Réunions ».
+
+La visibilité fermée par défaut reste nécessaire : entre une suppression définitive et la purge, la ligne interne subsiste.
+
 ## Vérification locale
 
 Jeu d'essai : `deploy/docker/seed/recherche-internal.sql` et
