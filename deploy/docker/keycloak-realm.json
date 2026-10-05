@@ -63,6 +63,44 @@
       "optionalClientScopes": [
         "offline_access"
       ]
+    },
+    {
+      "clientId": "mysearch",
+      "name": "Mon portail (MySearch) — dev local",
+      "description": "Dev local : Mon portail -> GET /api/v1/search. Audience mes-reunions posée par un mappeur du client (en prod : portée optionnelle mes-reunions-recherche). Mot de passe direct ouvert pour obtenir un jeton en ligne de commande.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/*",
+        "http://localhost:3043/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8080",
+        "http://localhost:3043"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*##http://localhost:3043/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-mes-reunions",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "mes-reunions",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
