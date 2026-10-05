@@ -14,6 +14,7 @@ métier sont sous ``app/modules/<name>/`` :
 - ``app.modules.meetings``     — /api/meetings/* (CR + reprocess)
 - ``app.modules.drive_sync``   — versement Drive best-effort (helper module)
 - ``app.modules.glossary``     — extraction de glossaire (helper module)
+- ``app.modules.search``       — /api/v1/search (contrat de recherche MirAI, Bearer)
 
 L'init OIDC ``oauth.register(...)`` reste ici (exigence module-level de
 flask-oauthlib). Les configs S3/RabbitMQ/OIDC sont publiées dans le mini
@@ -165,6 +166,33 @@ def meeting_prep_new_page():
     return redirect("/?tab=brief&action=new", code=302)
 
 
+@app.route("/reunion/<uaf_id>")
+@require_auth
+def reunion_page(uaf_id):
+    """Lien public vers la fiche d'une réunion (renvoyé par ``/api/v1/search``).
+
+    Ouvre la fiche dans l'onglet des réunions et, avec ``?t=<secondes>``, se
+    place à ce moment de la transcription. Derrière la connexion habituelle
+    (``require_auth``) : le lien survit à la connexion dès que ``require_auth``
+    transmet ``next=`` (mécanisme du lien externe ``/preparer``). Les droits
+    sont ceux de la fiche : un identifiant qui n'est pas à l'utilisateur ne
+    s'ouvre pas.
+    """
+    from urllib.parse import urlencode
+    from uuid import UUID
+    from flask import request as _request
+
+    try:
+        file_id = str(UUID(uaf_id))
+    except ValueError:
+        return redirect("/?tab=transfers", code=302)
+    out = {"tab": "transfers", "file": file_id}
+    raw_t = (_request.args.get("t") or "").strip()
+    if raw_t.isdigit() and len(raw_t) <= 6:
+        out["t"] = raw_t
+    return redirect("/?" + urlencode(out), code=302)
+
+
 # Import lazy : helpers meeting_prep (utilisés par les blueprints).
 from app import meeting_prep as _meeting_prep  # noqa: E402,F401
 
@@ -216,6 +244,7 @@ def _register_modular_blueprints(flask_app):
     from app.modules.mcr_import import mcr_import_bp
     from app.modules.youtube_import import youtube_import_bp
     from app.modules.rag import rag_bp
+    from app.modules.search import search_bp
 
     registered = {b.name for b in flask_app.blueprints.values()}
     for name, bp in (
@@ -228,6 +257,7 @@ def _register_modular_blueprints(flask_app):
         ("mcr_import", mcr_import_bp),
         ("youtube_import", youtube_import_bp),
         ("rag", rag_bp),
+        ("search", search_bp),
     ):
         if name not in registered:
             flask_app.register_blueprint(bp)

@@ -67,6 +67,17 @@ class OidcAuthError(Exception):
         self.status = status
 
 
+class OidcAudienceError(OidcAuthError):
+    """Token valide mais destiné à un autre service (``aud``/``azp``).
+
+    Distinct d'un token invalide : un appelant d'API peut répondre 403
+    (jeton authentique, mauvais destinataire) plutôt que 401.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, status=403)
+
+
 class AuthStartupError(RuntimeError):
     """Configuration d'authentification non sûre détectée au démarrage."""
 
@@ -157,7 +168,7 @@ def verify_oidc_token(
         token_aud = [token_aud]
     token_aud = token_aud or []
     if audience not in token_aud and audience != claims.get("azp"):
-        raise OidcAuthError("Audience du JWT non reconnue (aud/azp)")
+        raise OidcAudienceError("Audience du JWT non reconnue (aud/azp)")
 
     # Validation de l'issuer : accepte une valeur unique ou un ensemble
     # (utile quand Keycloak frappe ``iss`` différemment selon l'horizon

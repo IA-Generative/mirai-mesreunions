@@ -104,6 +104,10 @@ window._devicesByQrToken = _devicesByQrToken;
 // État vue transferts : null = liste compacte, fileId = vue détail pour
 // ce fichier. Switch via showFileDetail / showFilesList.
 let _detailFileId = null;
+// Lien entrant /reunion/<id>?t=<secondes> (résultat de recherche Mon
+// portail) : moment à atteindre une fois la transcription de la fiche montée.
+// Consommé une seule fois par mountTranscriptCorrector.
+let _pendingDeepLinkSeek = null;
 function showFileDetail(fileId) {
     _detailFileId = fileId;
     activateTab('transfers');
@@ -2385,6 +2389,24 @@ async function mountTranscriptCorrector(container) {
             _ytPendingSeek = { t, opts };
         }
     };
+
+    // Lien entrant avec ?t= : on ouvre la transcription, on se place au
+    // moment demandé (sans lancer la lecture) et on montre le bloc.
+    if (_pendingDeepLinkSeek && _detailFileId === _pendingDeepLinkSeek.fileId) {
+        const t = _pendingDeepLinkSeek.t;
+        _pendingDeepLinkSeek = null;
+        const det = container.querySelector('details.transcript-corrector');
+        if (det) det.open = true;
+        const _bounds = (el) => [parseFloat(el.getAttribute('data-tc-start')), parseFloat(el.getAttribute('data-tc-end'))];
+        const target = blocksEls.find((el) => { const [s, e] = _bounds(el); return t >= s && t <= e; })
+            || blocksEls.find((el) => _bounds(el)[0] >= t);
+        _doSeek(t, { play: false });
+        if (target) {
+            requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
+            target.style.outline = '2px solid #000091';
+            setTimeout(() => { target.style.outline = ''; }, 4000);
+        }
+    }
 
     // Alt+click (Option+click sur Mac) sur un mot précis → seek + play
     // avec petit contexte. On utilise Alt plutôt que dblclick parce que
@@ -5497,6 +5519,24 @@ function pickDefaultTab(hasActiveDevice) {
         target = hasActiveDevice ? 'transfers' : 'generate';
     }
     activateTab(target);
+    // Lien entrant /reunion/<id> (cf. main.reunion_page) : ?file=<uaf_id>
+    // ouvre la fiche, ?t=<secondes> s'y place. Les paramètres sont retirés
+    // de l'adresse pour qu'un rechargement ne rejoue pas le saut.
+    if (target === 'transfers') {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            const fileId = params.get('file');
+            if (fileId && /^[0-9a-f-]{36}$/i.test(fileId)) {
+                const t = parseInt(params.get('t') || '', 10);
+                _pendingDeepLinkSeek = Number.isFinite(t) && t >= 0 ? { fileId, t } : null;
+                params.delete('file');
+                params.delete('t');
+                const qs = params.toString();
+                history.replaceState(null, '', window.location.pathname + (qs ? '?' + qs : ''));
+                showFileDetail(fileId);
+            }
+        } catch (e) {}
+    }
     if (target === 'brief') {
         // Migré vers tabs/preparations.js — `window.loadBriefs` publié au boot du module.
         try { if (typeof window.loadBriefs === 'function') window.loadBriefs(); } catch (e) {}

@@ -2199,6 +2199,51 @@ def audio_rag_export():
         db.close()
 
 
+@app.route("/api/v1/audio/search", methods=["POST"])
+def audio_search():
+    """Recherche plein texte dans les réunions d'un user (contrat de recherche
+    MirAI, consommé par ``GET /api/v1/search`` de mesreunions-web).
+
+    Corps : ``{user_sub, q, limit, from, to, uploads: [{simple_code, filename}]}``
+    — ``uploads`` = uploads VIVANTS de l'utilisateur en zone externe (fermé
+    par défaut : un upload absent de la liste n'est pas renvoyé ; un import
+    n'est renvoyé que si une réunion vivante lui est liée). Filtre
+    ``user_sub`` obligatoire, visibilité appliquée en SQL avant la limite.
+    Aucun appel LLM. Auth = INTERNAL_API_TOKEN. Lecture seule.
+
+    Ni ``q`` ni les contenus ne sont journalisés : en cas d'erreur SQL, seul
+    le type d'exception l'est (le message SQLAlchemy recopie les paramètres).
+    """
+    from app import meeting_search
+    if not verify_token():
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        params = meeting_search.validate_payload(request.get_json(silent=True))
+    except meeting_search.SearchValidationError as exc:
+        return jsonify({"error": "invalid_query", "message": str(exc)}), 400
+    if SessionLocal is None:
+        return jsonify({"error": "search_unavailable"}), 503
+    t0 = time.monotonic()
+    db = SessionLocal()
+    try:
+        out = meeting_search.run_search(
+            db, params, reparse_blocks=_reparse_speaker_tagged_blocks)
+    except Exception as exc:
+        logger.error("audio_search failed user=%s error=%s",
+                     params["user_sub"][:12], type(exc).__name__)
+        return jsonify({"error": "search_unavailable"}), 503
+    finally:
+        try:
+            db.rollback()
+        finally:
+            db.close()
+    logger.info("audio_search user=%s q_len=%d limit=%d live_uploads=%d total=%d ms=%d",
+                params["user_sub"][:12], len(params["q"]), params["limit"],
+                len(params["up_codes"]), out["total"],
+                round((time.monotonic() - t0) * 1000))
+    return jsonify(out)
+
+
 @app.route("/api/v1/audio/lookup", methods=["POST"])
 def audio_lookup():
     """Return all transcription/diarization outputs for a user audio file.
