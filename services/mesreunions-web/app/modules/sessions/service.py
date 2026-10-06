@@ -283,6 +283,27 @@ def lookup_audio_outputs(db, file_obj: UploadedFile):
         return None
 
 
+def lookup_audio_outputs_by_uaf_id(user_sub: str, uaf_id: str):
+    """Sorties de transcription d'un audio désigné par ``user_audio_files.id``.
+
+    Piège : la fiche et les routes ``/api/file/...`` parlent en ``file_id``
+    (``uploaded_files.id``, zone externe), alors qu'une ``Meeting`` pointe
+    ``user_audio_file_id`` (zone interne). Ce chemin est le bon quand on part
+    d'une réunion ; ``lookup_audio_outputs`` quand on part d'un upload.
+    Renvoie None si l'audio n'existe pas pour cette personne.
+    """
+    if not uaf_id:
+        return None
+    try:
+        return _request_internal_ingester_api(
+            "/api/v1/audio/lookup",
+            json_body={"user_sub": user_sub, "uaf_id": str(uaf_id)},
+        )
+    except req.RequestException:
+        logger.exception("internal-ingester lookup failed for uaf_id=%s", uaf_id)
+        return None
+
+
 # ── Loudnorm ────────────────────────────────────────────────────────────
 
 

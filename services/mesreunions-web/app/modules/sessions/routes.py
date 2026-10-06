@@ -1105,6 +1105,10 @@ def api_file_transcript_status(file_id):
             # l'utilisateur dans l'éditeur de transcription. Réversible
             # jusqu'au clic "Supprimer les blocs barrés".
             "hidden_block_indices": audio.get("hidden_block_indices") or [],
+            # La réunion (``meetings.id``) de cet audio, résolue par l'ingester.
+            # L'onglet « Agents » de la fiche en a besoin : une exécution se
+            # mémorise sur la réunion, pas sur le fichier.
+            "meeting_id": audio.get("meeting_id"),
         }
         if not summary_only:
             # Texte speaker-tagged (avec timecodes par bloc) exposé pour
