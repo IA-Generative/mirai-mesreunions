@@ -15,6 +15,8 @@ métier sont sous ``app/modules/<name>/`` :
 - ``app.modules.drive_sync``   — versement Drive best-effort (helper module)
 - ``app.modules.glossary``     — extraction de glossaire (helper module)
 - ``app.modules.search``       — /api/v1/search (contrat de recherche MirAI, Bearer)
+- ``app.modules.agents``       — /api/agents, /api/meetings/<id>/agents/<id>/run
+                                 (contrat d'agents MirAI, jeton de la personne relayé)
 
 L'init OIDC ``oauth.register(...)`` reste ici (exigence module-level de
 flask-oauthlib). Les configs S3/RabbitMQ/OIDC sont publiées dans le mini
@@ -31,6 +33,7 @@ from authlib.integrations.flask_client import OAuth
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 from libs.shared.app.config import (
     ALLOWED_AUDIO_EXTENSIONS, DEVICE_TOKEN_RETENTION_HOURS,
+    MESAGENTS_BASE_URL, MESAGENTS_OIDC_SCOPE,
     OIDCConfig, OIDC_OFFLINE_ACCESS, RabbitMQConfig, SECRET_KEY,
     UPLOAD_MAX_FILE_SIZE_MB, load_ext_db, load_s3_internal, load_s3_processed,
     load_s3_upload,
@@ -111,6 +114,11 @@ NORMALIZATION_ANALYSIS_MAX_SECONDS = max(30, int(os.getenv("NORMALIZATION_ANALYS
 
 _OIDC_SCOPE_BASE = "openid email profile"
 _OIDC_SCOPE = f"{_OIDC_SCOPE_BASE} offline_access" if OIDC_OFFLINE_ACCESS else _OIDC_SCOPE_BASE
+# Contrat d'agents MirAI : la portée optionnelle ajoute l'audience « mesagents »
+# au jeton d'accès relayé à Mes agents. Demandée seulement quand la fonction
+# est active, pour ne rien changer au login des instances sans Mes agents.
+if MESAGENTS_BASE_URL and MESAGENTS_OIDC_SCOPE:
+    _OIDC_SCOPE = f"{_OIDC_SCOPE} {MESAGENTS_OIDC_SCOPE}"
 oidc_internal_issuer = os.getenv("OIDC_INTERNAL_ISSUER", oidc_cfg.issuer).rstrip("/")
 
 oauth = OAuth(app)
@@ -126,6 +134,10 @@ if OIDC_OFFLINE_ACCESS:
     logger.info("OIDC offline_access scope ENABLED — refresh tokens will be persisted")
 else:
     logger.info("OIDC offline_access scope DISABLED — set OIDC_OFFLINE_ACCESS=true to enable MCR push prerequisite")
+if MESAGENTS_BASE_URL:
+    logger.info("Mes agents ENABLED — portée OIDC « %s » demandée à la connexion", MESAGENTS_OIDC_SCOPE)
+else:
+    logger.info("Mes agents DISABLED — MESAGENTS_BASE_URL vide, pas d'onglet « Agents »")
 
 
 # ─── Pages racine + meeting-prep ────────────────────────────────────────
@@ -289,6 +301,7 @@ def _register_modular_blueprints(flask_app):
     from app.modules.youtube_import import youtube_import_bp
     from app.modules.rag import rag_bp
     from app.modules.search import search_bp
+    from app.modules.agents import agents_bp
 
     registered = {b.name for b in flask_app.blueprints.values()}
     for name, bp in (
@@ -302,6 +315,7 @@ def _register_modular_blueprints(flask_app):
         ("youtube_import", youtube_import_bp),
         ("rag", rag_bp),
         ("search", search_bp),
+        ("agents", agents_bp),
     ):
         if name not in registered:
             flask_app.register_blueprint(bp)
