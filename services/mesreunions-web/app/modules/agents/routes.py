@@ -72,8 +72,11 @@ DEFAULT_INSTRUCTIONS = {
     "reformulated": "Travaille sur la transcription de réunion suivante.",
 }
 
-# Bornes du contrat et de la mémorisation.
-MAX_MESSAGE_CHARS = 20_000       # contrat : 20 000 caractères par message
+# Bornes du contrat et de la mémorisation. Mes agents accepte 120 000
+# caractères par message (422 au-delà) ; le contrat demande au consommateur
+# de tronquer au-delà de 100 000 en le disant à la personne — un contenu qui
+# dépasse la fenêtre du modèle donne 502 llm_unavailable.
+MAX_MESSAGE_CHARS = 100_000
 MAX_INSTRUCTION_CHARS = 2_000
 MAX_AGENT_ID_CHARS = 200
 MAX_STORED_OUTPUT_CHARS = 20_000

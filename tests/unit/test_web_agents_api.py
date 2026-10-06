@@ -6,7 +6,7 @@ Mes agents (``requests.request`` du module), Keycloak (le rafraîchissement
 silencieux), device-token-authority (la réunion et ``/amend``) et
 internal-ingester (le texte de la réunion), pour vérifier : la fonction
 désactivée, le relais du jeton, le nouvel essai après 401, l'encadrement
-``<<< >>>`` et sa neutralisation, la borne de 20 000 caractères, la
+``<<< >>>`` et sa neutralisation, la borne de 100 000 caractères, la
 mémorisation dans ``content.agents``, les erreurs du contrat et le refus
 d'une réunion d'un autre compte.
 """
@@ -442,15 +442,26 @@ def test_run_memorisation_bornee_a_dix_et_sortie_tronquee(web):
     assert [r["id"] for r in runs[1:]] == [f"vieux-{i}" for i in range(9)]
 
 
-def test_run_borne_le_message_a_20000_caracteres(web):
-    web.audio["cleaned_text"] = "mot " * 10_000      # 40 000 caractères
+def test_run_borne_le_message_a_100000_caracteres(web):
+    """Le contrat : tronquer au-delà de 100 000 caractères en le disant à la
+    personne (Mes agents en accepte 120 000, puis 422)."""
+    web.audio["cleaned_text"] = "mot " * 30_000      # 120 000 caractères
     r = _run(web, {"kind": "cleaned"})
     assert r.status_code == 200
     assert r.get_json()["input_truncated"] is True
     content = web.fake.runs()[0]["json"]["messages"][0]["content"]
-    assert len(content) <= 20_000
+    assert 99_000 < len(content) <= 100_000
     assert content.endswith("texte tronqué : la réunion dépasse la taille acceptée par l'agent …]\n>>>")
     assert content.startswith("Travaille sur la transcription de réunion suivante.\n\n<<<\n")
+
+
+def test_run_sous_la_borne_n_est_pas_tronque(web):
+    web.audio["cleaned_text"] = "mot " * 20_000      # 80 000 caractères : entier
+    r = _run(web, {"kind": "cleaned"})
+    assert r.status_code == 200
+    assert r.get_json()["input_truncated"] is False
+    content = web.fake.runs()[0]["json"]["messages"][0]["content"]
+    assert "tronqué" not in content and content.count("mot") == 20_000
 
 
 def test_run_ne_bloque_pas_si_la_memorisation_echoue(web, monkeypatch):

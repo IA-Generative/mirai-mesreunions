@@ -567,8 +567,9 @@ mesreunions-web relaie le **jeton d'accès de la personne** (dépôt
 `web_session_tokens`, rafraîchi silencieusement sur 401, comme l'import
 YouTube) ; le navigateur ne parle jamais à Mes agents. Le texte envoyé est
 encadré par `<<<` / `>>>` (les marqueurs présents dans le texte sont aérés),
-borné à 20 000 caractères par le contrat (la coupe est annoncée à l'agent et à
-la personne), et jamais journalisé. Routes : `GET /api/agents?input=meeting`,
+tronqué au-delà de 100 000 caractères comme le demande le contrat (Mes agents
+en accepte 120 000 ; la coupe est annoncée à l'agent et à la personne), et
+jamais journalisé. Routes : `GET /api/agents?input=meeting`,
 `POST /api/meetings/<id>/agents/<agent_id>/run`
 (`modules/agents/routes.py`).
 
