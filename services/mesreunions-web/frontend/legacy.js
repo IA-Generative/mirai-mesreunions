@@ -4876,14 +4876,17 @@ function _ficheHtml(fileId, data, statusBadge, audioOptions) {
             <button type="button" role="tab" data-fiche-onglet="cr">Compte-rendu</button>
             <button type="button" role="tab" data-fiche-onglet="absents">Pour les absents</button>
             <button type="button" role="tab" data-fiche-onglet="tr">Transcription</button>
+            <button type="button" role="tab" data-fiche-onglet="agents" hidden>Agents</button>
         </div>
         <div class="fiche-panneau" data-fiche-panneau="cr" role="tabpanel">${panneauCr}</div>
-        <div class="fiche-panneau" data-fiche-panneau="absents" role="tabpanel" data-dispo="${aAbsents ? '1' : '0'}" hidden>${panneauAbsents}</div>`;
+        <div class="fiche-panneau" data-fiche-panneau="absents" role="tabpanel" data-dispo="${aAbsents ? '1' : '0'}" hidden>${panneauAbsents}</div>
+        <div class="fiche-panneau" data-fiche-panneau="agents" role="tabpanel" hidden></div>`;
 }
 
 function _ficheAppliquerOnglet(fileId, container, cle) {
     const racine = container.closest('.file-detail') || container.parentNode;
-    const dispo = Array.from(container.querySelectorAll('[data-fiche-onglet]')).map((b) => b.getAttribute('data-fiche-onglet'));
+    const dispo = Array.from(container.querySelectorAll('[data-fiche-onglet]'))
+        .filter((b) => !b.hidden).map((b) => b.getAttribute('data-fiche-onglet'));
     if (!dispo.includes(cle)) cle = 'cr';
     _ficheOnglet.set(fileId, cle);
     container.querySelectorAll('[data-fiche-onglet]').forEach((b) => {
@@ -4895,6 +4898,7 @@ function _ficheAppliquerOnglet(fileId, container, cle) {
         p.hidden = p.getAttribute('data-fiche-panneau') !== cle;
     });
     if (racine) racine.setAttribute('data-onglet', cle);
+    if (cle === 'agents') _ficheAgentsRendre(fileId, container);
     if (cle === 'absents') {
         const p = container.querySelector('[data-fiche-panneau="absents"]');
         if (p && !p.dataset.charge && p.dataset.dispo === '1') {
@@ -4909,6 +4913,9 @@ function _ficheAppliquerOnglet(fileId, container, cle) {
 }
 
 function _ficheMonter(fileId, container, data) {
+    // D'abord : l'onglet « Agents » se montre tout de suite si la liste est
+    // déjà connue (la fiche est re-rendue par le polling).
+    _ficheAgentsPreparer(fileId, container, data);
     _ficheAppliquerOnglet(fileId, container, _ficheOnglet.get(fileId) || 'cr');
     container.querySelectorAll('[data-fiche-onglet]').forEach((b) => {
         b.addEventListener('click', () => _ficheAppliquerOnglet(fileId, container, b.getAttribute('data-fiche-onglet')));
@@ -4921,6 +4928,262 @@ function _ficheMonter(fileId, container, data) {
             _ficheAppliquerOnglet(fileId, container, cible.getAttribute('data-fiche-onglet'));
         });
     });
+}
+
+// ═══ Onglet « Agents » (contrat d'agents MirAI, 2026-10-06) ═══════════════
+// Les agents de la personne (Mes agents) lancés sur le compte-rendu ou la
+// transcription de la réunion. Le serveur relaie le jeton de la personne ; le
+// navigateur ne parle jamais à Mes agents. Tout ce qui vient d'une fiche
+// d'agent ou d'un agent est une DONNÉE : rendu par textContent, ou par
+// _ficheMarkdown (texte échappé avant le Markdown minimal). L'onglet n'apparaît
+// que si la liste répond ; désactivé, injoignable ou refusé, il reste caché et
+// la fiche vit sans lui. La dernière exécution par agent est mémorisée sur la
+// réunion (content.agents) et réaffichée à l'ouverture.
+
+const _AGENTS_KINDS = [
+    { kind: 'meeting_analysis', flag: 'meeting-cr',              label: 'Compte-rendu' },
+    { kind: 'cleaned',          flag: 'transcript-cleaned',      label: 'Transcription nettoyée' },
+    { kind: 'reformulated',     flag: 'transcript-reformulated', label: 'Transcription reformulée' },
+];
+const _AGENTS_MESSAGES = {
+    agent_not_found: "Cet agent n'est plus accessible.",
+    text_unavailable: "Ce texte n'existe pas encore pour cette réunion.",
+    meeting_not_found: 'Réunion introuvable.',
+    rate_limited: 'Trop de demandes : réessayez dans un instant.',
+    mesagents_unavailable: "L'agent ne répond pas. Réessayez plus tard.",
+    mesagents_forbidden: "Mes agents refuse l'accès pour le moment.",
+    session_expired: 'Votre session a expiré : reconnectez-vous.',
+    disabled: 'Les agents ne sont pas activés ici.',
+};
+const _AGENTS_LISTE_TTL_MS = 3 * 60 * 1000;   // le contrat : garder la liste quelques minutes, pas plus
+let _agentsListeCache = null;                 // { promesse, date }
+
+function _agentsListe() {
+    const now = Date.now();
+    if (_agentsListeCache && now - _agentsListeCache.date < _AGENTS_LISTE_TTL_MS) return _agentsListeCache.promesse;
+    const promesse = fetch('/api/agents?input=meeting', { headers: { Accept: 'application/json' } })
+        .then(async (r) => {
+            let j = null;
+            try { j = await r.json(); } catch (e) { j = null; }
+            if (r.ok && j && Array.isArray(j.agents)) return { ok: true, agents: j.agents };
+            return { ok: false, code: (j && j.error && j.error.code) || `http_${r.status}` };
+        })
+        .catch(() => ({ ok: false, code: 'network' }));
+    _agentsListeCache = { promesse, date: now };
+    promesse.then((res) => { if (!res.ok) _agentsListeCache = null; });   // une erreur ne reste pas en cache
+    return promesse;
+}
+
+const _ficheAgents = new Map();   // fileId → état de l'onglet (survit aux re-rendus de la fiche)
+function _ficheAgentsEtat(fileId) {
+    let e = _ficheAgents.get(fileId);
+    if (!e) {
+        e = { data: null, agents: null, runs: new Map(), runsCharges: false,
+              enCours: new Set(), erreurs: new Map(), kind: null, consigne: '' };
+        _ficheAgents.set(fileId, e);
+    }
+    return e;
+}
+
+function _agEl(tag, attrs, text) {
+    const n = document.createElement(tag);
+    if (attrs) Object.entries(attrs).forEach(([k, v]) => { if (v != null && v !== false) n.setAttribute(k, v === true ? '' : v); });
+    if (text != null) n.textContent = text;
+    return n;
+}
+
+function _ficheAgentsPreparer(fileId, container, data) {
+    const e = _ficheAgentsEtat(fileId);
+    e.data = data;
+    if (!data || !data.meeting_id) return;   // pas de réunion rattachée : rien à lancer
+    const montrer = () => {
+        const b = container.querySelector('[data-fiche-onglet="agents"]');
+        if (b) b.hidden = false;
+    };
+    if (e.agents) montrer();
+    _agentsListe().then((res) => {
+        if (!res.ok || !container.isConnected) return;   // disabled / unavailable / forbidden : onglet caché
+        e.agents = res.agents;
+        montrer();
+        if (_ficheOnglet.get(fileId) === 'agents') _ficheAgentsRendre(fileId, container);
+    });
+}
+
+function _ficheAgentsRendre(fileId, container) {
+    const e = _ficheAgentsEtat(fileId);
+    const p = container.querySelector('[data-fiche-panneau="agents"]');
+    if (!p) return;
+    if (!e.agents) { p.replaceChildren(_agEl('p', { class: 'fiche-vide' }, 'Chargement des agents…')); return; }
+    if (!e.runsCharges) { e.runsCharges = true; _ficheAgentsChargerRuns(fileId, container); }
+    p.replaceChildren(_ficheAgentsPanneau(fileId, container, e));
+}
+
+// Les exécutions mémorisées sur la réunion (content.agents), une fois par fiche.
+function _ficheAgentsChargerRuns(fileId, container) {
+    const e = _ficheAgentsEtat(fileId);
+    const mid = e.data && e.data.meeting_id;
+    if (!mid) return;
+    fetch(`/api/meetings/${encodeURIComponent(mid)}`, { headers: { Accept: 'application/json' } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => {
+            const c = j && j.meeting && j.meeting.content;
+            const runs = c && Array.isArray(c.agents) ? c.agents : [];
+            let nouveaux = 0;
+            runs.forEach((run) => {
+                if (run && run.id && typeof run.output === 'string' && !e.runs.has(run.id)) { e.runs.set(run.id, run); nouveaux++; }
+            });
+            if (nouveaux && _ficheOnglet.get(fileId) === 'agents') _ficheAgentsRendre(fileId, container);
+        })
+        .catch(() => {});
+}
+
+function _ficheAgentsPanneau(fileId, container, e) {
+    const frag = document.createDocumentFragment();
+    const o = (e.data && e.data.outputs) || {};
+    const sources = _AGENTS_KINDS.filter((k) => o[k.flag]);
+    if (!e.kind || !sources.some((s) => s.kind === e.kind)) e.kind = sources.length ? sources[0].kind : null;
+
+    const outils = _agEl('div', { class: 'agents-outils' });
+    const idSrc = `agents-src-${fileId}`;
+    const idCons = `agents-consigne-${fileId}`;
+    if (sources.length) {
+        const champ = _agEl('div');
+        champ.appendChild(_agEl('label', { for: idSrc }, "Texte envoyé à l'agent"));
+        const sel = _agEl('select', { id: idSrc });
+        sources.forEach((s) => {
+            const opt = _agEl('option', { value: s.kind }, s.label);
+            if (s.kind === e.kind) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        sel.addEventListener('change', () => { e.kind = sel.value; });
+        champ.appendChild(sel);
+        outils.appendChild(champ);
+    } else {
+        outils.appendChild(_agEl('p', { class: 'fiche-vide' },
+            "Aucun texte à envoyer pour l'instant : le compte-rendu ou la transcription apparaîtra ici dès la fin du traitement."));
+    }
+    const champC = _agEl('div');
+    champC.appendChild(_agEl('label', { for: idCons }, 'Consigne (facultative)'));
+    const ta = _agEl('textarea', { id: idCons, rows: '2', maxlength: '2000',
+                                   placeholder: 'Ex. : résume en cinq points pour la direction' });
+    ta.value = e.consigne || '';
+    ta.addEventListener('input', () => { e.consigne = ta.value; });
+    champC.appendChild(ta);
+    outils.appendChild(champC);
+    frag.appendChild(outils);
+
+    if (!e.agents.length) {
+        frag.appendChild(_agEl('p', { class: 'fiche-vide' },
+            'Aucun agent ne sait travailler sur une réunion pour le moment. Créez-en un dans Mes agents.'));
+        return frag;
+    }
+    const ul = _agEl('ul', { class: 'agents-liste' });
+    e.agents.forEach((a) => { if (a && a.id) ul.appendChild(_ficheAgentsCarte(fileId, container, e, a, sources.length > 0)); });
+    frag.appendChild(ul);
+    return frag;
+}
+
+function _agentsDate(iso) {
+    try {
+        const d = new Date(iso);
+        if (!isNaN(d)) return d.toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
+    } catch (e) { /* rien */ }
+    return '';
+}
+
+function _ficheAgentsCarte(fileId, container, e, a, peutLancer) {
+    const id = String(a.id);
+    const li = _agEl('li', { class: 'agent-carte', 'data-agent-id': id });
+    const entete = _agEl('div', { class: 'agent-entete' });
+    entete.appendChild(_agEl('span', { class: 'agent-nom' }, String(a.name || id)));
+    const mine = a.origin === 'mine';
+    entete.appendChild(_agEl('span', { class: `agent-origine${mine ? ' agent-origine--mine' : ''}` },
+        mine ? 'Le vôtre' : 'Partagé par des collègues'));
+    li.appendChild(entete);
+    if (a.description) li.appendChild(_agEl('p', { class: 'agent-desc' }, String(a.description)));
+
+    const actions = _agEl('div', { class: 'agent-actions' });
+    const enCours = e.enCours.has(id);
+    const btn = _agEl('button', { type: 'button', class: 'fr-btn fr-btn--sm fr-btn--secondary', 'data-agent-lancer': id },
+        enCours ? 'En cours…' : 'Lancer');
+    btn.disabled = enCours || !peutLancer;
+    btn.addEventListener('click', () => _ficheAgentsLancer(fileId, container, id));
+    actions.appendChild(btn);
+    if (enCours) actions.appendChild(_agEl('span', { class: 'agent-attente', role: 'status' },
+        "L'agent travaille sur la réunion, jusqu'à deux minutes…"));
+    li.appendChild(actions);
+
+    const err = e.erreurs.get(id);
+    if (err) li.appendChild(_agEl('p', { class: 'agent-erreur', role: 'alert' }, err));
+
+    const run = e.runs.get(id);
+    if (run && run.output) {
+        const res = _agEl('div', { class: 'agent-resultat' });
+        const meta = _agEl('div', { class: 'agent-resultat-meta' });
+        const src = _AGENTS_KINDS.find((k) => k.kind === run.kind);
+        const quand = _agentsDate(run.ran_at);
+        meta.appendChild(_agEl('span', null,
+            `${quand ? `Résultat du ${quand}` : 'Résultat'}${src ? ` · ${src.label.toLowerCase()}` : ''}${run.input_truncated ? ' · texte tronqué' : ''}`));
+        const copier = _agEl('button', { type: 'button', class: 'fr-btn fr-btn--sm fr-btn--tertiary-no-outline' }, 'Copier');
+        copier.addEventListener('click', () => _ficheAgentsCopier(String(run.output), copier));
+        meta.appendChild(copier);
+        res.appendChild(meta);
+        const corps = _agEl('div', { class: 'fiche-cr' });
+        corps.innerHTML = _ficheMarkdown(String(run.output));   // échappé d'abord, Markdown minimal ensuite
+        res.appendChild(corps);
+        li.appendChild(res);
+    }
+    return li;
+}
+
+async function _ficheAgentsLancer(fileId, container, agentId) {
+    const e = _ficheAgentsEtat(fileId);
+    const mid = e.data && e.data.meeting_id;
+    if (!mid || !e.kind || e.enCours.has(agentId)) return;
+    e.enCours.add(agentId);
+    e.erreurs.delete(agentId);
+    _ficheAgentsRendre(fileId, container);
+    try {
+        const consigne = (e.consigne || '').trim();
+        const r = await fetch(`/api/meetings/${encodeURIComponent(mid)}/agents/${encodeURIComponent(agentId)}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(consigne ? { kind: e.kind, instruction: consigne } : { kind: e.kind }),
+        });
+        let j = null;
+        try { j = await r.json(); } catch (err) { j = null; }
+        if (r.ok && j && typeof j.output === 'string') {
+            e.runs.set(agentId, { id: agentId, name: j.agent && j.agent.name, kind: j.kind, output: j.output,
+                                  ran_at: j.ran_at, input_truncated: !!j.input_truncated });
+            if (j.saved === false && window.showToast) window.showToast('Résultat affiché, mais non mémorisé sur la réunion.', 'info');
+        } else {
+            const code = (j && j.error && j.error.code) || '';
+            const msg = (j && j.error && j.error.message) || '';
+            // 422 : le message de Mes agents est à afficher tel quel (garde anti-injection).
+            e.erreurs.set(agentId, (r.status === 422 && msg) ? msg : (_AGENTS_MESSAGES[code] || 'Le lancement a échoué. Réessayez plus tard.'));
+        }
+    } catch (err) {
+        e.erreurs.set(agentId, 'Le lancement a échoué (réseau). Réessayez plus tard.');
+    } finally {
+        e.enCours.delete(agentId);
+        _ficheAgentsRendre(fileId, container);
+    }
+}
+
+async function _ficheAgentsCopier(texte, bouton) {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(texte);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = texte; ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+        }
+        if (bouton) { bouton.textContent = 'Copié'; setTimeout(() => { bouton.textContent = 'Copier'; }, 1500); }
+    } catch (err) {
+        if (window.showToast) window.showToast('Impossible de copier le résultat.', 'error');
+    }
 }
 
 // Menus de la fiche (« ⋯ », Télécharger ▾) et le lien « modifier » de la date.
