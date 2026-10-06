@@ -554,6 +554,52 @@ Enrôlement et gestion des appareils autorisés à uploader :
 | `OIDC_INTERNAL_ISSUER` | `http://keycloak:8080/realms/openwebui` | URL Keycloak interne (serveur-à-serveur) |
 | `OIDC_REDIRECT_URI` | — | URI code-generator (sans `/admin` !). admin-portal override via env inline |
 
+### 10.8 Agents MirAI sur une réunion (Mes agents)
+
+La fiche d'une réunion porte un onglet « Agents » : la liste des agents MirAI
+accessibles à la personne (contrat d'agents MirAI, servi par Mes agents), un
+sélecteur du texte source (compte-rendu, transcription nettoyée ou reformulée),
+une consigne facultative, « Lancer », puis le résultat, copiable. La dernière
+exécution de chaque agent est mémorisée sur la réunion
+(`meetings.content.agents`, 10 entrées au plus) et réaffichée à l'ouverture.
+
+mesreunions-web relaie le **jeton d'accès de la personne** (dépôt
+`web_session_tokens`, rafraîchi silencieusement sur 401, comme l'import
+YouTube) ; le navigateur ne parle jamais à Mes agents. Le texte envoyé est
+encadré par `<<<` / `>>>` (les marqueurs présents dans le texte sont aérés),
+borné à 20 000 caractères par le contrat (la coupe est annoncée à l'agent et à
+la personne), et jamais journalisé. Routes : `GET /api/agents?input=meeting`,
+`POST /api/meetings/<id>/agents/<agent_id>/run`
+(`modules/agents/routes.py`).
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `MESAGENTS_BASE_URL` | vide = désactivé | Racine **interne** de Mes agents (`http://<service>.<namespace>.svc.cluster.local:<port>`), jamais l'hôte public |
+| `MESAGENTS_TIMEOUT_SECONDS` | `120` | Délai d'une exécution (le contrat demande au moins 120 s) |
+| `MESAGENTS_OIDC_SCOPE` | `mesagents-agents` | Portée optionnelle demandée à la connexion quand la fonction est active |
+
+Gestes pour la bêta, dans l'ordre :
+
+1. **Keycloak (realm de la bêta, `mirai`)** : importer la portée optionnelle
+   `mesagents-agents` (`keycloak/mesagents-agents.client-scope.json` du dépôt du
+   contrat : mapper d'audience `mesagents` sur le jeton d'accès + groupes en
+   chemins complets) et l'affecter en **optionnel** au client `mes-reunions`.
+   Ne jamais configurer `audience=mes-reunions` côté Mes agents (confusion
+   d'audience). Si Mes agents filtre `azp`, y ajouter `mes-reunions`.
+2. **Variables** : poser `MESAGENTS_BASE_URL` sur le Deployment `mesreunions-web`
+   (zone externe). Les personnes déjà connectées doivent se reconnecter : leur
+   jeton actuel n'a pas l'audience (sinon `503 mesagents_forbidden`, onglet
+   caché).
+3. **Réseau** : autoriser l'egress de `mesreunions-web` (namespace
+   `audio-external`) vers le Service interne de Mes agents et, côté Mes agents,
+   l'ingress depuis ce pod (NetworkPolicy). Le trafic reste intra-cluster,
+   jamais par l'Ingress public.
+
+Diagnostic : `GET /api/agents?input=meeting` répond `404 disabled` (variable
+vide), `503 mesagents_forbidden` (jeton sans audience `mesagents`, ou groupe
+exigé par la bêta), `502 mesagents_unavailable` (service injoignable ou en
+erreur). Les trois cachent l'onglet sans bloquer la fiche.
+
 ---
 
 ## 11. Référence — pipeline audio
