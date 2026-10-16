@@ -85,6 +85,14 @@ _SYSTEM_PROMPT = (
 )
 
 
+def aplatir_source(s):
+    """Source OpenRAG 2.3 (métadonnées sous `chunk`) → forme à plat de 2.2.1 ; inchangée sinon."""
+    c = s.get("chunk") if isinstance(s, dict) else None
+    if not isinstance(c, dict):
+        return s
+    return {**c, **{k: v for k, v in s.items() if k != "chunk"}}
+
+
 def chat(partition: str, question: str, *, history: list | None = None,
          max_tokens: int = 700) -> dict:
     """Interroge la partition (RAG) via /v1/chat/completions. → {answer, sources}."""
@@ -119,6 +127,8 @@ def chat(partition: str, question: str, *, history: list | None = None,
             sources = parsed.get("sources", []) if isinstance(parsed, dict) else []
         except Exception:
             sources = []
+    if isinstance(sources, list):
+        sources = [aplatir_source(s) for s in sources]
     return {"answer": answer, "sources": sources}
 
 
