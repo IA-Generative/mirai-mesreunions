@@ -12,6 +12,8 @@
 // (« · indisponible ») au lieu de disparaître. Chaque changement d'état est
 // annoncé par l'événement `mesreunions:rag-status` sur document.
 
+import { aplatirSource } from './sources-openrag.js';
+
 let _open = false;
 let _state = 'pending';     // 'pending' (statut en cours de lecture) | 'ready' | 'unavailable'
 let _busy = false;
@@ -114,7 +116,8 @@ function _addMsg(role, html, sources) {
   if (sources && sources.length) {
     const seen = new Set();
     const chips = [];
-    for (const s of sources) {
+    for (const brute of sources) {
+      const s = aplatirSource(brute);
       const meta = (s && s.metadata) || {};
       // L'uaf_id (= user_audio_files.id, UUID à tirets) est l'id passé à
       // showFileDetail. On le cherche dans le metadata enrichi, puis sur la
