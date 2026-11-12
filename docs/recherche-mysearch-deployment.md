@@ -59,6 +59,23 @@ Sans la migration, la route répond `503 search_unavailable`.
 Ne jamais régler `SEARCH_OIDC_AUDIENCE=mysearch` : ce serait une confusion
 d'audience.
 
+### Clients autorisés (`SEARCH_ALLOWED_AZP`) : le relais d'outils du Device Management
+
+Depuis le 2026-11-12, le relais d'outils du Device Management (`/tools/v1`) appelle cette
+route **avec le jeton de la personne**, émis pour le client Keycloak du plugin (le relais
+n'a pas de jeton propre). Ce client doit donc figurer dans `SEARCH_ALLOWED_AZP`, à côté de
+`mysearch`, sur chaque instance de Mes réunions qui porte la recherche : un client de
+plugin par instance (bêta, puis production), dont les identifiants vivent dans le manifeste
+privé de l'overlay, pas ici. L'audience reste `mes-reunions` : la portée Keycloak
+`mes-reunions-recherche`, rattachée au client du plugin, la pose dans `aud`.
+
+**Comment la poser.** Comme tout changement de variable sur `mesreunions-web` en prod-bêta :
+par `kubectl set env` sur le Deployment, puis report dans le manifeste privé de l'overlay
+prod-bêta (`private/…/internal/mesreunions-web.yaml`) et ligne ajoutée au tableau
+« Changements posés hors manifeste » du runbook de déploiement. Pas de `kubectl apply` du
+manifeste pour ce seul changement. Sans la variable, le relais reçoit `403 audience_mismatch`
+pour chaque appel, et rien n'est journalisé côté service.
+
 La limite de débit est comptée **par processus** : limite effective =
 `SEARCH_RATE_LIMIT_PER_MINUTE × workers gunicorn × réplicas` (accepté en V1).
 
