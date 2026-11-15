@@ -13,20 +13,22 @@ import sys
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from urllib.parse import urlencode
-from uuid import uuid4
 
-import qrcode
 import requests as req
 from flask import Blueprint, jsonify, request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
 from libs.shared.app.config import (  # noqa: E402
     CODE_TTL_MAX_MINUTES, CODE_TTL_MINUTES, INTERNAL_API_TOKEN,
-    MAX_UPLOADS_PER_SESSION, TOKEN_ISSUER_API_URL, UPLOAD_PORTAL_BASE_URL,
+    MAX_UPLOADS_PER_SESSION, UPLOAD_PORTAL_BASE_URL,
     UPLOAD_STATUS_VIEW_TTL_MINUTES,
 )
-from libs.shared.app.models import SessionStatus, UploadSession, UploadTokenOption  # noqa: E402
+from libs.shared.app.models import SessionStatus, UploadSession  # noqa: E402
 from libs.shared.app.security import verify_bearer_token, resolve_auto_transcribe  # noqa: E402
+from libs.shared.app.enrollment import (  # noqa: E402
+    enrich_devices, make_qr_png, record_upload_session,
+    request_token_from_internal, upload_url_for,
+)
 
 from app.runtime import (
     allow_short_qr_ttl, get_public_host, session_scope,
@@ -44,15 +46,7 @@ bp = Blueprint("devices", __name__)
 
 
 def make_qr_image(url: str) -> BytesIO:
-    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M,
-                       box_size=8, border=2)
-    qr.add_data(url)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
+    return BytesIO(make_qr_png(url))
 
 
 def _mobile_upload_pwa_base_url() -> str:
@@ -75,27 +69,10 @@ def _mobile_upload_pwa_base_url() -> str:
 
 def _request_token_from_internal(user, ttl_minutes, max_uploads,
                                   ttl_seconds=None, auto_transcribe=True):
-    payload = {
-        "user_sub": user["sub"],
-        "user_email": user.get("email"),
-        "user_display_name": user.get("name"),
-        "ttl_minutes": ttl_minutes,
-        "max_uploads": max_uploads,
-        "auto_transcribe": bool(auto_transcribe),
-    }
-    if ttl_seconds is not None:
-        payload["ttl_seconds"] = ttl_seconds
-    resp = req.post(
-        TOKEN_ISSUER_API_URL,
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {INTERNAL_API_TOKEN}",
-            "Content-Type": "application/json",
-        },
-        timeout=10,
+    return request_token_from_internal(
+        user, ttl_minutes, max_uploads,
+        ttl_seconds=ttl_seconds, auto_transcribe=auto_transcribe,
     )
-    resp.raise_for_status()
-    return resp.json()
 
 
 # ── Routes ──────────────────────────────────────────────────────────────
@@ -145,31 +122,16 @@ def api_generate_code():
     qr_token = token_data["qr_token"]
     expires_at = datetime.fromisoformat(token_data["expires_at"])
 
-    upload_session = UploadSession(
-        id=uuid4(),
-        user_sub=user["sub"],
-        user_email=user.get("email"),
-        user_display_name=user.get("name"),
-        simple_code=simple_code,
-        qr_token=qr_token,
-        max_uploads=max_uploads,
-        ttl_minutes=ttl_minutes,
-        expires_at=expires_at,
-        status_view_expires_at=expires_at + timedelta(minutes=UPLOAD_STATUS_VIEW_TTL_MINUTES),
-    )
-
     db = session_scope()
     try:
-        db.add(upload_session)
-        db.add(UploadTokenOption(
-            id=uuid4(), qr_token=qr_token, simple_code=simple_code,
-            auto_transcribe=auto_transcribe,
-        ))
-        db.commit()
+        upload_session = record_upload_session(
+            db, user, token_data, ttl_minutes=ttl_minutes,
+            max_uploads=max_uploads, auto_transcribe=auto_transcribe,
+        )
     finally:
         db.close()
 
-    upload_url = f"{_mobile_upload_pwa_base_url()}/upload/{qr_token}"
+    upload_url = upload_url_for(_mobile_upload_pwa_base_url(), qr_token)
 
     return jsonify({
         "session_id": str(upload_session.id),
@@ -186,7 +148,7 @@ def api_generate_code():
 @bp.route("/api/qr-image/<qr_token>")
 @require_auth
 def api_qr_image(qr_token):
-    upload_url = f"{_mobile_upload_pwa_base_url()}/upload/{qr_token}"
+    upload_url = upload_url_for(_mobile_upload_pwa_base_url(), qr_token)
     buf = make_qr_image(upload_url)
     return buf.getvalue(), 200, {"Content-Type": "image/png"}
 
@@ -202,61 +164,12 @@ def api_my_devices():
             params={"user_sub": user.get("sub", "")},
         )
         devices = devices if isinstance(devices, list) else []
-
-        now = datetime.now(timezone.utc)
-        day_ago = now - timedelta(hours=24)
         sessions = (
             db.query(UploadSession)
             .filter(UploadSession.user_sub == user.get("sub", ""))
             .all()
         )
-        session_by_qr = {}
-        for s in sessions:
-            token = (s.qr_token or "").strip()
-            if not token:
-                continue
-            prev = session_by_qr.get(token)
-            if prev is None or (s.created_at and prev.created_at and s.created_at > prev.created_at):
-                session_by_qr[token] = s
-
-        enriched = []
-        for d in devices:
-            item = dict(d) if isinstance(d, dict) else {}
-            qr_token = (item.get("qr_token") or "").strip()
-            s = session_by_qr.get(qr_token)
-            if s is not None:
-                recent_uploads_24h = 0
-                for f in (s.uploads or []):
-                    created = f.created_at
-                    if created is None:
-                        continue
-                    created_utc = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
-                    if created_utc >= day_ago:
-                        recent_uploads_24h += 1
-                remaining_uploads = max(0, int(s.max_uploads or 0) - int(s.upload_count or 0))
-                session_max_uploads = int(s.max_uploads or 0)
-                session_upload_count = int(s.upload_count or 0)
-                expires_at = s.expires_at
-                expiring_soon = False
-                if expires_at:
-                    exp_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-                    expiring_soon = exp_utc <= (now + timedelta(days=7))
-                item["recent_uploads_24h"] = recent_uploads_24h
-                item["remaining_uploads"] = remaining_uploads
-                item["session_max_uploads"] = session_max_uploads
-                item["session_upload_count"] = session_upload_count
-                item["session_simple_code"] = s.simple_code
-                item["session_expiring_soon"] = expiring_soon
-                item["session_expires_at"] = expires_at.isoformat() if expires_at else None
-            else:
-                item["recent_uploads_24h"] = 0
-                item["remaining_uploads"] = 0
-                item["session_max_uploads"] = 0
-                item["session_upload_count"] = 0
-                item["session_simple_code"] = None
-                item["session_expiring_soon"] = False
-                item["session_expires_at"] = None
-            enriched.append(item)
+        enriched = enrich_devices(devices, sessions)
 
         return jsonify(enriched)
     except Exception:

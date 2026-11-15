@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Enrôler un appareil</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+  <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">MIrAI · mes réunions</span>
+    <span class="who">{{ user.name }}</span>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h1>Enrôler un appareil</h1>
+      <p>Générez un QR code puis scannez-le avec l'application mobile
+        (<em>Scanner le QR code</em>) ou saisissez le code court. Les
+        enregistrements envoyés par cet appareil arriveront dans votre
+        espace mes-réunions.</p>
+
+      <form id="generate-form" class="row">
+        <label for="ttl">Validité du QR</label>
+        <select id="ttl" name="ttl_minutes" data-default="{{ ttl_minutes }}" data-max="{{ max_ttl_minutes }}">
+        </select>
+        <button type="submit" class="btn-primary">Générer un QR code</button>
+      </form>
+
+      <div id="result" class="result" hidden>
+        <img id="qr-image" alt="QR code d'enrôlement" width="264" height="264">
+        <div>
+          <p class="label">Code court</p>
+          <p id="simple-code" class="code" aria-live="polite"></p>
+          <p class="label">Expire</p>
+          <p id="expires"></p>
+          <p class="hint">Le QR ne sert qu'une fois : générez-en un nouveau pour chaque appareil.</p>
+        </div>
+      </div>
+      <p id="generate-error" class="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card">
+      <div class="row space">
+        <h2>Mes appareils</h2>
+        <button id="revoke-all" type="button" class="btn-danger">Tout révoquer</button>
+      </div>
+      <p id="devices-empty" hidden>Aucun appareil enrôlé.</p>
+      <ul id="devices" class="devices"></ul>
+      <p id="devices-error" class="error" role="alert" hidden></p>
+    </section>
+  </main>
+</body>
+</html>
