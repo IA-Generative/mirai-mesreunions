@@ -301,6 +301,50 @@ services:
       - external-net
       - dmz-net
 
+  # --- QR Enrollment Portal (générateur de QR derrière Passage2) ---
+  # En local, pas de proxy Passage2 : PASSAGE2_DEV_IDENTITY simule l'agent
+  # connecté (refusé hors ENVIRONMENT=development). Le compte Keycloak de
+  # cette adresse doit exister ; voir services/qr-enrollment-portal/README.md
+  # pour créer le client d'administration (view-users).
+  qr-enrollment-portal:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    command: gunicorn -w 2 -b 0.0.0.0:8093 app.main:application
+    working_dir: /app/services/qr-enrollment-portal
+    volumes:
+      - ../../services/qr-enrollment-portal:/app/services/qr-enrollment-portal
+      - ../../libs:/app/libs
+    ports:
+      - "8093:8093"
+    environment:
+      ENVIRONMENT: development
+      LOG_LEVEL: DEBUG
+      PASSAGE2_DEV_IDENTITY: ${PASSAGE2_DEV_IDENTITY:-test@example.com}
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: openwebui
+      KEYCLOAK_ADMIN_CLIENT_ID: ${QR_PORTAL_KEYCLOAK_CLIENT_ID:-qr-enrollment-portal}
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${QR_PORTAL_KEYCLOAK_CLIENT_SECRET:-}
+      QR_UPLOAD_BASE_URL: http://localhost:8081
+      TOKEN_ISSUER_API_URL: http://device-token-authority:8091/api/v1/issue-token
+      TOKEN_ISSUER_INTERNAL_BASE_URL: http://device-token-authority:8091
+      EXT_DB_HOST: postgres-external
+      EXT_DB_PORT: "5432"
+      EXT_DB_NAME: audio_upload_ext
+      EXT_DB_USER: audio_ext
+      EXT_DB_PASSWORD: changeme-ext
+      INTERNAL_API_TOKEN: dev-only-internal-token-CHANGE-ME-IN-PROD
+    depends_on:
+      postgres-external:
+        condition: service_healthy
+      device-token-authority:
+        condition: service_started
+      keycloak:
+        condition: service_started
+    networks:
+      - external-net
+      - dmz-net
+
   # --- Antivirus Worker ---
   clamav-scanner:
     build:

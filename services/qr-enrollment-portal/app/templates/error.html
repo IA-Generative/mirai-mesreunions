@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accès impossible</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+</head>
+<body>
+  <header class="topbar"><span class="brand">MIrAI · mes réunions</span></header>
+  <main class="container">
+    <section class="card">
+      <h1>Accès impossible</h1>
+      <p class="error">{{ message }}</p>
+    </section>
+  </main>
+</body>
+</html>
