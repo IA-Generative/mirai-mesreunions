@@ -19,10 +19,10 @@ import logging
 import os
 
 import requests as req
-from flask import Blueprint, jsonify, request, session
+from flask import Blueprint, jsonify, request
 
 from app.shared import get_current_user, request_internal_device_api, require_auth
-from app.modules.auth import token_store
+from app.modules.auth import token_store, user_token  # noqa: F401  — token_store : bouchonné par les tests e2e
 
 bp = Blueprint("youtube_import", __name__, url_prefix="/api/youtube")
 logger = logging.getLogger("mesreunions_web.youtube_import")
@@ -36,9 +36,9 @@ def _video_ingest_base() -> str:
 
 
 def _bearer() -> str | None:
-    # Jetons en base via token_ref ; repli sur la clé de session héritée
-    # (cookies posés avant la migration web_session_tokens).
-    return token_store.load_tokens().get("access_token") or session.get("access_token") or None
+    # Jeton de la personne (dépôt web_session_tokens, repli session héritée) :
+    # helper partagé avec le module ``agents``.
+    return user_token.access_token()
 
 
 def _user_sub() -> str | None:
@@ -47,52 +47,8 @@ def _user_sub() -> str | None:
 
 
 def _refresh_access_token_if_possible() -> bool:
-    """Tente un refresh silencieux de l'access_token via le refresh_token
-    stocké en session au login. Retourne True si l'access_token a été
-    rafraîchi avec succès et écrit en session, False sinon.
-
-    Best-effort : aucun log d'erreur sensible, juste succès/échec.
-    """
-    rt = token_store.load_tokens().get("refresh_token") or session.get("refresh_token")
-    if not rt:
-        return False
-    try:
-        from libs.shared.app.config import OIDCConfig  # noqa: E402
-        cfg = OIDCConfig()
-        token_url = cfg.issuer.rstrip("/") + "/protocol/openid-connect/token"
-        resp = req.post(
-            token_url,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": rt,
-                "client_id": cfg.client_id,
-                "client_secret": cfg.client_secret,
-            },
-            timeout=8,
-        )
-        if resp.status_code != 200:
-            logger.warning("OIDC refresh HTTP %d", resp.status_code)
-            return False
-        body = resp.json()
-        new_at = body.get("access_token")
-        if not new_at:
-            return False
-        updated = token_store.update_tokens(
-            access_token=new_at,
-            refresh_token=body.get("refresh_token"),
-        )
-        if not updated:
-            # Session héritée (cookie d'avant la migration) : on garde
-            # l'ancien emplacement pour ne pas casser la requête en cours.
-            session["access_token"] = new_at
-            # Keycloak renvoie un nouveau refresh_token (rotation)
-            if body.get("refresh_token"):
-                session["refresh_token"] = body["refresh_token"]
-        logger.info("OIDC access_token refreshed silently")
-        return True
-    except Exception:
-        logger.exception("OIDC refresh failed (non-fatal)")
-        return False
+    """Refresh silencieux via le refresh_token stocké (helper partagé)."""
+    return user_token.refresh_access_token()
 
 
 def _call_video_ingest(method: str, path: str, *, json_body=None, timeout: int = 10,

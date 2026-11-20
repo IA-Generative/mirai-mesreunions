@@ -2165,6 +2165,27 @@
         .fiche-cr li { margin-bottom: .3rem; }
         .fiche-vide { color: #666; font-style: italic; }
         .fiche-aide { color: #666; font-size: .8rem; margin-top: .4rem; }
+        /* Onglet « Agents » (contrat d'agents MirAI) : caché tant que la liste
+           n'a pas répondu ; cartes sobres, résultat dans le même rendu que le CR. */
+        .fiche-onglets button[hidden] { display: none; }
+        .agents-outils { display: grid; gap: .6rem; margin: 0 0 1rem; max-width: 60ch; }
+        .agents-outils label { display: block; font-size: .8rem; color: #666; margin-bottom: .2rem; }
+        .agents-outils select, .agents-outils textarea { width: 100%; font: inherit; padding: .4rem .5rem;
+            border: 1px solid #ddd; border-radius: 3px; background: #fff; box-sizing: border-box; }
+        .agents-liste { list-style: none; padding: 0; margin: 0; display: grid; gap: .75rem; }
+        .agent-carte { border: 1px solid #e5e5e5; border-radius: 4px; padding: .75rem .9rem; }
+        .agent-entete { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+        .agent-nom { font-weight: 600; }
+        .agent-origine { font-size: .68rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+            padding: .05rem .45rem; border-radius: 3px; border: 1px solid #ddd; color: #666; }
+        .agent-origine--mine { color: #000091; border-color: #000091; background: #eeeeff; }
+        .agent-desc { color: #444; font-size: .875rem; margin: .3rem 0 .6rem; white-space: pre-line; }
+        .agent-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+        .agent-attente { color: #666; font-size: .8rem; }
+        .agent-erreur { color: #b91c1c; font-size: .85rem; margin: .4rem 0 0; }
+        .agent-resultat { margin-top: .7rem; border-top: 1px dashed #e5e5e5; padding-top: .6rem; }
+        .agent-resultat-meta { display: flex; justify-content: space-between; align-items: center; gap: .6rem;
+            flex-wrap: wrap; color: #666; font-size: .78rem; margin-bottom: .3rem; }
         /* La transcription (correcteur) est l'onglet « Transcription » ; hors de
            cet onglet elle se cache. Les régénérations sont sous « ⋯ » : on garde
            leurs boutons (la fiche les déclenche) mais on ne les montre plus. */

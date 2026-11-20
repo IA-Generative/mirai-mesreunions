@@ -209,6 +209,22 @@ OIDC_OFFLINE_ACCESS = _bool("OIDC_OFFLINE_ACCESS", False)
 OIDC_TOKEN_ENDPOINT = _str("OIDC_TOKEN_ENDPOINT", "")
 OIDC_REFRESH_TOKEN_FERNET_KEY = _str("OIDC_REFRESH_TOKEN_FERNET_KEY", "")
 
+# Mes agents (contrat d'agents MirAI) — l'onglet « Agents » de la fiche d'une
+# réunion liste les agents de la personne et en lance un sur le compte rendu
+# ou la transcription. mesreunions-web relaie le jeton d'ACCÈS de la personne
+# (dépôt web_session_tokens), jamais une clé partagée.
+#   MESAGENTS_BASE_URL        : racine de Mes agents, adresse INTERNE du cluster
+#                               (jamais l'hôte public). Vide = fonction désactivée,
+#                               l'onglet n'apparaît pas.
+#   MESAGENTS_TIMEOUT_SECONDS : délai d'une exécution (le contrat demande ≥ 120 s).
+#   MESAGENTS_OIDC_SCOPE      : portée optionnelle demandée à la connexion quand
+#                               la fonction est active ; elle ajoute l'audience
+#                               « mesagents » et les groupes en chemins complets au
+#                               jeton d'accès (cf. keycloak/ du dépôt du contrat).
+MESAGENTS_BASE_URL = _str("MESAGENTS_BASE_URL", "").strip().rstrip("/")
+MESAGENTS_TIMEOUT_SECONDS = _int("MESAGENTS_TIMEOUT_SECONDS", 120)
+MESAGENTS_OIDC_SCOPE = _str("MESAGENTS_OIDC_SCOPE", "mesagents-agents").strip()
+
 # suitenumerique/drive (mesfichiers) — pre-meeting prep route reads
 # preparation documents from the user's Drive. Auth reuses the OIDC refresh
 # token already captured at login (same Keycloak realm).
